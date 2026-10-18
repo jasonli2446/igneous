@@ -3,20 +3,24 @@
 A creation layer for personal knowledge graphs: ingest files, email, documents, and calendar into a typed,
 provenance-tracked graph in Postgres + pgvector, then search and explore it. Backlog: GitHub Issues.
 
-## Quick start (local dev)
+## Quick start
+
+Needs Docker, [uv](https://docs.astral.sh/uv/), and Node 20+.
 
 ```bash
-docker compose up -d db                      # Postgres 16 + pgvector on :5432
-make enron                                   # download + extract demo mailboxes into data/ (~450 MB)
-cd api && uv sync && uv run alembic upgrade head
-uv run igneous sync email --mailbox lay-k --mailbox skilling-j --mailbox allen-p \
-  --mailbox arnold-j --mailbox delainey-d --mailbox lavorato-j     # ~26k emails, ~1 min
-uv run igneous pipeline                      # spine -> chunk -> embed (embed takes a while on CPU)
-uv run uvicorn igneous.main:app --reload     # API on :8000, docs at /docs
-cd ../web && npm install && npm run dev      # explorer on :3000
+make enron      # download + extract the Enron mailboxes into data/ (~450 MB, once)
+make demo       # Postgres up, migrate, ingest one mailbox (~3k emails), build graph + index
+make api        # terminal 1: API on :8000 (OpenAPI docs at /docs)
+make web        # terminal 2: explorer on :3000
 ```
 
-Or everything in containers: `docker compose up` (then run the `igneous` CLI with `docker compose exec api igneous ...`).
+Try it: on the Explorer, search `jeff.skilling` or `phillip.allen` and pick the Person. Search lives at `/search`.
+
+`make baseline` ingests six mailboxes (~26k emails, the set the demo uses). Ingest + graph take ~3 min;
+embedding takes ~45 min on CPU. Search works during that, it just falls back to lexical for unembedded chunks.
+
+Everything is incremental: re-running `make demo` or `igneous pipeline` only processes what changed.
+`docker compose up` also runs the api and web in containers.
 
 ## Layout
 

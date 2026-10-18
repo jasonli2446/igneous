@@ -26,7 +26,7 @@ def stats(s: Session = Depends(get_session)):
         "source_items": dict(q("SELECT source, count(*) FROM source_items GROUP BY 1")),
         "nodes": dict(q("SELECT type, count(*) FROM nodes GROUP BY 1")),
         "edges": dict(q("SELECT type, count(*) FROM edges GROUP BY 1")),
-        "chunks": s.execute(text("SELECT count(*), count(embedding) FROM chunks")).one()._asdict(),
+        "chunks": s.execute(text("SELECT count(*) AS total, count(embedding) AS embedded FROM chunks")).one()._asdict(),
     }
 
 
