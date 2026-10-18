@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Inspector from "@/components/Inspector";
 import { api, GNode, Subgraph, TYPE_COLORS } from "@/lib/api";
 
@@ -17,7 +17,7 @@ export default function Explorer() {
   const [canvasKey, setCanvasKey] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
   const [hidden, setHidden] = useState<Set<string>>(new Set(["Organization"]));
-  const [hops, setHops] = useState(1);
+  const [view, setView] = useState<"people" | "items">("people");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -26,10 +26,11 @@ export default function Explorer() {
     return () => clearTimeout(t);
   }, [query]);
 
-  const seed = async (id: number) => {
+  const seed = async (node: GNode) => {
     setError(null);
     try {
-      const g = await api.subgraph([id], hops, 400);
+      const id = node.id;
+      const g = view === "people" && node.type === "Person" ? await api.people(id, 60) : await api.subgraph([id], 1, 400);
       setCanvasKey((k) => k + 1); // fresh canvas for a fresh seed
       setData(g);
       setSelected(id);
@@ -39,8 +40,11 @@ export default function Explorer() {
     }
   };
 
+  // The canvas binds this once at mount, so read the current view through a ref, not a closure.
+  const viewRef = useRef(view);
+  viewRef.current = view;
   const expand = useCallback(async (id: number) => {
-    const g = await api.subgraph([id], 1, 200);
+    const g = viewRef.current === "people" ? await api.people(id, 30) : await api.subgraph([id], 1, 200);
     setData((prev) => {
       const nodes = new Map(prev.nodes.map((n) => [n.id, n]));
       g.nodes.forEach((n) => nodes.set(n.id, n));
@@ -67,7 +71,7 @@ export default function Explorer() {
             <ul className="absolute z-10 mt-1 max-h-72 w-full overflow-y-auto rounded border border-zinc-200 bg-white shadow">
               {matches.map((m) => (
                 <li key={m.id}>
-                  <button onClick={() => seed(m.id)} className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-zinc-50">
+                  <button onClick={() => seed(m)} className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-zinc-50">
                     <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: TYPE_COLORS[m.type] }} />
                     <span className="truncate">{m.name}</span>
                     <span className="ml-auto text-xs text-zinc-400">{m.degree}</span>
@@ -79,15 +83,18 @@ export default function Explorer() {
         </div>
 
         <div>
-          <label className="mb-1 block font-medium text-zinc-700">Hops from seed</label>
+          <label className="mb-1 block font-medium text-zinc-700">View</label>
           <div className="flex gap-1">
-            {[1, 2].map((h) => (
-              <button key={h} onClick={() => setHops(h)}
-                className={`flex-1 rounded border px-2 py-1 ${hops === h ? "border-zinc-800 bg-zinc-800 text-white" : "border-zinc-300"}`}>
-                {h}
+            {([["people", "People"], ["items", "Items"]] as const).map(([v, label]) => (
+              <button key={v} onClick={() => setView(v)}
+                className={`flex-1 rounded border px-2 py-1 ${view === v ? "border-zinc-800 bg-zinc-800 text-white" : "border-zinc-300"}`}>
+                {label}
               </button>
             ))}
           </div>
+          <p className="mt-1 text-xs text-zinc-500">
+            {view === "people" ? "Who a person corresponds with; edge width = messages exchanged." : "Raw neighbors: messages, threads, files."}
+          </p>
         </div>
 
         {types.length > 0 && (

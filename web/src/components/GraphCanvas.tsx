@@ -77,10 +77,12 @@ export default function GraphCanvas({ data, hiddenTypes, selected, onSelectActio
         added++;
       }
     }
+    const maxW = Math.max(1, ...data.edges.map((e) => e.weight ?? 1));
     for (const e of data.edges) {
       const id = String(e.id);
+      const size = e.weight ? 0.5 + 4 * Math.sqrt(e.weight / maxW) : 0.6;
       if (!g.hasEdge(id) && g.hasNode(String(e.src)) && g.hasNode(String(e.dst)))
-        g.addEdgeWithKey(id, String(e.src), String(e.dst), { edgeType: e.type, color: "#cbd5e1", size: 0.6 });
+        g.addEdgeWithKey(id, String(e.src), String(e.dst), { edgeType: e.type, color: "#cbd5e1", size });
     }
     if (added > 0 && g.order > 1) {
       forceAtlas2.assign(g, {

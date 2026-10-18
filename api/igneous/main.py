@@ -6,7 +6,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.db import get_session
-from igneous.graph.traversal import neighborhood
+from igneous.graph.traversal import neighborhood, people
 from igneous.rag.search import Filters, hybrid
 
 app = FastAPI(title="Igneous", version="0.1.0")
@@ -63,6 +63,11 @@ def graph_search(q: str, type: str | None = None, limit: int = Query(20, le=100)
 def graph_subgraph(seed: list[int] = Query(...), hops: int = Query(1, le=3), limit: int = Query(300, le=5000),
                    types: list[str] | None = Query(None), s: Session = Depends(get_session)):
     return neighborhood(s, seed, hops=hops, limit=limit, edge_types=types)
+
+
+@app.get("/graph/people")
+def graph_people(seed: int, limit: int = Query(60, le=500), s: Session = Depends(get_session)):
+    return people(s, seed, limit=limit)
 
 
 @app.get("/graph/node/{node_id}")

@@ -1,7 +1,7 @@
 export const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export type GNode = { id: number; type: string; name: string; key: string; degree: number };
-export type GEdge = { id: number; src: number; dst: number; type: string; extractor: string; confidence: number | null };
+export type GEdge = { id: number; src: number; dst: number; type: string; extractor: string; confidence: number | null; weight?: number };
 export type Subgraph = { nodes: GNode[]; edges: GEdge[] };
 
 export type Hit = {
@@ -48,6 +48,7 @@ export const api = {
   findNodes: (q: string, type?: string) => get<{ nodes: GNode[] }>("/graph/search", { q, type }),
   subgraph: (seed: number[], hops = 1, limit = 300, types?: string[]) =>
     get<Subgraph>("/graph/subgraph", { seed, hops, limit, types }),
+  people: (seed: number, limit = 60) => get<Subgraph>("/graph/people", { seed, limit }),
   node: (id: number) => get<NodeDetail>(`/graph/node/${id}`, {}),
 };
 
