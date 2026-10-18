@@ -17,7 +17,7 @@ def model():
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    return [v.tolist() for v in model().embed(texts)]
+    return [v.tolist() for v in model().embed(texts, batch_size=BATCH)]
 
 
 def embed_query(q: str) -> list[float]:
@@ -32,8 +32,11 @@ def run(s: Session, log=print) -> int:
         if not rows:
             break
         vecs = embed_texts([r.text for r in rows])
-        s.execute(text("UPDATE chunks SET embedding = CAST(:v AS vector) WHERE id = :id"),
-                  [{"id": r.id, "v": str(v)} for r, v in zip(rows, vecs)])
+        # One statement per batch; per-row UPDATEs made the DB, not the model, the bottleneck (~10x).
+        s.execute(text("""
+            UPDATE chunks c SET embedding = CAST(u.v AS vector)
+            FROM unnest(CAST(:ids AS bigint[]), CAST(:vs AS text[])) AS u(id, v) WHERE c.id = u.id
+        """), {"ids": [r.id for r in rows], "vs": [str(v) for v in vecs]})
         s.commit()
         total += len(rows)
         if total % (BATCH * 10) == 0:
