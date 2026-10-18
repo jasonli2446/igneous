@@ -21,7 +21,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 
 def embed_query(q: str) -> list[float]:
-    return [v.tolist() for v in model().query_embed(q)][0]
+    return next(v.tolist() for v in model().query_embed(q))
 
 
 def run(s: Session, log=print) -> int:
