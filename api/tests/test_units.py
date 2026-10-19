@@ -56,3 +56,24 @@ def test_names_and_threads():
 def test_rrf_rewards_agreement():
     assert rrf([1, 2, 3], [3, 2, 9])[0][0] in (2, 3)
     assert {c for c, _ in rrf([1], [2])} == {1, 2}
+
+
+def test_locate_spans():
+    from igneous.graph.extract import locate
+
+    body = "Please ask Jeff\n  Skilling and FERC about the caps."
+    assert locate(body, "FERC") == (body.index("FERC"), body.index("FERC") + 4)
+    s0, s1 = locate(body, "Jeff Skilling")  # survives the line wrap
+    assert body[s0:s1].split() == ["Jeff", "Skilling"]
+    assert locate(body, "Ken Lay") is None and locate(body, "  ") is None
+
+
+def test_extraction_spans_index_the_stored_body():
+    """Regression: offsets were computed on a .strip()-ed body and stored against the original (off by one)."""
+    from igneous.graph.extract import locate
+    from igneous.rag.chunking import QUOTE_START
+
+    stored = "\n  Ask David Oxley.\n -----Original Message-----\nold"
+    own = stored[: QUOTE_START.search(stored).start()]
+    s0, s1 = locate(own, "David Oxley")
+    assert stored[s0:s1] == "David Oxley"

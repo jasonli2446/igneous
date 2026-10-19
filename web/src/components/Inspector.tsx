@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import EvidenceList from "@/components/EvidenceList";
 import { api, NodeDetail, TYPE_COLORS } from "@/lib/api";
 
 type Props = { id: number | null; onExpandAction: (id: number) => void };
@@ -41,6 +42,11 @@ export default function Inspector({ id, onExpandAction }: Props) {
         <button onClick={() => onExpandAction(node.id)} className="mt-2 rounded border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50">
           Expand neighbors
         </button>
+      </div>
+
+      <div>
+        <div className="mb-1 font-medium text-zinc-700">Evidence</div>
+        <EvidenceList id={node.id} />
       </div>
 
       {src && (

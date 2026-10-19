@@ -25,6 +25,24 @@ export type AskResult = {
   timing: { retrieve_s: number; total_s?: number };
 };
 
+export type Evidence = {
+  id: number;
+  type: string;
+  confidence: number | null;
+  model: string | null;
+  extractor: string;
+  extractor_version: string;
+  props: { role?: string; quote?: string };
+  title: string | null;
+  occurred_at: string | null;
+  external_id: string;
+  window: string;
+  hl_start: number;
+  hl_end: number;
+  other_name: string;
+  other_type: string;
+};
+
 export type NodeDetail = GNode & {
   props: Record<string, unknown>;
   degree: Record<string, number>;
@@ -66,6 +84,7 @@ export const api = {
     if (!r.ok) throw new Error(`${r.status} ${(await r.json().catch(() => ({}))).detail ?? "/ask"}`);
     return (await r.json()) as AskResult;
   },
+  evidence: (id: number) => get<{ evidence: Evidence[] }>(`/graph/node/${id}/evidence`, { limit: 30 }),
   node: (id: number) => get<NodeDetail>(`/graph/node/${id}`, {}),
 };
 

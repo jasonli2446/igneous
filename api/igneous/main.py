@@ -97,3 +97,29 @@ def graph_node(node_id: int, s: Session = Depends(get_session)):
             FROM source_items WHERE id = :id
         """), {"id": n["source_item_id"]}).mappings().first()
     return {**dict(n), "degree": degree, "source_item": dict(source) if source else None}
+
+
+@app.get("/graph/node/{node_id}/evidence")
+def graph_evidence(node_id: int, limit: int = Query(50, le=200), s: Session = Depends(get_session)):
+    """Model-derived edges touching this node, each with the source text around its span ("why do you
+    believe this"). Deterministic edges are omitted: their evidence is the header itself."""
+    rows = s.execute(text("""
+        SELECT e.id, e.type, e.src, e.dst, e.confidence, e.model, e.extractor, e.extractor_version, e.props,
+               e.span_start, e.span_end, si.id AS source_item_id, si.title, si.occurred_at, si.external_id,
+               substr(si.body_text, greatest(1, e.span_start + 1 - 160),
+                      least(e.span_end - e.span_start, 400) + least(e.span_start, 160) + 160) AS window,
+               greatest(0, e.span_start - 160) AS window_start,
+               (SELECT name FROM nodes WHERE id = CASE WHEN e.src = :id THEN e.dst ELSE e.src END) AS other_name,
+               (SELECT type FROM nodes WHERE id = CASE WHEN e.src = :id THEN e.dst ELSE e.src END) AS other_type
+        FROM edges e JOIN source_items si ON si.id = e.source_item_id
+        WHERE (e.src = :id OR e.dst = :id) AND e.extractor <> 'spine' AND e.span_start IS NOT NULL
+        ORDER BY si.occurred_at DESC NULLS LAST LIMIT :limit
+    """), {"id": node_id, "limit": limit}).mappings().all()
+    out = []
+    for r in rows:
+        d = dict(r)
+        # Offsets of the span inside `window`, so the client can highlight without re-searching.
+        d["hl_start"] = r["span_start"] - r["window_start"]
+        d["hl_end"] = min(r["span_end"], r["span_start"] + 400) - r["window_start"]
+        out.append(d)
+    return {"evidence": out}

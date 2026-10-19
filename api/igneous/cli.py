@@ -42,6 +42,17 @@ def pipeline(stage: list[str] = typer.Option(None, help="spine, chunk, embed; de
 
 
 @app.command()
+def extract(limit: int = typer.Option(200, help="max messages to process this run")):
+    """Stage two: LLM extraction of MENTIONS / ABOUT with span provenance. Costs money; selective by default."""
+    from igneous.graph import extract as ex
+
+    t = time.time()
+    with SessionLocal() as s:
+        n = ex.run(s, limit=limit)
+    print(f"extract {n:>6} items  {time.time() - t:6.1f}s")
+
+
+@app.command()
 def search(q: str, k: int = 5, mode: str = "hybrid"):
     """Hybrid search from the terminal."""
     from igneous.rag.search import hybrid
