@@ -7,3 +7,7 @@ __pycache__/
 .env
 .DS_Store
 .playwright-cli/
+
+# OAuth client + tokens (CO-5): never commit
+client_secret*.json
+*token*.json

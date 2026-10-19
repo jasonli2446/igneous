@@ -1,6 +1,6 @@
 # 0002 — Bedrock Knowledge Bases interop: the proposal's plan doesn't match how Bedrock works
 
-**Status:** open, needs a team decision. **Affects:** success criterion 5, issues #10 and #56.
+**Status:** decided 2026-10-19: **option C**. **Affects:** success criterion 5, issues #10 and #56.
 
 ## What the proposal said
 
@@ -38,3 +38,10 @@ working A or B shows less. If the team wants Bedrock anyway, A is the supported 
 "no re-*extraction*" rather than "no re-embedding".
 
 Any option touching AWS needs someone to provision and pay for Aurora or S3 Vectors. Not done here.
+
+## Decision
+
+**C.** Criterion 5 is met by LightRAG (custom-KG export, zero re-extraction, verified) and the MCP server
+(our graph consumed directly by Claude Code / Desktop / Cursor). Bedrock Knowledge Bases is out of scope:
+it can consume only chunks plus metadata, not a graph, and it requires re-embedding into its own store. The
+local 384-d embedding model stays (#10 closed).
