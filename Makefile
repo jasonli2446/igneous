@@ -3,6 +3,8 @@ BASELINE_BOXES := lay-k skilling-j allen-p arnold-j delainey-d lavorato-j
 ALL_BOXES := $(BASELINE_BOXES) kaminski-v kean-s dasovich-j beck-s
 
 IGN := cd api && uv run igneous
+# Messages to LLM-extract per run (needs AWS_BEARER_TOKEN_BEDROCK). EXTRACT=0 skips model calls.
+EXTRACT ?= 100
 
 .PHONY: enron db migrate demo baseline api web test
 
@@ -19,11 +21,11 @@ migrate: db
 
 demo: migrate  ## one mailbox (~3k emails), end to end in a few minutes
 	$(IGN) sync email $(addprefix --mailbox ,$(DEMO_BOXES))
-	$(IGN) pipeline
+	$(IGN) pipeline --extract $(EXTRACT)
 
 baseline: migrate  ## six mailboxes (~26k emails); embedding takes ~45 min on CPU
 	$(IGN) sync email $(addprefix --mailbox ,$(BASELINE_BOXES))
-	$(IGN) pipeline
+	$(IGN) pipeline --extract $(EXTRACT)
 
 api:
 	cd api && uv run uvicorn igneous.main:app --reload

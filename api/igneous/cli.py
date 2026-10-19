@@ -28,17 +28,21 @@ def sync(connector: str = typer.Argument(..., help="email"),
 
 
 @app.command()
-def pipeline(stage: list[str] = typer.Option(None, help="spine, chunk, embed; default all")):
-    """Build the graph and index from whatever source_items are new since the last run."""
-    from igneous.graph import spine
+def pipeline(stage: list[str] = typer.Option(None, help="spine, chunk, embed, extract, resolve; default all"),
+             extract: int = typer.Option(0, help="LLM-extract up to N newest messages (costs money; 0 = skip)")):
+    """Build the graph and index from whatever is new since the last run. Every stage is incremental."""
+    from igneous.graph import extract as ex
+    from igneous.graph import resolve, spine
     from igneous.rag import chunking, embed
 
-    stages = {"spine": spine.run, "chunk": chunking.run, "embed": embed.run}
+    stages = {"spine": spine.run, "chunk": chunking.run, "embed": embed.run,
+              "extract": lambda s: ex.run(s, limit=extract) if extract else 0,
+              "resolve": lambda s: resolve.run(s)["same_as"]}
     with SessionLocal() as s:
         for name in stage or stages:
             t = time.time()
             n = stages[name](s)
-            print(f"{name:6s} {n:>8} items  {time.time() - t:6.1f}s")
+            print(f"{name:7s} {n:>8} items  {time.time() - t:6.1f}s")
 
 
 @app.command()

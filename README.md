@@ -19,7 +19,9 @@ Try it: on the Explorer, search `jeff.skilling` or `phillip.allen` and pick the 
 `make baseline` ingests six mailboxes (~26k emails, the set the demo uses). Ingest + graph take ~3 min;
 embedding takes ~45 min on CPU. Search works during that, it just falls back to lexical for unembedded chunks.
 
-Everything is incremental: re-running `make demo` or `igneous pipeline` only processes what changed.
+`igneous pipeline` runs spine -> chunk -> embed -> extract -> resolve. Extraction calls the model, so it's
+bounded: `make demo EXTRACT=0` skips it, `EXTRACT=500` does more. Everything is incremental: re-running only
+processes what changed.
 `docker compose up` also runs the api and web in containers.
 
 ## Layout
@@ -27,12 +29,14 @@ Everything is incremental: re-running `make demo` or `igneous pipeline` only pro
 | Path | What |
 |---|---|
 | `api/igneous/connectors/` | `base.py` connector contract + resumable sync runner; `email_maildir.py` Enron importer |
-| `api/igneous/graph/` | `spine.py` deterministic graph (stage one); `traversal.py` bounded k-hop |
-| `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF |
+| `api/igneous/graph/` | `spine.py` deterministic graph (stage one); `extract.py` LLM mentions/topics with span provenance (stage two); `resolve.py` entity resolution; `traversal.py` k-hop + people view |
+| `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `qa.py` graph-augmented answers with citations |
+| `api/igneous/llm.py` | the only place model calls happen |
+| `api/eval/` | gold questions, ER labels, harnesses, results (see `api/eval/README.md`) |
 | `api/igneous/pipeline.py` | per-stage watermarks; every stage is incremental and safe to re-run |
-| `api/igneous/main.py` | FastAPI: `/search`, `/ask` (retrieval-only for now), `/graph/search`, `/graph/subgraph`, `/graph/node/{id}`, `/stats` |
+| `api/igneous/main.py` | FastAPI: `/search`, `/ask`, `/graph/search`, `/graph/subgraph`, `/graph/people`, `/graph/node/{id}`, `/graph/node/{id}/evidence`, `/stats` |
 | `api/migrations/` | schema (plain SQL in `0001_core_schema.py`) |
-| `web/` | Next.js explorer (sigma.js) and search page |
+| `web/` | Next.js: explorer (sigma.js) with inspector + evidence, Ask, Search |
 
 ## Adding a stage or connector
 
