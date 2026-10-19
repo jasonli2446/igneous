@@ -44,3 +44,9 @@ Everything is incremental: re-running `make demo` or `igneous pipeline` only pro
 - Enron has no `In-Reply-To`/`References` headers. Threads are keyed on subject + participants; `REPLIES_TO` is inferred and sparse.
 - Enron stores one email in several folders with different Message-IDs. Messages dedupe on a content fingerprint (`raw_meta.fingerprint`).
 - Embedding model is a placeholder (`bge-small-en-v1.5`, 384-d) until the Bedrock interop decision (#11).
+
+## Model calls
+
+Q&A uses Claude Sonnet 5.5 on Amazon Bedrock. Set `AWS_BEARER_TOKEN_BEDROCK` and `AWS_REGION` (e.g. `us-east-1`);
+everything goes through `api/igneous/llm.py`. `IGNEOUS_LLM_ENABLED=false` turns off all model calls (search and
+the graph keep working; `/ask` returns 503).

@@ -14,6 +14,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         <nav className="flex h-[49px] shrink-0 items-center gap-6 border-b border-zinc-200 px-4 text-sm">
           <span className="font-semibold">Igneous</span>
           <Link href="/" className="text-zinc-600 hover:text-zinc-900">Explorer</Link>
+          <Link href="/ask" className="text-zinc-600 hover:text-zinc-900">Ask</Link>
           <Link href="/search" className="text-zinc-600 hover:text-zinc-900">Search</Link>
         </nav>
         {children}

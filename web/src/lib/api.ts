@@ -17,6 +17,14 @@ export type Hit = {
   matched: string[];
 };
 
+export type AskResult = {
+  answerable: boolean;
+  answer: string;
+  citations: Hit[];
+  evidence: Hit[];
+  timing: { retrieve_s: number; total_s?: number };
+};
+
 export type NodeDetail = GNode & {
   props: Record<string, unknown>;
   degree: Record<string, number>;
@@ -49,6 +57,15 @@ export const api = {
   subgraph: (seed: number[], hops = 1, limit = 300, types?: string[]) =>
     get<Subgraph>("/graph/subgraph", { seed, hops, limit, types }),
   people: (seed: number, limit = 60) => get<Subgraph>("/graph/people", { seed, limit }),
+  ask: async (question: string, use_graph = true) => {
+    const r = await fetch(new URL("/ask", API), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ question, use_graph }),
+    });
+    if (!r.ok) throw new Error(`${r.status} ${(await r.json().catch(() => ({}))).detail ?? "/ask"}`);
+    return (await r.json()) as AskResult;
+  },
   node: (id: number) => get<NodeDetail>(`/graph/node/${id}`, {}),
 };
 

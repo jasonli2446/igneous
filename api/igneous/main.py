@@ -2,11 +2,14 @@ from datetime import datetime
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.db import get_session
 from igneous.graph.traversal import neighborhood, people
+from igneous.llm import LLMDisabled
+from igneous.rag import qa
 from igneous.rag.search import Filters, hybrid
 
 app = FastAPI(title="Igneous", version="0.1.0")
@@ -38,11 +41,19 @@ def search(q: str, source: str | None = None, person: str | None = None,
     return {"hits": hybrid(s, q, Filters(source, person, since, until), k=k, mode=mode)}
 
 
+class AskBody(BaseModel):
+    question: str
+    person: str | None = None
+    use_graph: bool = True  # False = the ablation baseline (criterion 4)
+    mode: str = "hybrid"
+
+
 @app.post("/ask")
-def ask(body: dict, s: Session = Depends(get_session)):
-    """Placeholder until graph-augmented Q&A lands (#qa): returns the evidence an answer would cite."""
-    hits = hybrid(s, body["question"], k=8)
-    return {"answer": None, "status": "retrieval-only", "citations": hits}
+def ask(body: AskBody, s: Session = Depends(get_session)):
+    try:
+        return qa.answer(s, body.question, Filters(person=body.person), use_graph=body.use_graph, mode=body.mode)
+    except LLMDisabled as e:
+        raise HTTPException(503, str(e)) from e
 
 
 @app.get("/graph/search")
