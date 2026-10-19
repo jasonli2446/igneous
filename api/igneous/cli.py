@@ -66,6 +66,18 @@ def resolve(undo: bool = typer.Option(False, help="delete every SAME_AS merge"))
 
 
 @app.command()
+def export(target: str = typer.Argument(..., help="lightrag"), out: Path = typer.Argument(...),
+           limit: int = typer.Option(None, help="newest N messages only")):
+    """Export the graph for an external engine (criterion 5)."""
+    if target != "lightrag":
+        raise typer.BadParameter("only 'lightrag' is a file export; Bedrock reads the bedrock_kb view directly")
+    from igneous.interop.lightrag import write
+
+    with SessionLocal() as s:
+        print(write(s, out, limit))
+
+
+@app.command()
 def search(q: str, k: int = 5, mode: str = "hybrid"):
     """Hybrid search from the terminal."""
     from igneous.rag.search import hybrid
