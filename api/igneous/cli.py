@@ -53,6 +53,15 @@ def extract(limit: int = typer.Option(200, help="max messages to process this ru
 
 
 @app.command()
+def resolve(undo: bool = typer.Option(False, help="delete every SAME_AS merge")):
+    """Entity resolution: write SAME_AS edges between Person nodes that are the same human."""
+    from igneous.graph import resolve as er
+
+    with SessionLocal() as s:
+        print(f"removed {er.undo(s)} merges" if undo else er.run(s))
+
+
+@app.command()
 def search(q: str, k: int = 5, mode: str = "hybrid"):
     """Hybrid search from the terminal."""
     from igneous.rag.search import hybrid

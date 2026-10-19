@@ -59,12 +59,20 @@ def ask(body: AskBody, s: Session = Depends(get_session)):
 @app.get("/graph/search")
 def graph_search(q: str, type: str | None = None, limit: int = Query(20, le=100),
                  s: Session = Depends(get_session)):
+    """Find seed nodes by name or key. Merged identities collapse to their canonical node (one Kenneth Lay,
+    not ten addresses); `aliases` counts the folded-in identities."""
     rows = s.execute(text("""
+        WITH hit AS (
+            SELECT COALESCE(c.canonical_id, n.id) AS id FROM nodes n LEFT JOIN canonical c ON c.node_id = n.id
+            WHERE (n.name ILIKE :like OR n.key ILIKE :like) AND (CAST(:type AS text) IS NULL OR n.type = :type)
+              AND n.type <> 'Message'
+            GROUP BY 1)
         SELECT n.id, n.type, n.name, n.key,
-               (SELECT count(*) FROM edges e WHERE e.src = n.id OR e.dst = n.id) AS degree
-        FROM nodes n
-        WHERE (n.name ILIKE :like OR n.key ILIKE :like) AND (CAST(:type AS text) IS NULL OR n.type = :type)
-          AND n.type <> 'Message'
+               (SELECT count(*) FROM edges e WHERE e.src = ANY(m.ids) OR e.dst = ANY(m.ids)) AS degree,
+               cardinality(m.ids) - 1 AS aliases
+        FROM hit JOIN nodes n ON n.id = hit.id
+        CROSS JOIN LATERAL (SELECT array_append(array_agg(node_id), hit.id) AS ids FROM canonical
+                            WHERE canonical_id = hit.id AND node_id <> hit.id) m
         ORDER BY degree DESC LIMIT :limit
     """), {"like": f"%{q}%", "type": type, "limit": limit}).mappings().all()
     return {"nodes": [dict(r) for r in rows]}
@@ -99,6 +107,15 @@ def graph_node(node_id: int, s: Session = Depends(get_session)):
     return {**dict(n), "degree": degree, "source_item": dict(source) if source else None}
 
 
+def cluster(s: Session, node_id: int) -> list[int]:
+    """All identities entity resolution merged with this node (just [node_id] if unmerged)."""
+    ids = s.execute(text("""
+        SELECT node_id FROM canonical WHERE canonical_id =
+            (SELECT COALESCE((SELECT canonical_id FROM canonical WHERE node_id = :id), :id))
+    """), {"id": node_id}).scalars().all()
+    return list({node_id, *ids})
+
+
 @app.get("/graph/node/{node_id}/evidence")
 def graph_evidence(node_id: int, limit: int = Query(50, le=200), s: Session = Depends(get_session)):
     """Model-derived edges touching this node, each with the source text around its span ("why do you
@@ -109,12 +126,12 @@ def graph_evidence(node_id: int, limit: int = Query(50, le=200), s: Session = De
                substr(si.body_text, greatest(1, e.span_start + 1 - 160),
                       least(e.span_end - e.span_start, 400) + least(e.span_start, 160) + 160) AS window,
                greatest(0, e.span_start - 160) AS window_start,
-               (SELECT name FROM nodes WHERE id = CASE WHEN e.src = :id THEN e.dst ELSE e.src END) AS other_name,
-               (SELECT type FROM nodes WHERE id = CASE WHEN e.src = :id THEN e.dst ELSE e.src END) AS other_type
+               (SELECT name FROM nodes WHERE id = CASE WHEN e.src = ANY(:ids) THEN e.dst ELSE e.src END) AS other_name,
+               (SELECT type FROM nodes WHERE id = CASE WHEN e.src = ANY(:ids) THEN e.dst ELSE e.src END) AS other_type
         FROM edges e JOIN source_items si ON si.id = e.source_item_id
-        WHERE (e.src = :id OR e.dst = :id) AND e.extractor <> 'spine' AND e.span_start IS NOT NULL
+        WHERE (e.src = ANY(:ids) OR e.dst = ANY(:ids)) AND e.extractor <> 'spine' AND e.span_start IS NOT NULL
         ORDER BY si.occurred_at DESC NULLS LAST LIMIT :limit
-    """), {"id": node_id, "limit": limit}).mappings().all()
+    """), {"ids": cluster(s, node_id), "limit": limit}).mappings().all()
     out = []
     for r in rows:
         d = dict(r)

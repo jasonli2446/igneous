@@ -77,3 +77,31 @@ def test_extraction_spans_index_the_stored_body():
     own = stored[: QUOTE_START.search(stored).start()]
     s0, s1 = locate(own, "David Oxley")
     assert stored[s0:s1] == "David Oxley"
+
+
+def test_er_names_and_scoring():
+    from igneous.graph.resolve import P, same_first, score, split_name, unresolvable
+
+    assert split_name("Allen, Phillip K.", "pallen@enron.com") == ("phillip", "allen")
+    assert split_name("", "jeff.skilling@enron.com") == ("jeff", "skilling")
+    assert same_first("rick", "richard") and same_first("joe", "joseph") and not same_first("ann", "mark")
+
+    def p(i, key, name, peers=()):
+        f, last = split_name(name, key)
+        return P(i, key, name, f, last, set(peers))
+
+    shared = {10, 11, 12, 13}
+    assert score(p(1, "james.steffes@enron.com", "James Steffes", shared), p(2, "steffes@enron.com", "James Steffes", shared))[0] >= 0.75
+    assert score(p(1, "ken.lay@enron.com", "Ken Lay"), p(2, "ken_lay@enron.net", "Ken Lay"))[0] >= 0.75
+    # Same surname, different first name: never merges no matter how much mail they share.
+    assert score(p(1, "ann.schmidt@enron.com", "Ann Schmidt", shared), p(2, "mark.schmidt@enron.com", "Mark Schmidt", shared))[0] == 0
+    assert unresolvable(p(3, ".john@enron.com", "e-mail")) and unresolvable(p(4, "dl-ga-all@enron.com", "DL GA All"))
+
+
+def test_er_rejects_mailing_lists():
+    from igneous.graph.resolve import P, split_name, unresolvable
+
+    for key, name in [("aei-bi_updates@www.brookings.org", "Aei-bi Updates"),
+                      ("western.price.survey.contacts@proxy4.ba.best.com", "Western Price Survey Contacts")]:
+        f, last = split_name(name, key)
+        assert unresolvable(P(1, key, name, f, last, set()))
