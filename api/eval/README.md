@@ -13,19 +13,26 @@ uv run python eval/run_eval.py           # + Q&A for both configs, ~150 model ca
 Results land in `results/<date>.json`; `results/<date>-answers.jsonl` has both configs' answers side by side
 for the blind A/B grading in criterion 4.
 
-## Baseline results (2026-10-18, 6 mailboxes, 13.9k messages)
+## Results (2026-10-18, 6 mailboxes, 13.9k messages)
+
+82 questions: 50 single-email, 15 multi-hop, **5 hard multi-hop**, 12 unanswerable. "Hard" questions come from
+verified reply pairs (REPLIES_TO from quoted headers) and are kept only if dense search finds the parent email
+but **not** the reply holding the answer. Answering them requires following the graph edge.
 
 | | full (hybrid + graph) | baseline (dense, no graph) |
 |---|---|---|
-| recall@10, all answerable | 0.877 | 0.846 |
-| answer cites gold email | **0.892** | 0.846 |
-| ... multi-hop | **1.000** | 0.933 |
+| answer cites gold email, all answerable | **0.900** | 0.771 (**+16.7% rel.**) |
+| ... single-email | 0.86 | 0.80 |
+| ... multi-hop | 1.00 | 0.93 |
+| ... **hard multi-hop** | **5/5** | **0/5** |
 | abstains on unanswerable | 1.00 | 1.00 |
-| p50 / p95 latency | 2.1 s / 3.0 s | 1.9 s / 2.6 s |
+| p50 / p95 latency | 2.2 s / 3.1 s | 1.8 s / 2.5 s |
 
-Caveats: dense recall on the multi-hop set is already high (replies restate the subject), so these are easier
-than real multi-hop questions and the graph gain is modest. Latency excludes cold-start model loading.
-Criterion 4 asks for ≥10% over baseline under blind grading; that grading hasn't been done yet.
+How to read it: the graph wins exactly where it should (answers only reachable through a reply link) and
+helps a little elsewhere. But only 5 corpus questions passed the "needs the hop" filter, so on this corpus most
+questions don't need the graph, and n=5 is small. Model answers also vary run to run (the baseline moved
+0.77-0.85 across runs on the same questions), so treat differences under ~5 points as noise. Criterion 4's
+blind A/B grading of answer quality is still to do; `results/<date>-answers.jsonl` has the pairs.
 
 ## Entity resolution (criterion 3)
 

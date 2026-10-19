@@ -120,3 +120,18 @@ def test_imessage_decoding_and_dates():
     assert apple_time(0) is None
     assert apple_time(700_000_000 * 10**9).year == 2023   # nanoseconds (current format)
     assert apple_time(700_000_000).year == 2023           # seconds (pre-10.13 rows)
+
+
+def test_quoted_header_parsing():
+    from igneous.graph.quoted import _surname, parse_quotes
+
+    body = ("Sounds good.\n\n -----Original Message-----\nFrom: Rice, Ken \nSent: Mon 8/20/2001 10:20 AM \n"
+            "To: Skilling, Jeff \nSubject: RE: Astros tickets\n\nThanks for the tickets.")
+    (q,) = parse_quotes(body)
+    assert (q["sent"].month, q["sent"].day, q["sent"].hour, q["sent"].minute) == (8, 20, 10, 20)
+    assert q["subject"] == "Astros tickets" and _surname(q["from"]) == "rice"
+    from igneous.graph.quoted import _first
+    assert _first("Rice, Ken") == "ken" and _first("Brad Schaeffer <b@x.com>") == "brad" and _first("Rice") == ""
+    long = "-----Original Message-----\nFrom: Brad Schaeffer <BSchaeffer@prebon.com>@ENRON \nSent: Thursday, November 29, 2001 9:49 AM\nSubject: x\n"
+    assert parse_quotes(long)[0]["sent"].year == 2001 and _surname(parse_quotes(long)[0]["from"]) == "schaeffer"
+    assert parse_quotes("no quote here") == []

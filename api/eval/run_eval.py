@@ -46,7 +46,7 @@ def main(run_qa: bool, limit: int | None):
 
     with SessionLocal() as s:
         report["recall@10"] = {m: round(recall(s, ans, m), 3) for m in ("hybrid", "dense", "lexical")}
-        multi = [q for q in ans if q["kind"] == "multihop"]
+        multi = [q for q in ans if q["kind"].startswith("multihop")]
         report["recall@10_multihop"] = {m: round(recall(s, multi, m), 3) for m in ("hybrid", "dense")}
         print("recall@10", report["recall@10"], "multihop", report["recall@10_multihop"])
         if run_qa:
@@ -61,7 +61,7 @@ def main(run_qa: bool, limit: int | None):
                     if q["answerable"]:
                         hit = bool({c["source_item_id"] for c in r["citations"]} & set(q["gold_source_items"]))
                         cited_gold += hit
-                        by_kind.setdefault(q["kind"] if q["kind"] == "multihop" else "single", []).append(hit)
+                        by_kind.setdefault(q["kind"] if q["kind"].startswith("multihop") else "single", []).append(hit)
                     else:
                         abstained += not r["answerable"]
                     rows.append({"config": name, "id": q["id"], "answerable": r["answerable"], "answer": r["answer"],

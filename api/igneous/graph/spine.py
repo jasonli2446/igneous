@@ -180,6 +180,10 @@ def run(s: Session) -> int:
             s.commit()
     if rows:
         advance(s, STAGE, rows[-1].updated_at)
-        s.execute(INFER_REPLIES)
+        s.commit()
+        from igneous.graph import quoted
+
+        quoted.run(s)               # exact parents from quoted "Original Message" headers first
+        s.execute(INFER_REPLIES)    # then the subject+participant heuristic for whatever is left
     s.commit()
     return len(rows)

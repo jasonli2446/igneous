@@ -63,11 +63,21 @@ UN_SCHEMA = {
 }
 
 
+def needs_hop(question: str, parent_id: int, reply_id: int) -> bool:
+    """A hard multi-hop question: search finds the parent (A) but not the reply (B) holding the answer.
+    Only then does answering require following the graph edge from A to B."""
+    from igneous.rag.search import hybrid
+
+    with SessionLocal() as s:
+        got = [h["source_item_id"] for h in hybrid(s, question, k=10, mode="dense")]
+    return parent_id in got and reply_id not in got
+
+
 def norm(t: str) -> str:
     return re.sub(r"\s+", " ", t).strip().lower()
 
 
-def main(n: int, n_unanswerable: int, n_multihop: int, seed: int):
+def main(n: int, n_unanswerable: int, n_multihop: int, seed: int, hard: bool = False, append: bool = False):
     with SessionLocal() as s:
         rows = s.execute(text("""
             SELECT si.id, si.title, si.body_text FROM nodes n JOIN source_items si ON si.id = n.source_item_id
@@ -82,9 +92,10 @@ def main(n: int, n_unanswerable: int, n_multihop: int, seed: int):
         """)).scalars().all()
 
     random.Random(seed).shuffle(rows)
+    existing = [json.loads(line) for line in OUT.read_text().splitlines()] if append and OUT.exists() else []
     out, tried = [], 0
     for r in rows:
-        if len(out) >= n:
+        if append or len(out) >= n:
             break
         tried += 1
         body = strip_quoted(r.body_text)
@@ -99,6 +110,13 @@ def main(n: int, n_unanswerable: int, n_multihop: int, seed: int):
 
     with SessionLocal() as s:
         pairs = s.execute(text("""
+            SELECT pa.id AS a_id, pa.title AS a_title, pa.body_text AS a_body, ch.id AS b_id, ch.body_text AS b_body
+            FROM edges r
+            JOIN nodes c ON c.id = r.src JOIN source_items ch ON ch.id = c.source_item_id
+            JOIN nodes p ON p.id = r.dst JOIN source_items pa ON pa.id = p.source_item_id
+            WHERE r.type = 'REPLIES_TO' AND r.extractor = 'spine-quoted'
+              AND length(pa.body_text) > 250 AND length(ch.body_text) > 250
+        """)).all() if hard else s.execute(text("""
             WITH m AS (
                 SELECT e.dst AS thread, si.id, si.title, si.body_text, si.occurred_at, snd.src AS sender
                 FROM edges e JOIN nodes n ON n.id = e.src JOIN source_items si ON si.id = n.source_item_id
@@ -121,12 +139,19 @@ def main(n: int, n_unanswerable: int, n_multihop: int, seed: int):
                               SCHEMA, max_tokens=800)
         if not g["usable"] or norm(g["answer_quote"]) not in norm(b) or norm(g["answer_quote"]) in norm(a):
             continue
+        if hard and not needs_hop(g["question"], p.a_id, p.b_id):
+            continue
         n_multi += 1
-        out.append({"id": f"q{len(out) + 1:03d}", "question": g["question"], "kind": "multihop",
+        out.append({"id": f"q{len(existing) + len(out) + 1:03d}", "question": g["question"],
+                    "kind": "multihop-hard" if hard else "multihop",
                     "answerable": True, "gold_source_items": [p.b_id], "bridge_source_items": [p.a_id],
                     "answer_quote": g["answer_quote"]})
         print(f"  multihop {n_multi}/{n_multihop}  {g['question'][:90]}")
 
+    if append:
+        OUT.write_text("".join(json.dumps(q) + "\n" for q in existing + out))
+        print(f"appended {len(out)} questions -> {OUT} ({len(existing) + len(out)} total)")
+        return
     un, _ = llm.structured("You write evaluation questions.", UNANSWERABLE.format(n=n_unanswerable,
                            names=", ".join(names)), UN_SCHEMA, max_tokens=2000)
     for q in un["questions"][:n_unanswerable]:
@@ -143,5 +168,7 @@ if __name__ == "__main__":
     ap.add_argument("--unanswerable", type=int, default=12)
     ap.add_argument("--multihop", type=int, default=15)
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--hard", action="store_true", help="multi-hop only from verified replies search can't reach")
+    ap.add_argument("--append", action="store_true", help="add to questions.jsonl instead of replacing it")
     a = ap.parse_args()
-    main(a.n, a.unanswerable, a.multihop, a.seed)
+    main(a.n, a.unanswerable, a.multihop, a.seed, a.hard, a.append)

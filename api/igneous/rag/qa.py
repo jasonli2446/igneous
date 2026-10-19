@@ -42,10 +42,13 @@ def expand(s: Session, hits: list[dict], per_hit: int = EXPAND_PER_HIT) -> list[
     node_ids = [h["node_id"] for h in hits if h["node_id"]]
     if not node_ids:
         return []
-    # Two hops, in priority order: (1) other messages in the same thread; (2) messages between the same sender
-    # and a recipient within 14 days. (2) matters because Enron threading is sparse (no reply headers).
+    # In priority order: (0) the direct reply chain (REPLIES_TO, from quoted headers); (1) other messages in the
+    # same thread; (2) messages between the same sender and a recipient within 14 days.
     rows = s.execute(text("""
         WITH hit AS (SELECT unnest(CAST(:nodes AS bigint[])) AS node),
+        reply AS (  -- direct reply chain, both directions: the most specific evidence there is
+            SELECT hit.node AS via, CASE WHEN r.src = hit.node THEN r.dst ELSE r.src END AS msg, -1 AS pri
+            FROM hit JOIN edges r ON r.type = 'REPLIES_TO' AND (r.src = hit.node OR r.dst = hit.node)),
         thread_sib AS (
             SELECT hit.node AS via, sib.src AS msg, 0 AS pri
             FROM hit JOIN edges t ON t.src = hit.node AND t.type = 'IN_THREAD'
@@ -61,7 +64,7 @@ def expand(s: Session, hits: list[dict], per_hit: int = EXPAND_PER_HIT) -> list[
             WHERE abs(extract(epoch FROM other.valid_from - snd.valid_from)) < 14 * 86400)
         SELECT DISTINCT ON (c.id) c.id, c.text, c.node_id, si.id AS source_item_id, si.source, si.external_id,
                si.title, si.occurred_at, n.via, n.pri
-        FROM (SELECT * FROM thread_sib UNION ALL SELECT * FROM pair_sib) n
+        FROM (SELECT * FROM reply UNION ALL SELECT * FROM thread_sib UNION ALL SELECT * FROM pair_sib) n
         JOIN chunks c ON c.node_id = n.msg AND c.ord = 0
         JOIN source_items si ON si.id = c.source_item_id
         ORDER BY c.id, n.pri
