@@ -38,6 +38,19 @@ processes what changed.
 | `api/migrations/` | schema (plain SQL in `0001_core_schema.py`) |
 | `web/` | Next.js: explorer (sigma.js) with inspector + evidence, Ask, Search |
 
+## Your own Messages (iMessage / SMS)
+
+```bash
+createdb -h localhost -U igneous igneous_personal     # keep personal data out of the shared Enron DB
+export IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous_personal
+cd api && uv run alembic upgrade head
+uv run igneous sync imessage --since-days 90 && uv run igneous pipeline --extract 0
+```
+
+Reads `~/Library/Messages/chat.db` read-only; each conversation-day becomes one item. Your terminal needs
+Full Disk Access (System Settings → Privacy & Security). **Never commit or demo personal data** (proposal
+CO-5): use the Enron DB for anything shared.
+
 ## Adding a stage or connector
 
 - **Connector:** implement `sync(cursor) -> Iterator[SourceItem | Checkpoint]` (see `connectors/base.py`), register it in `cli.py`.

@@ -10,18 +10,24 @@ app = typer.Typer(no_args_is_help=True)
 
 
 @app.command()
-def sync(connector: str = typer.Argument(..., help="email"),
+def sync(connector: str = typer.Argument(..., help="email | imessage"),
          path: Path = typer.Option(None, help="maildir root (default: <data_dir>/maildir)"),
          mailbox: list[str] = typer.Option(None, help="restrict to these mailboxes; repeatable"),
-         limit: int = typer.Option(None, help="stop after about this many items")):
+         limit: int = typer.Option(None, help="stop after about this many items"),
+         since_days: int = typer.Option(None, help="imessage: only the last N days on first sync")):
     """Pull items from a source into source_items. Resumable: re-run continues from the saved cursor."""
     from igneous.connectors.base import run_sync
 
-    if connector != "email":
-        raise typer.BadParameter("only 'email' exists so far")
-    from igneous.connectors.email_maildir import MaildirConnector
+    if connector == "email":
+        from igneous.connectors.email_maildir import MaildirConnector
 
-    conn = MaildirConnector(path or Path(settings.data_dir) / "maildir", mailbox or None)
+        conn = MaildirConnector(path or Path(settings.data_dir) / "maildir", mailbox or None)
+    elif connector == "imessage":
+        from igneous.connectors.imessage import DEFAULT_DB, MessagesConnector
+
+        conn = MessagesConnector(path or DEFAULT_DB, since_days=since_days)
+    else:
+        raise typer.BadParameter("connector must be email or imessage")
     t = time.time()
     with SessionLocal() as s:
         print(run_sync(s, conn, limit=limit), f"in {time.time() - t:.1f}s")

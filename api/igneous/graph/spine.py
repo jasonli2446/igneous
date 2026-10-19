@@ -128,6 +128,27 @@ ON CONFLICT (src, dst, type, extractor) DO NOTHING
 """)
 
 
+def build_chat(b: Builder, item) -> None:
+    """A conversation-day from Messages: one Message node for the day, a Thread per chat, a Person per handle.
+    Phone numbers and Apple IDs are the keys; entity resolution can later join them to email identities."""
+    meta = item.raw_meta
+    mid = b.node("Message", f"imessage:{item.external_id}", item.title or "(chat)", {"source": "imessage"},
+                 sid=item.id)
+    tid = b.node("Thread", f"imessage-chat:{meta.get('chat')}", (item.title or "").rsplit(" — ", 1)[0] or "chat")
+    b.edge(mid, tid, "IN_THREAD", item.occurred_at, item.id)
+    me = b.node("Person", "me", "Me", {"self": True})
+    for handle in meta.get("participants", []):
+        pid = b.node("Person", handle.lower(), handle, {"handle": handle})
+        if handle in meta.get("senders", []):
+            b.edge(pid, mid, "SENT", item.occurred_at, item.id)
+        else:
+            b.edge(mid, pid, "RECEIVED", item.occurred_at, item.id)
+    if "me" in meta.get("senders", []):
+        b.edge(me, mid, "SENT", item.occurred_at, item.id)
+    else:
+        b.edge(mid, me, "RECEIVED", item.occurred_at, item.id)
+
+
 def build_file(b: Builder, item) -> None:
     fid = b.node("File", f"{item.source}:{item.external_id}", item.title or item.external_id,
                  {"source": item.source, "path": item.external_id}, sid=item.id)
@@ -150,6 +171,8 @@ def run(s: Session) -> int:
     for i, item in enumerate(rows, 1):
         if item.source in ("email", "gmail"):
             build_email(b, item)
+        elif item.source == "imessage":
+            build_chat(b, item)
         elif item.source in ("fs", "drive"):
             build_file(b, item)
         if i % BATCH == 0:

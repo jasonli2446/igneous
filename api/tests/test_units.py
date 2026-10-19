@@ -105,3 +105,18 @@ def test_er_rejects_mailing_lists():
                       ("western.price.survey.contacts@proxy4.ba.best.com", "Western Price Survey Contacts")]:
         f, last = split_name(name, key)
         assert unresolvable(P(1, key, name, f, last, set()))
+
+
+def test_imessage_decoding_and_dates():
+    from igneous.connectors.imessage import apple_time, decode_attributed
+
+    short = b"\x04\x0bstreamtyped\x81\xe8\x03\x84\x01@\x84\x84\x84\x12NSAttributedString\x00\x84\x84\x08NSObject" \
+            b"\x00\x85\x92\x84\x84\x84\x08NSString\x01\x94\x84\x01+\x05hello\x86"
+    assert decode_attributed(short) == "hello"
+    long_text = "x" * 300
+    long_blob = b"NSString\x01\x94\x84\x01+\x81" + (300).to_bytes(2, "little") + long_text.encode()
+    assert decode_attributed(long_blob) == long_text
+    assert decode_attributed(None) is None and decode_attributed(b"garbage") is None
+    assert apple_time(0) is None
+    assert apple_time(700_000_000 * 10**9).year == 2023   # nanoseconds (current format)
+    assert apple_time(700_000_000).year == 2023           # seconds (pre-10.13 rows)
