@@ -13,7 +13,7 @@ app = typer.Typer(no_args_is_help=True)
 def sync(connector: str = typer.Argument(..., help="email | imessage"),
          path: Path = typer.Option(None, help="maildir root (default: <data_dir>/maildir)"),
          mailbox: list[str] = typer.Option(None, help="restrict to these mailboxes; repeatable"),
-         limit: int = typer.Option(None, help="stop after about this many items"),
+         limit: int = typer.Option(None, help="stop at the first checkpoint after this many items (resumable)"),
          since_days: int = typer.Option(None, help="imessage: only the last N days on first sync")):
     """Pull items from a source into source_items. Resumable: re-run continues from the saved cursor."""
     from igneous.connectors.base import run_sync

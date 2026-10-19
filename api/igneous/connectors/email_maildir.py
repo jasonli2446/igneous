@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 
 from igneous.connectors.base import Checkpoint, SourceItem
 
-CHECKPOINT_EVERY = 500
+CHECKPOINT_EVERY = 100  # also the granularity of `sync --limit` (it stops at the first checkpoint past the limit)
 
 
 def _addrs(msg, header: str) -> list[dict]:
