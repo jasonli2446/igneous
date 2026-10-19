@@ -1,0 +1,30 @@
+{
+  "date": "2026-10-18",
+  "n_answerable": 65,
+  "n_unanswerable": 12,
+  "recall@10": {
+    "hybrid": 0.877,
+    "dense": 0.846,
+    "lexical": 0.446
+  },
+  "recall@10_multihop": {
+    "hybrid": 0.867,
+    "dense": 0.933
+  },
+  "full": {
+    "cited_gold": 0.892,
+    "abstention": 1.0,
+    "p50_s": 2.14,
+    "p95_s": 3.02,
+    "cited_gold_multihop": 1.0,
+    "cited_gold_single": 0.86
+  },
+  "baseline": {
+    "cited_gold": 0.846,
+    "abstention": 1.0,
+    "p50_s": 1.91,
+    "p95_s": 2.58,
+    "cited_gold_multihop": 0.933,
+    "cited_gold_single": 0.82
+  }
+}

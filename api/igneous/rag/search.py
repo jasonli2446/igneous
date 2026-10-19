@@ -39,11 +39,16 @@ def _where(f: Filters) -> tuple[str, dict]:
 
 
 def lexical(s: Session, q: str, f: Filters, n: int = POOL) -> list[int]:
+    """websearch_to_tsquery ANDs every term, so a natural-language question ("who pitched Enron on ...")
+    matches almost nothing (recall@10 was 0.14). OR the terms instead and let ts_rank_cd reward chunks that
+    match more of them. Quoted phrases still work: the <-> operator survives the rewrite."""
     where, params = _where(f)
     return list(s.execute(text(f"""
-        SELECT c.id FROM chunks c JOIN source_items si ON si.id = c.source_item_id
-        WHERE c.tsv @@ websearch_to_tsquery('english', :q) {where}
-        ORDER BY ts_rank_cd(c.tsv, websearch_to_tsquery('english', :q)) DESC LIMIT :n
+        WITH q AS (SELECT CAST(replace(CAST(websearch_to_tsquery('english', :q) AS text), ' & ', ' | ')
+                               AS tsquery) AS tq)
+        SELECT c.id FROM chunks c JOIN source_items si ON si.id = c.source_item_id, q
+        WHERE c.tsv @@ q.tq {where}
+        ORDER BY ts_rank_cd(c.tsv, q.tq, 32) DESC LIMIT :n
     """), {"q": q, "n": n, **params}).scalars())
 
 
