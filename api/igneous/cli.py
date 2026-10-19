@@ -78,6 +78,14 @@ def export(target: str = typer.Argument(..., help="lightrag"), out: Path = typer
 
 
 @app.command()
+def mcp():
+    """Serve the graph to MCP clients (Claude Code, Claude Desktop, Cursor) over stdio. Read-only."""
+    from igneous.mcp_server import main
+
+    main()
+
+
+@app.command()
 def search(q: str, k: int = 5, mode: str = "hybrid"):
     """Hybrid search from the terminal."""
     from igneous.rag.search import hybrid

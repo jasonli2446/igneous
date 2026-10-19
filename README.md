@@ -54,3 +54,15 @@ processes what changed.
 Q&A uses Claude Sonnet 5.5 on Amazon Bedrock. Set `AWS_BEARER_TOKEN_BEDROCK` and `AWS_REGION` (e.g. `us-east-1`);
 everything goes through `api/igneous/llm.py`. `IGNEOUS_LLM_ENABLED=false` turns off all model calls (search and
 the graph keep working; `/ask` returns 503).
+
+## MCP server (use the graph from Claude Code, Claude Desktop, Cursor)
+
+Read-only tools: `search`, `find_entity`, `get_node`, `correspondents`, `neighbors`, `evidence`, `ask`.
+
+```bash
+claude mcp add igneous -e AWS_REGION=us-east-1 -e AWS_BEARER_TOKEN_BEDROCK=$AWS_BEARER_TOKEN_BEDROCK \
+  -- uv run --directory "$(pwd)/api" igneous mcp
+```
+
+The model credentials only matter for `ask`; MCP clients don't pass your shell's environment through, so
+set them with `-e` as above (other tools work without them). Postgres must be running (`make db`).
