@@ -27,10 +27,11 @@ def client() -> anthropic.AnthropicBedrock:
     return anthropic.AnthropicBedrock(aws_region=os.environ.get("AWS_REGION", "us-east-1"), api_key=token)
 
 
-def structured(system: str, user: str, schema: dict, max_tokens: int = 4000, effort: str = "low") -> tuple[dict, dict]:
+def structured(system: str, user: str, schema: dict, max_tokens: int = 4000, effort: str = "low",
+               model: str | None = None) -> tuple[dict, dict]:
     """One call returning (parsed JSON matching `schema`, usage). Raises on refusal or truncation."""
     r = client().messages.create(
-        model=settings.llm_model,
+        model=model or settings.llm_model,
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user}],

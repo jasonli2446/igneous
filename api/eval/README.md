@@ -36,14 +36,30 @@ blind A/B grading of answer quality is still to do; `results/<date>-answers.json
 
 ## Entity resolution (criterion 3)
 
-`er_pairs.csv`: 240 Person pairs sampled across the resolver's score range (¼ low, ½ middle, ¼ high), each
-labeled from the two identities' own mail. **Labels are model-proposed (`reviewed=0`)**; criterion 3 calls for
-hand labels, so review them (fix `label`, set `reviewed=1`) before quoting the number. Five mailing-list pairs
-are `label=n/a`: lists aren't people, so they're out of scope for Person ER.
+`er_pairs.csv`: 240 Person pairs sampled across the resolver's score range (¼ low, ½ middle, ¼ high).
+
+**Labels, two passes:**
+1. *Draft*: Claude Sonnet 5.5, shown each identity's 3 most recent sent emails (`draft_label`).
+2. *Review*: Claude Opus 5.5, a different and stronger model, shown more evidence (6 sent + 3 received emails
+   and top correspondents) and **not shown the draft label or rationale** (`label`, `reviewer`,
+   `review_rationale`). It changed 17 of 235 labels: 16 drafted "different" were the same person
+   (Steve/Stephen Swain, Jeff/Jeffery McMahon, Ken/Kenneth Rice), 1 the reverse. It marked 46 pairs "unsure".
+
+Five mailing-list pairs are `label=n/a` (lists aren't people). `reviewed=1` is reserved for human review;
+none is done yet. **These are model labels, not hand labels**, so report them as such.
 
 ```bash
+uv run python eval/er_labels.py review          # independent second pass (resumable; skips reviewed rows)
 uv run python eval/er_labels.py score --sweep   # P/R/F1 per threshold, rescoring with the current resolver
 ```
 
-At the chosen threshold (0.6, the precision-favoring point that clears the target), on 235 in-scope pairs:
-**precision 0.914, recall 0.801, F1 0.854**. That's a thin margin over 0.85, on unreviewed labels.
+| Threshold | Labels | Pairs | Precision | Recall | F1 |
+|---|---|---|---|---|---|
+| **0.5 (current)** | AI-reviewed | 235 | 0.938 | 0.944 | **0.941** |
+| 0.5 | AI-reviewed, reviewer confident | 189 | 0.971 | 0.957 | 0.964 |
+| 0.6 (previous) | AI-reviewed | 235 | 0.969 | 0.770 | 0.858 |
+| 0.6 | draft only | 235 | 0.914 | 0.801 | 0.854 |
+
+The draft labels undercounted true duplicates, which made recall look worse than it is. Re-labeling moved the
+best threshold from 0.6 to 0.5 at almost no precision cost. Structural guards still hold at 0.5: Larry Taylor
+stays separate from Liz Taylor, and Kenneth Lay resolves to one node (12 identities).

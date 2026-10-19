@@ -41,6 +41,10 @@ def split(t: str) -> list[str]:
 
 def chunks_for(item) -> list[str]:
     body = item.body_text or ""
+    if item.source == "gcal":  # title + time + people so "meeting with Sam last week" finds it
+        who = ", ".join(a.get("name") or a["email"] for a in (item.raw_meta or {}).get("attendees", [])[:20])
+        head = f"Event: {item.title}\nWhen: {item.occurred_at}\nAttendees: {who}\n"
+        return [head + c for c in split(body)] or [head.strip()]
     if item.source in ("email", "gmail"):
         body = strip_quoted(body)
         header = f"Subject: {item.title}\n" if item.title else ""
@@ -51,11 +55,13 @@ def chunks_for(item) -> list[str]:
 def run(s: Session) -> int:
     since = watermark(s, STAGE)
     rows = s.execute(text("""
-        SELECT si.id, si.source, si.title, si.body_text, si.occurred_at, si.updated_at,
+        SELECT si.id, si.source, si.title, si.body_text, si.occurred_at, si.updated_at, si.raw_meta,
                n.id AS node_id
         FROM source_items si
         LEFT JOIN nodes n ON n.source_item_id = si.id AND n.type IN ('Message', 'File', 'Event')
-        WHERE si.updated_at > :since ORDER BY si.updated_at, si.id
+        -- contact cards carry no text worth searching
+        WHERE si.source <> 'gcontacts' AND si.updated_at > :since
+        ORDER BY si.updated_at, si.id
     """), {"since": since}).all()
     for item in rows:
         s.execute(text("DELETE FROM chunks WHERE source_item_id = :id"), {"id": item.id})

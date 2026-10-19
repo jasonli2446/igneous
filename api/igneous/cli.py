@@ -10,11 +10,12 @@ app = typer.Typer(no_args_is_help=True)
 
 
 @app.command()
-def sync(connector: str = typer.Argument(..., help="email | imessage"),
+def sync(connector: str = typer.Argument(..., help="email | imessage | gmail | gcal | gcontacts"),
          path: Path = typer.Option(None, help="maildir root (default: <data_dir>/maildir)"),
          mailbox: list[str] = typer.Option(None, help="restrict to these mailboxes; repeatable"),
          limit: int = typer.Option(None, help="stop at the first checkpoint after this many items (resumable)"),
-         since_days: int = typer.Option(None, help="imessage: only the last N days on first sync")):
+         since_days: int = typer.Option(None, help="first sync only: how far back to go (imessage, gmail, gcal)"),
+         account: str = typer.Option(None, help="google: which connected account (default: the only one)")):
     """Pull items from a source into source_items. Resumable: re-run continues from the saved cursor."""
     from igneous.connectors.base import run_sync
 
@@ -26,11 +27,39 @@ def sync(connector: str = typer.Argument(..., help="email | imessage"),
         from igneous.connectors.imessage import DEFAULT_DB, MessagesConnector
 
         conn = MessagesConnector(path or DEFAULT_DB, since_days=since_days)
+    elif connector in ("gmail", "gcal", "gcontacts"):
+        from igneous.connectors import google_auth
+
+        with SessionLocal() as s:
+            account, creds = google_auth.load(s, account)
+        if connector == "gmail":
+            from igneous.connectors.gmail import GmailConnector
+
+            conn = GmailConnector(creds, account, since_days=since_days or 90)
+        elif connector == "gcal":
+            from igneous.connectors.gcal import CalendarConnector
+
+            conn = CalendarConnector(creds, account, since_days=since_days or 365)
+        else:
+            from igneous.connectors.gcal import ContactsConnector
+
+            conn = ContactsConnector(creds, account)
     else:
-        raise typer.BadParameter("connector must be email or imessage")
+        raise typer.BadParameter("unknown connector")
     t = time.time()
     with SessionLocal() as s:
-        print(run_sync(s, conn, limit=limit), f"in {time.time() - t:.1f}s")
+        print(run_sync(s, conn, account=account or "default", limit=limit), f"in {time.time() - t:.1f}s")
+
+
+@app.command()
+def connect(provider: str = typer.Argument(..., help="google")):
+    """Sign in once (opens a browser). The token is stored encrypted; Testing-mode tokens last 7 days."""
+    if provider != "google":
+        raise typer.BadParameter("only google")
+    from igneous.connectors import google_auth
+
+    with SessionLocal() as s:
+        print("connected", google_auth.connect(s))
 
 
 @app.command()

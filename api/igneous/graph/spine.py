@@ -1,6 +1,7 @@
 """Stage one: deterministic graph from metadata alone. Exactly correct, no model calls, idempotent."""
 import json
 import re
+from itertools import pairwise
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -60,6 +61,8 @@ REPLY_PREFIX = re.compile(r"^\s*((re|fw|fwd)\s*:\s*)+", re.I)
 def _thread_key(meta: dict, title: str) -> str:
     """Root of the reply chain if headers give one. Otherwise (all of Enron) normalized subject plus the
     participant set, so unrelated messages that share a generic subject ("Thank You") don't merge."""
+    if meta.get("gmail_thread_id"):
+        return f"gmail:{meta['gmail_thread_id']}"
     if meta.get("references"):
         return meta["references"][0]
     if meta.get("in_reply_to"):
@@ -149,6 +152,33 @@ def build_chat(b: Builder, item) -> None:
         b.edge(mid, me, "RECEIVED", item.occurred_at, item.id)
 
 
+def build_event(b: Builder, item) -> None:
+    """Calendar event: Event node; organizer and attendees ATTENDED it (decliners excluded)."""
+    meta = item.raw_meta
+    eid = b.node("Event", f"{item.source}:{item.external_id}", item.title or "(event)",
+                 {"start": meta.get("start"), "end": meta.get("end")}, sid=item.id)
+    people = list(meta.get("attendees", []))
+    if meta.get("organizer", {}).get("email"):
+        people.append({**meta["organizer"], "response": "accepted"})
+    for a in people:
+        if a.get("response") == "declined" or "@" not in a.get("email", ""):
+            continue
+        b.edge(_person(b, a, _name_from(a, None)), eid, "ATTENDED", item.occurred_at, item.id)
+
+
+def build_contact(b: Builder, item) -> None:
+    """A contact card names one human with several addresses: emit SAME_AS between them, which is
+    ground truth for entity resolution (extractor 'contacts', so `resolve --undo` leaves it alone)."""
+    emails = item.raw_meta.get("emails", [])
+    ids = [_person(b, {"email": e, "name": item.title}, item.title or e) for e in emails]
+    for a, c in pairwise(ids):
+        s0, s1 = sorted((a, c))
+        b.s.execute(text("""
+            INSERT INTO edges (src, dst, type, extractor, confidence, source_item_id)
+            VALUES (:a, :b, 'SAME_AS', 'contacts', 1.0, :sid) ON CONFLICT (src, dst, type, extractor) DO NOTHING
+        """), {"a": s0, "b": s1, "sid": item.id})
+
+
 def build_file(b: Builder, item) -> None:
     fid = b.node("File", f"{item.source}:{item.external_id}", item.title or item.external_id,
                  {"source": item.source, "path": item.external_id}, sid=item.id)
@@ -173,6 +203,10 @@ def run(s: Session) -> int:
             build_email(b, item)
         elif item.source == "imessage":
             build_chat(b, item)
+        elif item.source == "gcal":
+            build_event(b, item)
+        elif item.source == "gcontacts":
+            build_contact(b, item)
         elif item.source in ("fs", "drive"):
             build_file(b, item)
         if i % BATCH == 0:

@@ -16,6 +16,8 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "anthropic>=1.15.0",
     "mcp>=2.3",
+    "google-auth-oauthlib>=1.5.0",
+    "google-api-python-client>=2.201.0",
 ]
 
 [dependency-groups]

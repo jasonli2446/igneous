@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 EXTRACTOR = "er"
 VERSION = "1"
-THRESHOLD = 0.6  # precision-favoring point that clears F1 0.85 on eval/er_pairs.csv (see eval/README.md)
+THRESHOLD = 0.5  # chosen on AI-reviewed labels: P 0.938 R 0.944 F1 0.941 (eval/README.md)
 
 # Display names and local parts that are mailbox roles, not people.
 ROLE_WORDS = {"info", "news", "newsletter", "editor", "admin", "support", "help", "sales", "webmaster", "mail",
@@ -159,7 +159,7 @@ def candidates(s: Session) -> list[tuple[P, P, float, dict]]:
 
 
 def run(s: Session, threshold: float = THRESHOLD) -> dict:
-    s.execute(text("DELETE FROM edges WHERE type = 'SAME_AS' AND extractor = :ex"), {"ex": EXTRACTOR})
+    s.execute(text("DELETE FROM edges WHERE type = 'SAME_AS' AND extractor = :ex"), {"ex": EXTRACTOR})  # not 'contacts'
     merged = 0
     for a, b, sc, f in candidates(s):
         if sc >= threshold:
