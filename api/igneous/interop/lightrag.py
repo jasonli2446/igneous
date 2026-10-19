@@ -46,17 +46,28 @@ def export(s: Session, limit_messages: int | None = None) -> dict:
             FROM edges e WHERE e.type = 'MENTIONS' AND e.src = ANY(:m)
             UNION ALL
             SELECT e.src, e.dst, 'ABOUT', NULL FROM edges e WHERE e.type = 'ABOUT' AND e.src = ANY(:m))
-        SELECT l.msg, l.rel, l.role, n.name, n.type, n.key
+        SELECT l.msg, l.rel, l.role, n.id AS node_id, n.name, n.type, n.key
         FROM links l JOIN nodes n ON n.id = l.person
     """), {"m": msg_ids}).all()
 
-    def is_person(name: str, key: str) -> bool:
-        # Automated senders (ipayit@, "Enron Messaging") become Person nodes in the spine; don't export them
-        # as people. Same test entity resolution uses.
-        f, last = split_name(name, key)
-        return not unresolvable(P(0, key, name, f, last, set()))
+    # A Person is a real person if their entity-resolved identity has two-way mail with someone: bots and
+    # announcement lists (ipayit@, "UBSW Energy Global Infrastructure") only send. Name-only mentions from
+    # extraction can't have mail, so they pass the role-name filter alone.
+    real = set(s.execute(text(f"""
+        WITH sent AS (
+            SELECT {CANON.format(x='snd.src')} AS p, {CANON.format(x='rcv.dst')} AS q
+            FROM edges snd JOIN edges rcv ON rcv.src = snd.dst
+            WHERE snd.type = 'SENT' AND rcv.type = 'RECEIVED')
+        SELECT DISTINCT a.p FROM sent a JOIN sent b ON b.p = a.q AND b.q = a.p WHERE a.p <> a.q
+    """)).scalars())
 
-    rows = [r for r in rows if r.type != "Person" or is_person(r.name, r.key)]
+    def is_person(node_id: int, name: str, key: str) -> bool:
+        f, last = split_name(name, key)
+        if unresolvable(P(0, key, name, f, last, set())):
+            return False
+        return key.startswith("name:") or node_id in real
+
+    rows = [r for r in rows if r.type != "Person" or is_person(r.node_id, r.name, r.key)]
     entities: dict[str, dict] = {}
     by_msg: dict[int, list] = {}
     for r in rows:
