@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     # Cross-encoder runs only in Q&A after graph expansion. It never blocks search if unavailable.
     reranker_enabled: bool = True
     reranker_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
+    reranker_pool_size: int = 32
     # Kill switch for every outbound model call (CO-1). Search and the graph still work without it.
     llm_enabled: bool = True
     llm_model: str = "us.anthropic.claude-sonnet-5-5"

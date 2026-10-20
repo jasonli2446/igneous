@@ -77,8 +77,9 @@ CO-5): use the Enron DB for anything shared.
 Q&A uses Claude Sonnet 5.5 on Amazon Bedrock. Set `AWS_BEARER_TOKEN_BEDROCK` and `AWS_REGION` (e.g. `us-east-1`);
 everything goes through `api/igneous/llm.py`. `IGNEOUS_LLM_ENABLED=false` turns off all model calls (search and
 the graph keep working; `/ask` returns 503). Q&A also uses FastEmbed's local
-`Xenova/ms-marco-MiniLM-L-6-v2` cross-encoder to rerank graph-expanded evidence. Set
-`IGNEOUS_RERANKER_ENABLED=false` to preserve graph retrieval order. If its model files cannot load, Q&A logs a
+`Xenova/ms-marco-MiniLM-L-6-v2` cross-encoder to rerank the graph-expanded candidate pool down to the top
+8 evidence chunks. Set `IGNEOUS_RERANKER_ENABLED=false` to preserve graph retrieval order, or adjust the
+bounded input with `IGNEOUS_RERANKER_POOL_SIZE` (32 by default). If its model files cannot load, Q&A logs a
 warning and safely preserves that order instead.
 
 ## MCP server (use the graph from Claude Code, Claude Desktop, Cursor)
