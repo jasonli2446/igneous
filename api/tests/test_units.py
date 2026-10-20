@@ -460,7 +460,7 @@ def test_get_sync_is_read_only_status_report():
 
 def test_filesystem_connector_walks_sorted_parseable_files_and_emits_hierarchy(tmp_path):
     from igneous.connectors.base import CompletedScan, SourceItem
-    from igneous.connectors.filesystem import FilesystemConnector
+    from igneous.connectors.filesystem import FilesystemConnector, _root_key
 
     (tmp_path / "z-last.txt").write_text("last")
     (tmp_path / "projects" / "igneous").mkdir(parents=True)
@@ -473,13 +473,15 @@ def test_filesystem_connector_walks_sorted_parseable_files_and_emits_hierarchy(t
 
     emitted = list(FilesystemConnector(tmp_path).sync({}))
     items = [event for event in emitted if isinstance(event, SourceItem)]
-    assert [item.external_id for item in items] == ["projects/igneous/plan.md", "z-last.txt"]
+    root_key = _root_key(tmp_path)
+    assert [item.external_id for item in items] == [
+        f"{root_key}/projects/igneous/plan.md", f"{root_key}/z-last.txt"]
     plan = items[0]
     assert plan.body_text == "# Plan\nship"
     assert plan.mime == "text/markdown"
     assert plan.raw_meta == {
-        "path": "projects/igneous/plan.md",
-        "folders": ["projects", "projects/igneous"],
+        "path": f"{root_key}/projects/igneous/plan.md",
+        "folders": [root_key, f"{root_key}/projects", f"{root_key}/projects/igneous"],
         "parser": "text",
         "boundaries": [],
     }
@@ -488,7 +490,7 @@ def test_filesystem_connector_walks_sorted_parseable_files_and_emits_hierarchy(t
 
 def test_filesystem_connector_hashes_file_bytes_and_namespaces_multiple_roots(tmp_path):
     from igneous.connectors.base import SourceItem
-    from igneous.connectors.filesystem import FilesystemConnector
+    from igneous.connectors.filesystem import FilesystemConnector, _root_key
 
     first, second = tmp_path / "first", tmp_path / "second"
     first.mkdir()
@@ -497,7 +499,8 @@ def test_filesystem_connector_hashes_file_bytes_and_namespaces_multiple_roots(tm
     (second / "same.txt").write_text("two")
     connector = FilesystemConnector([second, first])
     initial = [event for event in connector.sync({}) if isinstance(event, SourceItem)]
-    assert [item.external_id for item in initial] == ["first/same.txt", "second/same.txt"]
+    assert [item.external_id for item in initial] == [
+        f"{_root_key(first)}/same.txt", f"{_root_key(second)}/same.txt"]
     (first / "same.txt").write_text("changed")
     changed = [event for event in connector.sync({}) if isinstance(event, SourceItem)]
     assert changed[0].content_hash != initial[0].content_hash
@@ -530,7 +533,7 @@ def test_run_sync_prunes_only_after_completed_scan(monkeypatch):
 
         def sync(self, cursor):
             yield base.SourceItem("fs", "kept.txt", "kept.txt", "body")
-            yield base.CompletedScan({})
+            yield base.CompletedScan({}, "fs", frozenset({"kept.txt"}))
 
     session = Session()
     monkeypatch.setattr(base, "load_cursor", lambda *args: {})

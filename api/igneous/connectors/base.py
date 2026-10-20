@@ -39,8 +39,15 @@ class Checkpoint:
 
 @dataclass
 class CompletedScan:
-    """Marks a complete source snapshot; only this permits deletion reconciliation."""
+    """Final source snapshot event; only it permits reconciliation for ``source``.
+
+    ``external_ids`` contains every observed path, including files a connector chose not
+    to emit as a SourceItem. It must be the final event from a connector sync.
+    """
     cursor: dict
+    source: str
+    external_ids: frozenset[str]
+    allow_empty_prune: bool = False
 
 
 class Connector(Protocol):
@@ -77,8 +84,11 @@ def save_cursor(s: Session, connector: str, account: str, cursor: dict) -> None:
     """), {"c": connector, "a": account, "cur": json.dumps(cursor)})
 
 
-def _reconcile_completed_scan(s: Session, source: str, external_ids: set[str]) -> int:
-    """Remove items absent from a source snapshot, after and only after it completes."""
+def _reconcile_completed_scan(s: Session, source: str, external_ids: frozenset[str],
+                              allow_empty_prune: bool) -> int:
+    """Remove items absent from a completed, non-suspicious source snapshot."""
+    if not external_ids and not allow_empty_prune:
+        return 0
     if external_ids:
         result = s.execute(text("""
             DELETE FROM source_items
@@ -98,10 +108,12 @@ def run_sync(s: Session, connector: Connector, account: str = "default", limit: 
     """
     stats = {"inserted": 0, "updated": 0, "unchanged": 0, "deleted": 0}
     cursor = load_cursor(s, connector.name, account)
-    seen, scanned_ids = 0, set()
+    seen = 0
     for obj in connector.sync(cursor):
         if isinstance(obj, CompletedScan):
-            stats["deleted"] += _reconcile_completed_scan(s, connector.name, scanned_ids)
+            if limit is None:
+                stats["deleted"] += _reconcile_completed_scan(
+                    s, obj.source, obj.external_ids, obj.allow_empty_prune)
             save_cursor(s, connector.name, account, obj.cursor)
             s.commit()
             break
@@ -123,7 +135,6 @@ def run_sync(s: Session, connector: Connector, account: str = "default", limit: 
             stats["inserted"] += 1
         else:
             stats["updated"] += 1
-        scanned_ids.add(obj.external_id)
         seen += 1
     s.commit()
     return stats

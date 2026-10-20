@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,8 +22,8 @@ IGNORED_EXTENSIONS = frozenset({
 })
 
 
-def _raise_walk_error(error: OSError) -> None:
-    raise error
+def _root_key(root: Path) -> str:
+    return hashlib.sha256(str(root).encode()).hexdigest()[:12]
 
 
 class FilesystemConnector:
@@ -44,28 +43,21 @@ class FilesystemConnector:
             raise ValueError("at least one filesystem root is required")
         if missing := [str(root) for root in self.roots if not root.is_dir()]:
             raise ValueError(f"filesystem roots must be directories: {', '.join(missing)}")
-        if len(self.roots) > 1 and len({root.name for root in self.roots}) != len(self.roots):
-            raise ValueError("filesystem roots must have distinct directory names")
-
-    def _files(self, root: Path) -> Iterator[Path]:
-        files = []
-        for directory, directories, filenames in os.walk(root, topdown=True, followlinks=False, onerror=_raise_walk_error):
-            directories[:] = sorted(
-                name for name in directories
-                if name not in IGNORED_DIRECTORIES and not (Path(directory) / name).is_symlink()
-            )
-            files.extend(
-                Path(directory) / filename for filename in filenames
-                if (Path(directory) / filename).suffix.lower() not in IGNORED_EXTENSIONS
-                and not (Path(directory) / filename).is_symlink()
-            )
-        yield from sorted(files, key=lambda path: path.relative_to(root).as_posix())
+    def _files(self, directory: Path) -> Iterator[Path]:
+        for path in sorted(directory.iterdir(), key=lambda entry: entry.name):
+            if path.is_symlink():
+                continue
+            if path.is_dir():
+                if path.name not in IGNORED_DIRECTORIES:
+                    yield from self._files(path)
+            elif path.suffix.lower() not in IGNORED_EXTENSIONS:
+                yield path
 
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | CompletedScan]:
         del cursor  # Full scans, rather than path cursors, make deletion reconciliation sound.
         processed = 0
         complete = True
-        multiple_roots = len(self.roots) > 1
+        observed_ids = set()
         for root in self.roots:
             for path in self._files(root):
                 try:
@@ -75,11 +67,12 @@ class FilesystemConnector:
                     # An incomplete observation must never become permission to prune old rows.
                     complete = False
                     continue
+                relative_path = path.relative_to(root).as_posix()
+                external_id = f"{_root_key(root)}/{relative_path}"
+                observed_ids.add(external_id)
                 parsed = parse_document(data, path.name)
                 if parsed.status != "ok":
                     continue
-                relative_path = path.relative_to(root).as_posix()
-                external_id = f"{root.name}/{relative_path}" if multiple_roots else relative_path
                 folders = external_id.split("/")[:-1]
                 hierarchy = ["/".join(folders[:index]) for index in range(1, len(folders) + 1)]
                 yield SourceItem(
@@ -95,11 +88,12 @@ class FilesystemConnector:
                         "parser": parsed.parser,
                         "boundaries": parsed.boundaries,
                     },
-                    # Identity is the file's bytes, not just its extracted text or metadata.
-                    content_hash=hashlib.sha256(data).hexdigest(),
+                    # This guard controls upserts, so include every mutable stored property.
+                    content_hash=hashlib.sha256(
+                        data + b"\0" + external_id.encode() + b"\0" + str(stat.st_mtime_ns).encode()).hexdigest(),
                 )
                 processed += 1
                 if processed % CHECKPOINT_EVERY == 0:
                     yield Checkpoint({})
         if complete:
-            yield CompletedScan({})
+            yield CompletedScan({}, self.name, frozenset(observed_ids))
