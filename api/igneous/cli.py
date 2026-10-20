@@ -119,6 +119,25 @@ def export(target: str = typer.Argument(..., help="lightrag"), out: Path = typer
         print(write(s, out, limit))
 
 
+@app.command("synthetic-corpus")
+def synthetic_corpus(out: Path = typer.Argument(..., help="directory for the generated fixture corpus")):
+    """Create small, deterministic synthetic files and an ICS calendar fixture."""
+    from igneous.synthetic_corpus import generate
+
+    manifest = generate(out)
+    print(f"wrote {manifest['document_count']} documents and "
+          f"{manifest['calendar_event_count']} calendar events to {out}")
+
+
+@app.command("verify-synthetic-corpus")
+def verify_synthetic_corpus(out: Path = typer.Argument(..., help="generated fixture corpus directory")):
+    """Verify a synthetic corpus was generated completely and without edits."""
+    from igneous.synthetic_corpus import verify
+
+    stats = verify(out)
+    print(f"verified {stats['documents']} documents and {stats['calendar_events']} calendar events")
+
+
 @app.command()
 def mcp():
     """Serve the graph to MCP clients (Claude Code, Claude Desktop, Cursor) over stdio. Read-only."""

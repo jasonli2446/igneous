@@ -21,6 +21,18 @@ Old quoted text.
 """
 
 
+def test_synthetic_cross_source_corpus_is_deterministic_and_valid(tmp_path):
+    from igneous.synthetic_corpus import NOTICE, generate, verify
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    assert generate(first) == generate(second)
+    assert verify(first) == {"documents": 5, "calendar_events": 2}
+    assert NOTICE in (first / "README.md").read_text()
+    assert NOTICE in (first / "calendar.ics").read_text()
+    assert "phillip.allen@enron.com" in (first / "files/2001-05-14-forecast-memo.md").read_text()
+
+
 def test_parse_message():
     item = parse_message(RAW, "allen-p/sent/1.")
     m = item.raw_meta
