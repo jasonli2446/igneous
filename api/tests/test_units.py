@@ -360,10 +360,10 @@ class _SyncStatusResult:
 class _SyncStatusSession:
     def __init__(self, rows):
         self.rows = rows
-        self.params = None
+        self.statement = None
 
-    def execute(self, _statement, params):
-        self.params = params
+    def execute(self, statement, _params):
+        self.statement = str(statement)
         return _SyncStatusResult(self.rows)
 
 
@@ -389,15 +389,25 @@ def test_sync_status_reports_age_counts_and_sanitized_cursor():
         "last_synced_at": datetime(2026, 10, 20, 11, 30, tzinfo=UTC),
         "cursor_age_seconds": 1800,
         "item_count": 42,
-        "cursor": {"present": True, "keys": ["backfill_page", "history_id"], "backfill_in_progress": True},
+        "item_count_scope": "connector",
+        "cursor": {"present": True, "keys": ["backfill_page", "history_id"], "gmail_backfill_in_progress": True},
     }
     assert "opaque-history-token" not in repr(status)
+    assert "SELECT source AS connector, count(*)::bigint AS item_count" in session.statement
+    assert "item_counts.connector = subjects.connector" in session.statement
+    assert "raw_meta ->> 'account'" not in session.statement
 
 
 def test_sync_status_marks_requested_missing_checkpoint_never_synced():
     from igneous.sync_status import sync_status
 
-    session = _SyncStatusSession([])
+    session = _SyncStatusSession([{
+        "connector": "gmail",
+        "account": "me@example.com",
+        "cursor": None,
+        "updated_at": None,
+        "item_count": 42,
+    }])
 
     assert sync_status(session, connector="gmail", account="me@example.com") == [{
         "connector": "gmail",
@@ -405,10 +415,10 @@ def test_sync_status_marks_requested_missing_checkpoint_never_synced():
         "status": "never_synced",
         "last_synced_at": None,
         "cursor_age_seconds": None,
-        "item_count": 0,
-        "cursor": {"present": False, "keys": [], "backfill_in_progress": False},
+        "item_count": 42,
+        "item_count_scope": "connector",
+        "cursor": {"present": False, "keys": [], "gmail_backfill_in_progress": False},
     }]
-    assert session.params == {"connector": "gmail", "account": "me@example.com"}
 
 
 def test_get_sync_is_read_only_status_report():
@@ -417,7 +427,13 @@ def test_get_sync_is_read_only_status_report():
     from igneous.db import get_session
     from igneous.main import app
 
-    session = _SyncStatusSession([])
+    session = _SyncStatusSession([{
+        "connector": "imessage",
+        "account": "default",
+        "cursor": None,
+        "updated_at": None,
+        "item_count": 0,
+    }])
     app.dependency_overrides[get_session] = lambda: session
     try:
         response = TestClient(app).get("/sync?connector=imessage&account=default")
@@ -433,6 +449,8 @@ def test_get_sync_is_read_only_status_report():
             "last_synced_at": None,
             "cursor_age_seconds": None,
             "item_count": 0,
-            "cursor": {"present": False, "keys": [], "backfill_in_progress": False},
+            "item_count_scope": "connector",
+            "cursor": {"present": False, "keys": [], "gmail_backfill_in_progress": False},
         }]
     }
+    assert TestClient(app).get("/sync?connector=unknown").status_code == 422
