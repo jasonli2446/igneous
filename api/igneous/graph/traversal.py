@@ -1,4 +1,6 @@
-"""Bounded k-hop neighborhoods. Shared by the explorer API and (later) graph-augmented retrieval."""
+"""Bounded, provenance-filtered graph traversals used by the Explorer API."""
+from dataclasses import dataclass
+from datetime import datetime
 import re
 
 from sqlalchemy import text
@@ -8,10 +10,41 @@ from sqlalchemy.orm import Session
 MAX_FANOUT = 200
 
 
+@dataclass(frozen=True)
+class GraphFilters:
+    """Request filters applied both while discovering and serializing edges."""
+
+    source: str | None = None
+    edge_types: list[str] | None = None
+    since: datetime | None = None
+    until: datetime | None = None
+
+
+NO_FILTERS = GraphFilters()
+
+
+def _edge_where(filters: GraphFilters, edge: str = "e", item: str = "si") -> str:
+    """Build a bound-parameter predicate for provenance-backed graph edges."""
+    clauses = []
+    if filters.edge_types:
+        clauses.append(f"{edge}.type = ANY(:types)")
+    if filters.source:
+        clauses.append(f"{item}.source = :source")
+    if filters.since:
+        clauses.append(f"COALESCE({item}.occurred_at, {edge}.valid_from) >= :since")
+    if filters.until:
+        clauses.append(f"COALESCE({item}.occurred_at, {edge}.valid_from) <= :until")
+    return " AND ".join(clauses) if clauses else "TRUE"
+
+
+def _filter_params(filters: GraphFilters) -> dict:
+    return {"types": filters.edge_types, "source": filters.source, "since": filters.since, "until": filters.until}
+
+
 def neighborhood(s: Session, seeds: list[int], hops: int = 1, limit: int = 300,
-                 edge_types: list[str] | None = None) -> dict:
+                 filters: GraphFilters = NO_FILTERS) -> dict:
     frontier, seen = list(seeds), list(dict.fromkeys(seeds))
-    type_clause = "AND e.type = ANY(:types)" if edge_types else ""
+    edge_where = _edge_where(filters)
     for _ in range(hops):
         if not frontier or len(seen) >= limit:
             break
@@ -19,15 +52,17 @@ def neighborhood(s: Session, seeds: list[int], hops: int = 1, limit: int = 300,
             WITH f AS (SELECT unnest(CAST(:frontier AS bigint[])) AS id),
             deg AS (SELECT f.id, (SELECT count(*) FROM edges e WHERE e.src = f.id OR e.dst = f.id) AS d FROM f)
             SELECT CASE WHEN e.src = deg.id THEN e.dst ELSE e.src END AS nbr
-            FROM deg JOIN edges e ON (e.src = deg.id OR e.dst = deg.id) {type_clause}
-            WHERE deg.d <= :fanout OR deg.id = ANY(:seeds)
+            FROM deg JOIN edges e ON (e.src = deg.id OR e.dst = deg.id)
+            LEFT JOIN source_items si ON si.id = e.source_item_id
+            WHERE (deg.d <= :fanout OR deg.id = ANY(:seeds)) AND {edge_where}
             LIMIT :room
-        """), {"frontier": frontier, "types": edge_types, "fanout": MAX_FANOUT, "seeds": seeds,
-               "room": (limit - len(seen)) * 4}).scalars().all()
-        new = [n for n in dict.fromkeys(rows) if n not in set(seen)][: limit - len(seen)]
+        """), {"frontier": frontier, "fanout": MAX_FANOUT, "seeds": seeds,
+               "room": (limit - len(seen)) * 4, **_filter_params(filters)}).scalars().all()
+        known = set(seen)
+        new = [n for n in dict.fromkeys(rows) if n not in known][: limit - len(seen)]
         seen += new
         frontier = new
-    return subgraph(s, seen)
+    return subgraph(s, seen, filters)
 
 
 def people(s: Session, seed: int, limit: int = 60) -> dict:
@@ -235,15 +270,17 @@ def prune(nodes: list[dict], edges: list[dict], seed: int, per_node: int = 4) ->
     return [e for e in edges if id(e) in keep]
 
 
-def subgraph(s: Session, node_ids: list[int]) -> dict:
+def subgraph(s: Session, node_ids: list[int], filters: GraphFilters = NO_FILTERS) -> dict:
     nodes = s.execute(text("""
         SELECT n.id, n.type, n.name, n.key,
                (SELECT count(*) FROM edges e WHERE e.src = n.id OR e.dst = n.id) AS degree
         FROM nodes n WHERE n.id = ANY(:ids)
         ORDER BY array_position(CAST(:ids AS bigint[]), n.id)
     """), {"ids": node_ids}).mappings().all()
-    edges = s.execute(text("""
-        SELECT id, src, dst, type, extractor, confidence FROM edges
-        WHERE src = ANY(:ids) AND dst = ANY(:ids)
-    """), {"ids": node_ids}).mappings().all()
+    edge_where = _edge_where(filters)
+    edges = s.execute(text(f"""
+        SELECT e.id, e.src, e.dst, e.type, e.extractor, e.confidence FROM edges e
+        LEFT JOIN source_items si ON si.id = e.source_item_id
+        WHERE e.src = ANY(:ids) AND e.dst = ANY(:ids) AND {edge_where}
+    """), {"ids": node_ids, **_filter_params(filters)}).mappings().all()
     return {"nodes": [dict(n) for n in nodes], "edges": [dict(e) for e in edges]}

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from igneous.connectors.email_maildir import parse_message
 from igneous.graph.spine import _name_from, _thread_key
 from igneous.rag.chunking import split, strip_quoted
@@ -68,6 +70,48 @@ def test_names_and_threads():
 def test_rrf_rewards_agreement():
     assert rrf([1, 2, 3], [3, 2, 9])[0][0] in (2, 3)
     assert {c for c, _ in rrf([1], [2])} == {1, 2}
+
+
+def test_graph_filters_scope_discovery_and_final_serialization():
+    """A source/date request must not discover or serialize a non-matching edge."""
+    from igneous.graph.traversal import GraphFilters, neighborhood
+
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+        def mappings(self):
+            return self
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, statement, params):
+            self.calls.append((str(statement), params))
+            sql = str(statement)
+            if "SELECT CASE WHEN e.src" in sql:
+                return Result([])  # zero discovered neighbors
+            if "FROM nodes n" in sql:
+                return Result([{"id": 7, "type": "Person", "name": "Seed", "key": "seed", "degree": 3}])
+            return Result([])
+
+    session = Session()
+    graph = neighborhood(session, [7], filters=GraphFilters(source="gmail", edge_types=["SENT"], since=datetime(2024, 1, 1)))
+    discovery, serialized = session.calls[0], session.calls[-1]
+    for sql, params in (discovery, serialized):
+        assert "LEFT JOIN source_items si ON si.id = e.source_item_id" in sql
+        assert "si.source = :source" in sql
+        assert "COALESCE(si.occurred_at, e.valid_from) >= :since" in sql
+        assert "e.type = ANY(:types)" in sql
+        assert params["source"] == "gmail" and params["types"] == ["SENT"]
+    assert graph == {"nodes": [{"id": 7, "type": "Person", "name": "Seed", "key": "seed", "degree": 3}], "edges": []}
 
 
 def test_locate_spans():

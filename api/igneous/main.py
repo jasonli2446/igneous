@@ -7,7 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.db import get_session
-from igneous.graph.traversal import explain, neighborhood, network, people
+from igneous.graph.traversal import GraphFilters, explain, neighborhood, network, people
 from igneous.llm import LLMDisabled
 from igneous.rag import qa
 from igneous.rag.search import Filters, hybrid
@@ -80,8 +80,10 @@ def graph_search(q: str, type: str | None = None, limit: int = Query(20, le=100)
 
 @app.get("/graph/subgraph")
 def graph_subgraph(seed: list[int] = Query(...), hops: int = Query(1, le=3), limit: int = Query(300, le=5000),
-                   types: list[str] | None = Query(None), s: Session = Depends(get_session)):
-    return neighborhood(s, seed, hops=hops, limit=limit, edge_types=types)
+                   source: str | None = None, types: list[str] | None = Query(None),
+                   since: datetime | None = Query(None, alias="from"), until: datetime | None = Query(None, alias="to"),
+                   s: Session = Depends(get_session)):
+    return neighborhood(s, seed, hops=hops, limit=limit, filters=GraphFilters(source, types, since, until))
 
 
 @app.get("/graph/people")
