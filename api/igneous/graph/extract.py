@@ -128,6 +128,9 @@ def run(s: Session, limit: int = 200, log=print) -> int:
         SELECT si.id, si.body_text, si.occurred_at, n.id AS node_id
         FROM nodes n JOIN source_items si ON si.id = n.source_item_id
         WHERE n.type = 'Message' AND length(si.body_text) >= :min
+          -- automated Gmail (newsletters, notifications) isn't worth a model call
+          AND NOT (si.raw_meta->'labels' ?| ARRAY['CATEGORY_PROMOTIONS', 'CATEGORY_SOCIAL', 'CATEGORY_UPDATES',
+                                                  'CATEGORY_FORUMS'])
           AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id AND e.extractor = :ex
                                                  AND e.extractor_version = :v)
           AND NOT (si.raw_meta ? ('extracted_v' || :v))

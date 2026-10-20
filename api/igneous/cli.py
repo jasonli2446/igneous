@@ -15,7 +15,8 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | gmail | g
          mailbox: list[str] = typer.Option(None, help="restrict to these mailboxes; repeatable"),
          limit: int = typer.Option(None, help="stop at the first checkpoint after this many items (resumable)"),
          since_days: int = typer.Option(None, help="first sync only: how far back to go (imessage, gmail, gcal)"),
-         account: str = typer.Option(None, help="google: which connected account (default: the only one)")):
+         account: str = typer.Option(None, help="google: which connected account (default: the only one)"),
+         all_mail: bool = typer.Option(False, help="gmail: include Promotions/Social/Forums (skipped by default)")):
     """Pull items from a source into source_items. Resumable: re-run continues from the saved cursor."""
     from igneous.connectors.base import run_sync
 
@@ -35,7 +36,8 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | gmail | g
         if connector == "gmail":
             from igneous.connectors.gmail import GmailConnector
 
-            conn = GmailConnector(creds, account, since_days=since_days or 90)
+            conn = GmailConnector(creds, account, since_days=since_days or 90,
+                                  query=None if all_mail else GmailConnector.DEFAULT_QUERY)
         elif connector == "gcal":
             from igneous.connectors.gcal import CalendarConnector
 
@@ -52,14 +54,15 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | gmail | g
 
 
 @app.command()
-def connect(provider: str = typer.Argument(..., help="google")):
+def connect(provider: str = typer.Argument(..., help="google"),
+            browser: bool = typer.Option(True, help="open the browser; --no-browser just prints the URL")):
     """Sign in once (opens a browser). The token is stored encrypted; Testing-mode tokens last 7 days."""
     if provider != "google":
         raise typer.BadParameter("only google")
     from igneous.connectors import google_auth
 
     with SessionLocal() as s:
-        print("connected", google_auth.connect(s))
+        print("connected", google_auth.connect(s, open_browser=browser), flush=True)
 
 
 @app.command()

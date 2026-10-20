@@ -100,14 +100,15 @@ def load(s: Session, account: str | None = None) -> tuple[str, Credentials]:
     return row.account, creds
 
 
-def connect(s: Session) -> str:
-    """Interactive: opens the browser consent screen, stores the token, returns the account email."""
+def connect(s: Session, open_browser: bool = True) -> str:
+    """Interactive: shows the consent screen (opens a browser, or prints the URL), stores the token, returns
+    the account email."""
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
 
     flow = InstalledAppFlow.from_client_secrets_file(str(client_secret_path()), SCOPES)
-    creds = flow.run_local_server(port=0, open_browser=True, prompt="consent", access_type="offline",
-                                  authorization_prompt_message="Opening Google sign-in: {url}")
+    creds = flow.run_local_server(port=0, open_browser=open_browser, prompt="consent", access_type="offline",
+                                  authorization_prompt_message="Sign in to Google here:\n{url}\n")
     email = build("oauth2", "v2", credentials=creds, cache_discovery=False).userinfo().get().execute()["email"]
     save(s, email, creds)
     return email
