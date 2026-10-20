@@ -285,6 +285,32 @@ def test_parse_corrupt_office_file_is_nonfatal():
 
     parsed = parse_document(b"not a document", "broken.docx")
     assert parsed.status == "corrupt" and parsed.parser == "docx" and parsed.text == "" and parsed.error
+def test_cross_encoder_reranks_and_limits(monkeypatch):
+    from igneous.rag import rerank
+
+    class Encoder:
+        def rerank(self, question, documents):
+            assert question == "Which item is relevant?"
+            assert documents == ["first", "second"]
+            return [0.1, 0.9]
+
+    monkeypatch.setattr(rerank, "_model", lambda: Encoder())
+    items = [{"text": "first", "score": 1.0}, {"text": "second", "score": 0.5}, {"text": "third"}]
+    assert rerank.rerank("Which item is relevant?", items, keep=2) == [
+        {"text": "second", "score": 0.9}, {"text": "first", "score": 0.1}
+    ]
+
+
+def test_cross_encoder_failure_preserves_retrieval_order(monkeypatch, caplog):
+    from igneous.rag import rerank
+
+    def unavailable():
+        raise OSError("model cache is offline")
+
+    monkeypatch.setattr(rerank, "_model", unavailable)
+    items = [{"text": "first"}, {"text": "second"}]
+    assert rerank.rerank("question", items, keep=1) == [{"text": "first"}]
+    assert "using retrieval order" in caplog.text
 
 
 def test_gmail_backfill_resumes_mid_page(monkeypatch):

@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous import llm
+from igneous.rag.rerank import rerank
 from igneous.rag.search import Filters, hybrid
 
 CONTEXT_CHUNKS = 12
@@ -83,22 +84,6 @@ def expand(s: Session, hits: list[dict], per_hit: int = EXPAND_PER_HIT) -> list[
     return out
 
 
-def rerank(s: Session, question: str, items: list[dict], keep: int) -> list[dict]:
-    """Order graph-expanded chunks by cosine similarity to the question; expansion is recall-oriented, so
-    most of what it pulls in is off-topic. (Cheap stand-in for the cross-encoder in #rerank.)"""
-    if not items:
-        return []
-    from igneous.rag.embed import embed_query
-
-    sims = dict(s.execute(text("""
-        SELECT id, 1 - (embedding <=> CAST(:v AS vector)) FROM chunks
-        WHERE id = ANY(:ids) AND embedding IS NOT NULL
-    """), {"v": str(embed_query(question)), "ids": [i["chunk_id"] for i in items]}).all())
-    for i in items:
-        i["score"] = round(float(sims.get(i["chunk_id"], 0.0)), 4)
-    return sorted(items, key=lambda i: i["score"], reverse=True)[:keep]
-
-
 def _evidence_block(items: list[dict]) -> str:
     parts = []
     for it in items:
@@ -111,7 +96,7 @@ def answer(s: Session, question: str, f: Filters | None = None, use_graph: bool 
            mode: str = "hybrid") -> dict:
     t0 = time.time()
     hits = hybrid(s, question, f, k=8, mode=mode)
-    extra = rerank(s, question, expand(s, hits), keep=CONTEXT_CHUNKS - len(hits)) if use_graph else []
+    extra = rerank(question, expand(s, hits), keep=CONTEXT_CHUNKS - len(hits)) if use_graph else []
     context = hits + extra
     t_retrieve = time.time() - t0
     if not context:
