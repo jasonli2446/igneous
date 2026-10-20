@@ -18,7 +18,7 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | maccontac
          since_days: int = typer.Option(None, help="first sync only: how far back to go (imessage, gmail, gcal)"),
          account: str = typer.Option(None, help="google: which connected account (default: the only one)"),
          all_mail: bool = typer.Option(False, help="gmail: include Promotions/Social/Forums (skipped by default)")):
-    """Pull items from a source into source_items. Resumable: re-run continues from the saved cursor."""
+    """Pull items into source_items; fs deliberately performs a fresh complete scan."""
     from igneous.connectors.base import run_sync
 
     if connector == "email":
