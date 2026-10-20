@@ -16,20 +16,24 @@ def test_endpoint_violations_reject_illegal_and_derived_edges():
 
     assert [(v.code, v.edge_id) for v in violations] == [
         ("illegal_edge_endpoints", 2),
-        ("illegal_edge_endpoints", 3),
+        ("unknown_edge_type", 3),
     ]
+    assert violations[1].message == "CORRESPONDS is not a persisted edge type"
 
 
 def test_message_cardinality_reports_each_failed_constraint():
     violations = invariants.message_cardinality_violations([
-        {"id": 10, "sent_count": 0, "received_count": 0},
-        {"id": 11, "sent_count": 2, "received_count": 1},
+        {"id": 10, "source": "email", "sent_count": 0, "received_count": 0},
+        {"id": 11, "source": "email", "sent_count": 2, "received_count": 1},
+        {"id": 12, "source": "imessage", "sent_count": 2, "received_count": 3},
+        {"id": 13, "source": "imessage", "sent_count": 0, "received_count": 1},
     ])
 
     assert [(v.code, v.node_id) for v in violations] == [
         ("message_sent_cardinality", 10),
         ("message_received_cardinality", 10),
         ("message_sent_cardinality", 11),
+        ("message_sent_cardinality", 13),
     ]
 
 
@@ -51,21 +55,26 @@ def test_check_graph_runs_all_read_only_checks():
 
     class Session:
         def __init__(self):
-            self.calls = 0
+            self.rows = {
+                str(invariants._ENDPOINT_ROWS): [{"id": 1, "type": "SENT", "src_type": "Person", "dst_type": "Message"}],
+                str(invariants._MESSAGE_CARDINALITIES): [{"id": 2, "source": "email", "sent_count": 1, "received_count": 0}],
+                str(invariants._REPLIES_OUTSIDE_THREAD): [{"id": 3, "src": 2, "dst": 4}],
+            }
 
         def execute(self, statement):
-            self.calls += 1
-            return Result([
-                [{"id": 1, "type": "SENT", "src_type": "Person", "dst_type": "Message"}],
-                [{"id": 2, "sent_count": 1, "received_count": 0}],
-                [{"id": 3, "src": 2, "dst": 4}],
-            ][self.calls - 1])
+            return Result(self.rows[str(statement)])
 
-    session = Session()
-    violations = invariants.check_graph(session)
+    violations = invariants.check_graph(Session())
 
-    assert session.calls == 3
     assert [v.code for v in violations] == ["message_received_cardinality", "reply_crosses_threads"]
+
+
+def test_cardinality_and_thread_queries_skip_expected_partial_messages():
+    assert "m.source_item_id IS NOT NULL" in str(invariants._MESSAGE_CARDINALITIES)
+    replies_query = str(invariants._REPLIES_OUTSIDE_THREAD)
+    assert "child.source_item_id IS NOT NULL" in replies_query
+    assert "parent.source_item_id IS NOT NULL" in replies_query
+    assert "r.extractor <> 'spine-quoted'" in replies_query
 
 
 def test_check_graph_cli_prints_json_violations_and_fails(monkeypatch):

@@ -1,8 +1,10 @@
 """Read-only consistency checks for persisted graph edges.
 
 ``CORRESPONDS`` is intentionally absent: it is a traversal API projection, not a
-persisted edge type.  The checker never writes or repairs data; it reports each
-violation with stable, machine-readable fields for CLI and automation use.
+persisted edge type.  The legacy ``HAS_CHUNK`` name is also absent because chunk
+linkage lives in ``chunks.node_id``, not ``edges``. The checker never writes or
+repairs data; it reports each violation with machine-readable fields for CLI and
+automation use.
 """
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
@@ -51,11 +53,17 @@ def endpoint_violations(rows: Iterable[Mapping[str, Any]]) -> list[Violation]:
         edge_type = row["type"]
         endpoints = (row["src_type"], row["dst_type"])
         allowed = LEGAL_ENDPOINTS.get(edge_type)
-        if allowed is not None and (not allowed or endpoints in allowed):
+        if allowed is None:
+            violations.append(Violation(
+                code="unknown_edge_type",
+                message=f"{edge_type} is not a persisted edge type",
+                edge_id=row["id"],
+                details={"edge_type": edge_type, "src_type": endpoints[0], "dst_type": endpoints[1]},
+            ))
             continue
-        expected = "any node types" if allowed == set() else ", ".join(
-            f"{src} -> {dst}" for src, dst in sorted(allowed or ())
-        )
+        if not allowed or endpoints in allowed:
+            continue
+        expected = ", ".join(f"{src} -> {dst}" for src, dst in sorted(allowed))
         violations.append(Violation(
             code="illegal_edge_endpoints",
             message=f"{edge_type} edge has illegal endpoints {endpoints[0]} -> {endpoints[1]}; expected {expected}",
@@ -66,16 +74,21 @@ def endpoint_violations(rows: Iterable[Mapping[str, Any]]) -> list[Violation]:
 
 
 def message_cardinality_violations(rows: Iterable[Mapping[str, Any]]) -> list[Violation]:
-    """Validate one sender and at least one recipient for each Message."""
+    """Validate email's one sender and every ingested Message's recipient cardinality."""
     violations = []
     for row in rows:
         sent, received = row["sent_count"], row["received_count"]
-        if sent != 1:
+        is_chat = row["source"] == "imessage"
+        if (is_chat and sent < 1) or (not is_chat and sent != 1):
+            expected = "at least 1" if is_chat else "exactly 1"
+            details = {"sent_count": sent, "expected": 1}
+            if is_chat:
+                details["minimum"] = details.pop("expected")
             violations.append(Violation(
                 code="message_sent_cardinality",
-                message=f"Message has {sent} SENT edges; expected exactly 1",
+                message=f"Message has {sent} SENT edges; expected {expected}",
                 node_id=row["id"],
-                details={"sent_count": sent, "expected": 1},
+                details=details,
             ))
         if received < 1:
             violations.append(Violation(
@@ -109,25 +122,25 @@ _ENDPOINT_ROWS = text("""
 """)
 
 _MESSAGE_CARDINALITIES = text("""
-    SELECT m.id,
-           count(DISTINCT s.id) FILTER (WHERE sender.type = 'Person') AS sent_count,
-           count(DISTINCT r.id) FILTER (WHERE recipient.type = 'Person') AS received_count
+    SELECT m.id, m.props->>'source' AS source,
+           count(DISTINCT s.src) FILTER (WHERE sender.type = 'Person') AS sent_count,
+           count(DISTINCT r.dst) FILTER (WHERE recipient.type = 'Person') AS received_count
     FROM nodes m
     LEFT JOIN edges s ON s.dst = m.id AND s.type = 'SENT'
     LEFT JOIN nodes sender ON sender.id = s.src
     LEFT JOIN edges r ON r.src = m.id AND r.type = 'RECEIVED'
     LEFT JOIN nodes recipient ON recipient.id = r.dst
-    WHERE m.type = 'Message'
+    WHERE m.type = 'Message' AND m.source_item_id IS NOT NULL
     GROUP BY m.id
-    HAVING count(DISTINCT s.id) FILTER (WHERE sender.type = 'Person') <> 1
-        OR count(DISTINCT r.id) FILTER (WHERE recipient.type = 'Person') < 1
     ORDER BY m.id
 """)
 
 _REPLIES_OUTSIDE_THREAD = text("""
     SELECT r.id, r.src, r.dst
     FROM edges r
-    WHERE r.type = 'REPLIES_TO'
+    JOIN nodes child ON child.id = r.src AND child.source_item_id IS NOT NULL
+    JOIN nodes parent ON parent.id = r.dst AND parent.source_item_id IS NOT NULL
+    WHERE r.type = 'REPLIES_TO' AND r.extractor <> 'spine-quoted'
       AND NOT EXISTS (
           SELECT 1
           FROM edges child_thread
