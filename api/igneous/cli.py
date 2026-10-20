@@ -1,3 +1,4 @@
+import json
 import time
 from pathlib import Path
 
@@ -136,6 +137,21 @@ def verify_synthetic_corpus(out: Path = typer.Argument(..., help="generated fixt
 
     stats = verify(out)
     print(f"verified {stats['documents']} documents and {stats['calendar_events']} calendar events")
+
+
+@app.command()
+def check_graph():
+    """Validate persisted graph invariants without changing any data."""
+    from igneous.graph.invariants import check_graph as run_checks
+
+    with SessionLocal() as s:
+        violations = run_checks(s)
+    if not violations:
+        print("graph check passed (0 violations)")
+        return
+    for violation in violations:
+        print(json.dumps(violation.as_dict(), sort_keys=True))
+    raise typer.Exit(code=1)
 
 
 @app.command()
