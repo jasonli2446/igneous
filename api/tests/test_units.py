@@ -184,3 +184,14 @@ def test_phone_normalization():
     assert norm_phone("(614) 555-1234") == norm_phone("+1 614 555 1234") == norm_phone("6145551234") == "+16145551234"
     assert norm_phone("+44 20 7946 0958") == "+442079460958"
     assert norm_phone("555-1234") is None and norm_phone(None) is None
+
+
+def test_contact_names_in_messages():
+    from igneous.graph.traversal import name_handles, pretty_thread
+
+    named = {"+16174075277": "Sam Lee", "6174075277": "Sam Lee", "+16149733915": "Ana Ruiz", "6149733915": "Ana Ruiz"}
+    assert name_handles("[14:39] +16174075277: home rn", named) == "[14:39] Sam Lee: home rn"
+    assert name_handles("[1:00] +19995550000: hi", named) == "[1:00] +19995550000: hi"  # unknown stays
+    assert pretty_thread("+16149733915, +16174075277", named) == "Ana, Sam"
+    assert pretty_thread("+16149733915, +16174075277, +19995550000, +18885550000", named).endswith("and 1 other")
+    assert pretty_thread("Biggers in Paris", named) == "Biggers in Paris"

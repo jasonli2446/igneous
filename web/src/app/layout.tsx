@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import ThemeToggle from "@/components/ThemeToggle";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -9,13 +10,14 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className="h-full antialiased">
-      <body className="flex min-h-full flex-col bg-white text-zinc-900">
-        <nav className="flex h-[49px] shrink-0 items-center gap-6 border-b border-zinc-200 px-4 text-sm">
-          <span className="font-semibold">Igneous</span>
-          <Link href="/" className="text-zinc-600 hover:text-zinc-900">Explorer</Link>
-          <Link href="/ask" className="text-zinc-600 hover:text-zinc-900">Ask</Link>
-          <Link href="/search" className="text-zinc-600 hover:text-zinc-900">Search</Link>
+    <html lang="en" className="h-full" suppressHydrationWarning>
+      <body className="flex min-h-full flex-col">
+        <nav className="flex h-[49px] shrink-0 items-center gap-5 border-b border-line bg-panel px-4 text-sm">
+          <span className="font-semibold tracking-tight">Igneous</span>
+          <Link href="/" className="text-muted hover:text-ink">Explorer</Link>
+          <Link href="/ask" className="text-muted hover:text-ink">Ask</Link>
+          <Link href="/search" className="text-muted hover:text-ink">Search</Link>
+          <ThemeToggle />
         </nav>
         {children}
       </body>

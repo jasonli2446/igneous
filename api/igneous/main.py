@@ -7,7 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.db import get_session
-from igneous.graph.traversal import neighborhood, network, people
+from igneous.graph.traversal import explain, neighborhood, network, people
 from igneous.llm import LLMDisabled
 from igneous.rag import qa
 from igneous.rag.search import Filters, hybrid
@@ -94,6 +94,12 @@ def graph_network(seed: int, people: int = Query(50, le=200), hubs: int = Query(
                   s: Session = Depends(get_session)):
     """People plus the group chats, threads, and events that join them (clusters, not a star)."""
     return network(s, seed, people_limit=people, hub_limit=hubs)
+
+
+@app.get("/graph/explain")
+def graph_explain(a: int, b: int, s: Session = Depends(get_session)):
+    """Why a and b are connected: shared conversations (counts, dates, latest excerpt) and shared events."""
+    return explain(s, a, b)
 
 
 @app.get("/graph/node/{node_id}")

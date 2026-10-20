@@ -1,6 +1,6 @@
 export const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-export type GNode = { id: number; type: string; name: string; key: string; degree: number };
+export type GNode = { id: number; type: string; name: string; key: string; degree: number; members?: number };
 export type GEdge = { id: number; src: number; dst: number; type: string; extractor: string; confidence: number | null; weight?: number };
 export type Subgraph = { nodes: GNode[]; edges: GEdge[] };
 
@@ -41,6 +41,15 @@ export type Evidence = {
   hl_end: number;
   other_name: string;
   other_type: string;
+};
+
+export type Explanation = {
+  a: { id: number; name: string };
+  b: { id: number; name: string };
+  messages: number;
+  conversations: { thread_id: number; thread: string; messages: number; people: number; first: string | null;
+    last: string | null; source: string; excerpt: string | null }[];
+  events: { id: number; name: string; at: string | null }[];
 };
 
 export type NodeDetail = GNode & {
@@ -86,6 +95,7 @@ export const api = {
     return (await r.json()) as AskResult;
   },
   evidence: (id: number) => get<{ evidence: Evidence[] }>(`/graph/node/${id}/evidence`, { limit: 30 }),
+  explain: (a: number, b: number) => get<Explanation>("/graph/explain", { a, b }),
   node: (id: number) => get<NodeDetail>(`/graph/node/${id}`, {}),
 };
 

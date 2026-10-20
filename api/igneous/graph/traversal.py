@@ -1,4 +1,6 @@
 """Bounded k-hop neighborhoods. Shared by the explorer API and (later) graph-augmented retrieval."""
+import re
+
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -89,18 +91,148 @@ def network(s: Session, seed: int, people_limit: int = 50, hub_limit: int = 30) 
         FROM mine GROUP BY hub HAVING count(*) >= 2
         ORDER BY count(*) DESC LIMIT :hubs
     """), {"others": others, "hubs": hub_limit}).all()
+    # How active each member is in each hub (messages), so a link's thickness means something.
+    activity = {(r.hub, r.person): r.n for r in s.execute(text(f"""
+        SELECT t.dst AS hub, {canon.format(x='pm.p')} AS person, count(DISTINCT pm.m) AS n
+        FROM (SELECT src AS p, dst AS m FROM edges WHERE type = 'SENT'
+              UNION SELECT dst, src FROM edges WHERE type = 'RECEIVED') pm
+        JOIN edges t ON t.src = pm.m AND t.type = 'IN_THREAD'
+        WHERE t.dst = ANY(:hubs) GROUP BY 1, 2
+    """), {"hubs": [h.hub for h in hubs]})}
     hub_ids = [h.hub for h in hubs]
     g = subgraph(s, [head, *others, *hub_ids])
-    # Direct ties: keep person-person ties between correspondents (thinner); drop the seed's spokes except
-    # for people in no hub, who would otherwise float.
-    in_hub = {p for h in hubs for p in h.members}
-    edges = [e for e in base["edges"] if head not in (e["src"], e["dst"])
-             or ({e["src"], e["dst"]} - {head}).isdisjoint(in_hub)]
+    # Keep every edge, including the seed's spokes: prune() decides what survives, and its spanning tree needs
+    # the spokes to hold the graph together (dropping them up front left the seed floating in its own island).
+    edges = list(base["edges"])
     edges += [{"id": -(100000 + i), "src": p, "dst": h.hub, "type": "PART_OF", "extractor": "derived",
-               "confidence": None, "weight": 1}
+               "confidence": None, "weight": activity.get((h.hub, p), 1)}
               for i, (h, p) in enumerate((h, p) for h in hubs for p in h.members)]
-    g["edges"] = edges
+    g["edges"] = prune(g["nodes"], edges, head)
+    # Hub nodes carry their size so the UI can say "group chat, 6 people", and readable names.
+    sizes = {h.hub: len(h.members) for h in hubs}
+    named = handle_names(s)
+    for n in g["nodes"]:
+        if n["id"] in sizes:
+            n["members"] = sizes[n["id"]]
+            n["name"] = pretty_thread(n["name"], named) or n["name"]
     return g
+
+
+def explain(s: Session, a: int, b: int, limit: int = 8) -> dict:
+    """Why two nodes are connected: the shared conversations (with message counts and the latest excerpt) and
+    shared events, entity-resolved on both sides. This is the evidence behind a CORRESPONDS / PART_OF link."""
+    canon = "COALESCE((SELECT canonical_id FROM canonical WHERE node_id = {x}), {x})"
+    # Every identity in each side's cluster counts (Ken Lay's 12 addresses are one Ken Lay).
+    ids = {}
+    for side, n in (("a", a), ("b", b)):
+        head = s.execute(text(f"SELECT {canon.format(x=':n')}"), {"n": n}).scalar_one()
+        ids[side] = [head, *s.execute(text("SELECT node_id FROM canonical WHERE canonical_id = :h"),
+                                      {"h": head}).scalars()]
+    names = dict(s.execute(text("SELECT id, name FROM nodes WHERE id = ANY(:i)"), {"i": [a, b]}).all())
+    convo = s.execute(text("""
+        WITH pm AS (SELECT src AS p, dst AS m FROM edges WHERE type = 'SENT'
+                    UNION SELECT dst, src FROM edges WHERE type = 'RECEIVED'),
+        shared AS (SELECT DISTINCT x.m FROM pm x JOIN pm y ON x.m = y.m
+                   WHERE x.p = ANY(:a) AND y.p = ANY(:b))
+        SELECT t.id AS thread_id, t.name AS thread, count(*) AS messages,
+               min(si.occurred_at) AS first, max(si.occurred_at) AS last,
+               (array_agg(si.source ORDER BY si.occurred_at DESC))[1] AS source,
+               (array_agg(left(si.body_text, 220) ORDER BY si.occurred_at DESC))[1] AS excerpt,
+               (SELECT count(DISTINCT p) FROM pm JOIN edges it2 ON it2.src = pm.m AND it2.type = 'IN_THREAD'
+                WHERE it2.dst = t.id) AS people
+        FROM shared JOIN nodes msg ON msg.id = shared.m JOIN source_items si ON si.id = msg.source_item_id
+        JOIN edges it ON it.src = shared.m AND it.type = 'IN_THREAD' JOIN nodes t ON t.id = it.dst
+        GROUP BY t.id, t.name ORDER BY count(*) DESC LIMIT :lim
+    """), {"a": ids["a"], "b": ids["b"], "lim": limit}).mappings().all()
+    events = s.execute(text("""
+        SELECT e.id, e.name, si.occurred_at AS at
+        FROM edges x JOIN edges y ON x.dst = y.dst AND x.type = 'ATTENDED' AND y.type = 'ATTENDED'
+        JOIN nodes e ON e.id = x.dst JOIN source_items si ON si.id = e.source_item_id
+        WHERE x.src = ANY(:a) AND y.src = ANY(:b) GROUP BY e.id, e.name, si.occurred_at
+        ORDER BY si.occurred_at DESC LIMIT :lim
+    """), {"a": ids["a"], "b": ids["b"], "lim": limit}).mappings().all()
+    total = sum(c["messages"] for c in convo)
+    named = handle_names(s)
+    out = []
+    for c in convo:
+        c = dict(c)
+        c["thread"] = pretty_thread(c["thread"], named)
+        c["excerpt"] = name_handles(c["excerpt"], named)
+        out.append(c)
+    return {"a": {"id": a, "name": names.get(a)}, "b": {"id": b, "name": names.get(b)},
+            "messages": total, "conversations": out, "events": [dict(e) for e in events]}
+
+
+def handle_names(s: Session) -> dict[str, str]:
+    """Phone number / address -> contact name, for every Person a contact card has named."""
+    rows = s.execute(text("""
+        SELECT key, name FROM nodes WHERE type = 'Person' AND props->>'named_by' = 'contacts'
+    """)).all()
+    out = {}
+    for key, name in rows:
+        out[key] = name
+        digits = re.sub(r"\D", "", key)
+        if len(digits) >= 10:
+            out[digits[-10:]] = name  # message text may carry the number without +1
+    return out
+
+
+PHONE = re.compile(r"\+?\d{10,15}")
+
+
+def name_handles(t: str | None, named: dict[str, str]) -> str | None:
+    """'[14:39] +16174075277: Yes' -> '[14:39] Sam Lee: Yes' where the number is a saved contact."""
+    if not t:
+        return t
+    return PHONE.sub(lambda m: named.get(m.group(), named.get(re.sub(r"\D", "", m.group())[-10:], m.group())), t)
+
+
+def pretty_thread(name: str | None, named: dict[str, str]) -> str | None:
+    """An unnamed group chat is titled by its members' handles; show names, and cap long lists."""
+    if not name or not PHONE.search(name):
+        return name
+    parts = [name_handles(p.strip(), named) for p in name.split(",")]
+    shown = [p.split()[0] if p and not PHONE.fullmatch(p) else p for p in parts]
+    extra = len(shown) - 3
+    return ", ".join(shown[:3]) + (f" and {extra} other{'s' if extra != 1 else ''}" if extra > 0 else "")
+
+
+def prune(nodes: list[dict], edges: list[dict], seed: int, per_node: int = 4) -> list[dict]:
+    """Keep the connections that explain the structure: each node's strongest `per_node` links, plus a maximum
+    spanning tree so no group gets cut off. Drops the long tail of one-off links that turn the graph into a
+    hairball without saying anything. The seed doesn't get a top-N of its own (it touches everyone, so its
+    top-N would just be a star); it keeps only the spokes the tree needs to hold groups together."""
+    def w(e):
+        return e.get("weight") or 1
+
+    keep: set[int] = set()
+    by_node: dict[int, list[dict]] = {}
+    for e in edges:
+        by_node.setdefault(e["src"], []).append(e)
+        by_node.setdefault(e["dst"], []).append(e)
+    for node, es in by_node.items():
+        if node == seed:
+            continue
+        # A person's strongest ties to *others*. Spokes to the seed are left to the spanning tree below, which
+        # keeps exactly the ones needed to attach each group (else it's a star again).
+        keep.update(id(e) for e in sorted((e for e in es if seed not in (e["src"], e["dst"])), key=w,
+                                          reverse=True)[:per_node])
+    # Kruskal for a maximum spanning forest: guarantees connectivity with the strongest possible bridges.
+    parent = {n["id"]: n["id"] for n in nodes}
+
+    def find(x):
+        while parent.get(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    # Peer edges first (strongest first), then spokes: so a group hangs off the seed by one spoke, not many.
+    for e in sorted(edges, key=lambda e: (seed in (e["src"], e["dst"]), -w(e))):
+        ra, rb = find(e["src"]), find(e["dst"])
+        if ra != rb:
+            parent[ra] = rb
+            keep.add(id(e))
+    return [e for e in edges if id(e) in keep]
 
 
 def subgraph(s: Session, node_ids: list[int]) -> dict:

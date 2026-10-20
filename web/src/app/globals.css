@@ -1,5 +1,76 @@
 @import "tailwindcss";
 
+/* Expose the tokens as Tailwind colors (bg-ink, text-muted, border-line, ...). */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-ink: var(--ink);
+  --color-soft: var(--soft);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-hover: var(--hover);
+  --color-accent: var(--accent);
+  --color-danger: var(--danger);
+}
+
+/* Stone neutrals: the chrome stays quiet so the graph's community colors carry the screen.
+   Light = pale limestone, dark = basalt; one moss-green accent for focus and links. */
+:root {
+  --bg: #f6f6f3;
+  --panel: #fbfbf9;
+  --ink: #1f2420;
+  --soft: #4a4f49;
+  --muted: #787d75;
+  --line: #e1e2dc;
+  --hover: #ecede8;
+  --accent: #3f7a5c;
+  --danger: #b4412f;
+  color-scheme: light;
+}
+:root.dark {
+  --bg: #151714;
+  --panel: #1b1d1a;
+  --ink: #e8e8e3;
+  --soft: #c2c4bd;
+  --muted: #8b8f87;
+  --line: #2c2f2a;
+  --hover: #252824;
+  --accent: #79c29a;
+  --danger: #f08a73;
+  color-scheme: dark;
+}
+
 body {
-  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 3D graph hover tooltip (rendered by 3d-force-graph as HTML). */
+.g3-tip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 280px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  font: 12px/1.35 ui-sans-serif, system-ui, sans-serif;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.12);
+}
+.g3-tip span { color: var(--soft); }
+.g3-tip em { color: var(--muted); font-style: normal; font-size: 11px; }
+/* 3d-force-graph's own tooltip wrapper is black by default; make it transparent around ours. */
+.scene-tooltip { background: transparent !important; padding: 0 !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { scroll-behavior: auto !important; }
 }
