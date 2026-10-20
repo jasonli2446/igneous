@@ -53,8 +53,11 @@ def people(s: Session, seed: int, limit: int = 60) -> dict:
             UNION SELECT {canon.format(x='dst')}, src FROM edges WHERE type = 'RECEIVED'),
         mine AS (SELECT * FROM parts WHERE p = ANY(:ids))
         SELECT a.p AS src, b.p AS dst, count(*) AS w
-        FROM mine a JOIN mine b ON a.m = b.m AND a.p < b.p GROUP BY 1, 2 HAVING count(*) >= 2
-    """), {"ids": ids}).all()
+        FROM mine a JOIN mine b ON a.m = b.m AND a.p < b.p GROUP BY 1, 2
+        -- Always draw the seed's own ties (else one-message correspondents float unattached); between
+        -- correspondents, require 2+ shared messages to keep the picture readable.
+        HAVING count(*) >= 2 OR CAST(:head AS bigint) IN (a.p, b.p)
+    """), {"ids": ids, "head": head}).all()
     g = subgraph(s, ids)
     g["edges"] = [{"id": -(i + 1), "src": t.src, "dst": t.dst, "type": "CORRESPONDS", "extractor": "derived",
                    "confidence": None, "weight": t.w} for i, t in enumerate(ties)]

@@ -140,16 +140,18 @@ def build_chat(b: Builder, item) -> None:
     tid = b.node("Thread", f"imessage-chat:{meta.get('chat')}", (item.title or "").rsplit(" — ", 1)[0] or "chat")
     b.edge(mid, tid, "IN_THREAD", item.occurred_at, item.id)
     me = b.node("Person", "me", "Me", {"self": True})
-    for handle in meta.get("participants", []):
-        pid = b.node("Person", handle.lower(), handle, {"handle": handle})
-        if handle in meta.get("senders", []):
+    senders = set(meta.get("senders", []))
+    members = {h.lower(): h for h in meta.get("participants", [])}
+    # Everyone in the chat received the day's conversation; whoever spoke also SENT it. (Earlier this gave each
+    # person only one of the two, so two members who both spoke never looked like correspondents.)
+    for key, handle in members.items():
+        pid = b.node("Person", key, handle, {"handle": handle})
+        b.edge(mid, pid, "RECEIVED", item.occurred_at, item.id)
+        if handle in senders:
             b.edge(pid, mid, "SENT", item.occurred_at, item.id)
-        else:
-            b.edge(mid, pid, "RECEIVED", item.occurred_at, item.id)
-    if "me" in meta.get("senders", []):
+    b.edge(mid, me, "RECEIVED", item.occurred_at, item.id)
+    if "me" in senders:
         b.edge(me, mid, "SENT", item.occurred_at, item.id)
-    else:
-        b.edge(mid, me, "RECEIVED", item.occurred_at, item.id)
 
 
 def build_event(b: Builder, item) -> None:
