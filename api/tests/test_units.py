@@ -1,5 +1,7 @@
 from datetime import datetime
 
+import pytest
+
 from igneous.connectors.email_maildir import parse_message
 from igneous.graph.spine import _name_from, _thread_key
 from igneous.rag.chunking import split, strip_quoted
@@ -454,3 +456,97 @@ def test_get_sync_is_read_only_status_report():
         }]
     }
     assert TestClient(app).get("/sync?connector=unknown").status_code == 422
+
+
+def test_filesystem_connector_walks_sorted_parseable_files_and_emits_hierarchy(tmp_path):
+    from igneous.connectors.base import CompletedScan, SourceItem
+    from igneous.connectors.filesystem import FilesystemConnector
+
+    (tmp_path / "z-last.txt").write_text("last")
+    (tmp_path / "projects" / "igneous").mkdir(parents=True)
+    (tmp_path / "projects" / "igneous" / "plan.md").write_text("# Plan\nship")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "ignored.txt").write_text("ignore")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("ignore")
+    (tmp_path / "photo.jpg").write_bytes(b"not an image parser input")
+
+    emitted = list(FilesystemConnector(tmp_path).sync({}))
+    items = [event for event in emitted if isinstance(event, SourceItem)]
+    assert [item.external_id for item in items] == ["projects/igneous/plan.md", "z-last.txt"]
+    plan = items[0]
+    assert plan.body_text == "# Plan\nship"
+    assert plan.mime == "text/markdown"
+    assert plan.raw_meta == {
+        "path": "projects/igneous/plan.md",
+        "folders": ["projects", "projects/igneous"],
+        "parser": "text",
+        "boundaries": [],
+    }
+    assert isinstance(emitted[-1], CompletedScan)
+
+
+def test_filesystem_connector_hashes_file_bytes_and_namespaces_multiple_roots(tmp_path):
+    from igneous.connectors.base import SourceItem
+    from igneous.connectors.filesystem import FilesystemConnector
+
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "same.txt").write_text("one")
+    (second / "same.txt").write_text("two")
+    connector = FilesystemConnector([second, first])
+    initial = [event for event in connector.sync({}) if isinstance(event, SourceItem)]
+    assert [item.external_id for item in initial] == ["first/same.txt", "second/same.txt"]
+    (first / "same.txt").write_text("changed")
+    changed = [event for event in connector.sync({}) if isinstance(event, SourceItem)]
+    assert changed[0].content_hash != initial[0].content_hash
+
+
+def test_run_sync_prunes_only_after_completed_scan(monkeypatch):
+    from igneous.connectors import base
+
+    class Result:
+        def __init__(self, deleted=False):
+            self.rowcount = 1 if deleted else 0
+
+        def first(self):
+            return None
+
+    class Session:
+        def __init__(self):
+            self.statements = []
+            self.commits = 0
+
+        def execute(self, statement, values=None):
+            self.statements.append(str(statement))
+            return Result("DELETE FROM source_items" in str(statement))
+
+        def commit(self):
+            self.commits += 1
+
+    class Complete:
+        name = "fs"
+
+        def sync(self, cursor):
+            yield base.SourceItem("fs", "kept.txt", "kept.txt", "body")
+            yield base.CompletedScan({})
+
+    session = Session()
+    monkeypatch.setattr(base, "load_cursor", lambda *args: {})
+    monkeypatch.setattr(base, "save_cursor", lambda *args: None)
+    assert base.run_sync(session, Complete())["deleted"] == 1
+    assert any("DELETE FROM source_items" in statement for statement in session.statements)
+
+    class Interrupted:
+        name = "fs"
+
+        def sync(self, cursor):
+            yield base.SourceItem("fs", "kept.txt", "kept.txt", "body")
+            yield base.Checkpoint({})
+            raise RuntimeError("interrupted")
+
+    session = Session()
+    with pytest.raises(RuntimeError, match="interrupted"):
+        base.run_sync(session, Interrupted())
+    assert not any("DELETE FROM source_items" in statement for statement in session.statements)

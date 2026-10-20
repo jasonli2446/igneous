@@ -11,8 +11,8 @@ app = typer.Typer(no_args_is_help=True)
 
 
 @app.command()
-def sync(connector: str = typer.Argument(..., help="email | imessage | maccontacts | gmail | gcal | gcontacts"),
-         path: Path = typer.Option(None, help="maildir root (default: <data_dir>/maildir)"),
+def sync(connector: str = typer.Argument(..., help="email | imessage | maccontacts | gmail | gcal | gcontacts | fs"),
+         path: Path = typer.Option(None, help="source path; fs defaults to IGNEOUS_FILESYSTEM_ROOTS"),
          mailbox: list[str] = typer.Option(None, help="restrict to these mailboxes; repeatable"),
          limit: int = typer.Option(None, help="stop at the first checkpoint after this many items (resumable)"),
          since_days: int = typer.Option(None, help="first sync only: how far back to go (imessage, gmail, gcal)"),
@@ -33,6 +33,13 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | maccontac
         from igneous.connectors.mac_contacts import MacContactsConnector
 
         conn = MacContactsConnector()
+    elif connector == "fs":
+        from igneous.connectors.filesystem import FilesystemConnector
+
+        roots = [path] if path else [Path(root.strip()) for root in settings.filesystem_roots.split(",") if root.strip()]
+        if not roots:
+            raise typer.BadParameter("fs requires --path or IGNEOUS_FILESYSTEM_ROOTS")
+        conn = FilesystemConnector(roots)
     elif connector in ("gmail", "gcal", "gcontacts"):
         from igneous.connectors import google_auth
 
