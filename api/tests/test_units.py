@@ -195,7 +195,6 @@ def test_quoted_header_parsing():
     assert parse_quotes("no quote here") == []
 
 
-<<<<<<< HEAD
 def test_parse_plain_text_markdown_and_binary_are_nonfatal():
     from igneous.parsers import parse_document
 
