@@ -3,6 +3,7 @@
 import Graph from "graphology";
 import louvain from "graphology-communities-louvain";
 import forceAtlas2 from "graphology-layout-forceatlas2";
+import FA2Layout from "graphology-layout-forceatlas2/worker";
 import { useEffect, useRef } from "react";
 import Sigma from "sigma";
 import { Subgraph, TYPE_COLORS } from "@/lib/api";
@@ -18,14 +19,45 @@ type Props = {
   data: Subgraph;
   hiddenTypes: Set<string>;
   selected: number | null;
+  expansionParent: number | null;
   onSelectAction: (id: number | null) => void;
   onExpandAction: (id: number) => void;
 };
 
-export default function GraphCanvas({ data, hiddenTypes, selected, onSelectAction: onSelect, onExpandAction: onExpand }: Props) {
+const LAYOUT_DURATION_MS = 750;
+
+function hash(value: string) {
+  let result = 2166136261;
+  for (let index = 0; index < value.length; index++) result = Math.imul(result ^ value.charCodeAt(index), 16777619);
+  return result >>> 0;
+}
+
+function initialPosition(id: string) {
+  return {
+    x: (hash(`${id}:x`) / 0xffffffff) * 2 - 1,
+    y: (hash(`${id}:y`) / 0xffffffff) * 2 - 1,
+  };
+}
+
+function expansionPosition(g: Graph, id: string, parentId: number | null) {
+  const parent = parentId === null ? null : String(parentId);
+  if (!parent || !g.hasNode(parent)) return initialPosition(id);
+
+  const { x, y } = g.getNodeAttributes(parent);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return initialPosition(id);
+
+  const value = hash(`${parent}:${id}`);
+  const angle = (value / 0xffffffff) * Math.PI * 2;
+  const radius = 0.08 + (((value >>> 16) & 0xffff) / 0xffff) * 0.24;
+  return { x: x + Math.cos(angle) * radius, y: y + Math.sin(angle) * radius };
+}
+
+export default function GraphCanvas({ data, hiddenTypes, selected, expansionParent, onSelectAction: onSelect, onExpandAction: onExpand }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const sigma = useRef<Sigma | null>(null);
   const graph = useRef(new Graph({ multi: true }));
+  const layout = useRef<FA2Layout | null>(null);
+  const layoutStopTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Latest props for the reducers, which Sigma calls outside React's render cycle.
   // Rendering every label makes dense people views unreadable; retain labels for the most
   // connected visible nodes and reveal the rest on hover or selection.
@@ -80,9 +112,16 @@ export default function GraphCanvas({ data, hiddenTypes, selected, onSelectActio
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => () => {
+    if (layoutStopTimer.current !== null) clearTimeout(layoutStopTimer.current);
+    layout.current?.kill();
+    layout.current = null;
+  }, []);
+
   // Merge new data in place so existing nodes keep their positions on expand.
   useEffect(() => {
     const g = graph.current;
+    const scale = graphScale(g);
     const seed = data.nodes[0] ? String(data.nodes[0].id) : null;
     // Importance to the seed: messages exchanged with it (people) or members (hubs); falls back to degree.
     const tie = new Map<string, number>();
@@ -100,7 +139,7 @@ export default function GraphCanvas({ data, hiddenTypes, selected, onSelectActio
         .slice(0, LABEL_TOP_N)
         .map((n) => String(n.id)),
     );
-    let added = 0;
+    let addedNodes = 0;
     for (const n of data.nodes) {
       const id = String(n.id);
       const hub = HUB_TYPES.has(n.type);
@@ -113,10 +152,8 @@ export default function GraphCanvas({ data, hiddenTypes, selected, onSelectActio
       };
       if (g.hasNode(id)) g.mergeNodeAttributes(id, attrs);
       else {
-        // New nodes start near the seed (or the node they were expanded from) so the layout grows, not scatters.
-        const anchor = seed && g.hasNode(seed) ? g.getNodeAttributes(seed) : { x: 0, y: 0 };
-        g.addNode(id, { ...attrs, x: (anchor.x as number) + (Math.random() - 0.5), y: (anchor.y as number) + (Math.random() - 0.5) });
-        added++;
+        g.addNode(id, { ...attrs, ...expansionPosition(g, id, expansionParent, scale) });
+        addedNodes++;
       }
     }
     const maxW = Math.max(1, ...data.edges.map((e) => e.weight ?? 1));
@@ -149,21 +186,32 @@ export default function GraphCanvas({ data, hiddenTypes, selected, onSelectActio
         });
       }
     }
-    if (added > 0 && g.order > 1) {
-      forceAtlas2.assign(g, {
-        iterations: g.order > 2000 ? 80 : 300,
-        settings: {
-          ...forceAtlas2.inferSettings(g),
-          linLogMode: true,          // pulls dense groups together and pushes groups apart: clusters, not a ring
-          outboundAttractionDistribution: true,  // keeps the high-degree seed from dragging everything inward
-          adjustSizes: true,
-          barnesHutOptimize: g.order > 500,
-          edgeWeightInfluence: 0.6,
-        },
-      });
+    if (addedNodes > 0 && g.order > 1) {
+      if (layoutStopTimer.current !== null) clearTimeout(layoutStopTimer.current);
+      layout.current?.kill();
+      try {
+        layout.current = new FA2Layout(g, {
+          settings: {
+            ...forceAtlas2.inferSettings(g),
+            linLogMode: true,
+            outboundAttractionDistribution: true,
+            adjustSizes: true,
+            barnesHutOptimize: g.order > 500,
+            edgeWeightInfluence: 0.6,
+          },
+        });
+        layout.current.start();
+        layoutStopTimer.current = setTimeout(() => {
+          layout.current?.stop();
+          layoutStopTimer.current = null;
+        }, LAYOUT_DURATION_MS);
+      } catch (error) {
+        layout.current = null;
+        console.warn("Unable to start graph layout worker", error);
+      }
     }
     sigma.current?.refresh();
-  }, [data]);
+  }, [data, expansionParent]);
 
   useEffect(() => {
     sigma.current?.refresh({ skipIndexation: true });

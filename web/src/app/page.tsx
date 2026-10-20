@@ -35,6 +35,7 @@ export default function Explorer() {
   const [legend, setLegend] = useState<Community[]>([]);
   const [legendOpen, setLegendOpen] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [expansionParent, setExpansionParent] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -43,13 +44,29 @@ export default function Explorer() {
     return () => clearTimeout(t);
   }, [query]);
 
+  const graphGeneration = useRef(0);
+  const seedRequest = useRef<AbortController | null>(null);
+  const expandRequest = useRef<AbortController | null>(null);
+
+  useEffect(() => () => {
+    seedRequest.current?.abort();
+    expandRequest.current?.abort();
+  }, []);
+
   const load = useCallback(async (node: GNode, v: View, push = true) => {
+    const generation = ++graphGeneration.current;
+    seedRequest.current?.abort();
+    expandRequest.current?.abort();
+    const request = new AbortController();
+    seedRequest.current = request;
     setError(null);
     setLoading(true);
     try {
-      const g = node.type !== "Person" || v === "items" ? await api.subgraph([node.id], 1, 400)
-        : v === "network" ? await api.network(node.id) : await api.people(node.id, 60);
+      const g = node.type !== "Person" || v === "items" ? await api.subgraph([node.id], 1, 400, {}, request.signal)
+        : v === "network" ? await api.network(node.id, 50, 30, request.signal) : await api.people(node.id, 60, request.signal);
+      if (graphGeneration.current !== generation || seedRequest.current !== request) return;
       setCanvasKey((k) => k + 1);
+      setExpansionParent(null);
       setData(g);
       setSelected(null);
       setWhy(null);
@@ -58,9 +75,12 @@ export default function Explorer() {
       setQuery("");
       if (push) setTrail((t) => [...t.filter((x) => x.id !== node.id), node].slice(-6));
     } catch (e) {
-      setError(`Couldn't load ${node.name}. Check that the API is running on port 8000. (${String(e)})`);
+      if (!request.signal.aborted) setError(`Couldn't load ${node.name}. Check that the API is running on port 8000. (${String(e)})`);
     } finally {
-      setLoading(false);
+      if (seedRequest.current === request) {
+        seedRequest.current = null;
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -68,16 +88,29 @@ export default function Explorer() {
   const viewRef = useRef(view);
   viewRef.current = view;
   const expand = useCallback(async (id: number) => {
-    const v = viewRef.current;
-    const g = v === "items" ? await api.subgraph([id], 1, 200) : v === "network" ? await api.network(id, 20, 12)
-      : await api.people(id, 30);
-    setData((prev) => {
-      const nodes = new Map(prev.nodes.map((n) => [n.id, n]));
-      g.nodes.forEach((n) => nodes.has(n.id) || nodes.set(n.id, n)); // keep the seed first: don't reorder
-      const edges = new Map(prev.edges.map((e) => [`${e.src}-${e.dst}-${e.type}`, e]));
-      g.edges.forEach((e) => edges.set(`${e.src}-${e.dst}-${e.type}`, { ...e, id: edges.size + 1e6 }));
-      return { nodes: [...nodes.values()], edges: [...edges.values()] };
-    });
+    const generation = graphGeneration.current;
+    expandRequest.current?.abort();
+    const request = new AbortController();
+    expandRequest.current = request;
+    setError(null);
+    try {
+      const v = viewRef.current;
+      const g = v === "items" ? await api.subgraph([id], 1, 200, {}, request.signal) : v === "network"
+        ? await api.network(id, 20, 12, request.signal) : await api.people(id, 30, request.signal);
+      if (graphGeneration.current !== generation || expandRequest.current !== request) return;
+      setExpansionParent(id);
+      setData((prev) => {
+        const nodes = new Map(prev.nodes.map((n) => [n.id, n]));
+        g.nodes.forEach((n) => nodes.has(n.id) || nodes.set(n.id, n)); // keep the seed first: don't reorder
+        const edges = new Map(prev.edges.map((e) => [`${e.src}-${e.dst}-${e.type}`, e]));
+        g.edges.forEach((e) => edges.set(`${e.src}-${e.dst}-${e.type}`, { ...e, id: edges.size + 1e6 }));
+        return { nodes: [...nodes.values()], edges: [...edges.values()] };
+      });
+    } catch (e) {
+      if (!request.signal.aborted) setError(String(e));
+    } finally {
+      if (expandRequest.current === request) expandRequest.current = null;
+    }
   }, []);
 
   const onLegend = useCallback((c: Community[]) => setLegend(c), []);
@@ -158,7 +191,7 @@ export default function Explorer() {
             onCommunitiesAction={onLegend} />
         ) : (
           <div className="absolute inset-0">
-            <GraphCanvas key={canvasKey} data={data} hiddenTypes={HIDDEN_2D} selected={selected}
+            <GraphCanvas key={canvasKey} data={data} hiddenTypes={HIDDEN_2D} selected={selected} expansionParent={expansionParent}
               onSelectAction={(id) => { setSelected(id); if (id !== null) setInspected(id); }} onExpandAction={expand} />
           </div>
         )}
