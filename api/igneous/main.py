@@ -11,6 +11,7 @@ from igneous.graph.traversal import GraphFilters, explain, neighborhood, network
 from igneous.llm import LLMDisabled
 from igneous.rag import qa
 from igneous.rag.search import Filters, hybrid
+from igneous.sync_status import sync_status
 
 app = FastAPI(title="Igneous", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -31,6 +32,16 @@ def stats(s: Session = Depends(get_session)):
         "edges": dict(q("SELECT type, count(*) FROM edges GROUP BY 1")),
         "chunks": s.execute(text("SELECT count(*) AS total, count(embedding) AS embedded FROM chunks")).one()._asdict(),
     }
+
+
+@app.get("/sync")
+def sync(
+    connector: str | None = None,
+    account: str | None = None,
+    s: Session = Depends(get_session),
+):
+    """Report persisted sync checkpoints; this endpoint never starts a sync."""
+    return {"syncs": sync_status(s, connector=connector, account=account)}
 
 
 @app.get("/search")

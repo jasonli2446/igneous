@@ -326,6 +326,7 @@ def test_gmail_backfill_resumes_mid_page(monkeypatch):
     assert fetched == ["m4", "m5"]  # resumes after m3, not from m0
 
 
+<<<<<<< HEAD
 def test_phone_normalization():
     from igneous.connectors.mac_contacts import norm_phone
 
@@ -343,3 +344,95 @@ def test_contact_names_in_messages():
     assert pretty_thread("+16149733915, +16174075277", named) == "Ana, Sam"
     assert pretty_thread("+16149733915, +16174075277, +19995550000, +18885550000", named).endswith("and 1 other")
     assert pretty_thread("Biggers in Paris", named) == "Biggers in Paris"
+
+
+class _SyncStatusResult:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self.rows
+
+
+class _SyncStatusSession:
+    def __init__(self, rows):
+        self.rows = rows
+        self.params = None
+
+    def execute(self, _statement, params):
+        self.params = params
+        return _SyncStatusResult(self.rows)
+
+
+def test_sync_status_reports_age_counts_and_sanitized_cursor():
+    from datetime import UTC, datetime
+
+    from igneous.sync_status import sync_status
+
+    session = _SyncStatusSession([{
+        "connector": "gmail",
+        "account": "me@example.com",
+        "cursor": {"history_id": "opaque-history-token", "backfill_page": "opaque-page-token"},
+        "updated_at": datetime(2026, 10, 20, 11, 30, tzinfo=UTC),
+        "item_count": 42,
+    }])
+
+    (status,) = sync_status(session, now=datetime(2026, 10, 20, 12, 0, tzinfo=UTC))
+
+    assert status == {
+        "connector": "gmail",
+        "account": "me@example.com",
+        "status": "known",
+        "last_synced_at": datetime(2026, 10, 20, 11, 30, tzinfo=UTC),
+        "cursor_age_seconds": 1800,
+        "item_count": 42,
+        "cursor": {"present": True, "keys": ["backfill_page", "history_id"], "backfill_in_progress": True},
+    }
+    assert "opaque-history-token" not in repr(status)
+
+
+def test_sync_status_marks_requested_missing_checkpoint_never_synced():
+    from igneous.sync_status import sync_status
+
+    session = _SyncStatusSession([])
+
+    assert sync_status(session, connector="gmail", account="me@example.com") == [{
+        "connector": "gmail",
+        "account": "me@example.com",
+        "status": "never_synced",
+        "last_synced_at": None,
+        "cursor_age_seconds": None,
+        "item_count": 0,
+        "cursor": {"present": False, "keys": [], "backfill_in_progress": False},
+    }]
+    assert session.params == {"connector": "gmail", "account": "me@example.com"}
+
+
+def test_get_sync_is_read_only_status_report():
+    from fastapi.testclient import TestClient
+
+    from igneous.db import get_session
+    from igneous.main import app
+
+    session = _SyncStatusSession([])
+    app.dependency_overrides[get_session] = lambda: session
+    try:
+        response = TestClient(app).get("/sync?connector=imessage&account=default")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "syncs": [{
+            "connector": "imessage",
+            "account": "default",
+            "status": "never_synced",
+            "last_synced_at": None,
+            "cursor_age_seconds": None,
+            "item_count": 0,
+            "cursor": {"present": False, "keys": [], "backfill_in_progress": False},
+        }]
+    }
