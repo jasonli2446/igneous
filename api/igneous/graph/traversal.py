@@ -64,6 +64,45 @@ def people(s: Session, seed: int, limit: int = 60) -> dict:
     return g
 
 
+def network(s: Session, seed: int, people_limit: int = 50, hub_limit: int = 30) -> dict:
+    """People plus the shared things that join them: group chats, email threads, events. Each hub is a node
+    and people link to the hubs they took part in, so friend groups and teams form visible clusters instead
+    of a star around the seed. A hub must join 2+ of the seed's correspondents (a thread with only the seed
+    and one other person adds nothing a direct tie doesn't). The seed itself is left off hubs: it is in all of
+    them, and drawing those spokes would pull the layout back into a star."""
+    base = people(s, seed, limit=people_limit)
+    if not base["nodes"]:
+        return base
+    head = base["nodes"][0]["id"]
+    others = [n["id"] for n in base["nodes"][1:]]
+    canon = "COALESCE((SELECT canonical_id FROM canonical WHERE node_id = {x}), {x})"
+    hubs = s.execute(text(f"""
+        WITH part AS (  -- (person, hub) for every conversation thread or event they were part of
+            SELECT DISTINCT {canon.format(x='pm.p')} AS person, t.dst AS hub
+            FROM (SELECT src AS p, dst AS m FROM edges WHERE type = 'SENT'
+                  UNION SELECT dst, src FROM edges WHERE type = 'RECEIVED') pm
+            JOIN edges t ON t.src = pm.m AND t.type = 'IN_THREAD'
+            UNION
+            SELECT DISTINCT {canon.format(x='src')}, dst FROM edges WHERE type = 'ATTENDED'),
+        mine AS (SELECT * FROM part WHERE person = ANY(:others))
+        SELECT hub, array_agg(person) AS members, count(*) AS n
+        FROM mine GROUP BY hub HAVING count(*) >= 2
+        ORDER BY count(*) DESC LIMIT :hubs
+    """), {"others": others, "hubs": hub_limit}).all()
+    hub_ids = [h.hub for h in hubs]
+    g = subgraph(s, [head, *others, *hub_ids])
+    # Direct ties: keep person-person ties between correspondents (thinner); drop the seed's spokes except
+    # for people in no hub, who would otherwise float.
+    in_hub = {p for h in hubs for p in h.members}
+    edges = [e for e in base["edges"] if head not in (e["src"], e["dst"])
+             or ({e["src"], e["dst"]} - {head}).isdisjoint(in_hub)]
+    edges += [{"id": -(100000 + i), "src": p, "dst": h.hub, "type": "PART_OF", "extractor": "derived",
+               "confidence": None, "weight": 1}
+              for i, (h, p) in enumerate((h, p) for h in hubs for p in h.members)]
+    g["edges"] = edges
+    return g
+
+
 def subgraph(s: Session, node_ids: list[int]) -> dict:
     nodes = s.execute(text("""
         SELECT n.id, n.type, n.name, n.key,

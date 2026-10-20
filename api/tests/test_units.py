@@ -176,3 +176,11 @@ def test_gmail_backfill_resumes_mid_page(monkeypatch):
     fetched.clear()
     list(Conn()._backfill(mid[1]))
     assert fetched == ["m4", "m5"]  # resumes after m3, not from m0
+
+
+def test_phone_normalization():
+    from igneous.connectors.mac_contacts import norm_phone
+
+    assert norm_phone("(614) 555-1234") == norm_phone("+1 614 555 1234") == norm_phone("6145551234") == "+16145551234"
+    assert norm_phone("+44 20 7946 0958") == "+442079460958"
+    assert norm_phone("555-1234") is None and norm_phone(None) is None

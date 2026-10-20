@@ -75,6 +75,7 @@ export const api = {
   subgraph: (seed: number[], hops = 1, limit = 300, types?: string[]) =>
     get<Subgraph>("/graph/subgraph", { seed, hops, limit, types }),
   people: (seed: number, limit = 60) => get<Subgraph>("/graph/people", { seed, limit }),
+  network: (seed: number, people = 50, hubs = 30) => get<Subgraph>("/graph/network", { seed, people, hubs }),
   ask: async (question: string, use_graph = true) => {
     const r = await fetch(new URL("/ask", API), {
       method: "POST",

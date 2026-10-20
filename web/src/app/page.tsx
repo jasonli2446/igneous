@@ -16,8 +16,8 @@ export default function Explorer() {
   const [data, setData] = useState<Subgraph>(EMPTY);
   const [canvasKey, setCanvasKey] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
-  const [hidden, setHidden] = useState<Set<string>>(new Set(["Organization"]));
-  const [view, setView] = useState<"people" | "items">("people");
+  const [hidden, setHidden] = useState<Set<string>>(new Set(["Organization", "Message"]));
+  const [view, setView] = useState<"network" | "people" | "items">("network");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -30,7 +30,8 @@ export default function Explorer() {
     setError(null);
     try {
       const id = node.id;
-      const g = view === "people" && node.type === "Person" ? await api.people(id, 60) : await api.subgraph([id], 1, 400);
+      const g = node.type !== "Person" || view === "items" ? await api.subgraph([id], 1, 400)
+        : view === "network" ? await api.network(id) : await api.people(id, 60);
       setCanvasKey((k) => k + 1); // fresh canvas for a fresh seed
       setData(g);
       setSelected(id);
@@ -44,7 +45,8 @@ export default function Explorer() {
   const viewRef = useRef(view);
   viewRef.current = view;
   const expand = useCallback(async (id: number) => {
-    const g = viewRef.current === "people" ? await api.people(id, 30) : await api.subgraph([id], 1, 200);
+    const g = viewRef.current === "items" ? await api.subgraph([id], 1, 200)
+      : viewRef.current === "network" ? await api.network(id, 25, 15) : await api.people(id, 30);
     setData((prev) => {
       const nodes = new Map(prev.nodes.map((n) => [n.id, n]));
       g.nodes.forEach((n) => nodes.set(n.id, n));
@@ -85,7 +87,7 @@ export default function Explorer() {
         <div>
           <label className="mb-1 block font-medium text-zinc-700">View</label>
           <div className="flex gap-1">
-            {([["people", "People"], ["items", "Items"]] as const).map(([v, label]) => (
+            {([["network", "Network"], ["people", "People"], ["items", "Items"]] as const).map(([v, label]) => (
               <button key={v} onClick={() => setView(v)}
                 className={`flex-1 rounded border px-2 py-1 ${view === v ? "border-zinc-800 bg-zinc-800 text-white" : "border-zinc-300"}`}>
                 {label}
@@ -93,7 +95,9 @@ export default function Explorer() {
             ))}
           </div>
           <p className="mt-1 text-xs text-zinc-500">
-            {view === "people" ? "Who a person corresponds with; edge width = messages exchanged." : "Raw neighbors: messages, threads, files."}
+            {view === "network" ? "People clustered by the group chats, threads, and events they share. Color = community; grey dots = the shared conversation or event."
+              : view === "people" ? "Who a person corresponds with; edge width = messages exchanged."
+              : "Raw neighbors: messages, threads, files."}
           </p>
         </div>
 

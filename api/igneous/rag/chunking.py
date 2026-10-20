@@ -60,7 +60,7 @@ def run(s: Session) -> int:
         FROM source_items si
         LEFT JOIN nodes n ON n.source_item_id = si.id AND n.type IN ('Message', 'File', 'Event')
         -- contact cards carry no text worth searching
-        WHERE si.source <> 'gcontacts' AND si.updated_at > :since
+        WHERE si.source NOT IN ('gcontacts', 'maccontacts') AND si.updated_at > :since
         ORDER BY si.updated_at, si.id
     """), {"since": since}).all()
     for item in rows:

@@ -7,7 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.db import get_session
-from igneous.graph.traversal import neighborhood, people
+from igneous.graph.traversal import neighborhood, network, people
 from igneous.llm import LLMDisabled
 from igneous.rag import qa
 from igneous.rag.search import Filters, hybrid
@@ -87,6 +87,13 @@ def graph_subgraph(seed: list[int] = Query(...), hops: int = Query(1, le=3), lim
 @app.get("/graph/people")
 def graph_people(seed: int, limit: int = Query(60, le=500), s: Session = Depends(get_session)):
     return people(s, seed, limit=limit)
+
+
+@app.get("/graph/network")
+def graph_network(seed: int, people: int = Query(50, le=200), hubs: int = Query(30, le=100),
+                  s: Session = Depends(get_session)):
+    """People plus the group chats, threads, and events that join them (clusters, not a star)."""
+    return network(s, seed, people_limit=people, hub_limit=hubs)
 
 
 @app.get("/graph/node/{node_id}")

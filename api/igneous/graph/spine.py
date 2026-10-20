@@ -6,6 +6,7 @@ from itertools import pairwise
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous.connectors.mac_contacts import norm_phone
 from igneous.pipeline import advance, watermark
 
 STAGE = "spine"
@@ -145,6 +146,8 @@ def build_chat(b: Builder, item) -> None:
     # Everyone in the chat received the day's conversation; whoever spoke also SENT it. (Earlier this gave each
     # person only one of the two, so two members who both spoke never looked like correspondents.)
     for key, handle in members.items():
+        if "@" not in key:
+            key = norm_phone(key) or key  # '+16145551234' / '6145551234' -> one key, matching contact cards
         pid = b.node("Person", key, handle, {"handle": handle})
         b.edge(mid, pid, "RECEIVED", item.occurred_at, item.id)
         if handle in senders:
@@ -169,10 +172,20 @@ def build_event(b: Builder, item) -> None:
 
 
 def build_contact(b: Builder, item) -> None:
-    """A contact card names one human with several addresses: emit SAME_AS between them, which is
-    ground truth for entity resolution (extractor 'contacts', so `resolve --undo` leaves it alone)."""
-    emails = item.raw_meta.get("emails", [])
-    ids = [_person(b, {"email": e, "name": item.title}, item.title or e) for e in emails]
+    """A contact card names one human with several addresses and numbers. It names the matching Person nodes
+    (so a Messages handle shows as "Jane Doe", not "+16145551234") and emits SAME_AS between every
+    identity on the card: ground truth for entity resolution (extractor 'contacts', which `resolve --undo`
+    leaves alone)."""
+    meta = item.raw_meta
+    name = item.title
+    keys = [e for e in meta.get("emails", [])] + [p for p in meta.get("phones", []) if p]
+    ids = []
+    for k in keys:
+        pid = b.node("Person", k, name, {"handle": k} if "@" not in k else {"email": k})
+        # A contact card is the authority on a person's name: overwrite handle- or address-derived names.
+        b.s.execute(text("UPDATE nodes SET name = :n, props = props || '{\"named_by\": \"contacts\"}' WHERE id = :id"),
+                    {"n": name, "id": pid})
+        ids.append(pid)
     for a, c in pairwise(ids):
         s0, s1 = sorted((a, c))
         b.s.execute(text("""
@@ -207,7 +220,7 @@ def run(s: Session) -> int:
             build_chat(b, item)
         elif item.source == "gcal":
             build_event(b, item)
-        elif item.source == "gcontacts":
+        elif item.source in ("gcontacts", "maccontacts"):
             build_contact(b, item)
         elif item.source in ("fs", "drive"):
             build_file(b, item)
