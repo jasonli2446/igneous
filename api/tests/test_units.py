@@ -550,3 +550,10 @@ def test_run_sync_prunes_only_after_completed_scan(monkeypatch):
     with pytest.raises(RuntimeError, match="interrupted"):
         base.run_sync(session, Interrupted())
     assert not any("DELETE FROM source_items" in statement for statement in session.statements)
+
+
+def test_filesystem_connector_rejects_missing_roots(tmp_path):
+    from igneous.connectors.filesystem import FilesystemConnector
+
+    with pytest.raises(ValueError, match="must be directories"):
+        FilesystemConnector(tmp_path / "does-not-exist")

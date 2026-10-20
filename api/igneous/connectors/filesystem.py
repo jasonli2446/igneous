@@ -42,6 +42,8 @@ class FilesystemConnector:
         self.roots = tuple(sorted({Path(root).expanduser().resolve() for root in roots}, key=str))
         if not self.roots:
             raise ValueError("at least one filesystem root is required")
+        if missing := [str(root) for root in self.roots if not root.is_dir()]:
+            raise ValueError(f"filesystem roots must be directories: {', '.join(missing)}")
         if len(self.roots) > 1 and len({root.name for root in self.roots}) != len(self.roots):
             raise ValueError("filesystem roots must have distinct directory names")
 
