@@ -15,7 +15,8 @@ export default function Explorer() {
   const [matches, setMatches] = useState<GNode[]>([]);
   const [data, setData] = useState<Subgraph>(EMPTY);
   const [canvasKey, setCanvasKey] = useState(0);
-  const [selected, setSelected] = useState<number | null>(null);
+  const [selected, setSelected] = useState<number | null>(null);   // canvas highlight (user clicked)
+  const [inspected, setInspected] = useState<number | null>(null); // inspector panel
   const [hidden, setHidden] = useState<Set<string>>(new Set(["Organization", "Message"]));
   const [view, setView] = useState<"network" | "people" | "items">("network");
   const [error, setError] = useState<string | null>(null);
@@ -34,7 +35,8 @@ export default function Explorer() {
         : view === "network" ? await api.network(id) : await api.people(id, 60);
       setCanvasKey((k) => k + 1); // fresh canvas for a fresh seed
       setData(g);
-      setSelected(id);
+      setSelected(null);   // don't dim the canvas: auto-highlighting the seed greyed out every hub
+      setInspected(id);
       setMatches([]);
     } catch (e) {
       setError(String(e));
@@ -130,12 +132,12 @@ export default function Explorer() {
           </div>
         ) : (
           <GraphCanvas key={canvasKey} data={data} hiddenTypes={hidden} selected={selected}
-            onSelectAction={setSelected} onExpandAction={expand} />
+            onSelectAction={(id) => { setSelected(id); if (id !== null) setInspected(id); }} onExpandAction={expand} />
         )}
       </main>
 
       <aside className="w-96 shrink-0 overflow-y-auto border-l border-zinc-200">
-        <Inspector id={selected} onExpandAction={expand} />
+        <Inspector id={selected ?? inspected} onExpandAction={expand} />
       </aside>
     </div>
   );

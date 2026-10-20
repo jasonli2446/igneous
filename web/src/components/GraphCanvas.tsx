@@ -53,7 +53,7 @@ export default function GraphCanvas({ data, hiddenTypes, selected, onSelectActio
       },
       edgeReducer: (edge, data, attrs) => {
         const { selected } = view.current;
-        if (selected === null) return attrs.spoke ? { color: "#eef2f7" } : {};
+        if (selected === null) return attrs.spoke ? { color: "#e8ecf2", size: 0.5 } : {};
         const touches = graph.current.extremities(edge).includes(String(selected));
         return touches ? { color: "#475569", size: 1.5 } : { color: "#f1f5f9" };
       },
