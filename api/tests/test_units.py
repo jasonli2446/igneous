@@ -1041,3 +1041,64 @@ def test_drive_ignores_non_file_change_events(monkeypatch):
     monkeypatch.setattr("igneous.connectors.drive.settings.drive_page_size", 100)
 
     assert list(connector.sync({"start_page_token": "old"})) == [Checkpoint({"start_page_token": "next"})]
+
+
+def test_calendar_uses_clean_incremental_params_and_tombstones_cancelled_events(monkeypatch):
+    from igneous.connectors.base import Checkpoint, SourceItem, Tombstone
+    from igneous.connectors.gcal import CalendarConnector
+
+    class Request:
+        def __init__(self, value):
+            self.value = value
+
+        def execute(self):
+            return self.value
+
+    class CalendarList:
+        def list(self, **kwargs):
+            return Request({"items": [{"id": "team", "summary": "Team"}]})
+
+    class Events:
+        def list(self, **kwargs):
+            assert kwargs["syncToken"] == "old-token"
+            assert "timeMin" not in kwargs
+            assert kwargs["showDeleted"] is True
+            return Request({"items": [{"id": "gone", "status": "cancelled"}],
+                            "nextSyncToken": "new-token"})
+
+    connector = object.__new__(CalendarConnector)
+    connector.svc = type("Service", (), {"calendarList": lambda self: CalendarList(),
+                                          "events": lambda self: Events()})()
+    connector.account = "me@example.com"
+    connector.since_days = 365
+    monkeypatch.setattr("igneous.connectors.gcal._retry", lambda request: request.execute())
+
+    events = list(connector.sync({"sync_tokens": {"team": "old-token"}}))
+    assert not any(isinstance(event, SourceItem) for event in events)
+    assert events == [Tombstone("gcal", "me@example.com/team/gone"),
+                      Checkpoint({"sync_tokens": {"team": "new-token"}})]
+
+
+def test_contacts_complete_scan_is_account_scoped(monkeypatch):
+    from igneous.connectors.base import CompletedScan
+    from igneous.connectors.gcal import ContactsConnector
+
+    class Request:
+        def execute(self):
+            return {"connections": [{"resourceName": "people/one", "names": [{"displayName": "One"}]}]}
+
+    class Connections:
+        def list(self, **kwargs):
+            return Request()
+
+    connector = object.__new__(ContactsConnector)
+    connector.svc = type("Service", (), {"people": lambda self: type("People", (), {
+        "connections": lambda self: Connections()})()})()
+    connector.account = "me@example.com"
+    monkeypatch.setattr("igneous.connectors.gcal._retry", lambda request: request.execute())
+
+    events = list(connector.sync({}))
+    assert events[0].external_id == "me@example.com/people/one"
+    assert isinstance(events[-1], CompletedScan)
+    assert events[-1].external_ids == frozenset({"me@example.com/people/one"})
+    assert events[-1].external_id_prefix == "me@example.com/"

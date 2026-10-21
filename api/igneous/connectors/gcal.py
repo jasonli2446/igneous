@@ -1,8 +1,8 @@
 """Google Calendar + Contacts connectors.
 
-Calendar: events with attendees from every calendar the account can see, incremental via syncToken (410 Gone
-means the token expired: full resync). Contacts: names and all email addresses from the People API, which
-entity resolution can use as ground truth ("these three addresses are one person").
+Calendar events are bootstrapped for a bounded history and then kept current with
+per-calendar sync tokens. Contacts are small enough for a complete People API scan
+on every run, allowing safe deletion reconciliation after that scan finishes.
 """
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from igneous.connectors.base import Checkpoint, SourceItem
+from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem, Tombstone
 from igneous.connectors.gmail import _retry
 
 
@@ -22,6 +22,11 @@ def _when(t: dict) -> datetime | None:
     return None
 
 
+def _external_id(account: str, resource_id: str) -> str:
+    """Avoid collisions and cross-account deletion reconciliation."""
+    return f"{account}/{resource_id}"
+
+
 class CalendarConnector:
     name = "gcal"
 
@@ -30,45 +35,69 @@ class CalendarConnector:
         self.account = account
         self.since_days = since_days
 
-    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint]:
+    def _calendars(self) -> Iterator[dict]:
+        page = None
+        while True:
+            response = _retry(self.svc.calendarList().list(pageToken=page))
+            yield from response.get("items", [])
+            page = response.get("nextPageToken")
+            if not page:
+                return
+
+    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | Tombstone]:
         tokens = dict(cursor.get("sync_tokens", {}))
-        cals = _retry(self.svc.calendarList().list()).get("items", [])
-        for cal in cals:
+        for cal in self._calendars():
             cid = cal["id"]
-            params = {"calendarId": cid, "singleEvents": True, "maxResults": 250, "showDeleted": False}
-            if cid in tokens:
-                params["syncToken"] = tokens[cid]
+            token = tokens.get(cid)
+            # Google rejects timeMin combined with syncToken. The bounded initial list
+            # deliberately has no CompletedScan: it is not a complete source snapshot.
+            params = {"calendarId": cid, "singleEvents": True, "maxResults": 250,
+                      "showDeleted": bool(token)}
+            if token:
+                params["syncToken"] = token
             else:
                 params["timeMin"] = (datetime.now(UTC) - timedelta(days=self.since_days)).isoformat()
             page = None
             while True:
                 try:
-                    resp = _retry(self.svc.events().list(**params, pageToken=page))
-                except HttpError as e:
-                    if e.resp.status == 410:  # sync token expired: drop it and do a full sync of this calendar
-                        tokens.pop(cid, None)
-                        params.pop("syncToken", None)
-                        params["timeMin"] = (datetime.now(UTC) - timedelta(days=self.since_days)).isoformat()
+                    response = _retry(self.svc.events().list(**params, pageToken=page))
+                except HttpError as exc:
+                    if exc.resp.status != 410 or not token:
+                        raise
+                    # An expired token requires the same bounded bootstrap as a new calendar.
+                    tokens.pop(cid, None)
+                    token, page = None, None
+                    params.pop("syncToken", None)
+                    params["showDeleted"] = False
+                    params["timeMin"] = (datetime.now(UTC) - timedelta(days=self.since_days)).isoformat()
+                    continue
+                for event in response.get("items", []):
+                    external_id = _external_id(self.account, f"{cid}/{event['id']}")
+                    if event.get("status") == "cancelled":
+                        yield Tombstone(self.name, external_id)
                         continue
-                    raise
-                for ev in resp.get("items", []):
-                    if ev.get("status") == "cancelled":
-                        continue
-                    attendees = [{"name": a.get("displayName", ""), "email": a["email"].lower(),
-                                  "response": a.get("responseStatus")}
-                                 for a in ev.get("attendees", []) if a.get("email") and not a.get("resource")]
-                    org = ev.get("organizer", {})
-                    body = "\n".join(x for x in [ev.get("description", ""), ev.get("location", "")] if x)
+                    attendees = [{"name": attendee.get("displayName", ""),
+                                  "email": attendee["email"].lower(),
+                                  "response": attendee.get("responseStatus")}
+                                 for attendee in event.get("attendees", [])
+                                 if attendee.get("email") and not attendee.get("resource")]
+                    organizer = event.get("organizer", {})
+                    body = "\n".join(value for value in (event.get("description", ""),
+                                                            event.get("location", "")) if value)
                     yield SourceItem(
-                        source="gcal", external_id=f"{cid}/{ev['id']}", title=ev.get("summary") or "(no title)",
-                        body_text=body, occurred_at=_when(ev.get("start", {})), mime="text/calendar",
-                        raw_meta={"calendar": cal.get("summary"), "attendees": attendees,
-                                  "organizer": {"name": org.get("displayName", ""), "email": org.get("email", "").lower()},
-                                  "start": ev.get("start"), "end": ev.get("end"), "account": self.account})
-                page = resp.get("nextPageToken")
+                        source=self.name, external_id=external_id,
+                        title=event.get("summary") or "(no title)", body_text=body,
+                        occurred_at=_when(event.get("start", {})), mime="text/calendar",
+                        raw_meta={"calendar": cal.get("summary"), "calendar_id": cid,
+                                  "attendees": attendees,
+                                  "organizer": {"name": organizer.get("displayName", ""),
+                                                "email": organizer.get("email", "").lower()},
+                                  "start": event.get("start"), "end": event.get("end"),
+                                  "account": self.account})
+                page = response.get("nextPageToken")
                 if not page:
-                    if resp.get("nextSyncToken"):
-                        tokens[cid] = resp["nextSyncToken"]
+                    if response.get("nextSyncToken"):
+                        tokens[cid] = response["nextSyncToken"]
                     break
             yield Checkpoint({"sync_tokens": tokens})
 
@@ -80,26 +109,29 @@ class ContactsConnector:
         self.svc = build("people", "v1", credentials=creds, cache_discovery=False)
         self.account = account
 
-    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint]:
-        # Contacts are small; a full pass each time is simpler than syncTokens and content-hash dedup makes
-        # unchanged contacts free.
-        page = None
+    def sync(self, cursor: dict) -> Iterator[SourceItem | CompletedScan]:
+        page, observed = None, set()
         while True:
-            resp = _retry(self.svc.people().connections().list(
+            response = _retry(self.svc.people().connections().list(
                 resourceName="people/me", pageSize=1000, pageToken=page,
                 personFields="names,emailAddresses,organizations,phoneNumbers"))
-            for p in resp.get("connections", []):
-                emails = [e["value"].lower() for e in p.get("emailAddresses", []) if e.get("value")]
-                name = (p.get("names") or [{}])[0].get("displayName", "")
+            for person in response.get("connections", []):
+                resource_name = person["resourceName"]
+                external_id = _external_id(self.account, resource_name)
+                observed.add(external_id)
+                emails = [email["value"].lower() for email in person.get("emailAddresses", [])
+                          if email.get("value")]
+                name = (person.get("names") or [{}])[0].get("displayName", "")
                 if not emails and not name:
                     continue
-                orgs = [o.get("name", "") for o in p.get("organizations", []) if o.get("name")]
-                yield SourceItem(source="gcontacts", external_id=p["resourceName"], title=name or emails[0],
+                orgs = [org["name"] for org in person.get("organizations", []) if org.get("name")]
+                yield SourceItem(source=self.name, external_id=external_id, title=name or emails[0],
                                  body_text="", mime="text/vcard",
                                  raw_meta={"emails": emails, "orgs": orgs, "account": self.account,
-                                           "phones": [x.get("canonicalForm") or x.get("value")
-                                                      for x in p.get("phoneNumbers", [])]})
-            page = resp.get("nextPageToken")
+                                           "phones": [phone.get("canonicalForm") or phone.get("value")
+                                                      for phone in person.get("phoneNumbers", [])]})
+            page = response.get("nextPageToken")
             if not page:
                 break
-        yield Checkpoint({"synced_at": datetime.now(UTC).isoformat()})
+        yield CompletedScan({"synced_at": datetime.now(UTC).isoformat()}, self.name, frozenset(observed),
+                            external_id_prefix=f"{self.account}/")

@@ -48,6 +48,7 @@ class CompletedScan:
     source: str
     external_ids: frozenset[str]
     allow_empty_prune: bool = False
+    external_id_prefix: str | None = None  # constrain reconciliation for account-scoped snapshots
 
 
 @dataclass
@@ -92,17 +93,22 @@ def save_cursor(s: Session, connector: str, account: str, cursor: dict) -> None:
 
 
 def _reconcile_completed_scan(s: Session, source: str, external_ids: frozenset[str],
-                              allow_empty_prune: bool) -> int:
+                              allow_empty_prune: bool, external_id_prefix: str | None = None) -> int:
     """Remove items absent from a completed, non-suspicious source snapshot."""
     if not external_ids and not allow_empty_prune:
         return 0
+    scope = ""
+    values = {"source": source, "external_ids": sorted(external_ids), "prefix": external_id_prefix}
+    if external_id_prefix is not None:
+        # Use a literal prefix comparison rather than LIKE: account IDs may contain wildcard characters.
+        scope = " AND left(external_id, char_length(:prefix)) = :prefix"
     if external_ids:
-        result = s.execute(text("""
+        result = s.execute(text(f"""
             DELETE FROM source_items
-            WHERE source = :source AND external_id <> ALL(CAST(:external_ids AS text[]))
-        """), {"source": source, "external_ids": sorted(external_ids)})
+            WHERE source = :source{scope} AND external_id <> ALL(CAST(:external_ids AS text[]))
+        """), values)
     else:
-        result = s.execute(text("DELETE FROM source_items WHERE source = :source"), {"source": source})
+        result = s.execute(text(f"DELETE FROM source_items WHERE source = :source{scope}"), values)
     return result.rowcount
 
 
@@ -120,7 +126,7 @@ def run_sync(s: Session, connector: Connector, account: str = "default", limit: 
         if isinstance(obj, CompletedScan):
             if limit is None:
                 stats["deleted"] += _reconcile_completed_scan(
-                    s, obj.source, obj.external_ids, obj.allow_empty_prune)
+                    s, obj.source, obj.external_ids, obj.allow_empty_prune, obj.external_id_prefix)
             save_cursor(s, connector.name, account, obj.cursor)
             s.commit()
             break
