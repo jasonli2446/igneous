@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     data_dir: str = "../data"
     # Comma-separated filesystem roots used by ``igneous sync fs`` when --path is omitted.
     filesystem_roots: str = ""
+    # Drive API page size for files.list and changes.list (1-1000).
+    drive_page_size: int = 100
     # Fixed by the schema (see docs/decisions/0001-embeddings.md); changing it needs a migration.
     embedding_provider: str = "fastembed"
     embedding_model: str = "BAAI/bge-small-en-v1.5"

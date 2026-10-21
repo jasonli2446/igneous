@@ -11,7 +11,7 @@ app = typer.Typer(no_args_is_help=True)
 
 
 @app.command()
-def sync(connector: str = typer.Argument(..., help="email | imessage | maccontacts | gmail | gcal | gcontacts | fs"),
+def sync(connector: str = typer.Argument(..., help="email | imessage | maccontacts | gmail | gcal | gcontacts | drive | fs"),
          path: Path = typer.Option(None, help="source path; fs defaults to IGNEOUS_FILESYSTEM_ROOTS"),
          mailbox: list[str] = typer.Option(None, help="restrict to these mailboxes; repeatable"),
          limit: int = typer.Option(None, help="stop at the first checkpoint after this many items (resumable)"),
@@ -40,7 +40,7 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | maccontac
         if not roots:
             raise typer.BadParameter("fs requires --path or IGNEOUS_FILESYSTEM_ROOTS")
         conn = FilesystemConnector(roots)
-    elif connector in ("gmail", "gcal", "gcontacts"):
+    elif connector in ("gmail", "gcal", "gcontacts", "drive"):
         from igneous.connectors import google_auth
 
         with SessionLocal() as s:
@@ -50,6 +50,10 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | maccontac
 
             conn = GmailConnector(creds, account, since_days=since_days or 90,
                                   query=None if all_mail else GmailConnector.DEFAULT_QUERY)
+        elif connector == "drive":
+            from igneous.connectors.drive import DriveConnector
+
+            conn = DriveConnector(creds, account)
         elif connector == "gcal":
             from igneous.connectors.gcal import CalendarConnector
 

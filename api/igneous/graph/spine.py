@@ -290,6 +290,14 @@ def build_file(b: Builder, item) -> None:
         folders.reverse()
     fid = b.node("File", f"{item.source}:{item.external_id}", item.title or item.external_id,
                  {"source": item.source, "path": path}, sid=item.id)
+    # Drive preserves every parent ID in metadata: a file can belong to more than one folder,
+    # which cannot be represented faithfully by a single filesystem-style path.
+    parents = item.raw_meta.get("parents")
+    if isinstance(parents, list) and all(isinstance(parent, str) for parent in parents):
+        for parent in parents:
+            folder = b.node("Folder", f"{item.source}:drive/{parent}", parent, {"path": f"drive/{parent}"})
+            b.edge(folder, fid, "CONTAINS")
+        return
     child = fid
     for parent in reversed(folders):
         folder = b.node("Folder", f"{item.source}:{parent}", parent.rsplit("/", 1)[-1], {"path": parent})
