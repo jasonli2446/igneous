@@ -71,11 +71,11 @@ def run(s: Session) -> int:
     from datetime import timedelta
 
     rows = s.execute(text("""
-        SELECT m.id, si.body_text FROM nodes m JOIN source_items si ON si.id = m.source_item_id
+        SELECT m.id, si.body_text, si.occurred_at FROM nodes m JOIN source_items si ON si.id = m.source_item_id
         WHERE m.type = 'Message' AND si.body_text ~* 'Original Message'
     """)).all()
     added = 0
-    for child, body in rows:
+    for child, body, occurred_at in rows:
         quotes = parse_quotes(body)
         if not quotes:
             continue
@@ -102,10 +102,13 @@ def run(s: Session) -> int:
             if (subj and surname and subj_ok and sender_ok) or (subj_ok and not surname) or (sender_ok and not subj
                                                                                                and not c_subj):
                 s.execute(text("""
-                    INSERT INTO edges (src, dst, type, extractor, confidence)
-                    VALUES (:c, :p, 'REPLIES_TO', 'spine-quoted', :conf)
-                    ON CONFLICT (src, dst, type, extractor) DO NOTHING
-                """), {"c": child, "p": cand.id, "conf": 1.0 if subj_ok and sender_ok else 0.7})
+                    INSERT INTO edges (src, dst, type, valid_from, valid_to, extractor, confidence)
+                    VALUES (:c, :p, 'REPLIES_TO', :at, :at, 'spine-quoted', :conf)
+                    ON CONFLICT (src, dst, type, extractor) DO UPDATE SET
+                        valid_from = COALESCE(edges.valid_from, EXCLUDED.valid_from),
+                        valid_to = COALESCE(edges.valid_to, EXCLUDED.valid_to)
+                """), {"c": child, "p": cand.id, "at": occurred_at,
+                           "conf": 1.0 if subj_ok and sender_ok else 0.7})
                 added += 1
                 break
     s.commit()

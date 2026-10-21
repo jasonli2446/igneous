@@ -69,6 +69,60 @@ def test_names_and_threads():
     assert _thread_key({"from": [{"email": "a@x"}], "to": [{"email": "b@x"}]}, "RE: FW: Forecast") == "subject:forecast|a@x,b@x"
 
 
+def test_spine_assigns_closed_message_intervals_and_membership_observations():
+    from igneous.graph.spine import UPSERT_EDGE, Builder, _person
+
+    class Result:
+        def scalar_one(self):
+            return 1
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, statement, params):
+            self.calls.append((str(statement), params))
+            return Result()
+
+    session = Session()
+    builder = Builder(session)
+    first, last = datetime(2024, 1, 2), datetime(2024, 3, 4)
+    person = _person(builder, {"email": "person@example.com"}, "Person", first, 10)
+    builder.edge(person, 99, "SENT", last, 11)
+
+    membership, sent = [params for statement, params in session.calls if statement == str(UPSERT_EDGE)]
+    assert membership == {"src": 1, "dst": 1, "type": "MEMBER_OF", "valid_from": first,
+                          "valid_to": first, "sid": 10}
+    assert sent == {"src": 1, "dst": 99, "type": "SENT", "valid_from": last,
+                    "valid_to": last, "sid": 11}
+    assert "LEAST(edges.valid_from, EXCLUDED.valid_from)" in str(UPSERT_EDGE)
+    assert "GREATEST(edges.valid_to, EXCLUDED.valid_to)" in str(UPSERT_EDGE)
+
+
+def test_temporal_backfill_is_bounded_and_repairs_both_edge_classes():
+    from igneous.graph.spine import BACKFILL_MEMBERSHIPS, BACKFILL_POINT_EDGES, backfill_temporal
+
+    class Result:
+        def __init__(self, rowcount):
+            self.rowcount = rowcount
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, statement, params):
+            self.calls.append((str(statement), params))
+            return Result(2 if statement == BACKFILL_POINT_EDGES else 3)
+
+    session = Session()
+    assert backfill_temporal(session, limit=25) == 5
+    assert [statement for statement, _ in session.calls] == [str(BACKFILL_POINT_EDGES), str(BACKFILL_MEMBERSHIPS)]
+    assert all(params["limit"] == 25 for _, params in session.calls)
+    assert "SET valid_from = c.observed_at, valid_to = c.observed_at" in str(BACKFILL_POINT_EDGES)
+    assert "min(COALESCE(si.occurred_at, observed.valid_from))" in str(BACKFILL_MEMBERSHIPS)
+    assert "max(COALESCE(si.occurred_at, observed.valid_from))" in str(BACKFILL_MEMBERSHIPS)
+
+
 def test_rrf_rewards_agreement():
     assert rrf([1, 2, 3], [3, 2, 9])[0][0] in (2, 3)
     assert {c for c, _ in rrf([1], [2])} == {1, 2}
@@ -172,12 +226,14 @@ def test_graph_filters_scope_discovery_and_final_serialization():
             return Result([])
 
     session = Session()
-    graph = neighborhood(session, [7], filters=GraphFilters(source="gmail", edge_types=["SENT"], since=datetime(2024, 1, 1)))
+    graph = neighborhood(session, [7], filters=GraphFilters(source="gmail", edge_types=["SENT"],
+                                                              since=datetime(2024, 1, 1), until=datetime(2024, 2, 1)))
     discovery, serialized = session.calls[0], session.calls[-1]
     for sql, params in (discovery, serialized):
         assert "LEFT JOIN source_items si ON si.id = e.source_item_id" in sql
         assert "si.source = :source" in sql
-        assert "COALESCE(si.occurred_at, e.valid_from) >= :since" in sql
+        assert "COALESCE(e.valid_to, si.occurred_at, e.valid_from) >= :since" in sql
+        assert "COALESCE(e.valid_from, si.occurred_at, e.valid_to) <= :until" in sql
         assert "e.type = ANY(:types)" in sql
         assert params["source"] == "gmail" and params["types"] == ["SENT"]
     assert graph == {"nodes": [{"id": 7, "type": "Person", "name": "Seed", "key": "seed", "degree": 3}], "edges": []}
