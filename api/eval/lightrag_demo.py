@@ -13,8 +13,8 @@ import tempfile
 
 import numpy as np
 
-from igneous import llm
 from igneous.config import settings
+from igneous.providers import chat
 from igneous.rag.embed import embed_texts
 
 
@@ -31,11 +31,10 @@ async def main(kg_path: str, question: str):
 
     async def complete(prompt, system_prompt=None, history_messages=None, **kwargs) -> str:
         calls["llm"] += 1
-        r = llm.client().messages.create(
-            model=settings.llm_model, max_tokens=2000, system=system_prompt or "",
-            messages=[*(history_messages or []), {"role": "user", "content": prompt}],
-            output_config={"effort": "low"})
-        return next(b.text for b in r.content if b.type == "text")
+        messages = ([{"role": "system", "content": system_prompt}] if system_prompt else [])
+        messages.extend(history_messages or [])
+        messages.append({"role": "user", "content": prompt})
+        return chat(messages, max_tokens=2000, effort="low", model=settings.llm_model).text
 
     work = tempfile.mkdtemp(prefix="igneous-lightrag-")
     try:

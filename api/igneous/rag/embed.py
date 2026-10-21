@@ -1,27 +1,19 @@
-"""Embedding backfill. Local ONNX model (fastembed) so it runs on a laptop with no GPU and no torch."""
-from functools import lru_cache
-
+"""Embedding backfill through the configured model provider."""
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.config import settings
+from igneous.providers import embed
 
-BATCH = 128
-
-
-@lru_cache(maxsize=1)
-def model():
-    from fastembed import TextEmbedding
-
-    return TextEmbedding(settings.embedding_model)
+BATCH = settings.embedding_batch_size
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    return [v.tolist() for v in model().embed(texts, batch_size=BATCH)]
+    return embed(texts)
 
 
 def embed_query(q: str) -> list[float]:
-    return next(v.tolist() for v in model().query_embed(q))
+    return embed([q], query=True)[0]
 
 
 def run(s: Session, log=print) -> int:
