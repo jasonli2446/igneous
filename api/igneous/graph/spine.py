@@ -418,6 +418,8 @@ def run(s: Session) -> int:
 
         quoted.run(s)               # exact parents from quoted "Original Message" headers first
         s.execute(INFER_REPLIES)    # then the subject+participant heuristic for whatever is left
+        from igneous.graph.history import derive_introductions
+        derive_introductions(s)     # deterministic, source-cited three-person introductions
     backfill_temporal(s)
     s.commit()
     return len(rows)
