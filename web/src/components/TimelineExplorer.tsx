@@ -68,7 +68,7 @@ export default function TimelineExplorer({ a, b, title = "Activity timeline" }: 
                 <span className="font-medium">{edge.type.replaceAll("_", " ")}</span>
                 <span className="text-muted">{edge.direction}</span>
                 <span className="text-muted">·</span>
-                <span className="text-soft">{edge.counterpart.type} #{edge.counterpart.id}</span>
+                <span className="text-soft">{edge.counterpart.name || edge.counterpart.type.toLowerCase()}</span>
               </div>
               <dl className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[11px] leading-relaxed text-muted">
                 <div><dt className="sr-only">Source</dt><dd>{edge.provenance.evidence.source}</dd></div>

@@ -86,7 +86,8 @@ export default function Inspector({ id, onExpandAction, onCloseAction, onSelectA
           )}
         </div>
         <h2 className="mt-1 text-lg font-semibold leading-snug break-words">{node.name}</h2>
-        {node.key !== "me" && <div className="mt-0.5 text-xs break-all text-muted">{node.key}</div>}
+        {/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(node.key) && node.key.toLowerCase() !== node.name.toLowerCase() && (
+          <div className="mt-0.5 text-xs break-all text-muted">{node.key}</div>)}
       </header>
 
       <Section title="Connections">

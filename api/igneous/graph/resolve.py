@@ -64,7 +64,11 @@ class P:
 
     @property
     def is_email(self) -> bool:
-        return not self.key.startswith("name:")
+        return "@" in self.key and not self.key.startswith("name:")
+
+    @property
+    def is_phone(self) -> bool:
+        return bool(re.fullmatch(r"\+?\d{7,15}", self.key))
 
     @property
     def local(self) -> str:
@@ -131,7 +135,8 @@ def score(a: P, b: P) -> tuple[float, dict]:
     shared = len(a.peers & b.peers)
     jaccard = shared / max(1, len(a.peers | b.peers))
     same_domain = a.is_email and b.is_email and a.domain == b.domain
-    # Mentions (name:...) have no correspondents; they lean on exact full-name agreement instead.
+    # Mentions (name:...) and phone handles have no mail correspondents; they lean on exact full-name agreement
+    # instead. A phone's name comes from a contact card, so an exact match to an address's name is strong.
     mention_pair = not a.is_email or not b.is_email
     exact_name = (a.first, a.last) == (b.first, b.last)
 
@@ -152,10 +157,19 @@ def score(a: P, b: P) -> tuple[float, dict]:
 
 def candidates(s: Session) -> list[tuple[P, P, float, dict]]:
     out = []
-    for group in blocks(load(s)).values():
+    people = load(s)
+    # Two different addresses with the same full name and nothing else in common might be two people; then a
+    # phone or mention with that name can't be safely assigned to either.
+    emails_by_name: dict[tuple[str, str], int] = defaultdict(int)
+    for p in people:
+        if p.is_email and p.first and p.last:
+            emails_by_name[(p.first, p.last)] += 1
+    for group in blocks(people).values():
         for i, a in enumerate(group):
             for b in group[i + 1:]:
                 sc, f = score(a, b)
+                if sc and (not a.is_email or not b.is_email) and emails_by_name[(a.first, a.last)] > 1:
+                    sc, f = 0.0, {**f, "ambiguous_name": True}
                 out.append((a, b, sc, f))
     return out
 
@@ -188,6 +202,11 @@ def run(s: Session, threshold: float = THRESHOLD) -> dict:
 TRUSTED = ("self", "contacts", "user", "github")
 
 
+def _human_name(name: str, handles: set[str]) -> bool:
+    """'Jane Doe', not 'Jdoe2446': two or more words, no digits, not one of the person's address handles."""
+    return len(name.split()) >= 2 and name.replace(" ", "").lower() not in handles and not re.search(r"\d", name)
+
+
 def refresh_canonical(s: Session) -> int:
     """Union-find over Person SAME_AS edges; each cluster's canonical node is its best-connected member, so
     the explorer shows "Kenneth Lay" with all his addresses folded in. Scoped to Person nodes: rows for other
@@ -206,7 +225,7 @@ def refresh_canonical(s: Session) -> int:
             x = parent[x]
         return x
 
-    meta = {r.id: r for r in s.execute(text("SELECT id, name, props FROM nodes WHERE type = 'Person'"))}
+    meta = {r.id: r for r in s.execute(text("SELECT id, key, name, props FROM nodes WHERE type = 'Person'"))}
     firsts: dict[int, set[str]] = {}  # per cluster root: the distinct full first names it contains
 
     def first_of(n: int) -> str:
@@ -241,12 +260,18 @@ def refresh_canonical(s: Session) -> int:
         is_self = {n for n in c if (meta[n].props or {}).get("self")} if all(n in meta for n in c) else set()
         head = max(c, key=lambda n: (n in is_self, degree.get(n, 0), -n))
         rows += [{"n": n, "c": head} for n in c]
-        if is_self:
-            # Name the user after their best real name in the cluster: a contact card beats an address.
+        # Every person is labeled by their best human name in the cluster, never an address or number when a
+        # name is known (the user's own cluster is headed by the self node, which takes the same rule).
+        if c:
             names = [meta[n] for n in c if n not in is_self and meta[n].name and "@" not in meta[n].name
                      and not re.fullmatch(r"\+?\d[\d\s()-]+", meta[n].name)]
-            named = sorted(names, key=lambda m: ((m.props or {}).get("named_by") != "contacts", -degree.get(m.id, 0)))
-            if named:
+            # A real name has a first and last name and isn't an address handle ("jasonli2446"); prefer it over
+            # a single-token card name, then prefer contact cards, then the best-connected identity.
+            handles = {k.split("@")[0].lower() for k in (meta[n].key for n in c) if "@" in k}
+            named = sorted(names, key=lambda m, h=handles: (not _human_name(m.name, h),
+                                                            (m.props or {}).get("named_by") != "contacts",
+                                                            -degree.get(m.id, 0)))
+            if named and (is_self or meta[head].name != named[0].name):
                 s.execute(text("UPDATE nodes SET name = :n WHERE id = :id"), {"n": named[0].name, "id": head})
     if rows:
         s.execute(text("INSERT INTO canonical (node_id, canonical_id) VALUES (:n, :c)"), rows)

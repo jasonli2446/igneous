@@ -65,6 +65,18 @@ class DriveConnector:
         self.svc = build("drive", "v3", credentials=creds, cache_discovery=False)
         self.account = account
 
+    def _folder_name(self, folder_id: str) -> str | None:
+        """A parent folder's human name (one read-only lookup per folder per sync), so the graph shows
+        "Draw Steel" rather than a Drive id. None when the folder isn't visible to this account."""
+        cache = self.__dict__.setdefault("_folder_names", {})
+        if folder_id not in cache:
+            try:
+                cache[folder_id] = self.svc.files().get(
+                    fileId=folder_id, fields="name", supportsAllDrives=True).execute().get("name")
+            except (HttpError, AttributeError, TypeError):  # not visible to this account, or a test double
+                cache[folder_id] = None
+        return cache[folder_id]
+
     def _source_item(self, file: dict) -> SourceItem | None:
         mime_type = file.get("mimeType")
         if mime_type == FOLDER_MIME or file.get("trashed"):
@@ -98,6 +110,7 @@ class DriveConnector:
             # Drive permits more than one parent. Keep every immutable parent ID, rather
             # than flattening the graph into a misleading filesystem-style path.
             "parents": parents,
+            "parent_names": {p: n for p in parents if (n := self._folder_name(p))},
             "original_mime": file.get("mimeType"),
             "web_view_link": file.get("webViewLink"),
             "modified_time": file.get("modifiedTime"),

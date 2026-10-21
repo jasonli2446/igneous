@@ -68,6 +68,9 @@ def neighborhood(s: Session, seeds: list[int], hops: int = 1, limit: int = 300,
     return subgraph(s, seen, filters)
 
 
+HALF_LIFE_DAYS = 90  # an interaction's weight halves every 90 days: last week ~1, six months ~0.25, 2 years ~0
+
+
 def relationships(s: Session, head: int, limit: int) -> list[tuple[int, float, dict]]:
     """Rank the seed's correspondents by how real the relationship is, not raw volume.
 
@@ -91,29 +94,41 @@ def relationships(s: Session, head: int, limit: int) -> list[tuple[int, float, d
         -- attendee list from its source item instead.
         my_keys AS (SELECT key FROM nodes WHERE id IN (SELECT id FROM me)),
         occ AS (
-            SELECT si.id AS occurrence, lower(a->>'email') AS email
+            SELECT si.id AS occurrence, lower(a->>'email') AS email, si.occurred_at AS at
             FROM source_items si, jsonb_array_elements(si.raw_meta->'attendees') a
-            WHERE si.source = 'gcal' AND COALESCE(a->>'response', '') <> 'declined'),
+            WHERE si.source = 'gcal' AND COALESCE(a->>'response', '') <> 'declined'
+              AND si.occurred_at < now() + interval '60 days'),
         events AS (
-            SELECT {canon.format(x='p.id')} AS p, count(DISTINCT o.occurrence) AS n
-            FROM occ mine JOIN occ o ON o.occurrence = mine.occurrence AND o.email <> mine.email
-            JOIN nodes p ON p.type = 'Person' AND p.key = o.email
-            WHERE mine.email IN (SELECT key FROM my_keys) GROUP BY 1)
+            SELECT p, count(*) AS n,
+                   sum(power(0.5, GREATEST(0, EXTRACT(EPOCH FROM now() - at) / 86400) / :hl)) AS recent
+            FROM (SELECT DISTINCT {canon.format(x='p.id')} AS p, o.occurrence, o.at
+                  FROM occ mine JOIN occ o ON o.occurrence = mine.occurrence AND o.email <> mine.email
+                  JOIN nodes p ON p.type = 'Person' AND p.key = o.email
+                  WHERE mine.email IN (SELECT key FROM my_keys)) shared GROUP BY 1)
         SELECT t.p, count(*) AS msgs,
                count(*) FILTER (WHERE t.they_sent) AS from_them, count(*) FILTER (WHERE t.i_sent) AS from_me,
                count(DISTINCT date_trunc('week', si.occurred_at)) AS weeks,
-               count(DISTINCT si.source) AS channels, COALESCE(max(ev.n), 0) AS events
+               count(DISTINCT si.source) AS channels, COALESCE(max(ev.n), 0) AS events,
+               -- Recency-weighted volume: each message counts 0.5^(age/half-life), so last week ~1, a year ago ~0.06.
+               sum(power(0.5, GREATEST(0, EXTRACT(EPOCH FROM now() - si.occurred_at) / 86400) / :hl)) AS recent_msgs,
+               count(DISTINCT date_trunc('week', si.occurred_at)) FILTER (WHERE si.occurred_at > now() - interval '180 days')
+                   AS recent_weeks,
+               COALESCE(max(ev.recent), 0) AS recent_events, max(si.occurred_at) AS last_at
         FROM theirs t JOIN nodes msg ON msg.id = t.m JOIN source_items si ON si.id = msg.source_item_id
         LEFT JOIN events ev ON ev.p = t.p
         GROUP BY t.p
-    """), {"head": head}).mappings().all()
+    """), {"head": head, "hl": HALF_LIFE_DAYS}).mappings().all()
     scored = []
     for r in rows:
         two_way = r["from_them"] > 0 and r["from_me"] > 0
         if not two_way and r["events"] == 0:
             continue  # one-directional: mail you received and never answered, or a list you're on
-        strength = (math.log1p(r["msgs"]) * 1.0 + math.log1p(r["weeks"]) * 1.5
-                    + (r["channels"] + (1 if r["events"] else 0) - 1) * 1.2 + math.log1p(r["events"]) * 0.8)
+        # Mostly about now (recency-weighted volume, recent weeks, recent shared events); the lifetime history
+        # only adds a little, so an old friendship isn't zero but doesn't crowd out who you talk to today.
+        strength = (math.log1p(float(r["recent_msgs"])) * 2.0 + math.log1p(r["recent_weeks"]) * 1.5
+                    + math.log1p(float(r["recent_events"])) * 1.2
+                    + (r["channels"] + (1 if r["events"] else 0) - 1) * 0.6
+                    + (math.log1p(r["msgs"]) + math.log1p(r["weeks"])) * 0.25)
         scored.append((r["p"], round(strength, 3), dict(r)))
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored[:limit]
@@ -251,9 +266,22 @@ PHONE = re.compile(r"\+?\d{10,15}")
 
 
 def handle_names(s: Session) -> dict[str, str]:
-    """Phone number / address -> contact name, for every Person a contact card has named."""
+    """Phone number / address -> the person's name. A handle takes the name of the person it belongs to: its
+    own contact card, or, once identity resolution has folded it into someone (an email address with the same
+    name, a contact card listing both), that person's best real name. So learning one identity names them all."""
     rows = s.execute(text("""
-        SELECT key, name FROM nodes WHERE type = 'Person' AND props->>'named_by' = 'contacts'
+        WITH named AS (
+            SELECT COALESCE(c.canonical_id, n.id) AS head, n.name,
+                   (n.props->>'named_by' = 'contacts') AS card
+            FROM nodes n LEFT JOIN canonical c ON c.node_id = n.id
+            WHERE n.type = 'Person' AND n.name ~ ' ' AND n.name !~ '@' AND n.name !~ '[0-9]{5,}'
+        ), best AS (
+            SELECT DISTINCT ON (head) head, name FROM named ORDER BY head, card DESC, length(name) DESC
+        )
+        SELECT n.key, COALESCE(b.name, CASE WHEN n.props->>'named_by' = 'contacts' THEN n.name END)
+        FROM nodes n LEFT JOIN canonical c ON c.node_id = n.id
+        LEFT JOIN best b ON b.head = COALESCE(c.canonical_id, n.id)
+        WHERE n.type = 'Person' AND (n.key ~ '^\\+?[0-9]{7,15}$' OR n.key LIKE '%@%')
     """)).all()
     out = {}
     for key, name in rows:
@@ -382,28 +410,37 @@ def scored_members(s: Session, head: int, per: int = 8) -> dict[str, list[dict]]
     groups = s.execute(text("""
         WITH mine AS (SELECT dst AS m FROM edges WHERE src = ANY(:me) AND type = 'SENT'
                       UNION SELECT src FROM edges WHERE dst = ANY(:me) AND type = 'RECEIVED'),
-        g AS (SELECT it.dst AS t, count(DISTINCT mine.m) AS msgs FROM mine
-              JOIN edges it ON it.src = mine.m AND it.type = 'IN_THREAD' GROUP BY it.dst)
-        SELECT g.t, g.msgs,
+        g AS (SELECT it.dst AS t, count(DISTINCT mine.m) AS msgs,
+                     sum(power(0.5, GREATEST(0, EXTRACT(EPOCH FROM now() - si.occurred_at) / 86400) / :hl)) AS recent
+              FROM (SELECT DISTINCT m FROM mine) mine
+              JOIN edges it ON it.src = mine.m AND it.type = 'IN_THREAD'
+              JOIN nodes msg ON msg.id = mine.m LEFT JOIN source_items si ON si.id = msg.source_item_id
+              GROUP BY it.dst)
+        SELECT g.t, g.msgs, COALESCE(g.recent, 0),
                (SELECT count(DISTINCT x.src) FROM edges it2 JOIN edges x ON x.dst = it2.src AND x.type = 'SENT'
                 WHERE it2.dst = g.t AND it2.type = 'IN_THREAD') AS people
         FROM g WHERE g.msgs >= 2
-    """), {"me": me}).all()
-    gl = [{"id": t, "strength": math.log1p(msgs) + math.log1p(people)} for t, msgs, people in groups if people >= 3]
+    """), {"me": me, "hl": HALF_LIFE_DAYS}).all()
+    # A group you're active in now outranks a big chat that went quiet; lifetime volume only adds a little.
+    gl = [{"id": t, "strength": math.log1p(float(recent)) * 2 + math.log1p(people) * 0.5 + math.log1p(msgs) * 0.25}
+          for t, msgs, recent, people in groups if people >= 3]
     if gl:
         out["Groups"] = gl
 
     # Events: series the seed attended, by occurrences (so a weekly meeting outranks a one-off).
     keys = [k for (k,) in s.execute(text("SELECT key FROM nodes WHERE id = ANY(:me)"), {"me": me})]
     events = s.execute(text("""
-        SELECT n.id, count(DISTINCT si.id) AS occ
+        SELECT id, sum(power(0.5, GREATEST(0, EXTRACT(EPOCH FROM now() - at) / 86400) / :hl)) AS occ FROM (
+        SELECT DISTINCT n.id, si.id AS occurrence, si.occurred_at AS at
         FROM source_items si
         CROSS JOIN LATERAL jsonb_array_elements(si.raw_meta->'attendees') a
         JOIN nodes n ON n.type = 'Event' AND n.key = COALESCE(si.raw_meta->>'event_key', 'gcal:' || COALESCE(si.raw_meta->>'series_key', si.external_id))
         WHERE si.source = 'gcal' AND lower(a->>'email') = ANY(:keys) AND COALESCE(a->>'response','') <> 'declined'
-        GROUP BY n.id
-    """), {"keys": keys}).all()
-    el = [{"id": e, "strength": math.log1p(occ)} for e, occ in events]
+          AND si.occurred_at < now() + interval '60 days'  -- far-future instances of a series aren't "now"
+        ) mine GROUP BY id
+    """), {"keys": keys, "hl": HALF_LIFE_DAYS}).all()
+    # Future occurrences count as "now" (an upcoming weekly meeting is current), past ones decay.
+    el = [{"id": e, "strength": math.log1p(float(occ))} for e, occ in events]
     if el:
         out["Events"] = el
 
@@ -429,12 +466,15 @@ def scored_members(s: Session, head: int, per: int = 8) -> dict[str, list[dict]]
                 UNION SELECT pe.dst, it.src FROM edges pe JOIN edges it ON it.dst = pe.src AND it.type = 'IN_THREAD'
                 WHERE pe.type = 'PART_OF')
         SELECT via.p, count(DISTINCT via.i) AS n,
-               (SELECT count(*) FROM edges x WHERE x.dst = via.p AND x.type = 'INVOLVED_IN') AS people
-        FROM via JOIN mine ON mine.i = via.i JOIN nodes n ON n.id = via.p AND n.type = 'Project'
-                      AND NOT COALESCE((n.props->>'hidden')::bool, false)
+               (SELECT count(*) FROM edges x WHERE x.dst = via.p AND x.type = 'INVOLVED_IN') AS people,
+               COALESCE(sum(power(0.5, GREATEST(0, EXTRACT(EPOCH FROM now() - si.occurred_at) / 86400) / :hl)), 0)
+        FROM (SELECT DISTINCT p, i FROM via) via JOIN (SELECT DISTINCT i FROM mine) mine ON mine.i = via.i
+        JOIN nodes n ON n.id = via.p AND n.type = 'Project' AND NOT COALESCE((n.props->>'hidden')::bool, false)
+        JOIN nodes item ON item.id = via.i LEFT JOIN source_items si ON si.id = item.source_item_id
         GROUP BY via.p
-    """), {"me": me}).all()
-    pl = [{"id": p, "strength": math.log1p(n) + 0.5 * math.log1p(people)} for p, n, people in projects]
+    """), {"me": me, "hl": HALF_LIFE_DAYS}).all()
+    pl = [{"id": p, "strength": math.log1p(float(recent)) * 2 + math.log1p(n) * 0.25 + 0.5 * math.log1p(people)}
+          for p, n, people, recent in projects]
     if pl:
         out["Projects"] = pl
 
@@ -458,11 +498,16 @@ def scored_members(s: Session, head: int, per: int = 8) -> dict[str, list[dict]]
         if pl:
             out["Places"] = pl
 
-    for items in out.values():
+    # One scale for everything: each item's raw score divided by the strongest raw score in its category gives
+    # 0..1 within the category; multiplying by how strong that category's best item is relative to the overall
+    # best keeps a category of stale things (a class from two years ago) from claiming the top spots.
+    tops = {c: max((it["strength"] for it in items), default=0) for c, items in out.items()}
+    overall = max(tops.values(), default=0) or 1
+    for c, items in out.items():
         items.sort(key=lambda x: x["strength"], reverse=True)
-        n = len(items)
-        for i, it in enumerate(items):
-            it["strength"] = round(1 - i / max(1, n), 3)  # rank-normalized so sizes spread
+        for it in items:
+            rel = it["strength"] / (tops[c] or 1)
+            it["strength"] = round(rel * (0.4 + 0.6 * tops[c] / overall), 3)
     return out
 
 
@@ -473,23 +518,26 @@ def _hub(cat: str, total: int, strength: float) -> dict:
 
 
 def view(s: Session, seed: int, per: int = 6) -> dict:
-    """The starting view: seed -> category hubs -> each hub's strongest `per` members, plus the strongest
-    ties among the visible members (not every connection: just the top ones, which is what makes it readable)."""
+    """The starting view: the seed and each category's strongest `per` members, linked straight to the seed and
+    colored by category (no hub nodes), plus the strongest ties among them. `categories` lists every category
+    with its total, for the legend; clicking one there reveals more of its members (see `expand`)."""
     head = _canon_head(s, seed)
     cats = scored_members(s, head, per)
     # Order categories by how much they matter: summed strength of their top members, normalized by size.
     order = sorted(cats, key=lambda c: -sum(m["strength"] for m in cats[c][:10]))
     shown: list[int] = [head]
-    nodes_extra: list[dict] = []
     edges: list[dict] = []
+    # The first ring is the strongest `per * 3` things overall, whatever kind they are (at least one of each
+    # kind that has anything current, so a category is never invisible up front).
+    ranked = sorted(((m, c) for c in order for m in cats[c]), key=lambda mc: -mc[0]["strength"])
+    first = ranked[:per * 3]
     for c in order:
-        hub = _hub(c, len(cats[c]), round(sum(m["strength"] for m in cats[c][:10]) / 10, 3))
-        nodes_extra.append(hub)
-        edges.append({"id": hub["id"] * 10, "src": head, "dst": hub["id"], "type": "HAS", "weight": hub["total"]})
-        for m in cats[c][:per]:
-            shown.append(m["id"])
-            edges.append({"id": -(len(edges) + 1) * 7, "src": hub["id"], "dst": m["id"], "type": "IN_CATEGORY",
-                          "weight": 1})
+        if cats[c] and not any(fc == c for _, fc in first) and cats[c][0]["strength"] >= 0.15:
+            first.append((cats[c][0], c))
+    for m, _c in first:
+        shown.append(m["id"])
+        edges.append({"id": -(len(edges) + 1) * 7, "src": head, "dst": m["id"], "type": "RELATED",
+                      "weight": 1 + 4 * m["strength"]})
     g = subgraph(s, shown)
     strength = {m["id"]: (m["strength"], c) for c in cats for m in cats[c]}
     for n in g["nodes"]:
@@ -500,8 +548,9 @@ def view(s: Session, seed: int, per: int = 6) -> dict:
     for n in g["nodes"]:
         if n["type"] == "Thread":
             n["name"] = pretty_thread(n["name"], named) or n["name"]
-    g["nodes"] = [*g["nodes"], *nodes_extra]
     g["edges"] = edges + _ties(s, [x for x in shown if x != head], per_node=2)
+    g["categories"] = [_hub(c, len(cats[c]), round(sum(m["strength"] for m in cats[c][:10]) / 10, 3))
+                       for c in order]
     g["seed"] = head
     return g
 
@@ -549,7 +598,8 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
         members = scored_members(s, head).get(cat, [])
         for m in [m for m in members if m["id"] not in seen][offset:offset + k]:
             new.append(m["id"])
-            edges.append({"id": -(900000 + m["id"]), "src": node, "dst": m["id"], "type": "IN_CATEGORY", "weight": 1})
+            # No hub node on screen: more members of a category attach to the seed, like the first ones.
+            edges.append({"id": -(900000 + m["id"]), "src": head, "dst": m["id"], "type": "RELATED", "weight": 1})
     else:
         ntype = s.execute(text("SELECT type FROM nodes WHERE id = :n"), {"n": node}).scalar()
         if ntype == "Person":
