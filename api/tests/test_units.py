@@ -1323,3 +1323,18 @@ def test_unknown_numbers_are_masked_in_labels_only():
     named = {"+16145551234": "Sam Lee"}
     assert name_handles("+16145551234, +19995550000", named, mask=True) == "Sam Lee, ···0000"
     assert name_handles("call +19995550000", named) == "call +19995550000"
+
+
+def test_no_sqlalchemy_param_casts_with_double_colon():
+    """`:name::bigint` breaks SQLAlchemy text(): it reads `name:` as the parameter and Postgres sees a stray
+    `:`. This crashed /timeline in production (tests with a fake session never sent the SQL to Postgres).
+    Use CAST(:name AS bigint) instead."""
+    import pathlib
+    import re
+
+    bad = []
+    for path in pathlib.Path(__file__).resolve().parents[1].joinpath("igneous").rglob("*.py"):
+        for i, line in enumerate(path.read_text().splitlines(), 1):
+            if re.search(r"(?<![:\w]):[A-Za-z_]\w*::[A-Za-z]", line):
+                bad.append(f"{path.name}:{i}: {line.strip()}")
+    assert not bad, "use CAST(:param AS type), not :param::type:\n" + "\n".join(bad)
