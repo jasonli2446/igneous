@@ -52,6 +52,8 @@ export default function Explorer() {
 
   // Entities only (people, projects, groups, events, ...), best match first. Messages live behind the last option.
   const seedForSearch = useRef<number | undefined>(undefined);
+  const enterPending = useRef(false);
+  const loadRef = useRef<((n: GNode | null, push?: boolean) => Promise<void>) | null>(null);
   useEffect(() => {
     setActive(0);
     if (query.trim().length < 2) { setSearching(false); return setMatches([]); }
@@ -59,7 +61,15 @@ export default function Explorer() {
     setSearching(true);
     const t = setTimeout(() => {
       api.findThings(query.trim(), seedForSearch.current, request.signal)
-        .then((r) => { setMatches(r.results); setSearching(false); })
+        .then((r) => {
+          setMatches(r.results); setSearching(false);
+          // Enter pressed while typing: open the best match for what was actually typed, now that it's known.
+          if (enterPending.current && r.results.length) {
+            enterPending.current = false;
+            const m = r.results[0];
+            loadRef.current?.({ id: m.id, type: m.type, name: m.name, key: "", degree: 0 });
+          }
+        })
         .catch(() => { if (!request.signal.aborted) setSearching(false); });
     }, 150);
     return () => { clearTimeout(t); request.abort(); };
@@ -109,6 +119,7 @@ export default function Explorer() {
       }
     }
   }, []);
+  loadRef.current = load;
 
   // Open on you: the graph starts from the account owner, no search needed.
   useEffect(() => { load(null); }, [load]);
@@ -221,7 +232,8 @@ export default function Explorer() {
     if (e.key === "Escape") { setQuery(""); setMatches([]); (e.target as HTMLElement).blur(); }
     else if (e.key === "ArrowDown" && searchOpen) { e.preventDefault(); setActive((i) => (i + 1) % optionCount); }
     else if (e.key === "ArrowUp" && searchOpen) { e.preventDefault(); setActive((i) => (i - 1 + optionCount) % optionCount); }
-    else if (e.key === "Enter" && searchOpen && !searching) { e.preventDefault(); choose(Math.min(active, optionCount - 1)); }
+    else if (e.key === "Enter" && searching) { e.preventDefault(); enterPending.current = true; }
+    else if (e.key === "Enter" && searchOpen) { e.preventDefault(); choose(Math.min(active, optionCount - 1)); }
   };
 
   // Escape closes the details panel when nothing else (search box, a text field) is using it.
@@ -358,6 +370,7 @@ export default function Explorer() {
             onOpenAction={(id) => { setWhy(null); openFromPanel(id); }} />
         ) : (
           <Inspector id={detailId} onExpandAction={toggle} onCloseAction={closePanel}
+            expanded={detailId !== null && expanded.has(detailId)}
             onSelectAction={openFromPanel}
             onChangedAction={async (keep) => { await load(trail[trail.length - 1] ?? null, false); if (keep !== null) setSelected(keep); }} />
         )}

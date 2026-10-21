@@ -129,7 +129,9 @@ def find(s: Session, q: str, seed: int | None = None, limit: int = LIMIT) -> lis
             continue  # a two-person email chain is a pair of people, not a group
         msgs, recent = shared.get(c["id"], (0, 0))
         near = math.log1p(msgs) / 6 if msgs else math.log1p(degree.get(c["id"], 0)) / 12
-        c["score"] = round(c["quality"] * 3 + min(1.0, near) * (1.0 if t == "Person" else 0.6), 4)
+        # Match quality dominates (a name that starts with what you typed always beats one that merely contains it:
+        # "drew" finds Drew Tobias before Andrew); closeness only orders matches of the same quality.
+        c["score"] = round(c["quality"] * 10 + min(1.0, near) * (1.0 if t == "Person" else 0.6), 4)
         c["category"] = CATEGORY.get("Group" if t == "Thread" else t)
         if t == "Person":
             c["context"] = (f"{_plural(recent, 'message')} this month" if recent else

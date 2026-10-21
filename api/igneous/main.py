@@ -379,6 +379,9 @@ def graph_network(seed: int, people: int = Query(50, le=200), hubs: int = Query(
     return network(s, seed, people_limit=people, hub_limit=hubs)
 
 
+_VIEW_CACHE: dict[tuple, dict] = {}
+
+
 @app.get("/graph/view")
 def graph_view(seed: int | None = None, per: int = Query(6, le=20), s: Session = Depends(get_session)):
     """The single graph: seed (default: you) -> categories that exist in the data -> their top members."""
@@ -386,7 +389,16 @@ def graph_view(seed: int | None = None, per: int = Query(6, le=20), s: Session =
         seed = s.execute(text("SELECT id FROM nodes WHERE type = 'Person' AND props->>'self' = 'true' LIMIT 1")).scalar()
         if seed is None:
             raise HTTPException(404, "No self node yet: run `igneous pipeline --stage self`.")
-    return view(s, seed, per=per)
+    # Ranking every relationship takes seconds on a large mailbox; the result only changes when the graph does,
+    # so cache it per (seed, per) and graph version (bumped by every pipeline stage that changes the graph).
+    from igneous.graph import dirty
+    key = (seed, per, dirty.version(s))
+    hit = _VIEW_CACHE.get(key)
+    if hit is None:
+        hit = view(s, seed, per=per)
+        _VIEW_CACHE.clear() if len(_VIEW_CACHE) > 64 else None
+        _VIEW_CACHE[key] = hit
+    return hit
 
 
 @app.get("/graph/expand")

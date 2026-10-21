@@ -7,7 +7,9 @@ import { InlineError, Skeleton } from "@/components/ui";
 import { api, NodeDetail, TYPE_COLORS } from "@/lib/api";
 
 type Props = {
-  id: number | null; onExpandAction: (id: number) => void; onCloseAction?: () => void;
+  id: number | null; onExpandAction: (id: number) => void | Promise<void>; onCloseAction?: () => void;
+  /** Whether this node's connections are currently shown on the graph (so the button says Show or Hide). */
+  expanded?: boolean;
   // Projects are editable: selecting one of their members, and re-fetching the graph after a correction.
   onSelectAction?: (id: number) => void; onChangedAction?: (keep: number | null) => void;
 };
@@ -40,7 +42,8 @@ function InspectorSkeleton() {
   );
 }
 
-export default function Inspector({ id, onExpandAction, onCloseAction, onSelectAction, onChangedAction }: Props) {
+export default function Inspector({ id, onExpandAction, onCloseAction, onSelectAction, onChangedAction, expanded }: Props) {
+  const [busy, setBusy] = useState(false);
   const [node, setNode] = useState<NodeDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -88,9 +91,13 @@ export default function Inspector({ id, onExpandAction, onCloseAction, onSelectA
 
       <NodeSummary id={node.id} onSelectAction={(x) => onSelectAction?.(x)} />
 
-      <button onClick={() => onExpandAction(node.id)}
-        className="rounded-md border border-line px-2.5 py-1 text-xs hover:bg-hover">
-        Show or hide their connections on the graph
+      <button disabled={busy} aria-pressed={expanded}
+        onClick={async () => { setBusy(true); try { await onExpandAction(node.id); } finally { setBusy(false); } }}
+        className={`inline-flex items-center gap-2 rounded-md border px-2.5 py-1 text-xs transition-colors disabled:opacity-60 ${
+          expanded ? "border-accent/50 bg-accent/10 text-ink hover:bg-accent/15" : "border-line hover:bg-hover"}`}>
+        {busy && <span aria-hidden className="h-3 w-3 animate-spin rounded-full border-2 border-accent border-t-transparent" />}
+        {busy ? (expanded ? "Hiding…" : "Finding connections…")
+          : expanded ? "Hide their connections" : "Show their connections on the graph"}
       </button>
 
       {src && (
