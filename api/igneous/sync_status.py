@@ -31,16 +31,16 @@ def sync_status(
         WITH states AS (
             SELECT connector, account, cursor, updated_at
             FROM sync_state
-            WHERE (:connector IS NULL OR connector = :connector)
-              AND (:account IS NULL OR account = :account)
+            WHERE (CAST(:connector AS text) IS NULL OR connector = :connector)
+              AND (CAST(:account AS text) IS NULL OR account = :account)
         ), item_counts AS (
             SELECT source AS connector, count(*)::bigint AS item_count
             FROM source_items
-            WHERE (:connector IS NULL OR source = :connector)
+            WHERE (CAST(:connector AS text) IS NULL OR source = :connector)
             GROUP BY source
         ), requested AS (
             SELECT CAST(:connector AS text) AS connector, CAST(:account AS text) AS account
-            WHERE :connector IS NOT NULL AND :account IS NOT NULL
+            WHERE CAST(:connector AS text) IS NOT NULL AND CAST(:account AS text) IS NOT NULL
         ), subjects AS (
             SELECT connector, account FROM states
             UNION

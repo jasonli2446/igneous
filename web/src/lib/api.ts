@@ -144,7 +144,36 @@ async function get<T>(
   return (await r.json()) as T;
 }
 
+export type AiImportResult = {
+  provider: "chatgpt" | "claude_ai" | "gemini";
+  conversations: number;
+  items_inserted: number;
+  items_updated: number;
+  redactions: number;
+};
+
+// XHR rather than fetch: fetch cannot report upload progress.
+function importAiExport(file: File, provider?: string, onProgress?: (fraction: number) => void) {
+  return new Promise<AiImportResult>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", new URL("/import/ai-export", API).toString());
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
+    xhr.onerror = () => reject(new Error("Could not reach the API."));
+    xhr.onload = () => {
+      let body: { detail?: unknown } = {};
+      try { body = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(body as unknown as AiImportResult);
+      reject(new Error(typeof body.detail === "string" ? body.detail : `Import failed (${xhr.status}).`));
+    };
+    const form = new FormData();
+    form.append("file", file);
+    if (provider) form.append("provider", provider);
+    xhr.send(form);
+  });
+}
+
 export const api = {
+  importAiExport,
   stats: () => get<{ source_items: Record<string, number>; nodes: Record<string, number>; edges: Record<string, number> }>("/stats", {}),
   sync: (signal?: AbortSignal) => get<{ syncs: SyncStatus[] }>("/sync", {}, signal),
   search: (q: string, opts: { source?: string; person?: string; from?: string; to?: string; mode?: string } = {}) =>
