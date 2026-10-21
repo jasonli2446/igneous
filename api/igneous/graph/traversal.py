@@ -390,6 +390,7 @@ def subgraph(s: Session, node_ids: list[int], filters: GraphFilters = NO_FILTERS
 CATEGORY = {"Person": "People", "Group": "Groups", "Event": "Events", "Organization": "Organizations",
             "Project": "Projects", "Course": "Courses", "Repo": "Code", "File": "Files", "Topic": "Topics",
             "Place": "Places"}
+GROUP_MAX = 25  # members revealed at once when expanding a group or event (the rest via "show more")
 HUB_ID_BASE = -1000  # category hubs are virtual nodes with stable negative ids
 
 
@@ -608,6 +609,7 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
     seen = set(visible)
     new: list[int] = []
     edges: list[dict] = []
+    ntype = None
     if node <= HUB_ID_BASE + 10 and node < 0:  # a category hub
         cat = list(CATEGORY.values())[HUB_ID_BASE - node]
         members = scored_members(s, head).get(cat, [])
@@ -634,17 +636,32 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
                 if p not in seen and p != head and per_kind.get(kind, 0) < max(2, k // 2) and len(new) < k * 2:
                     new.append(p)
                     per_kind[kind] = per_kind.get(kind, 0) + 1
-        else:  # a group, event, org: its members, strongest first
+        else:  # a group, event, org: everyone who actually takes part, strongest first
+            # Every member who speaks (or attends), not a top-k: a 6-person chat where all six talk shows all
+            # six. "Takes part" = 2+ messages or 2%+ of the group's messages, so a huge list's silent
+            # recipients stay out; anyone beyond GROUP_MAX waits for "show more" (offset).
             rows = s.execute(text("""
-                SELECT COALESCE((SELECT canonical_id FROM canonical WHERE node_id = p), p) AS p, count(*) AS n FROM (
-                    SELECT x.src AS p FROM edges it JOIN edges x ON x.dst = it.src AND x.type = 'SENT'
+                WITH q AS (
+                    SELECT x.src AS p, 'sent' AS how FROM edges it JOIN edges x ON x.dst = it.src AND x.type = 'SENT'
                     WHERE it.dst = :n AND it.type = 'IN_THREAD'
-                    UNION ALL SELECT src FROM edges WHERE dst = :n AND type IN ('ATTENDED', 'MEMBER_OF')) q
-                GROUP BY 1 ORDER BY 2 DESC LIMIT 40
+                    UNION ALL SELECT src, 'attended' FROM edges WHERE dst = :n AND type IN ('ATTENDED', 'MEMBER_OF')
+                    UNION ALL SELECT src, 'involved' FROM edges WHERE dst = :n AND type = 'INVOLVED_IN'),
+                c AS (SELECT COALESCE((SELECT canonical_id FROM canonical WHERE node_id = q.p), q.p) AS p, count(*) AS n
+                      FROM q JOIN nodes pn ON pn.id = q.p AND pn.type = 'Person'
+                       AND COALESCE(pn.props->>'kind', '') <> 'service'
+                      GROUP BY 1)
+                SELECT p, n FROM c
+                WHERE n >= 2 OR n >= 0.02 * (SELECT sum(n) FROM c) OR (SELECT count(*) FROM c) <= 12
+                ORDER BY n DESC
             """), {"n": node}).all()
-            for p, _n in rows:
-                if p not in seen and p != head and len(new) < k:
-                    new.append(p)
+            members = [p for p, _n in rows if p != head]
+            for p in members:
+                if p in seen:
+                    # Already on screen: still show they're in this group.
+                    edges.append({"id": -(810000 + p * 13 + node % 997), "src": node, "dst": p, "type": "RELATED",
+                                  "weight": 1})
+            for p in [p for p in members if p not in seen][offset:offset + GROUP_MAX]:
+                new.append(p)
         for p in new:
             edges.append({"id": -(800000 + p * 13 + node % 997), "src": node, "dst": p, "type": "RELATED", "weight": 1})
     g = subgraph(s, new)
@@ -654,5 +671,7 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
                  category=CATEGORY.get("Group" if n["type"] == "Thread" else n["type"]))
         if n["type"] == "Thread":
             n["name"] = pretty_thread(n["name"], named) or n["name"]
-    g["edges"] = edges + _ties(s, [*new, *[v for v in visible if v > 0]], per_node=1)
+    # Among a group's members, show how they relate to each other too (who talks to whom), not one tie each.
+    ties = 3 if ntype not in ("Person", "Project") else 1
+    g["edges"] = edges + _ties(s, [*new, *[v for v in visible if v > 0]], per_node=ties)
     return g
