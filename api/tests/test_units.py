@@ -831,16 +831,15 @@ def test_filesystem_connector_walks_sorted_parseable_files_and_emits_hierarchy(t
     items = [event for event in emitted if isinstance(event, SourceItem)]
     root_key = _root_key(tmp_path)
     assert [item.external_id for item in items] == [
-        f"{root_key}/projects/igneous/plan.md", f"{root_key}/z-last.txt"]
-    plan = items[0]
+        f"{root_key}/photo.jpg", f"{root_key}/projects/igneous/plan.md", f"{root_key}/z-last.txt"]
+    assert items[0].body_text is None and items[0].raw_meta["parse_status"] == "unsupported"
+    plan = items[1]
     assert plan.body_text == "# Plan\nship"
     assert plan.mime == "text/markdown"
-    assert plan.raw_meta == {
-        "path": f"{root_key}/projects/igneous/plan.md",
-        "folders": [root_key, f"{root_key}/projects", f"{root_key}/projects/igneous"],
-        "parser": "text",
-        "boundaries": [],
-    }
+    assert plan.raw_meta["path"] == f"{root_key}/projects/igneous/plan.md"
+    assert plan.raw_meta["folders"] == [root_key, f"{root_key}/projects", f"{root_key}/projects/igneous"]
+    assert plan.raw_meta["parser"] == "text" and plan.raw_meta["boundaries"] == []
+    assert plan.raw_meta["model_opt_in"] is False
     assert isinstance(emitted[-1], CompletedScan)
 
 
@@ -1487,3 +1486,77 @@ def test_shared_event_and_drive_file_from_two_accounts_make_one_node():
         spine.build_file(b, Item("drive", f"{acct}/f1", {"drive_id": "f1", "path": "drive/f1", "parents": []}))
     assert {k for t, k in b.keys if t == "Event"} == {"gcal:uid-123@google.com"}
     assert {k for t, k in b.keys if t == "File"} == {"drive:f1"}
+
+
+def test_filesystem_metadata_secret_exclusion_incremental_and_repo_evidence(tmp_path):
+    from igneous.connectors.base import CompletedScan, SourceItem
+    from igneous.connectors.filesystem import FilesystemConnector
+
+    (tmp_path / "binary.bin").write_bytes(b"\x00binary")
+    (tmp_path / ".env").write_text("PASSWORD=not-stored")
+    repo = tmp_path / "igneous"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:a/igneous.git\n')
+    connector = FilesystemConnector(tmp_path)
+    events = list(connector.sync({}))
+    items = [event for event in events if isinstance(event, SourceItem)]
+    assert {item.title for item in items} == {"binary.bin", "igneous"}
+    assert next(item for item in items if item.title == "binary.bin").body_text is None
+    evidence = next(item for item in items if item.title == "igneous")
+    assert evidence.raw_meta["kind"] == "repo" and evidence.raw_meta["remote"].endswith("igneous.git")
+    cursor = next(event for event in events if isinstance(event, CompletedScan)).cursor
+    assert not [event for event in connector.sync(cursor) if isinstance(event, SourceItem)]
+
+
+def test_apple_notes_gzip_protobuf_body_and_locked_rows(tmp_path):
+    import gzip
+    import sqlite3
+
+    from igneous.connectors.apple_notes import AppleNotesConnector, decode_body
+    from igneous.connectors.base import CompletedScan, SourceItem
+
+    raw = b"\x0a\x0cProject plan\x12\x0bShip safely"
+    assert "Project plan" in decode_body(gzip.compress(raw))
+    db = tmp_path / "NoteStore.sqlite"
+    connection = sqlite3.connect(db)
+    connection.executescript("""
+        CREATE TABLE ZICCLOUDSYNCINGOBJECT (Z_PK INTEGER, ZTITLE1 TEXT,
+            ZIDENTIFIER TEXT, ZMODIFICATIONDATE REAL, ZISPASSWORDPROTECTED INTEGER);
+        CREATE TABLE ZICNOTEDATA (ZNOTE INTEGER, ZDATA BLOB);
+    """)
+    connection.execute("INSERT INTO ZICCLOUDSYNCINGOBJECT VALUES (1, 'Plan', 'note-1', 1, 0)")
+    connection.execute("INSERT INTO ZICCLOUDSYNCINGOBJECT VALUES (2, 'Locked', 'note-2', 1, 1)")
+    connection.execute("INSERT INTO ZICCLOUDSYNCINGOBJECT VALUES (3, 'Fallback', NULL, 1, 0)")
+    connection.execute("INSERT INTO ZICNOTEDATA VALUES (1, ?)", (gzip.compress(raw),))
+    connection.execute("INSERT INTO ZICNOTEDATA VALUES (2, ?)", (gzip.compress(raw),))
+    connection.execute("INSERT INTO ZICNOTEDATA VALUES (3, ?)", (gzip.compress(raw),))
+    connection.commit()
+    connection.close()
+    events = list(AppleNotesConnector(db).sync({}))
+    items = [event for event in events if isinstance(event, SourceItem)]
+    assert [(item.external_id, item.title) for item in items] == [("note-1", "Plan"), ("3", "Fallback")]
+    assert "Ship safely" in items[0].body_text and items[0].raw_meta["model_opt_in"] is False
+    assert next(event for event in events if isinstance(event, CompletedScan)).external_ids == frozenset({"note-1", "3"})
+
+
+def test_spine_repo_evidence_uses_shared_repository_anchor():
+    from igneous.graph.spine import build_file
+
+    class B:
+        def __init__(self):
+            self.nodes, self.edges = [], []
+
+        def node(self, *args, **kwargs):
+            self.nodes.append(args)
+            return len(self.nodes)
+
+        def edge(self, *args, **kwargs):
+            self.edges.append(args)
+
+    item = type("Item", (), {"source": "fs", "external_id": "root/.repos/igneous", "title": "igneous",
+        "raw_meta": {"path": "root/igneous", "folders": ["root", "root/igneous"], "kind": "repo", "repo": "igneous",
+                     "remote": "git@github.com:a/igneous.git"}, "occurred_at": None, "id": 7})()
+    builder = B()
+    build_file(builder, item)
+    assert ("Folder", "repo:igneous", "igneous", {"path": "root/igneous", "kind": "repo",
+            "remote": "git@github.com:a/igneous.git"}) in builder.nodes

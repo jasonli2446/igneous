@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous import llm
+from igneous.config import settings
 from igneous.rag.constraints import apply
 from igneous.rag.rerank import rerank
 from igneous.rag.search import Filters, _where, hybrid
@@ -103,6 +104,10 @@ def answer(s: Session, question: str, f: Filters | None = None, use_graph: bool 
     t0 = time.time()
     f = apply(s, question, f)
     hits = hybrid(s, question, f, k=CONTEXT_CHUNKS, mode=mode)
+    # Local filesystem and Notes evidence is searchable in the UI, but cannot be supplied to any model
+    # (reranker, embedder, or LLM) until the owner has explicitly opted in.
+    if not settings.local_sources_model_enabled:
+        hits = [hit for hit in hits if hit["source"] not in ("fs", "notes")]
     candidates = hits + expand(s, hits, f=f) if use_graph else hits
     t_rerank = time.time()
     context = rerank(question, candidates, keep=CONTEXT_CHUNKS) if use_graph else candidates

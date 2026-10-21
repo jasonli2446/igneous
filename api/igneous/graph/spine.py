@@ -366,6 +366,13 @@ def build_file(b: Builder, item) -> None:
         folder = b.node("Folder", f"{item.source}:{parent}", parent.rsplit("/", 1)[-1], {"path": parent})
         b.edge(folder, child, "CONTAINS")
         child = folder
+    # A discovered .git remote is a deterministic, source-backed hard link from its on-disk folder to the
+    # repository anchor shared with coding-session and GitHub evidence. No model is needed to make this join.
+    if item.raw_meta.get("kind") == "repo" and isinstance(item.raw_meta.get("repo"), str):
+        repo_name = item.raw_meta["repo"]
+        repo = b.node("Folder", f"repo:{repo_name.lower()}", repo_name,
+                      {"path": path, "kind": "repo", "remote": item.raw_meta.get("remote")})
+        b.edge(repo, child, "CONTAINS", item.occurred_at, item.id)
 
 
 def backfill_temporal(s: Session, limit: int = BATCH) -> int:
@@ -396,7 +403,7 @@ def run(s: Session) -> int:
             build_event(b, item)
         elif item.source in ("gcontacts", "maccontacts"):
             build_contact(b, item)
-        elif item.source in ("fs", "drive"):
+        elif item.source in ("fs", "drive", "notes"):
             build_file(b, item)
         if i % BATCH == 0:
             advance(s, STAGE, item.updated_at)
