@@ -1732,3 +1732,9 @@ def test_product_relay_senders_are_services_not_people():
     assert not is_relay_name("Jason Li") and not is_service_address("jane.doe@gmail.com")
     assert unresolvable(P(1, "comments-noreply@docs.google.com", "Jason Li (Google Docs)", "jason", "li", set()))
     assert not _human_name("Jason Li (Google Docs)", set())
+
+
+def test_group_expand_reveals_every_participant_not_top_k():
+    from igneous.graph import traversal
+
+    assert traversal.GROUP_MAX >= 20  # a group shows all who take part (up to a readable cap), not 6
