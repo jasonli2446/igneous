@@ -70,13 +70,17 @@ export type NodeDetail = GNode & {
   } | null;
 };
 
-async function get<T>(path: string, params: Record<string, string | number | (string | number)[] | undefined>) {
+async function get<T>(
+  path: string,
+  params: Record<string, string | number | (string | number)[] | undefined>,
+  signal?: AbortSignal,
+) {
   const url = new URL(path, API);
   for (const [k, v] of Object.entries(params)) {
     if (v === undefined || v === "") continue;
     for (const x of Array.isArray(v) ? v : [v]) url.searchParams.append(k, String(x));
   }
-  const r = await fetch(url);
+  const r = await fetch(url, { signal });
   if (!r.ok) throw new Error(`${r.status} ${path}`);
   return (await r.json()) as T;
 }
@@ -86,10 +90,11 @@ export const api = {
   search: (q: string, opts: { source?: string; person?: string; from?: string; to?: string; mode?: string } = {}) =>
     get<{ hits: Hit[] }>("/search", { q, ...opts }),
   findNodes: (q: string, type?: string) => get<{ nodes: GNode[] }>("/graph/search", { q, type }),
-  subgraph: (seed: number[], hops = 1, limit = 300, filters: GraphFilters = {}) =>
-    get<Subgraph>("/graph/subgraph", { seed, hops, limit, ...graphParams(filters) }),
-  people: (seed: number, limit = 60) => get<Subgraph>("/graph/people", { seed, limit }),
-  network: (seed: number, people = 50, hubs = 30) => get<Subgraph>("/graph/network", { seed, people, hubs }),
+  subgraph: (seed: number[], hops = 1, limit = 300, filters: GraphFilters = {}, signal?: AbortSignal) =>
+    get<Subgraph>("/graph/subgraph", { seed, hops, limit, ...graphParams(filters) }, signal),
+  people: (seed: number, limit = 60, signal?: AbortSignal) => get<Subgraph>("/graph/people", { seed, limit }, signal),
+  network: (seed: number, people = 50, hubs = 30, signal?: AbortSignal) =>
+    get<Subgraph>("/graph/network", { seed, people, hubs }, signal),
   ask: async (question: string, use_graph = true) => {
     const r = await fetch(new URL("/ask", API), {
       method: "POST",
