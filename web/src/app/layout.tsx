@@ -17,6 +17,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           <Link href="/" className="text-muted hover:text-ink">Explorer</Link>
           <Link href="/ask" className="text-muted hover:text-ink">Ask</Link>
           <Link href="/search" className="text-muted hover:text-ink">Search</Link>
+          <Link href="/import" className="text-muted hover:text-ink">Import</Link>
           <Link href="/settings" className="text-muted hover:text-ink">Settings</Link>
           <ThemeToggle />
         </nav>
