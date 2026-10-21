@@ -1708,3 +1708,15 @@ def test_ai_session_repo_comes_from_files_touched_not_launch_dir(tmp_path):
     f.write_text("\n".join(json.dumps(r) for r in rows))
     meta, _ = claude_turns(str(f))
     assert meta["repo_path"] == str(repo)
+
+
+def test_node_upsert_keeps_human_names_over_keys_and_contact_names():
+    from igneous.graph.spine import NAME_FROM_HEADERS, UPSERT_NODE
+
+    sql = str(UPSERT_NODE)
+    # a contact card's name is never replaced; a real name beats the key (phone/address) itself
+    assert "named_by' = 'contacts' THEN nodes.name" in sql
+    assert "EXCLUDED.name = nodes.key AND nodes.name <> nodes.key THEN nodes.name" in sql
+    # header naming picks the most frequent display name and never overrides cards or user renames
+    hs = str(NAME_FROM_HEADERS)
+    assert "ORDER BY key, n DESC" in hs and "'contacts'" in hs and "renamed" in hs

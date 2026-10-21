@@ -17,7 +17,13 @@ UPSERT_NODE = text("""
 INSERT INTO nodes (type, key, name, props, source_item_id)
 VALUES (:type, :key, :name, CAST(:props AS jsonb), :sid)
 ON CONFLICT (type, key) DO UPDATE SET
-    name = CASE WHEN length(EXCLUDED.name) > length(nodes.name) THEN EXCLUDED.name ELSE nodes.name END,
+    -- Keep the more human name: a contact card's name is never replaced, and a real name always beats the
+    -- key itself (a phone number or address). Otherwise the longer name wins ("J. Doe" -> "Jane Doe").
+    name = CASE
+        WHEN nodes.props->>'named_by' = 'contacts' THEN nodes.name
+        WHEN EXCLUDED.name = nodes.key AND nodes.name <> nodes.key THEN nodes.name
+        WHEN nodes.name = nodes.key THEN EXCLUDED.name
+        WHEN length(EXCLUDED.name) > length(nodes.name) THEN EXCLUDED.name ELSE nodes.name END,
     source_item_id = COALESCE(EXCLUDED.source_item_id, nodes.source_item_id),
     props = nodes.props || EXCLUDED.props
 RETURNING id
@@ -447,6 +453,30 @@ def backfill_temporal(s: Session, limit: int = BATCH) -> int:
     return points + memberships
 
 
+NAME_FROM_HEADERS = text(r"""
+WITH seen AS (
+    SELECT lower(a->>'email') AS key, btrim(a->>'name', ' "') AS name
+    FROM source_items si,
+         LATERAL jsonb_array_elements(COALESCE(si.raw_meta->'from', '[]') || COALESCE(si.raw_meta->'to', '[]')
+                                      || COALESCE(si.raw_meta->'cc', '[]')) a
+    WHERE si.source IN ('gmail', 'email') AND COALESCE(a->>'name', '') <> ''
+), counted AS (
+    SELECT key, name, count(*) AS n FROM seen
+    WHERE name !~ '@' AND name ~ '[[:alpha:]] [[:alpha:]]' GROUP BY key, name
+), best AS (SELECT DISTINCT ON (key) key, name FROM counted ORDER BY key, n DESC, length(name) DESC)
+UPDATE nodes p SET name = best.name
+FROM best
+WHERE p.type = 'Person' AND p.key = best.key AND p.name IS DISTINCT FROM best.name
+  AND COALESCE(p.props->>'named_by', '') <> 'contacts' AND NOT COALESCE((p.props->>'renamed')::bool, false)
+""")
+
+
+def name_from_headers(s: Session) -> int:
+    """Name each address by what most mail calls it ("Drew Tobias" in 50 headers beats "Joseph Tobias" in 26),
+    whatever order items arrived in. A contact card or a user rename always wins."""
+    return s.execute(NAME_FROM_HEADERS).rowcount
+
+
 def run(s: Session) -> int:
     since = watermark(s, STAGE)
     rows = s.execute(text("""
@@ -481,6 +511,7 @@ def run(s: Session) -> int:
         s.commit()
         from igneous.graph import quoted
 
+        name_from_headers(s)        # each address's most common display name, across all mail
         quoted.run(s)               # exact parents from quoted "Original Message" headers first
         s.execute(INFER_REPLIES)    # then the subject+participant heuristic for whatever is left
         from igneous.graph.history import derive_introductions
