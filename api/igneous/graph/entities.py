@@ -14,6 +14,8 @@ structurally (confidence 1.0). People involved in 2+ of its items get INVOLVED_I
 that mentions it on 2+ days is linked as a whole: that's how "Draw Steel" on the calendar finds the group
 chat, and the chat finds who else plays.
 
+Corrections made in the Inspector live in graph/overrides.py and are replayed last on every run.
+
 Idempotent: every edge here is written with extractor='entities' and the stage deletes and rebuilds its own
 edges, so new data (a new mention, a new chat day) updates old entities on the next run.
 """
@@ -22,6 +24,8 @@ import re
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from igneous.graph import overrides
 
 EXTRACTOR = "entities"
 VERSION = "1"
@@ -167,7 +171,8 @@ def run(s: Session, log=print) -> int:
             INSERT INTO nodes (type, key, name, props) VALUES ('Project', :k, :name, CAST(:p AS jsonb))
             ON CONFLICT (type, key) DO UPDATE SET props = nodes.props || EXCLUDED.props RETURNING id
         """), {"k": f"project:{n}", "name": c["display"],
-               "p": json.dumps({"derived": True, "anchors": sorted({h for _, h in c["anchors"]})})}).scalar_one()
+               "p": json.dumps({"derived": True, "original_name": c["display"],
+                                "anchors": sorted({h for _, h in c["anchors"]})})}).scalar_one()
 
         # Structural members.
         for nid, how in c["anchors"]:
@@ -219,5 +224,6 @@ def run(s: Session, log=print) -> int:
         """), {"pid": pid, "x": EXTRACTOR, "v": VERSION, "min": MIN_PEOPLE_ITEMS})
         built += 1
         log(f"  {c['display'][:40]:40s} anchors={len(c['anchors'])} mentions={mentioned}") if log else None
+    overrides.apply(s)  # corrections (rename / hide / merge / unlink) always win, so they survive every rebuild
     s.commit()
     return built

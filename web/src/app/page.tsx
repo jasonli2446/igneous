@@ -273,7 +273,9 @@ export default function Explorer() {
           <WhyConnected a={why.a} b={why.b} onCloseAction={closePanel}
             onOpenAction={(id) => { setWhy(null); setSelected(id); }} />
         ) : (
-          <Inspector id={detailId} onExpandAction={toggle} onCloseAction={closePanel} />
+          <Inspector id={detailId} onExpandAction={toggle} onCloseAction={closePanel}
+            onSelectAction={(id) => setSelected(id)}
+            onChangedAction={async (keep) => { await load(trail[trail.length - 1] ?? null, false); if (keep !== null) setSelected(keep); }} />
         )}
       </aside>
     </div>
