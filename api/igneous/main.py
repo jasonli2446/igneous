@@ -2,7 +2,9 @@ from datetime import datetime
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -16,7 +18,30 @@ from igneous.rag.search import Filters, experts, hybrid
 from igneous.sync_status import sync_status
 from igneous.timeline import EntityNotFoundError, timeline
 
-app = FastAPI(title="Igneous", version="0.1.0")
+
+class NamedResponse(JSONResponse):
+    """Every string the API returns shows contact names instead of phone numbers, wherever a number has a saved
+    contact. Identity fields (`key`, `external_id`) stay raw so clients can still address things by them."""
+    KEEP = frozenset({"key", "external_id", "chat", "handle"})
+
+    def render(self, content) -> bytes:
+        from igneous.db import SessionLocal
+        from igneous.graph.traversal import handle_names, name_handles
+        with SessionLocal() as s:
+            named = handle_names(s)
+
+        def walk(v, field=None):
+            if isinstance(v, str):
+                return v if field in self.KEEP else name_handles(v, named)
+            if isinstance(v, dict):
+                return {k: walk(x, k) for k, x in v.items()}
+            if isinstance(v, list):
+                return [walk(x, field) for x in v]
+            return v
+        return super().render(walk(jsonable_encoder(content)) if named else content)
+
+
+app = FastAPI(title="Igneous", version="0.1.0", default_response_class=NamedResponse)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 

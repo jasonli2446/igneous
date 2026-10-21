@@ -220,7 +220,9 @@ def build_chat(b: Builder, item) -> None:
     meta = item.raw_meta
     mid = b.node("Message", f"imessage:{item.external_id}", item.title or "(chat)", {"source": "imessage"},
                  sid=item.id)
-    tid = b.node("Thread", f"imessage-chat:{meta.get('chat')}", (item.title or "").rsplit(" — ", 1)[0] or "chat")
+    # Group chats are marked so the graph can treat them as groups ("who else is in the Draw Steel chat").
+    tid = b.node("Thread", f"imessage-chat:{meta.get('chat')}", (item.title or "").rsplit(" — ", 1)[0] or "chat",
+                 {"source": "imessage", "group": bool(meta.get("group")) or len(meta.get("participants", [])) > 1})
     b.edge(mid, tid, "IN_THREAD", item.occurred_at, item.id)
     me = b.node("Person", "me", "Me", {"self": True})
     senders = set(meta.get("senders", []))

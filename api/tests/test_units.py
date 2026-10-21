@@ -1197,3 +1197,16 @@ def test_redact_is_idempotent_and_queued_image_prompts_parse(tmp_path):
         "type": "queued_command", "prompt": [{"type": "text", "text": "see this screenshot"}, {"type": "image"}]}}))
     _, turns = claude_turns(str(f))
     assert [t["text"] for t in turns] == ["see this screenshot"]
+
+
+def test_api_responses_name_numbers_but_keep_keys(monkeypatch):
+    from igneous import main
+    from igneous.graph import traversal
+
+    monkeypatch.setattr(traversal, "handle_names", lambda s: {"+16145551234": "Sam Lee", "6145551234": "Sam Lee"})
+    body = main.NamedResponse({"name": "+16145551234", "key": "+16145551234",
+                               "items": [{"text": "[14:39] +16145551234: hi"}]}).body
+    import json
+    out = json.loads(body)
+    assert out["name"] == "Sam Lee" and out["key"] == "+16145551234"
+    assert out["items"][0]["text"] == "[14:39] Sam Lee: hi"
