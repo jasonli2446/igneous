@@ -19,8 +19,12 @@ def embed_query(q: str) -> list[float]:
 def run(s: Session, log=print) -> int:
     total = 0
     while True:
-        rows = s.execute(text("SELECT id, text FROM chunks WHERE embedding IS NULL ORDER BY id LIMIT :n"),
-                         {"n": BATCH}).all()
+        rows = s.execute(text("""
+            SELECT c.id, c.text FROM chunks c JOIN source_items si ON si.id = c.source_item_id
+            WHERE c.embedding IS NULL
+              AND (:local_models OR si.source NOT IN ('fs', 'notes'))
+            ORDER BY c.id LIMIT :n
+        """), {"n": BATCH, "local_models": settings.local_sources_model_enabled}).all()
         if not rows:
             break
         vecs = embed_texts([r.text for r in rows])

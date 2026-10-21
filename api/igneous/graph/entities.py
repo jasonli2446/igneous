@@ -25,6 +25,7 @@ import re
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous.config import settings
 from igneous.graph import overrides
 
 EXTRACTOR = "entities"
@@ -114,6 +115,10 @@ def _screen(names: list[str]) -> set[str]:
 
     if not names:
         return set()
+    if not settings.local_sources_model_enabled:
+        # Project candidates include local folder and repository names; do not disclose even those to a model
+        # until the owner opts in. The conservative generic stop-list still filters obvious non-projects.
+        return set(names)
     try:
         out, _ = structured(
             "You classify short names taken from someone's calendar, group chats and folders. Keep a name if it "

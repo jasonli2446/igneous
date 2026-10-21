@@ -12,7 +12,7 @@ app = typer.Typer(no_args_is_help=True)
 
 @app.command()
 def sync(connector: str = typer.Argument(..., help="email | imessage | maccontacts | gmail | gcal | gcontacts | drive | fs "
-                                                   "| ai_chats | github"),
+                                                   "| ai_chats | notes | github"),
          path: Path = typer.Option(None, help="source path; fs defaults to IGNEOUS_FILESYSTEM_ROOTS"),
          mailbox: list[str] = typer.Option(None, help="restrict to these mailboxes; repeatable"),
          limit: int = typer.Option(None, help="stop at the first checkpoint after this many items (resumable)"),
@@ -38,12 +38,17 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | maccontac
         from igneous.connectors.mac_contacts import MacContactsConnector
 
         conn = MacContactsConnector()
+    elif connector == "notes":
+        from igneous.connectors.apple_notes import AppleNotesConnector
+
+        conn = AppleNotesConnector(path) if path else AppleNotesConnector()
     elif connector == "fs":
         from igneous.connectors.filesystem import FilesystemConnector
+        from igneous.sources import _fs_roots
 
-        roots = [path] if path else [Path(root.strip()) for root in settings.filesystem_roots.split(",") if root.strip()]
+        roots = [path] if path else _fs_roots()
         if not roots:
-            raise typer.BadParameter("fs requires --path or IGNEOUS_FILESYSTEM_ROOTS")
+            raise typer.BadParameter("no default folders found; pass --path or set IGNEOUS_FILESYSTEM_ROOTS")
         conn = FilesystemConnector(roots)
     elif connector == "github":
         from igneous.connectors import secrets

@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from igneous import jobs
 from igneous.config import settings
-from igneous.connectors import ai_chats, github, google_auth, imessage, mac_contacts, secrets
+from igneous.connectors import ai_chats, apple_notes, github, google_auth, imessage, mac_contacts, secrets
 
 FDA_STEPS = [
     "Open System Settings, then Privacy & Security, then Full Disk Access.",
@@ -63,11 +63,18 @@ SOURCES: list[dict] = [
                "Press Sync now."],
      "cli": "igneous sync ai_chats"},
     {"id": "fs", "kind": "local", "name": "Local files", "group": "This Mac",
-     "reads": "Text, Markdown, PDFs and other documents under the folders you choose.",
+     "reads": "Metadata for every non-secret file in the folders you choose, plus text from readable documents. "
+              "Secrets are skipped and document text is redacted. Local text never reaches a model unless "
+              "IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true.",
      "steps": ["Set IGNEOUS_FILESYSTEM_ROOTS to a comma-separated list of folders (in api/.env or the API's "
-               "environment), then restart the API.",
-               "Press Sync now. Each sync rescans the folders, so deleted files disappear from Igneous too."],
+               "environment), then restart the API. With no setting, existing Documents, Desktop, Downloads, and "
+               "iCloud Drive folders are used.",
+               "Press Sync now. Each sync reconciles deletions without reopening unchanged file bodies."],
      "cli": "igneous sync fs --path ~/Documents/notes"},
+    {"id": "notes", "kind": "local", "name": "Apple Notes", "group": "This Mac",
+     "reads": "Unlocked Notes.app titles and bodies from the local database. Bodies are redacted and never sent "
+              "to a model unless IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true.",
+     "steps": [*FDA_STEPS, "Press Sync now. Locked notes are skipped."], "cli": "igneous sync notes"},
     {"id": "email", "kind": "local", "name": "Enron demo mailbox", "group": "Demo",
      "reads": "The public Enron email corpus. For demos and evaluation only; never mix it with your own data.",
      "steps": ["Run make enron once to download the mailboxes into data/maildir.", "Press Sync now."],
@@ -127,6 +134,9 @@ def check_requirements(source_id: str) -> tuple[bool, str | None]:
             return False, "No Contacts database found on this Mac."
         problems = [p for p in map(_sqlite_readable, paths) if p]
         return (not problems), (problems[0] if problems else None)
+    elif source_id == "notes":
+        problem = _sqlite_readable(str(apple_notes.DEFAULT_DB))
+        return (problem is None), problem
     elif source_id == "ai_chats":
         if not (os.path.isdir(ai_chats.CLAUDE_ROOT) or os.path.isdir(ai_chats.CODEX_ROOT)):
             return False, "No Claude Code or Codex sessions found on this Mac."
@@ -143,7 +153,12 @@ def check_requirements(source_id: str) -> tuple[bool, str | None]:
 
 
 def _fs_roots() -> list[Path]:
-    return [Path(r.strip()).expanduser() for r in settings.filesystem_roots.split(",") if r.strip()]
+    configured = [Path(r.strip()).expanduser() for r in settings.filesystem_roots.split(",") if r.strip()]
+    if configured:
+        return configured
+    defaults = [Path.home() / name for name in ("Documents", "Desktop", "Downloads")]
+    defaults.append(Path.home() / "Library/Mobile Documents/com~apple~CloudDocs")
+    return [path for path in defaults if path.is_dir()]
 
 
 # ---- live description ----
@@ -246,6 +261,8 @@ def build(source_id: str, s: Session, account: str | None, progress: Callable[..
         conn, acct = imessage.MessagesConnector(imessage.DEFAULT_DB), "default"
     elif source_id == "maccontacts":
         conn, acct = mac_contacts.MacContactsConnector(), "default"
+    elif source_id == "notes":
+        conn, acct = apple_notes.AppleNotesConnector(), "default"
     elif source_id == "ai_chats":
         conn, acct = ai_chats.AIChatConnector(), "default"
     elif source_id == "fs":

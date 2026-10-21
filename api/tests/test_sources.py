@@ -25,7 +25,7 @@ def test_registry_shape():
 def test_every_syncable_source_can_be_built(monkeypatch, tmp_path):
     monkeypatch.setattr(sources.settings, "data_dir", str(tmp_path))
     assert sources.SYNCABLE == {"gmail", "gcal", "gcontacts", "drive", "imessage", "maccontacts", "ai_chats", "fs",
-                                "email", "github"}
+                                "notes", "email", "github"}
     for sid in sources.SYNCABLE:
         ok, message = sources.check_requirements(sid)
         assert isinstance(ok, bool) and (ok or message)
@@ -50,9 +50,7 @@ def test_requirements_report_missing_client_secret_and_blocked_messages(monkeypa
     assert not ok and "Full Disk Access" in message
 
 
-def test_fs_requires_configured_roots(monkeypatch, tmp_path):
-    monkeypatch.setattr(sources.settings, "filesystem_roots", "")
-    assert sources.check_requirements("fs")[0] is False
+def test_fs_accepts_configured_roots(monkeypatch, tmp_path):
     monkeypatch.setattr(sources.settings, "filesystem_roots", str(tmp_path))
     assert sources.check_requirements("fs") == (True, None)
 

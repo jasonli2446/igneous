@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     web_url: str = "http://localhost:3000"
     # Comma-separated filesystem roots used by ``igneous sync fs`` when --path is omitted.
     filesystem_roots: str = ""
+    # Local documents and Apple Notes never go to an embedding or chat model unless explicitly enabled.
+    local_sources_model_enabled: bool = False
     # Drive API page size for files.list and changes.list (1-1000).
     drive_page_size: int = 100
     # Fixed by the schema (see docs/decisions/0001-embeddings.md); changing it needs a migration.
