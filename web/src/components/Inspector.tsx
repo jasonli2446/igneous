@@ -14,7 +14,7 @@ type Props = {
 };
 
 const LABELS: Record<string, string> = {
-  SENT: "Sent", RECEIVED: "Received", MEMBER_OF: "Organizations", IN_THREAD: "In conversations",
+  SENT: "Sent", RECEIVED: "Received", MEMBER_OF: "Organizations", WORKED_AT: "Worked at", IN_THREAD: "In conversations",
   REPLIES_TO: "Replies", ATTENDED: "Events attended", MENTIONS: "Mentioned", ABOUT: "Topics", SAME_AS: "Other addresses",
 };
 

@@ -411,7 +411,7 @@ def scored_members(s: Session, head: int, per: int = 8) -> dict[str, list[dict]]
         orgs = s.execute(text("""
             SELECT e.dst AS org, sum(p.w) AS w, count(*) AS n
             FROM (SELECT unnest(CAST(:ids AS bigint[])) AS id, unnest(CAST(:ws AS float8[])) AS w) p
-            JOIN edges e ON e.src = p.id AND e.type = 'MEMBER_OF'
+            JOIN edges e ON e.src = p.id AND e.type = 'WORKED_AT'
             JOIN nodes o ON o.id = e.dst
             WHERE o.key NOT IN ('gmail.com','icloud.com','yahoo.com','hotmail.com','outlook.com','me.com','aol.com')
             GROUP BY e.dst
