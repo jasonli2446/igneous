@@ -1,6 +1,9 @@
 export const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-export type GNode = { id: number; type: string; name: string; key: string; degree: number; members?: number };
+export type GNode = {
+  id: number; type: string; name: string; key: string; degree: number; members?: number;
+  strength?: number; kind?: "seed" | "category" | "entity"; category?: string | null; total?: number; expandable?: boolean;
+};
 export type GEdge = { id: number; src: number; dst: number; type: string; extractor: string; confidence: number | null; weight?: number };
 export type Subgraph = { nodes: GNode[]; edges: GEdge[] };
 export type GraphFilters = { source?: string; edgeTypes?: string[]; from?: string; to?: string };
@@ -163,6 +166,9 @@ export const api = {
     return (await r.json()) as AskResult;
   },
   evidence: (id: number) => get<{ evidence: Evidence[] }>(`/graph/node/${id}/evidence`, { limit: 30 }),
+  view: (seed?: number, signal?: AbortSignal) => get<Subgraph & { seed: number }>("/graph/view", { seed }, signal),
+  expandNode: (seed: number, node: number, visible: number[], offset = 0, signal?: AbortSignal) =>
+    get<Subgraph>("/graph/expand", { seed, node, visible, offset }, signal),
   explain: (a: number, b: number) => get<Explanation>("/graph/explain", { a, b }),
   timeline: (a: number, b?: number, limit = 50, signal?: AbortSignal) =>
     get<Timeline>("/timeline", { a, b, limit }, signal),

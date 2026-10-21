@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.db import get_session
-from igneous.graph.traversal import GraphFilters, explain, neighborhood, network, people
+from igneous.graph.traversal import GraphFilters, expand, explain, neighborhood, network, people, view
 from igneous.llm import LLMDisabled
 from igneous.rag import qa
 from igneous.rag.constraints import apply
@@ -135,6 +135,23 @@ def graph_network(seed: int, people: int = Query(50, le=200), hubs: int = Query(
                   s: Session = Depends(get_session)):
     """People plus the group chats, threads, and events that join them (clusters, not a star)."""
     return network(s, seed, people_limit=people, hub_limit=hubs)
+
+
+@app.get("/graph/view")
+def graph_view(seed: int | None = None, per: int = Query(6, le=20), s: Session = Depends(get_session)):
+    """The single graph: seed (default: you) -> categories that exist in the data -> their top members."""
+    if seed is None:
+        seed = s.execute(text("SELECT id FROM nodes WHERE type = 'Person' AND props->>'self' = 'true' LIMIT 1")).scalar()
+        if seed is None:
+            raise HTTPException(404, "No self node yet: run `igneous pipeline --stage self`.")
+    return view(s, seed, per=per)
+
+
+@app.get("/graph/expand")
+def graph_expand(seed: int, node: int, visible: list[int] = Query([]), k: int = Query(6, le=20),
+                 offset: int = 0, s: Session = Depends(get_session)):
+    """Reveal a node's top connections that aren't already on screen."""
+    return expand(s, seed, node, visible, k=k, offset=offset)
 
 
 @app.get("/graph/explain")

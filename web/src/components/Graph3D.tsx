@@ -7,8 +7,10 @@ import { useEffect, useRef } from "react";
 import { Fog } from "three";
 import SpriteText from "three-spritetext";
 import { GEdge, GNode, Subgraph } from "@/lib/api";
+import { CATEGORY_COLOR } from "@/lib/graph-style";
 
-export type Community = { color: string; members: string[]; size: number };
+export type { Community } from "@/lib/graph-style";
+import type { Community } from "@/lib/graph-style";
 type N = GNode & { color: string; val: number; hub: boolean; seed: boolean; x?: number; y?: number; z?: number;
   fx?: number; fy?: number; fz?: number };
 type L = { source: number | N; target: number | N; type: string; weight: number; spoke: boolean };
@@ -48,7 +50,6 @@ export default function Graph3D({ data, dark, selected, onSelectAction, onExpand
   cb.current = { onSelectAction, onExpandAction, onLinkAction };
   const sel = useRef<number | null>(selected);
   sel.current = selected;
-  const lastClick = useRef<{ id: number; t: number } | null>(null);
   const fitted = useRef(false);
 
   // Create once.
@@ -70,15 +71,9 @@ export default function Graph3D({ data, dark, selected, onSelectAction, onExpand
       .nodeLabel((n) => `<div class="g3-tip"><b>${escapeHtml(n.name)}</b><span>${describe(n)}</span></div>`)
       .linkLabel((l) => `<div class="g3-tip"><span>${linkReason(l)}</span><em>Click to see why</em></div>`)
       .onNodeClick((n) => {
-        // Double-click (within 350 ms on the same node) expands; single click selects and flies to it.
-        const now = Date.now();
-        if (lastClick.current && lastClick.current.id === n.id && now - lastClick.current.t < 350) {
-          cb.current.onExpandAction(n.id);
-          lastClick.current = null;
-          return;
-        }
-        lastClick.current = { id: n.id, t: now };
+        // One click: select it and reveal its top connections (clicking again collapses them).
         cb.current.onSelectAction(n.id);
+        if (n.expandable !== false) cb.current.onExpandAction(n.id);
         const d = 140, r = Math.hypot(n.x ?? 0, n.y ?? 0, n.z ?? 0) || 1;
         g.cameraPosition({ x: (n.x ?? 0) * (1 + d / r), y: (n.y ?? 0) * (1 + d / r), z: (n.z ?? 0) * (1 + d / r) },
           { x: n.x ?? 0, y: n.y ?? 0, z: n.z ?? 0 }, 900);
@@ -160,8 +155,14 @@ export default function Graph3D({ data, dark, selected, onSelectAction, onExpand
       const prev = old.get(n.id);
       const base: N = {
         ...n, hub, seed: n.id === seed,
-        color: n.id === seed ? (dark ? "#f2f2ee" : "#1f2420") : hub ? (dark ? "#5c6159" : "#b9bcb4") : colorOf.get(n.id) ?? "#a8aca3",
-        val: n.id === seed ? 14 : hub ? 1.2 : 1.5 + 9 * Math.sqrt((tie.get(n.id) ?? 1) / max),
+        color: n.id === seed ? (dark ? "#f2f2ee" : "#1f2420")
+          : n.kind === "category" ? (CATEGORY_COLOR[n.name] ?? "#a8aca3")
+          : n.category ? (CATEGORY_COLOR[n.category] ?? "#a8aca3")
+          : hub ? (dark ? "#5c6159" : "#b9bcb4") : colorOf.get(n.id) ?? "#a8aca3",
+        // Biggest = strongest relationship to you. Category hubs are mid-sized landmarks.
+        val: n.id === seed ? 14 : n.kind === "category" ? 6
+          : n.strength !== undefined ? 1.2 + 10 * n.strength ** 1.6
+          : hub ? 1.2 : 1.5 + 9 * Math.sqrt((tie.get(n.id) ?? 1) / max),
       };
       return prev ? Object.assign(prev, base) : base;
     });
@@ -171,10 +172,10 @@ export default function Graph3D({ data, dark, selected, onSelectAction, onExpand
     }));
 
     g.nodeThreeObject((n: N) => {
-      if (!(n.seed || labeled.has(n.id))) return undefined as unknown as never;
-      const t = new SpriteText(firstName(n.name));
+      if (!(n.seed || n.kind === "category" || labeled.has(n.id))) return undefined as unknown as never;
+      const t = new SpriteText(n.kind === "category" ? `${n.name} · ${n.total ?? ""}` : firstName(n.name));
       t.color = dark ? "#e8e8e3" : "#2b302b";
-      t.textHeight = n.seed ? 6 : 4;
+      t.textHeight = n.seed ? 6 : n.kind === "category" ? 5 : 4;
       t.fontFace = "ui-sans-serif, system-ui";
       t.position.set(0, -(Math.cbrt(n.val) * 4 + 5), 0);
       return t;
@@ -220,6 +221,7 @@ function firstName(name: string) {
 
 function describe(n: N) {
   if (n.seed) return "You";
+  if (n.kind === "category") return `${n.total} ${n.name.toLowerCase()} · click to show more`;
   if (n.type === "Thread") return n.members ? `Conversation with ${n.members} of your contacts` : "Conversation";
   if (n.type === "Event") return n.members ? `Event with ${n.members} of your contacts` : "Event";
   return n.type;
@@ -227,6 +229,7 @@ function describe(n: N) {
 
 function linkReason(l: L) {
   const a = (l.source as N).name, b = (l.target as N).name;
+  if (l.type === "HAS" || l.type === "IN_CATEGORY") return escapeHtml(b);
   if (l.type === "PART_OF") return `${escapeHtml(firstName(a))} in ${escapeHtml(b)} · ${l.weight} message${l.weight === 1 ? "" : "s"}`;
   return `${escapeHtml(firstName(a))} and ${escapeHtml(firstName(b))} · ${l.weight} shared message${l.weight === 1 ? "" : "s"}`;
 }
