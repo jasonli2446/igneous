@@ -264,8 +264,8 @@ def build_event(b: Builder, item) -> None:
     ATTENDED edges dedupe to one per series. Each occurrence stays its own source item, which is what
     relationship strength counts. Organizer and attendees ATTENDED it (decliners excluded)."""
     meta = item.raw_meta
-    series = meta.get("series_key") or item.external_id
-    eid = b.node("Event", f"{item.source}:{series}", item.title or "(event)",
+    key = meta.get("event_key") or f"{item.source}:{meta.get('series_key') or item.external_id}"
+    eid = b.node("Event", key, item.title or "(event)",
                  {"series": bool(meta.get("recurring"))}, sid=item.id)
     people = list(meta.get("attendees", []))
     if meta.get("organizer", {}).get("email"):
@@ -312,7 +312,10 @@ def build_file(b: Builder, item) -> None:
             folders.append(parent)
             parent = parent.rsplit("/", 1)[0] if "/" in parent else ""
         folders.reverse()
-    fid = b.node("File", f"{item.source}:{item.external_id}", item.title or item.external_id,
+    # A Drive file shared with two connected accounts is one file: key on its Drive id, not the account.
+    drive_id = item.raw_meta.get("drive_id") if item.source == "drive" else None
+    fkey = f"drive:{drive_id}" if drive_id else f"{item.source}:{item.external_id}"
+    fid = b.node("File", fkey, item.title or item.external_id,
                  {"source": item.source, "path": path}, sid=item.id)
     # Drive preserves every parent ID in metadata: a file can belong to more than one folder,
     # which cannot be represented faithfully by a single filesystem-style path.

@@ -99,7 +99,12 @@ class CalendarConnector:
                                   # external_id (account/calendar/...) so two accounts' series can't collide.
                                   "series_key": _external_id(self.account, f"{cid}/" + (
                                       event.get("recurringEventId") or event.get("iCalUID") or event["id"])),
-                                  "recurring": bool(event.get("recurringEventId"))})
+                                  "recurring": bool(event.get("recurringEventId")),
+                                  # The graph's Event identity, shared across accounts: every invitee's copy of a
+                                  # meeting carries the same iCalUID (recurring instances share the series' UID),
+                                  # so two connected accounts invited to it make one node, not two.
+                                  "event_key": "gcal:" + (event.get("iCalUID") or _external_id(
+                                      self.account, f"{cid}/" + (event.get("recurringEventId") or event["id"])))})
                 page = response.get("nextPageToken")
                 if not page:
                     if response.get("nextSyncToken"):
