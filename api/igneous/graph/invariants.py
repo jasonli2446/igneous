@@ -85,7 +85,7 @@ def message_cardinality_violations(rows: Iterable[Mapping[str, Any]]) -> list[Vi
     violations = []
     for row in rows:
         sent, received = row["sent_count"], row["received_count"]
-        is_chat = row["source"] == "imessage"
+        is_chat = row["source"] in ("imessage", "takeout_chat")
         if (is_chat and sent < 1) or (not is_chat and sent != 1):
             expected = "at least 1" if is_chat else "exactly 1"
             details = {"sent_count": sent, "expected": 1}

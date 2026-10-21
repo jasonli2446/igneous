@@ -1,10 +1,10 @@
 "use client";
 
-import { useRef, useState } from "react";
-import { AiImportResult, api } from "@/lib/api";
+import { useEffect, useRef, useState } from "react";
+import { AiImportResult, api, Job, TakeoutResult } from "@/lib/api";
 
 type Provider = {
-  id: "chatgpt" | "gemini" | "claude_ai";
+  id: "chatgpt" | "claude_ai";
   name: string;
   wait: string;
   file: string;
@@ -24,21 +24,6 @@ const PROVIDERS: Provider[] = [
       "Wait for the email from OpenAI and click Download data export.",
       "Upload the .zip here. You do not need to unzip it.",
     ],
-  },
-  {
-    id: "gemini",
-    name: "Gemini",
-    wait: "Anywhere from a few minutes to several hours, depending on how much Google has to gather.",
-    file: "The Takeout .zip, or the MyActivity.json inside it.",
-    steps: [
-      "Go to takeout.google.com and click Deselect all.",
-      "Scroll to My Activity and tick it, then click All activity data included.",
-      "Deselect everything except Gemini Apps, then click OK.",
-      "Click Multiple formats, and change Activity records from HTML to JSON. HTML files are not supported.",
-      "Click Next step, then Create export, and wait for Google's email with the download link.",
-      "Upload the .zip here.",
-    ],
-    note: "Gemini activity only keeps your prompts and the replies Google logged, grouped into one chat per day.",
   },
   {
     id: "claude_ai",
@@ -177,20 +162,180 @@ function ProviderCard({ provider }: { provider: Provider }) {
   );
 }
 
+const TAKEOUT_STEPS = [
+  "Go to takeout.google.com and click Deselect all.",
+  "Tick My Activity, Chrome, and Maps (your places). If you see Location History (Timeline), tick it too.",
+  "On My Activity, click Multiple formats and change Activity records from HTML to JSON. HTML files are not read.",
+  "Click Next step, keep One-time export and .zip, then Create export.",
+  "Wait for Google's email (usually hours; it may arrive as several zips) and download every zip.",
+  "Pick them below: scan Downloads, give a folder or path, or upload the zips.",
+];
+
+function TakeoutCard() {
+  const [job, setJob] = useState<Job | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [upload, setUpload] = useState<number | null>(null);
+  const [path, setPath] = useState("");
+  const input = useRef<HTMLInputElement>(null);
+  const running = starting || job?.status === "running";
+
+  useEffect(() => {
+    if (job?.status !== "running") return;
+    const t = setInterval(() => {
+      api.job(job.id).then(setJob).catch(() => {});
+    }, 1500);
+    return () => clearInterval(t);
+  }, [job]);
+
+  async function start(args: { files?: File[]; path?: string; scanDownloads?: boolean }) {
+    if (running) return;
+    setError(null);
+    setStarting(true);
+    setUpload(args.files?.length ? 0 : null);
+    try {
+      setJob(await api.importTakeout(args, args.files?.length ? setUpload : undefined));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setStarting(false);
+      setUpload(null);
+      if (input.current) input.current.value = "";
+    }
+  }
+
+  const result = job?.status === "succeeded" ? (job.result as unknown as TakeoutResult | null) : null;
+  const p = job?.progress;
+  const secondary =
+    "rounded-md border border-line bg-panel px-3 py-1.5 text-sm font-medium text-soft transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50";
+
+  return (
+    <section className="rounded-lg border border-line bg-panel" aria-labelledby="takeout-title">
+      <div className="grid gap-6 p-5 sm:p-6 md:grid-cols-2">
+        <div>
+          <h2 id="takeout-title" className="text-lg font-semibold tracking-tight text-ink">
+            Google Takeout
+          </h2>
+          <p className="mt-1 text-sm leading-6 text-muted">
+            My Activity (Search, YouTube, Maps, Gemini and more), Chrome history and bookmarks, and Maps places and visits.
+          </p>
+          <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm leading-6 text-soft marker:text-muted">
+            {TAKEOUT_STEPS.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ol>
+          <p className="mt-4 text-sm leading-6 text-muted">
+            <span className="font-medium text-soft">How long it takes:</span> Google usually needs a few hours to prepare
+            a Takeout; the download link works for about a week.
+          </p>
+          <p className="mt-2 text-sm leading-6 text-muted">
+            Gemini chats come in with My Activity. An export of only Gemini Apps (My Activity, JSON) works here too. This data stays on this computer and is never sent to a model unless
+            you opt in.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-4">
+          <div>
+            <button type="button" onClick={() => void start({ scanDownloads: true })} disabled={running} className={secondary}>
+              Scan Downloads for takeout-*.zip
+            </button>
+            <p className="mt-1.5 text-xs text-muted">Best for multi-GB files: they are read in place, not uploaded.</p>
+          </div>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void start({ path });
+            }}
+            className="flex flex-col gap-2 sm:flex-row"
+          >
+            <label htmlFor="takeout-path" className="sr-only">Path to a Takeout zip or folder</label>
+            <input
+              id="takeout-path"
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              placeholder="~/Downloads/takeout-2025.zip or a folder"
+              className="min-w-0 flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none placeholder:text-muted focus-visible:border-accent"
+            />
+            <button type="submit" disabled={running || !path.trim()} className={secondary}>Import path</button>
+          </form>
+          <label
+            htmlFor="takeout-file"
+            className={`flex min-h-24 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-line px-4 py-5 text-center text-sm transition-colors hover:bg-hover ${running ? "pointer-events-none opacity-60" : ""}`}
+          >
+            <span className="font-medium text-ink">Or choose the zip files</span>
+            <span className="text-xs text-muted">Select all parts of a split export at once.</span>
+            <input
+              ref={input}
+              id="takeout-file"
+              type="file"
+              multiple
+              accept=".zip,application/zip"
+              className="sr-only"
+              disabled={running}
+              onChange={(e) => void start({ files: Array.from(e.target.files ?? []) })}
+            />
+          </label>
+
+          <div aria-live="polite" className="min-h-6 text-sm">
+            {upload !== null && <p className="text-xs text-muted">Uploading {Math.round(upload * 100)}%</p>}
+            {job?.status === "running" && (
+              <div role="status">
+                <div className="h-1.5 overflow-hidden rounded-full bg-hover">
+                  <div className="progress-slide h-full w-1/3 bg-accent" />
+                </div>
+                <p className="mt-1.5 text-xs text-muted tabular-nums">
+                  {p?.items_total
+                    ? `Saving ${new Intl.NumberFormat().format(p.items ?? 0)} of ${new Intl.NumberFormat().format(p.items_total)} entries`
+                    : p?.files_total
+                      ? `Reading file ${(p.files_done ?? 0) + 1} of ${p.files_total}${p.file ? `: ${p.file}` : ""}`
+                      : "Starting"}
+                  . You can leave this page open.
+                </p>
+              </div>
+            )}
+            {error && <p role="alert" className="text-danger">{error}</p>}
+            {job?.status === "failed" && <p role="alert" className="text-danger">{job.error ?? "The import failed."}</p>}
+            {result && (
+              <div>
+                <p className="text-accent">
+                  Imported. Open Sources and press Rebuild to add it to the graph.
+                </p>
+                <div className="mt-3 grid grid-cols-2 gap-4">
+                  <Stat label="New days" value={result.inserted} />
+                  <Stat label="Updated" value={result.updated} />
+                  <Stat label="Unchanged" value={result.unchanged} />
+                  <Stat label="Places" value={result.places} />
+                  <Stat label="Secrets removed" value={result.redactions} />
+                </div>
+                {result.notes?.length > 0 && (
+                  <ul className="mt-3 list-disc space-y-1 pl-5 text-xs leading-5 text-muted">
+                    {result.notes.map((n) => <li key={n}>{n}</li>)}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export default function ImportPage() {
   return (
     <main className="mx-auto w-full max-w-5xl px-4 py-10 sm:px-6 sm:py-14">
       <header className="border-b border-line pb-7">
         <p className="text-xs font-medium uppercase tracking-[0.16em] text-accent">Sources</p>
-        <h1 className="mt-2 text-3xl font-semibold tracking-tight text-ink">Import AI chats</h1>
+        <h1 className="mt-2 text-3xl font-semibold tracking-tight text-ink">Import exports</h1>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-soft">
-          Download your history from each assistant, then drop the file in its card. Passwords, API keys and tokens are
+          Download your history from Google or each assistant, then give the file to its card. Passwords, API keys and tokens are
           removed before anything is saved, and the uploaded file itself is not kept. Importing the same file again
           only updates what changed.
         </p>
       </header>
 
       <div className="mt-8 space-y-6">
+        <TakeoutCard />
         {PROVIDERS.map((p) => (
           <ProviderCard key={p.id} provider={p} />
         ))}

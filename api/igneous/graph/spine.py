@@ -376,13 +376,45 @@ def build_file(b: Builder, item) -> None:
         b.edge(repo, child, "CONTAINS", item.occurred_at, item.id)
 
 
+def build_takeout_chat(b: Builder, item) -> None:
+    """A Google Chat conversation-day, shaped like an iMessage one: a Message in a Thread per conversation,
+    People keyed by email. Whoever spoke SENT the day; everyone in the conversation RECEIVED it."""
+    meta = item.raw_meta
+    mid = b.node("Message", f"takeout_chat:{item.external_id}", item.title or "(chat)", {"source": "takeout_chat"},
+                 sid=item.id)
+    tid = b.node("Thread", f"takeout-chat:{meta.get('group')}", f"Google Chat {meta.get('group', '')}".strip(),
+                 {"source": "takeout_chat", "group": len(meta.get("participants", [])) > 2})
+    b.edge(mid, tid, "IN_THREAD", item.occurred_at, item.id)
+    senders = set(meta.get("senders", []))
+    for email in meta.get("participants", []):
+        pid = b.node("Person", email, email, {"email": email})
+        b.edge(mid, pid, "RECEIVED", item.occurred_at, item.id)
+        if email in senders:
+            b.edge(pid, mid, "SENT", item.occurred_at, item.id)
+
+
 def build_takeout(b: Builder, item) -> None:
     """Google Takeout day-items. Each item is a File node (so it is chunked, searchable and linkable to a
     Project by phrase match). Maps items also create Place nodes: you VISITED a place (one edge per place,
     spanning first to last visit; counts come from the item metadata) or SAVED it (starred, listed, reviewed)."""
     meta = item.raw_meta
-    b.node("File", f"{item.source}:{item.external_id}", item.title or item.external_id,
-           {"source": item.source, "kind": meta.get("kind") or meta.get("product", "activity")}, sid=item.id)
+    if item.source == "takeout_chat":
+        return build_takeout_chat(b, item)
+    fid = b.node("File", f"{item.source}:{item.external_id}", item.title or item.external_id,
+                 {"source": item.source, "kind": meta.get("kind") or meta.get("product", "activity")}, sid=item.id)
+    if item.source == "takeout_meet" and meta.get("event_id"):
+        # Meet records the Calendar event id; gcal external ids end in it ("<account>/<calendar>/<event id>").
+        event = b.s.execute(text("""
+            SELECT n.id FROM source_items si
+            JOIN nodes n ON n.type = 'Event' AND n.key = COALESCE(si.raw_meta->>'event_key',
+                 'gcal:' || COALESCE(si.raw_meta->>'series_key', si.external_id))
+            WHERE si.source = 'gcal' AND si.external_id LIKE '%/' || :eid ORDER BY n.id LIMIT 1
+        """), {"eid": meta["event_id"].replace("%", "").replace("_", "\\_")}).scalar()
+        if event:
+            b.s.execute(text("""
+                INSERT INTO edges (src, dst, type, valid_from, valid_to, source_item_id)
+                VALUES (:a, :b, 'RELATED_TO', :t, :t, :sid) ON CONFLICT (src, dst, type, extractor) DO NOTHING
+            """), {"a": fid, "b": event, "t": item.occurred_at, "sid": item.id})
     if item.source != "takeout_maps":
         return
     me = b.node("Person", "me", "Me", {"self": True})

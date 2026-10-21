@@ -75,8 +75,32 @@ def build_zip(path: Path, files: dict[str, bytes | dict]) -> Path:
     return path
 
 
+CHAT_MSGS = {"messages": [
+    {"creator": {"name": "Sam Lee", "email": "sam@example.com", "user_type": "Human"},
+     "created_date": "Tuesday, May 6, 2025 at 3:04:05\u202fPM UTC", "text": f"see you at draw steel {TOKEN}",
+     "topic_id": "t", "message_id": "m1"},
+    {"creator": {"name": "Me", "email": "me@example.com", "user_type": "Human"},
+     "created_date": "Tuesday, May 6, 2025 at 3:09:00\u202fPM UTC", "text": "ok", "topic_id": "t", "message_id": "m2"}]}
+CHAT_GROUP = {"members": [{"name": "Sam Lee", "email": "sam@example.com", "user_type": "Human"},
+                          {"name": "Me", "email": "me@example.com", "user_type": "Human"}]}
+TASKS = {"kind": "tasks#taskLists", "items": [{"id": "L1", "title": "Todo", "updated": "2025-05-01T00:00:00.000000Z",
+                                                "items": [{"title": "Buy dice", "status": "completed",
+                                                           "completed": "2025-05-02T00:00:00Z", "notes": "d10s"}]}]}
+MEET_CSV = (b"Owner Gaia Id,Item Id,Conference Id,Item Type,Meeting Code,Event Id,Thread Id,Inbox Id,Call Direction,"
+            b"Start Time,End Time,Duration,Direct Call Result,Participation State,Call Counterparts,Meeting Media Type\n"
+            b"1,i1,conf1,meet:meeting,abc-defg-hij,EVT123,,,,2025-06-04 18:00:00 UTC,2025-06-04 18:30:00 UTC,0:30:00,,,,\n")
+
+
 def full_files(html_activity=False):
     files = {f"My Activity/{p}/MyActivity.json": rows for p, rows in ACTIVITY.items()}
+    files.update({"My Activity/Ads/MyActivity.json": [{"header": "Ads", "title": "Viewed an ad", "time": "2025-06-01T10:00:00Z"}],
+                  "My Activity/Chrome/MyActivity.json": [{"header": "Chrome", "title": "Visited Dup", "time": "2025-06-01T10:00:00Z",
+                                                          "titleUrl": "https://dup.example.com"}],
+                  "Google Chat/Groups/DM abc/messages.json": CHAT_MSGS,
+                  "Google Chat/Groups/DM abc/group_info.json": CHAT_GROUP,
+                  "Tasks/Tasks.json": TASKS, "Chrome/Addresses and more.json": {"secret": "do not import"},
+                  "Chrome/Reading List.html": b'<DL><DT><A HREF="https://read.example.com/x?utm_source=q">Read me</A></DL>',
+                  "Google Meet/ConferenceHistory/conference_history_records.csv": MEET_CSV})
     files.update({"Chrome/History.json": HISTORY, "Chrome/Bookmarks.html": BOOKMARKS,
                   "Maps (your places)/Saved Places.json": SAVED, "Maps (your places)/Reviews.json": REVIEWS,
                   "Location History (Timeline)/Semantic Location History/2025/2025_JUNE.json": SEMANTIC,
@@ -100,8 +124,17 @@ def test_parse_items_cover_all_parts(zpath):
     ids = by_id(items)
     assert {"activity/search/2025-06-01", "activity/youtube/2025-06-02", "chrome/history/2025-06-01",
             "chrome/bookmarks", "maps/visits/2025-06-03", "maps/visits/2025-06-10", "maps/visits/2025-07-01",
-            "maps/saved/saved-places", "maps/reviews/reviews"} <= set(ids)
+            "maps/saved/saved-places", "maps/reviews/reviews", "chrome/reading-list", "tasks/l1",
+            "meet/conf1", "chat/dm-abc/2025-05-06"} <= set(ids)
     assert report["parts"]["gemini"] == 1 and report["places"] == 4
+    assert not any("ads" in i for i in ids) and not any("activity/chrome" in i for i in ids)
+    assert "do not import" not in "".join(i.body_text for i in items)
+    assert "Buy dice [completed, done 2025-05-02]" in ids["tasks/l1"].body_text and "d10s" in ids["tasks/l1"].body_text
+    chat = ids["chat/dm-abc/2025-05-06"]
+    assert chat.occurred_at.hour == 15 and "Sam Lee: see you at draw steel [REDACTED" in chat.body_text
+    assert chat.raw_meta["participants"] == ["me@example.com", "sam@example.com"]
+    assert ids["meet/conf1"].raw_meta["event_id"] == "EVT123" and "Meeting abc-defg-hij (0:30:00)" in ids["meet/conf1"].body_text
+    assert "read.example.com/x)" in ids["chrome/reading-list"].body_text
     assert any("Records.json" in n for n in report["notes"])
     search = ids["activity/search/2025-06-01"]
     assert "[14:02] Searched for draw steel rules" in search.body_text
@@ -194,7 +227,7 @@ def test_scan_downloads(tmp_path):
 
 def clean():
     with SessionLocal() as s:
-        s.execute(text("DELETE FROM nodes WHERE type = 'Place' OR (type = 'File' AND key LIKE 'takeout\\_%')"))
+        s.execute(text("DELETE FROM nodes WHERE type = 'Place' OR (type IN ('File', 'Message') AND key LIKE 'takeout\\_%')"))
         s.execute(text("DELETE FROM source_items WHERE source LIKE 'takeout\\_%' OR "
                        "(source = 'ai_chats' AND external_id LIKE 'gemini/gemini-2025-05-01/%')"))
         s.execute(text("DELETE FROM sync_state WHERE connector = 'takeout'"))
@@ -243,6 +276,41 @@ def test_import_is_idempotent_and_builds_graph(db, zpath):
         assert [v for v in check_graph(s) if v.details and v.details.get("edge_type") in ("VISITED", "SAVED")] == []
 
 
+def test_chat_people_and_meet_event_link(db, zpath):
+    from igneous.connectors.base import SourceItem, run_sync
+    from igneous.graph import spine
+
+    class Cal:
+        name = "takeouttest"
+
+        def sync(self, cursor):
+            yield SourceItem(source="gcal", external_id="acct/primary/EVT123", title="Standup", body_text="",
+                             raw_meta={"series_key": "acct/primary/EVT123", "attendees": [],
+                                       "event_key": "gcal:takeouttest-uid"},
+                             occurred_at=datetime(2025, 6, 4, tzinfo=UTC))
+
+    try:
+        with SessionLocal() as s:
+            run_sync(s, Cal(), account="t")
+            takeout.run_import(s, [zpath])
+            spine.run(s)
+            people = s.execute(text("SELECT key FROM nodes WHERE type = 'Person' AND key LIKE '%@example.com' "
+                                    "ORDER BY key")).scalars().all()
+            assert people == ["me@example.com", "sam@example.com"]
+            link = s.execute(text("""
+                SELECT count(*) FROM edges e JOIN nodes ev ON ev.id = e.dst AND ev.key = 'gcal:takeouttest-uid'
+                JOIN nodes f ON f.id = e.src AND f.key = 'takeout_meet:meet/conf1' WHERE e.type = 'RELATED_TO'
+            """)).scalar()
+            assert link == 1
+    finally:
+        with SessionLocal() as s:
+            s.execute(text("DELETE FROM source_items WHERE source = 'gcal' AND external_id = 'acct/primary/EVT123'"))
+            s.execute(text("DELETE FROM nodes WHERE key IN ('gcal:takeouttest-uid', 'me@example.com', 'sam@example.com')"
+                           " OR key LIKE 'takeout-chat:%'"))
+            s.execute(text("DELETE FROM sync_state WHERE connector = 'takeouttest'"))
+            s.commit()
+
+
 def test_search_joins_existing_project_after_rebuild(db, zpath):
     """Done-when: a search mentioning an existing Project links to it. The Project comes from a synthetic
     recurring calendar series named 'Draw Steel' (3 occurrences)."""
@@ -287,4 +355,4 @@ def test_takeout_sources_are_hidden_from_models_by_default():
     from igneous.graph.extract import allowed_sources
 
     assert not set(takeout.TAKEOUT_SOURCES) & allowed_sources("")
-    assert set(takeout.TAKEOUT_SOURCES) - allowed_sources("takeout_maps") == {"takeout_activity", "takeout_chrome"}
+    assert set(takeout.TAKEOUT_SOURCES) - allowed_sources("takeout_maps") == set(takeout.TAKEOUT_SOURCES) - {"takeout_maps"}

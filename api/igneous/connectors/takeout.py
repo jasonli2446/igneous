@@ -24,6 +24,7 @@ every model call unless named in IGNEOUS_LLM_SOURCES (see rag/qa.py and graph/ex
 """
 import csv
 import io
+import json
 import os
 import re
 import zipfile
@@ -43,7 +44,10 @@ from igneous.connectors.ai_exports import export_items, gemini_conversations
 from igneous.connectors.base import Checkpoint, SourceItem
 from igneous.connectors.redact import redact
 
-TAKEOUT_SOURCES = ("takeout_activity", "takeout_chrome", "takeout_maps")
+TAKEOUT_SOURCES = ("takeout_activity", "takeout_chrome", "takeout_maps", "takeout_tasks", "takeout_meet",
+                   "takeout_chat")
+# My Activity products that are advertising/analytics telemetry, not things you did.
+SKIP_PRODUCTS = {"ads", "google analytics", "takeout"}
 MAX_LINES = 1000  # per item; a day with more than this is almost certainly a script, not you
 GEMINI_PRODUCTS = {"gemini apps", "gemini"}
 TRACKING = re.compile(r"^(utm_.*|fbclid|gclid|gclsrc|dclid|msclkid|yclid|mc_cid|mc_eid|_ga|_gl|igshid|si|"
@@ -104,6 +108,33 @@ def _any_ts(raw) -> datetime | None:
             return datetime.fromtimestamp(int(raw) / 1000, UTC)
         return _utc(_ts(raw))
     return None
+
+
+_CHAT_FORMATS = ("%A, %B %d, %Y at %I:%M:%S %p", "%A, %b %d, %Y at %I:%M:%S %p", "%B %d, %Y at %I:%M:%S %p")
+
+
+def _chat_ts(raw) -> datetime | None:
+    """'Tuesday, May 6, 2025 at 3:04:05 PM UTC' (the space before PM is a narrow no-break space) or ISO."""
+    if not isinstance(raw, str):
+        return None
+    t = re.sub(r"[\u202f\u00a0\s]+", " ", raw).strip()
+    t = re.sub(r" (UTC|GMT)$", "", t)
+    for fmt in _CHAT_FORMATS:
+        try:
+            return datetime.strptime(t, fmt).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return _utc(_ts(raw))
+
+
+def _meet_ts(raw) -> datetime | None:
+    """'2026-05-04 14:00:00 UTC'."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return datetime.strptime(raw.strip().removesuffix(" UTC"), "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+    except ValueError:
+        return _utc(_ts(raw.strip()))
 
 
 def _red(text: str | None, counter: list[int]) -> str:
@@ -189,7 +220,7 @@ class Tree:
                 for f in sorted(files):
                     full = Path(root) / f
                     rel = full.relative_to(p).parts
-                    if f.lower().endswith(".zip") and f.lower().startswith("takeout"):
+                    if f.lower().endswith(".zip") and zipfile.is_zipfile(full):
                         self._add_zip(full)
                     elif "__MACOSX" not in rel:
                         # An extracted folder may be the Takeout dir, its parent, or a copy of one product.
@@ -227,6 +258,19 @@ def classify(path: str) -> tuple[str, str | None] | None:
         return "chrome_history", None
     if "chrome" in dirs and name == "bookmarks.html":
         return "chrome_bookmarks", None
+    if "chrome" in dirs and name == "reading list.html":
+        return "chrome_reading_list", None
+    if "google chat" in dirs:
+        if name == "messages.json":
+            return "chat_messages", parts[-2]
+        if name == "group_info.json":
+            return "chat_group", parts[-2]
+        if name == "user_info.json":
+            return "chat_user", None
+    if "tasks" in dirs and name == "tasks.json":
+        return "tasks", None
+    if name == "conference_history_records.csv":
+        return "meet", None
     stem = Path(parts[-1]).stem
     if any(d.startswith("maps") and "your places" in d for d in dirs) and name.endswith(".json"):
         return ("maps_reviews" if "review" in name else "maps_places"), stem
@@ -348,6 +392,10 @@ class _Import:
         self.visits: dict[str, dict[tuple[str, str], dict]] = defaultdict(dict)  # day -> (key, start) -> visit
         self.lists: dict[tuple[str, str], list[dict]] = defaultdict(list)  # (kind, list name) -> places
         self.list_secrets: dict[tuple[str, str], int] = defaultdict(int)
+        self.reading: list[tuple[str, str, str]] = []
+        self.chat: dict[str, dict] = {}  # group dir -> {members, days: {day: [(at, email, text)]}}
+        self.tasks: list[dict] = []
+        self.meet: list[dict] = []
         self.notes: list[str] = []
         self.counts: dict[str, int] = defaultdict(int)
 
@@ -368,6 +416,9 @@ class _Import:
                 if not isinstance(e, dict):
                     continue
                 product = hint or e.get("header") or "Google"
+                if _norm_name(product) in SKIP_PRODUCTS:
+                    self.counts["skipped_noise"] += 1
+                    continue
                 if _norm_name(str(e.get("header") or product)) in GEMINI_PRODUCTS or _norm_name(product) in GEMINI_PRODUCTS:
                     self.gemini.append(e)
                     continue
@@ -379,6 +430,62 @@ class _Import:
                     self.activity_secrets[key] += red[0]
                     self.counts["activity_entries"] += 1
         self._safe(m, go)
+
+    # -- chat / tasks / meet / reading list
+    def read_chat(self, m: Member, group: str | None, kind: str):
+        g = self.chat.setdefault(group or "?", {"members": {}, "days": defaultdict(list)})
+
+        def go():
+            with m.open() as fh:
+                data = json.load(fh)
+            if kind == "chat_group":
+                for u in data.get("members") or []:
+                    if isinstance(u, dict) and u.get("email"):
+                        g["members"][u["email"].lower()] = u.get("name") or u["email"]
+                return
+            for msg in data.get("messages") or []:
+                at, text_ = _chat_ts(msg.get("created_date")), msg.get("text")
+                who = msg.get("creator") if isinstance(msg.get("creator"), dict) else {}
+                if not at or not isinstance(text_, str) or not text_.strip() or not who.get("email"):
+                    continue
+                g["members"].setdefault(who["email"].lower(), who.get("name") or who["email"])
+                g["days"][at.date().isoformat()].append((at, who["email"].lower(), text_))
+                self.counts["chat_messages"] += 1
+        self._safe(m, go)
+
+    def read_tasks(self, m: Member):
+        def go():
+            with m.open() as fh:
+                data = json.load(fh)
+            for lst in data.get("items") or []:
+                if not isinstance(lst, dict):
+                    continue
+                self.tasks.append({"id": str(lst.get("id") or lst.get("title")), "title": lst.get("title") or "Tasks",
+                                   "updated": lst.get("updated") or lst.get("create_time"),
+                                   "tasks": [t for t in lst.get("items") or [] if isinstance(t, dict)]})
+                self.counts["tasks"] += len(self.tasks[-1]["tasks"])
+        self._safe(m, go)
+
+    def read_meet(self, m: Member):
+        def go():
+            with m.open() as fh:
+                for r in csv.DictReader(io.TextIOWrapper(fh, encoding="utf-8-sig", errors="replace")):
+                    start = _meet_ts(r.get("Start Time"))
+                    cid = r.get("Conference Id") or r.get("Item Id")
+                    if not start or not cid:
+                        continue
+                    self.meet.append({"id": cid, "start": start, "end": _meet_ts(r.get("End Time")),
+                                      "duration": r.get("Duration"), "kind": r.get("Item Type") or "",
+                                      "code": r.get("Meeting Code") or "", "event_id": r.get("Event Id") or "",
+                                      "counterparts": r.get("Call Counterparts") or ""})
+                    self.counts["meet_conferences"] += 1
+        self._safe(m, go)
+
+    def read_reading_list(self, m: Member):
+        p = _Bookmarks()
+        with m.open() as fh:
+            p.feed(fh.read().decode("utf-8", errors="replace"))
+        self.reading += [(f or "Reading list", t, u) for f, t, u in p.marks if u.startswith(("http://", "https://"))]
 
     # -- chrome
     def read_chrome(self, m: Member):
@@ -500,6 +607,7 @@ class _Import:
                                  recs[0][0], {"product": "Chrome", "urls": len(recs),
                                               "visits": sum(r[1] for r in recs), "redactions": self.chrome_secrets[day]})
         yield from self._bookmark_item()
+        yield from self._extra_items()
         for day, vs in sorted(self.visits.items()):
             vl = sorted(vs.values(), key=lambda v: v["start"])
             lines = []
@@ -542,6 +650,56 @@ class _Import:
         return SourceItem(source=source, external_id=external_id, title=title, body_text="\n".join(body),
                           occurred_at=first, mime="text/plain", raw_meta={"day": day, **meta})
 
+    def _extra_items(self) -> Iterator[SourceItem]:
+        if self.reading:
+            red = [0]
+            body = "\n".join(f"- {_red(t, red) or domain(clean_url(u))} ({_red(clean_url(u), red)})"
+                             for _, t, u in self.reading[:MAX_LINES])
+            yield SourceItem(source="takeout_chrome", external_id="chrome/reading-list", title="Chrome reading list",
+                             body_text=body, mime="text/plain",
+                             raw_meta={"product": "Chrome", "entries": len(self.reading), "redactions": red[0]})
+        for lst in self.tasks:
+            red = [0]
+            lines = []
+            for t in lst["tasks"][:MAX_LINES]:
+                title = _red(t.get("title") or "(untitled)", red)
+                bits = [t.get("status") or "", f"due {t['due'][:10]}" if t.get("due") else "",
+                        f"done {t['completed'][:10]}" if t.get("completed") else ""]
+                line = f"- {title}" + (f" [{', '.join(b for b in bits if b)}]" if any(bits) else "")
+                if t.get("notes"):
+                    line += f"\n  {_red(_clean_text(str(t['notes'])), red)}"
+                lines.append(line)
+            yield SourceItem(source="takeout_tasks", external_id=f"tasks/{_slug(lst['id'])}",
+                             title=f"Tasks: {_red(lst['title'], red)}", body_text="\n".join(lines),
+                             occurred_at=_any_ts(lst.get("updated")), mime="text/plain",
+                             raw_meta={"product": "Tasks", "tasks": len(lst["tasks"]), "redactions": red[0]})
+        for c in sorted(self.meet, key=lambda c: c["start"]):
+            red = [0]
+            is_call = "call" in c["kind"]
+            label = "Direct call" if is_call else f"Meeting {c['code']}".strip()
+            who = _red(c["counterparts"].strip("[]"), red)
+            body = f"[{c['start']:%H:%M}] {label}" + (f" with {who}" if who else "")
+            body += f" ({c['duration']})" if c["duration"] and c["duration"] != "0:00:00" else ""
+            yield SourceItem(source="takeout_meet", external_id=f"meet/{_slug(c['id'])}",
+                             title=f"Google Meet {label.lower()}, {c['start']:%Y-%m-%d}", body_text=body,
+                             occurred_at=c["start"], mime="text/plain",
+                             raw_meta={"product": "Google Meet", "event_id": c["event_id"] or None,
+                                       "code": c["code"], "start": c["start"].isoformat(),
+                                       "end": c["end"].isoformat() if c["end"] else None, "redactions": red[0]})
+        for group, g in sorted(self.chat.items()):
+            members = g["members"]
+            for day, msgs in sorted(g["days"].items()):
+                msgs.sort(key=lambda m_: m_[0])
+                red = [0]
+                lines = [f"[{at:%H:%M}] {members.get(em, em)}: {_red(_clean_text(text_), red)}"
+                         for at, em, text_ in msgs[:MAX_LINES]]
+                yield SourceItem(source="takeout_chat", external_id=f"chat/{_slug(group)}/{day}",
+                                 title=f"Google Chat, {day}", body_text="\n".join(lines), occurred_at=msgs[0][0],
+                                 mime="text/plain",
+                                 raw_meta={"product": "Google Chat", "group": group, "day": day,
+                                           "participants": sorted(members), "senders": sorted({m_[1] for m_ in msgs}),
+                                           "turns": len(msgs), "redactions": red[0]})
+
     def _bookmark_item(self) -> Iterator[SourceItem]:
         if not self.bookmarks:
             return
@@ -570,11 +728,22 @@ def parse(paths: list[Path], progress: Callable[[dict], None] | None = None) -> 
             if progress:
                 progress({"file": m.path.rsplit("/", 1)[-1], "files_done": i - 1, "files_total": len(todo)})
             if kind == "activity":
+                if _norm_name(hint or "") == "chrome" and any(c and c[0] == "chrome_history" for _, c in todo):
+                    imp.note("My Activity > Chrome was skipped because Chrome/History.json covers the same visits.")
+                    continue
                 imp.read_activity(m, hint)
             elif kind == "chrome_history":
                 imp.read_chrome(m)
             elif kind == "chrome_bookmarks":
                 imp.read_bookmarks(m)
+            elif kind == "chrome_reading_list":
+                imp.read_reading_list(m)
+            elif kind in ("chat_messages", "chat_group"):
+                imp.read_chat(m, hint, kind)
+            elif kind == "tasks":
+                imp.read_tasks(m)
+            elif kind == "meet":
+                imp.read_meet(m)
             elif kind == "semantic":
                 imp.read_semantic(m)
             elif kind == "timeline":
@@ -585,6 +754,11 @@ def parse(paths: list[Path], progress: Callable[[dict], None] | None = None) -> 
                 imp.read_saved_csv(m, hint or "saved")
             elif kind == "records":
                 imp.note("Records.json (raw location points) was skipped: it is huge and adds little over place visits.")
+        if imp.counts.get("skipped_noise"):
+            imp.note(f"{imp.counts['skipped_noise']} Ads / Google Analytics / Takeout activity entries were skipped.")
+        if not any(c and c[0] in ("timeline", "semantic") for _, c in todo):
+            imp.note("No Timeline / Location History data in this export (Timeline now lives on your phone). "
+                     "Place visits come from Maps (your places) if present.")
         if html:
             imp.note(f"{len(html)} My Activity file(s) are in HTML format and were skipped. Re-export My Activity "
                      "with Multiple formats set to JSON.")
