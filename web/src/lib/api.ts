@@ -129,6 +129,27 @@ export type NodeDetail = GNode & {
   } | null;
 };
 
+export type EntityDetail = {
+  id: number; name: string; key: string; aliases: string[]; anchors: string[]; hidden: boolean;
+  people: { id: number; name: string; items: number }[];
+  groups: { id: number; name: string; why: string | null; days: number | null }[];
+  events: { id: number; name: string; date: string | null; why: string | null }[];
+  items: { id: number; type: string; name: string; why: string | null; quote: string | null; source: string | null;
+    date: string | null; confidence: number | null }[];
+  counts: { people: number; groups: number; events: number; items: number };
+};
+export type Correction = { override_id: number; op: string; id: number };
+
+async function send<T>(method: "POST" | "DELETE", path: string, body?: unknown) {
+  const r = await fetch(new URL(path, API), {
+    method,
+    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`${r.status} ${(await r.json().catch(() => ({}))).detail ?? path}`);
+  return (await r.json()) as T;
+}
+
 async function get<T>(
   path: string,
   params: Record<string, string | number | (string | number)[] | undefined>,
@@ -201,6 +222,12 @@ export const api = {
   explain: (a: number, b: number) => get<Explanation>("/graph/explain", { a, b }),
   timeline: (a: number, b?: number, limit = 50, signal?: AbortSignal) =>
     get<Timeline>("/timeline", { a, b, limit }, signal),
+  entity: (id: number) => get<EntityDetail>(`/graph/entity/${id}`, {}),
+  renameEntity: (id: number, name: string) => send<Correction>("POST", `/graph/entity/${id}/rename`, { name }),
+  hideEntity: (id: number) => send<Correction>("POST", `/graph/entity/${id}/hide`),
+  mergeEntity: (id: number, other: number) => send<Correction>("POST", `/graph/entity/${id}/merge`, { other }),
+  unlinkFromEntity: (id: number, node: number) => send<Correction>("POST", `/graph/entity/${id}/unlink`, { node }),
+  undoCorrection: (overrideId: number) => send<{ undone: number }>("DELETE", `/overrides/${overrideId}`),
   node: (id: number) => get<NodeDetail>(`/graph/node/${id}`, {}),
 };
 
@@ -213,4 +240,5 @@ export const TYPE_COLORS: Record<string, string> = {
   Folder: "#0d9488",
   Event: "#db2777",
   Topic: "#ea580c",
+  Project: "#4f46e5",
 };

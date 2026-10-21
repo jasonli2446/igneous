@@ -1,12 +1,17 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import EntityInspector from "@/components/EntityInspector";
 import EvidenceList from "@/components/EvidenceList";
 import TimelineExplorer from "@/components/TimelineExplorer";
 import { InlineError, Skeleton } from "@/components/ui";
 import { api, NodeDetail, TYPE_COLORS } from "@/lib/api";
 
-type Props = { id: number | null; onExpandAction: (id: number) => void; onCloseAction?: () => void };
+type Props = {
+  id: number | null; onExpandAction: (id: number) => void; onCloseAction?: () => void;
+  // Projects are editable: selecting one of their members, and re-fetching the graph after a correction.
+  onSelectAction?: (id: number) => void; onChangedAction?: (keep: number | null) => void;
+};
 
 const LABELS: Record<string, string> = {
   SENT: "Sent", RECEIVED: "Received", MEMBER_OF: "Organizations", IN_THREAD: "In conversations",
@@ -41,7 +46,7 @@ function InspectorSkeleton() {
   );
 }
 
-export default function Inspector({ id, onExpandAction, onCloseAction }: Props) {
+export default function Inspector({ id, onExpandAction, onCloseAction, onSelectAction, onChangedAction }: Props) {
   const [node, setNode] = useState<NodeDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -59,6 +64,10 @@ export default function Inspector({ id, onExpandAction, onCloseAction }: Props) 
 
   if (error) return <div className="p-4"><InlineError message={error} onRetry={() => setAttempt((a) => a + 1)} /></div>;
   if (!node) return <InspectorSkeleton />;
+  if (node.type === "Project" && onSelectAction) {
+    return <EntityInspector id={node.id} onSelectAction={onSelectAction} onCloseAction={onCloseAction}
+      onChangedAction={onChangedAction ?? (() => {})} />;
+  }
 
   const src = node.source_item;
   const meta = (src?.raw_meta ?? {}) as { from?: { email: string }[]; to?: { email: string }[] };
