@@ -17,7 +17,7 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | maccontac
          mailbox: list[str] = typer.Option(None, help="restrict to these mailboxes; repeatable"),
          limit: int = typer.Option(None, help="stop at the first checkpoint after this many items (resumable)"),
          since_days: int = typer.Option(None, help="first sync only: how far back to go (imessage, gmail, gcal)"),
-         account: str = typer.Option(None, help="google: which connected account (default: the only one)"),
+         account: str = typer.Option(None, help="google: which connected account (default: every connected one)"),
          all_mail: bool = typer.Option(False, help="gmail: include Promotions/Social/Forums (skipped by default)")):
     """Pull items into source_items; fs deliberately performs a fresh complete scan."""
     from igneous.connectors.base import run_sync
@@ -48,25 +48,19 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | maccontac
     elif connector in ("gmail", "gcal", "gcontacts", "drive"):
         from igneous.connectors import google_auth
 
+        # No --account: sync every connected Google account in turn (each keeps its own cursor).
         with SessionLocal() as s:
-            account, creds = google_auth.load(s, account)
-        if connector == "gmail":
-            from igneous.connectors.gmail import GmailConnector
-
-            conn = GmailConnector(creds, account, since_days=since_days or 90,
-                                  query=None if all_mail else GmailConnector.DEFAULT_QUERY)
-        elif connector == "drive":
-            from igneous.connectors.drive import DriveConnector
-
-            conn = DriveConnector(creds, account)
-        elif connector == "gcal":
-            from igneous.connectors.gcal import CalendarConnector
-
-            conn = CalendarConnector(creds, account, since_days=since_days or 365)
-        else:
-            from igneous.connectors.gcal import ContactsConnector
-
-            conn = ContactsConnector(creds, account)
+            targets = [account] if account else google_auth.accounts(s)
+        if not targets:
+            raise typer.BadParameter("no Google account connected: run `igneous connect google`")
+        for acct in targets:
+            with SessionLocal() as s:
+                acct, creds = google_auth.load(s, acct)
+            conn = _google_connector(connector, creds, acct, since_days, all_mail)
+            t = time.time()
+            with SessionLocal() as s:
+                print(acct, run_sync(s, conn, account=acct, limit=limit), f"in {time.time() - t:.1f}s", flush=True)
+        return
     else:
         raise typer.BadParameter("unknown connector")
     t = time.time()
@@ -74,10 +68,30 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | maccontac
         print(run_sync(s, conn, account=account or "default", limit=limit), f"in {time.time() - t:.1f}s")
 
 
+def _google_connector(connector: str, creds, account: str, since_days: int | None, all_mail: bool):
+    if connector == "gmail":
+        from igneous.connectors.gmail import GmailConnector
+
+        return GmailConnector(creds, account, since_days=since_days or 90,
+                              query=None if all_mail else GmailConnector.DEFAULT_QUERY)
+    if connector == "drive":
+        from igneous.connectors.drive import DriveConnector
+
+        return DriveConnector(creds, account)
+    if connector == "gcal":
+        from igneous.connectors.gcal import CalendarConnector
+
+        return CalendarConnector(creds, account, since_days=since_days or 365)
+    from igneous.connectors.gcal import ContactsConnector
+
+    return ContactsConnector(creds, account)
+
+
 @app.command()
 def connect(provider: str = typer.Argument(..., help="google"),
             browser: bool = typer.Option(True, help="open the browser; --no-browser just prints the URL")):
-    """Sign in once (opens a browser). The token is stored encrypted; Testing-mode tokens last 7 days."""
+    """Sign in once per Google account (opens a browser; run again to add another account). The token is stored
+    encrypted; Testing-mode tokens last 7 days."""
     if provider != "google":
         raise typer.BadParameter("only google")
     from igneous.connectors import google_auth
