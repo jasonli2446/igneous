@@ -11,7 +11,7 @@ from igneous.db import get_session
 from igneous.graph.traversal import GraphFilters, explain, neighborhood, network, people
 from igneous.llm import LLMDisabled
 from igneous.rag import qa
-from igneous.rag.search import Filters, hybrid
+from igneous.rag.search import Filters, experts, hybrid
 from igneous.sync_status import sync_status
 
 app = FastAPI(title="Igneous", version="0.1.0")
@@ -51,6 +51,17 @@ def search(q: str, source: str | None = None, person: str | None = None,
            k: int = Query(10, le=50), mode: str = Query("hybrid", pattern="^(hybrid|lexical|dense)$"),
            s: Session = Depends(get_session)):
     return {"hits": hybrid(s, q, Filters(source, person, since, until), k=k, mode=mode)}
+
+
+@app.get("/experts")
+def expert_search(q: str = Query(..., min_length=1), k: int = Query(10, ge=1, le=20),
+                  evidence_limit: int = Query(3, ge=1, le=5),
+                  mode: str = Query("hybrid", pattern="^(hybrid|lexical|dense)$"),
+                  s: Session = Depends(get_session)):
+    """People involved in query-relevant items, with at most five bounded evidence excerpts each."""
+    if not q.strip():
+        raise HTTPException(422, "q must contain non-whitespace characters")
+    return {"experts": experts(s, q, k=k, evidence_limit=evidence_limit, mode=mode)}
 
 
 class AskBody(BaseModel):

@@ -74,6 +74,73 @@ def test_rrf_rewards_agreement():
     assert {c for c, _ in rrf([1], [2])} == {1, 2}
 
 
+def test_experts_uses_retrieved_items_and_returns_bounded_evidence(monkeypatch):
+    from igneous.rag import search
+
+    hits = [
+        {"source_item_id": 10, "score": 0.03, "text": "a" * 500},
+        {"source_item_id": 10, "score": 0.02, "text": "older duplicate"},
+        {"source_item_id": 20, "score": 0.01, "text": "event discussion"},
+    ]
+    monkeypatch.setattr(search, "hybrid", lambda *args, **kwargs: hits)
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {"person_id": 7, "name": "Pat Smith", "score": 0.04, "evidence_count": 2,
+                 "source_item_id": 10, "involvement": ["authored", "mentioned"], "source": "gmail",
+                 "external_id": "m-10", "title": "Plan", "occurred_at": None},
+                {"person_id": 7, "name": "Pat Smith", "score": 0.04, "evidence_count": 2,
+                 "source_item_id": 20, "involvement": ["attended"], "source": "gcal",
+                 "external_id": "e-20", "title": "Review", "occurred_at": None},
+            ]
+
+    class Session:
+        def __init__(self):
+            self.params = None
+
+        def execute(self, _statement, params):
+            self.params = params
+            return Result()
+
+    session = Session()
+    assert search.experts(session, "topic", k=5, evidence_limit=2) == [{
+        "id": 7, "name": "Pat Smith", "score": 0.04, "evidence_count": 2,
+        "evidence": [
+            {"source_item_id": 10, "source": "gmail", "external_id": "m-10", "title": "Plan",
+             "occurred_at": None, "involvement": ["authored", "mentioned"], "excerpt": "a" * 400},
+            {"source_item_id": 20, "source": "gcal", "external_id": "e-20", "title": "Review",
+             "occurred_at": None, "involvement": ["attended"], "excerpt": "event discussion"},
+        ],
+    }]
+    assert session.params["item_ids"] == [10, 20]
+    assert session.params["relevance"] == [0.03, 0.01]
+    assert session.params["k"] == 5 and session.params["evidence_limit"] == 2
+
+
+def test_experts_endpoint_validates_query_and_passes_bounded_parameters(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from igneous import main
+    from igneous.db import get_session
+
+    calls = []
+    monkeypatch.setattr(main, "experts", lambda session, q, **kwargs: calls.append((session, q, kwargs)) or [])
+    marker = object()
+    main.app.dependency_overrides[get_session] = lambda: marker
+    try:
+        client = TestClient(main.app)
+        assert client.get("/experts?q=%20%20").status_code == 422
+        response = client.get("/experts?q=budget&k=2&evidence_limit=1&mode=lexical")
+    finally:
+        main.app.dependency_overrides.clear()
+    assert response.status_code == 200 and response.json() == {"experts": []}
+    assert calls == [(marker, "budget", {"k": 2, "evidence_limit": 1, "mode": "lexical"})]
+
+
 def test_graph_filters_scope_discovery_and_final_serialization():
     """A source/date request must not discover or serialize a non-matching edge."""
     from igneous.graph.traversal import GraphFilters, neighborhood

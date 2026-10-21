@@ -22,6 +22,24 @@ export type Hit = {
   matched: string[];
 };
 
+export type ExpertEvidence = {
+  source_item_id: number;
+  source: string;
+  external_id: string;
+  title: string | null;
+  occurred_at: string | null;
+  involvement: ("authored" | "mentioned" | "attended")[];
+  excerpt: string;
+};
+
+export type Expert = {
+  id: number;
+  name: string;
+  score: number;
+  evidence_count: number;
+  evidence: ExpertEvidence[];
+};
+
 export type AskResult = {
   answerable: boolean;
   answer: string;
@@ -89,6 +107,7 @@ export const api = {
   stats: () => get<{ source_items: Record<string, number>; nodes: Record<string, number>; edges: Record<string, number> }>("/stats", {}),
   search: (q: string, opts: { source?: string; person?: string; from?: string; to?: string; mode?: string } = {}) =>
     get<{ hits: Hit[] }>("/search", { q, ...opts }),
+  experts: (q: string, opts: { mode?: string } = {}) => get<{ experts: Expert[] }>("/experts", { q, ...opts }),
   findNodes: (q: string, type?: string) => get<{ nodes: GNode[] }>("/graph/search", { q, type }),
   subgraph: (seed: number[], hops = 1, limit = 300, filters: GraphFilters = {}, signal?: AbortSignal) =>
     get<Subgraph>("/graph/subgraph", { seed, hops, limit, ...graphParams(filters) }, signal),
