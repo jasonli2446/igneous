@@ -25,6 +25,60 @@ type Props = {
 };
 
 const LAYOUT_DURATION_MS = 750;
+const LOD_ENTER_RATIO = 1.65;
+const LOD_EXIT_RATIO = 1.35;
+const LOD_PREFIX = "community:";
+
+type CommunityAssignment = Record<string, number>;
+
+function syncLodNodes(g: Graph, seed: string | null, assignments: CommunityAssignment, colors: Map<number, string>) {
+  for (const node of [...g.nodes()]) if (node.startsWith(LOD_PREFIX)) g.dropNode(node);
+
+  const members = new Map<number, string[]>();
+  for (const [node, community] of Object.entries(assignments)) {
+    const attributes = g.getNodeAttributes(node);
+    if (HUB_TYPES.has(attributes.nodeType as string)) continue;
+    members.set(community, [...(members.get(community) ?? []), node]);
+  }
+  const nodeCommunity = new Map(Object.entries(assignments));
+  const weightByPair = new Map<string, number>();
+  for (const edge of g.edges()) {
+    const [source, target] = g.extremities(edge);
+    if (source.startsWith(LOD_PREFIX) || target.startsWith(LOD_PREFIX)) continue;
+    const sourceCommunity = nodeCommunity.get(source);
+    const targetCommunity = nodeCommunity.get(target);
+    if (source === seed && targetCommunity !== undefined) {
+      const key = `${source}|${LOD_PREFIX}${targetCommunity}`;
+      weightByPair.set(key, (weightByPair.get(key) ?? 0) + (g.getEdgeAttribute(edge, "weight") as number));
+    } else if (target === seed && sourceCommunity !== undefined) {
+      const key = `${target}|${LOD_PREFIX}${sourceCommunity}`;
+      weightByPair.set(key, (weightByPair.get(key) ?? 0) + (g.getEdgeAttribute(edge, "weight") as number));
+    } else if (sourceCommunity !== undefined && targetCommunity !== undefined && sourceCommunity !== targetCommunity) {
+      const [first, second] = sourceCommunity < targetCommunity ? [sourceCommunity, targetCommunity] : [targetCommunity, sourceCommunity];
+      const key = `${LOD_PREFIX}${first}|${LOD_PREFIX}${second}`;
+      weightByPair.set(key, (weightByPair.get(key) ?? 0) + (g.getEdgeAttribute(edge, "weight") as number));
+    }
+  }
+
+  for (const [community, people] of members) {
+    if (people.length < 2) continue;
+    const center = people.reduce((sum, node) => {
+      const { x, y } = g.getNodeAttributes(node);
+      return { x: sum.x + x, y: sum.y + y };
+    }, { x: 0, y: 0 });
+    const id = `${LOD_PREFIX}${community}`;
+    g.addNode(id, {
+      x: center.x / people.length, y: center.y / people.length,
+      label: `${people.length} people`, nodeType: "Community", lod: true,
+      color: colors.get(community) ?? "#94a3b8", size: 8 + Math.sqrt(people.length) * 3,
+    });
+  }
+  for (const [key, weight] of weightByPair) {
+    const [source, target] = key.split("|");
+    if (g.hasNode(source) && g.hasNode(target))
+      g.addEdgeWithKey(`lod:${key}`, source, target, { lod: true, weight, size: 0.8 + Math.min(2.5, Math.log2(weight + 1) * 0.5), color: "#94a3b8" });
+  }
+}
 
 function hash(value: string) {
   let result = 2166136261;
@@ -75,7 +129,7 @@ export default function GraphCanvas({ data, hiddenTypes, selected, expansionPare
   // Latest props for the reducers, which Sigma calls outside React's render cycle.
   // Rendering every label makes dense people views unreadable; retain labels for the most
   // connected visible nodes and reveal the rest on hover or selection.
-  const view = useRef({ hiddenTypes, selected, hovered: null as string | null });
+  const view = useRef({ hiddenTypes, selected, hovered: null as string | null, lod: false });
   view.current.hiddenTypes = hiddenTypes;
   view.current.selected = selected;
 
@@ -84,11 +138,11 @@ export default function GraphCanvas({ data, hiddenTypes, selected, expansionPare
       settings: { renderEdgeLabels: false, labelRenderedSizeThreshold: 0, hideEdgesOnMove: true,
         labelDensity: 1, labelGridCellSize: 120 },
       nodeReducer: (node, data, attrs) => {
-        const { hiddenTypes, selected, hovered } = view.current;
+        const { hiddenTypes, selected, hovered, lod } = view.current;
         const out: Partial<typeof data> = {};
-        if (hiddenTypes.has(attrs.nodeType as string)) out.visibility = "hidden";
-        if (!attrs.showLabel && node !== hovered && node !== String(selected)) out.label = null;
-        if (selected !== null) {
+        if (lod ? !attrs.lod && !attrs.seed : attrs.lod || hiddenTypes.has(attrs.nodeType as string)) out.visibility = "hidden";
+        if (!attrs.showLabel && !attrs.lod && node !== hovered && node !== String(selected)) out.label = null;
+        if (selected !== null && !lod) {
           const g = graph.current;
           const sel = String(selected);
           if (node === sel || (g.hasNode(sel) && g.areNeighbors(node, sel))) out.label = attrs.label as string;
@@ -101,13 +155,33 @@ export default function GraphCanvas({ data, hiddenTypes, selected, expansionPare
         return out;
       },
       edgeReducer: (edge, data, attrs) => {
-        const { selected } = view.current;
+        const { selected, lod } = view.current;
+        if (lod) return attrs.lod ? {} : { hidden: true };
+        if (attrs.lod) return { hidden: true };
         if (selected === null) return attrs.spoke ? { color: "#e8ecf2", size: 0.5 } : {};
         const touches = graph.current.extremities(edge).includes(String(selected));
         return touches ? { color: "#475569", size: 1.5 } : { color: "#f1f5f9" };
       },
     });
-    s.on("clickNode", ({ node }) => onSelect(Number(node)));
+    const updateLod = () => {
+      const ratio = s.getCamera().getState().ratio;
+      const hasGroups = graph.current.someNode((_, attributes) => attributes.lod === true);
+      const next = hasGroups && (view.current.lod ? ratio > LOD_EXIT_RATIO : ratio >= LOD_ENTER_RATIO);
+      if (next !== view.current.lod) {
+        view.current.lod = next;
+        s.refresh({ skipIndexation: true });
+      }
+    };
+    s.getCamera().on("updated", updateLod);
+    s.on("clickNode", ({ node }) => {
+      if (node.startsWith(LOD_PREFIX)) {
+        view.current.lod = false;
+        void s.getCamera().animate({ ratio: LOD_EXIT_RATIO * 0.9 }, { duration: 220 });
+        s.refresh({ skipIndexation: true });
+        return;
+      }
+      onSelect(Number(node));
+    });
     s.on("enterNode", ({ node }) => {
       view.current.hovered = node;
       s.refresh({ skipIndexation: true });
@@ -122,7 +196,10 @@ export default function GraphCanvas({ data, hiddenTypes, selected, expansionPare
     });
     s.on("clickStage", () => onSelect(null));
     sigma.current = s;
-    return () => s.kill();
+    return () => {
+      s.getCamera().off("updated", updateLod);
+      s.kill();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -135,6 +212,9 @@ export default function GraphCanvas({ data, hiddenTypes, selected, expansionPare
   // Merge new data in place so existing nodes keep their positions on expand.
   useEffect(() => {
     const g = graph.current;
+    if (layoutStopTimer.current !== null) clearTimeout(layoutStopTimer.current);
+    for (const node of [...g.nodes()]) if (node.startsWith(LOD_PREFIX)) g.dropNode(node);
+    view.current.lod = false;
     const scale = graphScale(g);
     const seed = data.nodes[0] ? String(data.nodes[0].id) : null;
     // Importance to the seed: messages exchanged with it (people) or members (hubs); falls back to degree.
@@ -160,6 +240,7 @@ export default function GraphCanvas({ data, hiddenTypes, selected, expansionPare
       const attrs = {
         label: n.name,
         nodeType: n.type,
+        seed: id === seed,
         showLabel: id === seed || labeled.has(id),
         color: TYPE_COLORS[n.type] ?? "#666",
         size: id === seed ? 16 : hub ? 3 + 5 * Math.sqrt(score(n) / maxScore) : 4 + 11 * Math.sqrt(score(n) / maxScore),
@@ -181,27 +262,30 @@ export default function GraphCanvas({ data, hiddenTypes, selected, expansionPare
           color: e.type === "PART_OF" ? "#d4d4d8" : "#94a3b8",
         });
     }
+    const assignments: CommunityAssignment = {};
+    const communityColors = new Map<number, string>();
     if (g.order > 2) {
       // Communities over the non-seed graph (the seed touches everyone and would merge them all).
       const sub = g.copy();
       if (seed && sub.hasNode(seed)) sub.dropNode(seed);
       if (sub.size > 0) {
-        const comm = louvain(sub, { getEdgeWeight: "weight", resolution: 1.1 });
+        Object.assign(assignments, louvain(sub, { getEdgeWeight: "weight", resolution: 1.1 }));
         const sizes = new Map<number, number>();
-        for (const c of Object.values(comm)) sizes.set(c, (sizes.get(c) ?? 0) + 1);
+        for (const c of Object.values(assignments)) sizes.set(c, (sizes.get(c) ?? 0) + 1);
         const rank = [...sizes.entries()].sort((a, b) => b[1] - a[1]).map(([c]) => c);
         g.forEachNode((node, a) => {
           if (node === seed) g.setNodeAttribute(node, "color", "#18181b");
           else if (HUB_TYPES.has(a.nodeType as string)) g.setNodeAttribute(node, "color", "#a1a1aa");
-          else if (node in comm) {
-            const r = rank.indexOf(comm[node]);
-            g.setNodeAttribute(node, "color", sizes.get(comm[node])! > 1 ? COMMUNITY[r % COMMUNITY.length] : "#94a3b8");
+          else if (node in assignments) {
+            const r = rank.indexOf(assignments[node]);
+            const color = sizes.get(assignments[node])! > 1 ? COMMUNITY[r % COMMUNITY.length] : "#94a3b8";
+            communityColors.set(assignments[node], color);
+            g.setNodeAttribute(node, "color", color);
           }
         });
       }
     }
     if (addedNodes > 0 && g.order > 1) {
-      if (layoutStopTimer.current !== null) clearTimeout(layoutStopTimer.current);
       layout.current?.kill();
       try {
         layout.current = new FA2Layout(g, {
@@ -218,13 +302,24 @@ export default function GraphCanvas({ data, hiddenTypes, selected, expansionPare
         layoutStopTimer.current = setTimeout(() => {
           layout.current?.stop();
           layoutStopTimer.current = null;
+          syncLodNodes(g, seed, assignments, communityColors);
+          const currentSigma = sigma.current;
+          if (currentSigma && currentSigma.getCamera().getState().ratio >= LOD_ENTER_RATIO
+            && g.someNode((_, attributes) => attributes.lod === true)) view.current.lod = true;
+          currentSigma?.refresh();
         }, LAYOUT_DURATION_MS);
       } catch (error) {
         layout.current = null;
         console.warn("Unable to start graph layout worker", error);
+        syncLodNodes(g, seed, assignments, communityColors);
       }
+    } else {
+      syncLodNodes(g, seed, assignments, communityColors);
     }
-    sigma.current?.refresh();
+    const currentSigma = sigma.current;
+    if (currentSigma && currentSigma.getCamera().getState().ratio >= LOD_ENTER_RATIO
+      && g.someNode((_, attributes) => attributes.lod === true)) view.current.lod = true;
+    currentSigma?.refresh();
   }, [data, expansionParent]);
 
   useEffect(() => {
