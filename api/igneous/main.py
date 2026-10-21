@@ -17,6 +17,7 @@ from igneous.connectors.ai_exports import ExportConnector, ExportError, export_i
 from igneous.connectors.base import run_sync
 from igneous.db import SessionLocal, get_session
 from igneous.graph.entity_api import router as entity_router
+from igneous.graph.history import commitments, decisions, relationship_history
 from igneous.graph.traversal import GraphFilters, expand, explain, neighborhood, network, people, view
 from igneous.llm import LLMDisabled
 from igneous.rag import qa
@@ -245,6 +246,39 @@ def graph_version(s: Session = Depends(get_session)):
     """Cheap change token for clients to refresh an open graph without polling its data."""
     from igneous.graph import dirty
     return {"version": str(dirty.version(s))}
+
+
+@app.get("/commitments")
+def list_commitments(status: str = Query("open", pattern="^(open|resolved|all)$"),
+                     limit: int = Query(50, ge=1, le=200), s: Session = Depends(get_session)):
+    """Model-derived commitments with verified, source-local citations.
+
+    This never presents a derived promise as a user correction or manually entered
+    fact: every returned record has ``derived: true`` and ``origin: model``.
+    """
+    return {"commitments": commitments(s, status=status, limit=limit)}
+
+
+@app.get("/decisions")
+def list_decisions(limit: int = Query(50, ge=1, le=200), s: Session = Depends(get_session)):
+    """Model-derived decisions with verified source-local citations only."""
+    return {"decisions": decisions(s, limit=limit)}
+
+
+@app.get("/relationships/history")
+def past_relationships(person: int = Query(..., ge=1), before: datetime | None = None,
+                       days: int = Query(90, ge=1, le=730), limit: int = Query(20, ge=1, le=100),
+                       s: Session = Depends(get_session)):
+    """Who this person talked to in a bounded historical window, with item citations only."""
+    try:
+        # Validate upfront so unknown IDs don't misleadingly look like a quiet relationship window.
+        from igneous.timeline import _entity
+        entity = _entity(s, person)
+    except EntityNotFoundError as e:
+        raise HTTPException(404, f"Entity {e.args[0]} not found") from e
+    if entity["type"] != "Person":
+        raise HTTPException(422, "person must identify a Person node")
+    return {"relationships": relationship_history(s, person, before=before, days=days, limit=limit)}
 
 
 @app.get("/graph/search")

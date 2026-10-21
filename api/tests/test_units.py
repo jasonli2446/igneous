@@ -1537,6 +1537,69 @@ def test_apple_notes_gzip_protobuf_body_and_locked_rows(tmp_path):
     assert next(event for event in events if isinstance(event, CompletedScan)).external_ids == frozenset({"note-1", "3"})
 
 
+def test_relationship_claims_require_verifiable_quotes_and_stay_derived():
+    from igneous.graph.history import store_claims
+
+    class Result:
+        def scalar_one(self):
+            return 9
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, statement, params):
+            self.calls.append((str(statement), params))
+            return Result()
+
+    body = "I will send the draft by Friday. We decided to use Postgres."
+    item = type("Item", (), {"id": 3, "node_id": 4, "occurred_at": datetime(2026, 1, 1)})()
+    session = Session()
+    stats = store_claims(session, item, body, {
+        "commitments": [{"who": "sender", "what": "send the draft", "by_when": "Friday",
+                           "quote": "I will send the draft by Friday."}],
+        "decisions": [{"what": "use Postgres", "quote": "We decided to use Postgres."},
+                      {"what": "unsupported", "quote": "not in body"}],
+    }, "test-model")
+    assert stats == {"commitments": 1, "decisions": 1, "dropped_claims": 1}
+    node_sql, node_params = session.calls[0]
+    assert "'derived'" not in node_sql and node_params["props"].find('"derived": true') >= 0
+    edge_sql, edge_params = session.calls[1]
+    assert "HAS_COMMITMENT" not in edge_sql and edge_params["type"] == "HAS_COMMITMENT"
+    assert body[edge_params["start"]:edge_params["end"]] == "I will send the draft by Friday."
+
+
+def test_relationship_history_is_bounded_and_citation_only():
+    from datetime import UTC
+
+    from igneous.graph.history import relationship_history
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def __iter__(self):
+            return iter([{"id": 2, "name": "Pat", "interactions": 3, "evidence_ids": [10, 11, 12]}])
+
+    class Session:
+        def __init__(self):
+            self.params = None
+            self.sql = None
+
+        def execute(self, statement, params):
+            self.sql, self.params = str(statement), params
+            return Result()
+
+    session = Session()
+    before = datetime(2026, 2, 1, tzinfo=UTC)
+    result = relationship_history(session, 1, before=before, days=30, limit=2)
+    assert result[0]["person"] == {"id": 2, "name": "Pat"}
+    assert result[0]["evidence_source_item_ids"] == [10, 11, 12]
+    assert result[0]["window"] == {"from": datetime(2026, 1, 2, tzinfo=UTC), "to": before}
+    assert session.params["person"] == 1 and session.params["limit"] == 2
+    assert "si.body_text" not in session.sql and "si.title" not in session.sql
+
+
 def test_spine_repo_evidence_uses_shared_repository_anchor():
     from igneous.graph.spine import build_file
 
