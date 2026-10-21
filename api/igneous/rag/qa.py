@@ -2,16 +2,19 @@
 
 The baseline for the ablation (criterion 4) is the same pipeline with expand=False and mode="dense".
 """
+import logging
 import time
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous import llm
+from igneous.rag.rerank import rerank
 from igneous.rag.search import Filters, hybrid
 
-CONTEXT_CHUNKS = 12
+CONTEXT_CHUNKS = 8
 EXPAND_PER_HIT = 2
+log = logging.getLogger(__name__)
 
 SYSTEM = """You answer questions about a person's own email, files, and calendar, using only the evidence
 given. Each evidence item has an id like [c123].
@@ -83,22 +86,6 @@ def expand(s: Session, hits: list[dict], per_hit: int = EXPAND_PER_HIT) -> list[
     return out
 
 
-def rerank(s: Session, question: str, items: list[dict], keep: int) -> list[dict]:
-    """Order graph-expanded chunks by cosine similarity to the question; expansion is recall-oriented, so
-    most of what it pulls in is off-topic. (Cheap stand-in for the cross-encoder in #rerank.)"""
-    if not items:
-        return []
-    from igneous.rag.embed import embed_query
-
-    sims = dict(s.execute(text("""
-        SELECT id, 1 - (embedding <=> CAST(:v AS vector)) FROM chunks
-        WHERE id = ANY(:ids) AND embedding IS NOT NULL
-    """), {"v": str(embed_query(question)), "ids": [i["chunk_id"] for i in items]}).all())
-    for i in items:
-        i["score"] = round(float(sims.get(i["chunk_id"], 0.0)), 4)
-    return sorted(items, key=lambda i: i["score"], reverse=True)[:keep]
-
-
 def _evidence_block(items: list[dict]) -> str:
     parts = []
     for it in items:
@@ -110,10 +97,14 @@ def _evidence_block(items: list[dict]) -> str:
 def answer(s: Session, question: str, f: Filters | None = None, use_graph: bool = True,
            mode: str = "hybrid") -> dict:
     t0 = time.time()
-    hits = hybrid(s, question, f, k=8, mode=mode)
-    extra = rerank(s, question, expand(s, hits), keep=CONTEXT_CHUNKS - len(hits)) if use_graph else []
-    context = hits + extra
+    hits = hybrid(s, question, f, k=CONTEXT_CHUNKS, mode=mode)
+    candidates = hits + expand(s, hits) if use_graph else hits
+    t_rerank = time.time()
+    context = rerank(question, candidates, keep=CONTEXT_CHUNKS) if use_graph else candidates
+    rerank_s = time.time() - t_rerank
     t_retrieve = time.time() - t0
+    log.info("Q&A retrieval completed in %.3fs (rerank %.3fs; %d candidates -> %d evidence)",
+             t_retrieve, rerank_s, len(candidates), len(context))
     if not context:
         return {"answerable": False, "answer": "No matching evidence.", "citations": [], "evidence": [],
                 "timing": {"retrieve_s": round(t_retrieve, 2)}}

@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     # Fixed by the schema (see docs/decisions/0001-embeddings.md); changing it needs a migration.
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_dim: int = 384
+    # Cross-encoder runs only in Q&A after graph expansion. It never blocks search if unavailable.
+    reranker_enabled: bool = True
+    reranker_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
+    reranker_pool_size: int = 32
     # Kill switch for every outbound model call (CO-1). Search and the graph still work without it.
     llm_enabled: bool = True
     llm_model: str = "us.anthropic.claude-sonnet-5-5"

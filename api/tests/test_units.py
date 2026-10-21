@@ -285,6 +285,49 @@ def test_parse_corrupt_office_file_is_nonfatal():
 
     parsed = parse_document(b"not a document", "broken.docx")
     assert parsed.status == "corrupt" and parsed.parser == "docx" and parsed.text == "" and parsed.error
+def test_cross_encoder_reranks_full_pool_then_limits(monkeypatch):
+    from igneous.rag import rerank
+
+    class Encoder:
+        def rerank(self, question, documents):
+            assert question == "Which item is relevant?"
+            assert documents == ["first", "second", "third"]
+            return [0.1, 0.2, 0.9]
+
+    monkeypatch.setattr(rerank, "_model", lambda: Encoder())
+    items = [{"text": "first", "score": 1.0}, {"text": "second", "score": 0.5}, {"text": "third"}]
+    assert rerank.rerank("Which item is relevant?", items, keep=2) == [
+        {"text": "third", "rerank_score": 0.9},
+        {"text": "second", "score": 0.5, "rerank_score": 0.2},
+    ]
+
+
+def test_cross_encoder_disabled_preserves_retrieval_order(monkeypatch):
+    from igneous.rag import rerank
+
+    monkeypatch.setattr(rerank.settings, "reranker_enabled", False)
+    monkeypatch.setattr(rerank, "_model", lambda: (_ for _ in ()).throw(AssertionError("must not load")))
+    items = [{"text": "first"}, {"text": "second"}]
+    assert rerank.rerank("question", items, keep=1) == [{"text": "first"}]
+
+
+def test_cross_encoder_failure_preserves_retrieval_order(monkeypatch, caplog):
+    from igneous.rag import rerank
+
+    attempts = 0
+
+    def unavailable():
+        nonlocal attempts
+        attempts += 1
+        raise OSError("model cache is offline")
+
+    monkeypatch.setattr(rerank, "_model", unavailable)
+    monkeypatch.setattr(rerank, "_load_failure", None)
+    items = [{"text": "first"}, {"text": "second"}]
+    assert rerank.rerank("question", items, keep=1) == [{"text": "first"}]
+    assert rerank.rerank("question", items, keep=1) == [{"text": "first"}]
+    assert attempts == 1
+    assert "using retrieval order" in caplog.text
 
 
 def test_gmail_backfill_resumes_mid_page(monkeypatch):

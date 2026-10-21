@@ -40,7 +40,7 @@ processes what changed.
 |---|---|
 | `api/igneous/connectors/` | `base.py` connector contract + resumable sync runner; `email_maildir.py` Enron importer |
 | `api/igneous/graph/` | `spine.py` deterministic graph (stage one); `extract.py` LLM mentions/topics with span provenance (stage two); `resolve.py` entity resolution; `traversal.py` k-hop + people view |
-| `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `qa.py` graph-augmented answers with citations |
+| `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
 | `api/igneous/llm.py` | the only place model calls happen |
 | `api/eval/` | gold questions, ER labels, harnesses, results (see `api/eval/README.md`) |
 | `api/igneous/pipeline.py` | per-stage watermarks; every stage is incremental and safe to re-run |
@@ -76,7 +76,11 @@ CO-5): use the Enron DB for anything shared.
 
 Q&A uses Claude Sonnet 5.5 on Amazon Bedrock. Set `AWS_BEARER_TOKEN_BEDROCK` and `AWS_REGION` (e.g. `us-east-1`);
 everything goes through `api/igneous/llm.py`. `IGNEOUS_LLM_ENABLED=false` turns off all model calls (search and
-the graph keep working; `/ask` returns 503).
+the graph keep working; `/ask` returns 503). Q&A also uses FastEmbed's local
+`Xenova/ms-marco-MiniLM-L-6-v2` cross-encoder to rerank the graph-expanded candidate pool down to the top
+8 evidence chunks. Set `IGNEOUS_RERANKER_ENABLED=false` to preserve graph retrieval order, or adjust the
+bounded input with `IGNEOUS_RERANKER_POOL_SIZE` (32 by default). If its model files cannot load, Q&A logs a
+warning and safely preserves that order instead.
 
 ## MCP server (use the graph from Claude Code, Claude Desktop, Cursor)
 
