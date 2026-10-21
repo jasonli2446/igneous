@@ -247,6 +247,9 @@ def explain(s: Session, a: int, b: int, limit: int = 8) -> dict:
             "messages": total, "conversations": out, "events": [dict(e) for e in events]}
 
 
+PHONE = re.compile(r"\+?\d{10,15}")
+
+
 def handle_names(s: Session) -> dict[str, str]:
     """Phone number / address -> contact name, for every Person a contact card has named."""
     rows = s.execute(text("""
@@ -254,6 +257,8 @@ def handle_names(s: Session) -> dict[str, str]:
     """)).all()
     out = {}
     for key, name in rows:
+        if not name or PHONE.fullmatch(name.strip()):
+            continue  # a card with only a number on it names nothing
         out[key] = name
         digits = re.sub(r"\D", "", key)
         if len(digits) >= 10:
@@ -261,14 +266,18 @@ def handle_names(s: Session) -> dict[str, str]:
     return out
 
 
-PHONE = re.compile(r"\+?\d{10,15}")
 
 
-def name_handles(t: str | None, named: dict[str, str]) -> str | None:
-    """'[14:39] +16174075277: Yes' -> '[14:39] Sam Lee: Yes' where the number is a saved contact."""
+def name_handles(t: str | None, named: dict[str, str], mask: bool = False) -> str | None:
+    """'[14:39] +16174075277: Yes' -> '[14:39] Sam Lee: Yes' where the number is a saved contact. With `mask`,
+    a number with no contact becomes '···5277' (used for labels, where a wall of digits is unreadable)."""
     if not t:
         return t
-    return PHONE.sub(lambda m: named.get(m.group(), named.get(re.sub(r"\D", "", m.group())[-10:], m.group())), t)
+
+    def sub(m):
+        hit = named.get(m.group(), named.get(re.sub(r"\D", "", m.group())[-10:]))
+        return hit or (f"···{m.group()[-4:]}" if mask else m.group())
+    return PHONE.sub(sub, t)
 
 
 def pretty_thread(name: str | None, named: dict[str, str]) -> str | None:

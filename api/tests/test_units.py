@@ -1315,3 +1315,11 @@ def test_export_rejects_unknown_and_html_uploads():
     for raw in (b'{"a": 1}', b"<html></html>", b"[]"):
         with pytest.raises(ExportError):
             parse_export(io.BytesIO(raw))
+
+
+def test_unknown_numbers_are_masked_in_labels_only():
+    from igneous.graph.traversal import name_handles
+
+    named = {"+16145551234": "Sam Lee"}
+    assert name_handles("+16145551234, +19995550000", named, mask=True) == "Sam Lee, ···0000"
+    assert name_handles("call +19995550000", named) == "call +19995550000"
