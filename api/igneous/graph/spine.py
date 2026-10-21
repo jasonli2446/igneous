@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.connectors.mac_contacts import norm_phone
+from igneous.graph import dirty
 from igneous.pipeline import advance, watermark
 
 STAGE = "spine"
@@ -108,6 +109,7 @@ class Builder:
     def __init__(self, s: Session):
         self.s = s
         self.cache: dict[tuple[str, str], int] = {}
+        self.touched: set[int] = set()
 
     def node(self, type_: str, key: str, name: str, props: dict | None = None, sid: int | None = None) -> int:
         k = (type_, key)
@@ -115,6 +117,7 @@ class Builder:
             self.cache[k] = self.s.execute(UPSERT_NODE, {
                 "type": type_, "key": key, "name": name or key,
                 "props": json.dumps(props or {}), "sid": sid}).scalar_one()
+        self.touched.add(self.cache[k])
         return self.cache[k]
 
     def edge(self, src: int, dst: int, type_: str, at=None, sid: int | None = None):
@@ -391,6 +394,7 @@ def run(s: Session) -> int:
     """), {"since": since}).all()
     b = Builder(s)
     for i, item in enumerate(rows, 1):
+        b.touched.clear()
         if item.source in ("email", "gmail"):
             build_email(b, item)
         elif item.source == "imessage":
@@ -405,6 +409,7 @@ def run(s: Session) -> int:
             build_contact(b, item)
         elif item.source in ("fs", "drive", "notes"):
             build_file(b, item)
+        dirty.mark(s, b.touched, f"source item {item.id} changed")
         if i % BATCH == 0:
             advance(s, STAGE, item.updated_at)
             s.commit()

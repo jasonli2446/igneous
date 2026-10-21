@@ -28,7 +28,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.config import settings
-from igneous.graph import overrides
+from igneous.graph import dirty, overrides
 
 EXTRACTOR = "entities"
 VERSION = "1"
@@ -234,6 +234,10 @@ def _edge(s: Session, src: int, dst: int, type_: str, props: dict, sid: int | No
 
 
 def run(s: Session, log=print) -> int:
+    # Nothing touched since the last completed rebuild: avoid a costly, quota-free but
+    # unnecessary scan. Dirty node markers are retained for resolve below.
+    if not dirty.pending(s):
+        return 0
     cands = candidates(s)
     # Equal names only propose a merge. Strong single anchors remain Projects; only corroborated pairs combine.
     cands = {f"{name}:{min(node_id for node_id, _ in component)}": {**candidate, "anchors": component, "screen": name}
@@ -251,7 +255,6 @@ def run(s: Session, log=print) -> int:
         pid = s.execute(text("""
             INSERT INTO nodes (type, key, name, props) VALUES ('Project', :k, :name, CAST(:p AS jsonb))
             ON CONFLICT (type, key) DO UPDATE SET props = nodes.props || EXCLUDED.props RETURNING id
-<<<<<<< HEAD
         """), {"k": f"project:{project_key}", "name": c["display"],
                "p": json.dumps({"derived": True, "original_name": c["display"],
                                 "anchors": sorted({h for _, h in c["anchors"]})})}).scalar_one()
@@ -310,5 +313,7 @@ def run(s: Session, log=print) -> int:
         built += 1
         log(f"  {c['display'][:40]:40s} anchors={len(c['anchors'])} mentions={mentioned}") if log else None
     overrides.apply(s)  # corrections (rename / hide / merge / unlink) always win, so they survive every rebuild
+    # Resolve consumes this same dirty batch after entities has incorporated all evidence.
+    dirty.touch(s)
     s.commit()
     return built

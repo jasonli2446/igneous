@@ -162,4 +162,6 @@ def apply(s: Session) -> int:
             s.execute(text("""
                 DELETE FROM edges WHERE src = :m AND dst = :p AND extractor = :x AND type IN ('PART_OF', 'INVOLVED_IN')
             """), {"m": ids[m], "p": ids[k], "x": EXTRACTOR})
+    from igneous.graph import dirty
+    dirty.touch(s)
     return len(p.merges) + len(p.renames) + len(p.hidden) + len(p.unlinks)
