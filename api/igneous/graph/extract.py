@@ -67,6 +67,13 @@ def _key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 
+def _topic_key(name: str) -> str:
+    # Keep topic vocabulary stable from the first extraction; broader duplicate detection lives in topics.py.
+    from igneous.graph.topics import normalize_key
+
+    return normalize_key(name)
+
+
 def extract_one(body: str) -> tuple[dict, dict]:
     return llm.structured(SYSTEM, f"Email body:\n\n{body}", SCHEMA, max_tokens=3000)
 
@@ -113,7 +120,7 @@ def store(s: Session, item, body: str, out: dict) -> dict:
         name = _norm(t)
         if not name:
             continue
-        tid = s.execute(UPSERT_NODE, {"type": "Topic", "key": _key(name), "name": name,
+        tid = s.execute(UPSERT_NODE, {"type": "Topic", "key": _topic_key(name), "name": name,
                                       "props": json.dumps({"origin": EXTRACTOR})}).scalar_one()
         # ABOUT applies to the whole item, so its span is the whole body.
         s.execute(INSERT_EDGE, {**common, "src": item.node_id, "dst": tid, "type": "ABOUT", "props": "{}",
