@@ -430,6 +430,7 @@ def scored_members(s: Session, head: int, per: int = 8) -> dict[str, list[dict]]
         SELECT via.p, count(DISTINCT via.i) AS n,
                (SELECT count(*) FROM edges x WHERE x.dst = via.p AND x.type = 'INVOLVED_IN') AS people
         FROM via JOIN mine ON mine.i = via.i JOIN nodes n ON n.id = via.p AND n.type = 'Project'
+                      AND NOT COALESCE((n.props->>'hidden')::bool, false)
         GROUP BY via.p
     """), {"me": me}).all()
     pl = [{"id": p, "strength": math.log1p(n) + 0.5 * math.log1p(people)} for p, n, people in projects]
@@ -534,8 +535,9 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
             for p, _st, _ in relationships(s, _canon_head(s, node), 40):
                 if p not in seen and p != head and len(new) < k:
                     new.append(p)
-        elif ntype == "Project":  # its people, then its group chats, events and items
-            rows = s.execute(text("""
+        elif ntype == "Project":  # its people, then its group chats, events and items (none if hidden)
+            rows = [] if s.execute(text("SELECT COALESCE((props->>'hidden')::bool, false) FROM nodes WHERE id = :n"),
+                                   {"n": node}).scalar() else s.execute(text("""
                 SELECT src, CASE n.type WHEN 'Person' THEN 0 WHEN 'Thread' THEN 1 WHEN 'Event' THEN 2 ELSE 3 END,
                        COALESCE((e.props->>'items')::int, (e.props->>'days')::int, 1)
                 FROM edges e JOIN nodes n ON n.id = e.src

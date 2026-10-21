@@ -1,0 +1,150 @@
+"""HTTP surface for derived entities (Projects): the inspector's read model and its corrections.
+
+Reads: GET /graph/entity/{id}. Corrections: POST /graph/entity/{id}/rename|hide|merge|unlink, each stored in
+`overrides` (graph/overrides.py) and applied immediately; DELETE /overrides/{id} undoes one.
+"""
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from igneous.db import get_session
+from igneous.graph import entities, overrides
+
+router = APIRouter()
+MEMBER_TYPES = ("Person", "Thread", "Event", "Message", "File", "Folder")
+
+
+def _project(s: Session, node_id: int) -> dict:
+    n = s.execute(text("SELECT id, type, key, name, props FROM nodes WHERE id = :i"), {"i": node_id}).mappings().first()
+    if not n or n["type"] != "Project":
+        raise HTTPException(404, "Not a project")
+    return dict(n)
+
+
+def _key(s: Session, node_id: int) -> str:
+    row = s.execute(text("SELECT type || ':' || key FROM nodes WHERE id = :i"), {"i": node_id}).scalar()
+    if row is None:
+        raise HTTPException(404, f"Node {node_id} not found")
+    return row
+
+
+def _aliases(props: dict, name: str) -> list[str]:
+    """Other names this entity is known by: its derived name (if renamed) and names folded into it."""
+    out = [props.get("original_name"), *props.get("merged_names", [])]
+    return sorted({a for a in out if a and a != name})
+
+
+@router.get("/graph/entity/{node_id}")
+def entity(node_id: int, items: int = Query(30, ge=1, le=200), s: Session = Depends(get_session)):
+    """Everything known about one derived entity: who is in it, where it lives, and the evidence per item."""
+    p = _project(s, node_id)
+    members = s.execute(text("""
+        SELECT n.id, n.type, n.name, e.type AS edge, e.props AS eprops, e.confidence,
+               COALESCE(si.source, si2.source) AS source,
+               COALESCE(si.occurred_at, si2.occurred_at) AS at
+        FROM edges e JOIN nodes n ON n.id = e.src
+        LEFT JOIN source_items si ON si.id = e.source_item_id
+        LEFT JOIN source_items si2 ON si2.id = n.source_item_id
+        WHERE e.dst = :p AND e.type IN ('PART_OF', 'INVOLVED_IN') AND n.type = ANY(:types)
+    """), {"p": node_id, "types": list(MEMBER_TYPES)}).mappings().all()
+
+    from igneous.graph.traversal import handle_names, pretty_thread
+    named = handle_names(s)
+    people, groups, events, rows = [], [], [], []
+    for m in members:
+        w, ep = m["edge"], m["eprops"] or {}
+        if m["type"] == "Person" and w == "INVOLVED_IN":
+            people.append({"id": m["id"], "name": m["name"], "items": int(ep.get("items", 1))})
+        elif m["type"] == "Thread":
+            groups.append({"id": m["id"], "name": pretty_thread(m["name"], named) or m["name"],
+                           "why": ep.get("why"), "days": ep.get("days")})
+        elif m["type"] == "Event":
+            events.append({"id": m["id"], "name": m["name"], "date": m["at"], "why": ep.get("why")})
+        elif m["type"] != "Person":
+            rows.append({"id": m["id"], "type": m["type"], "name": m["name"], "why": ep.get("why"),
+                         "quote": ep.get("quote"), "source": m["source"], "date": m["at"],
+                         "confidence": m["confidence"]})
+    people.sort(key=lambda x: -x["items"])
+    groups.sort(key=lambda x: -(x["days"] or 0))
+    events.sort(key=lambda x: (x["date"] is None, str(x["date"])), reverse=False)
+    rows.sort(key=lambda x: str(x["date"] or ""), reverse=True)
+    props = p["props"] or {}
+    return {"id": p["id"], "name": p["name"], "key": p["key"], "aliases": _aliases(props, p["name"]),
+            "anchors": props.get("anchors", []), "hidden": bool(props.get("hidden")),
+            "people": people, "groups": groups, "events": events, "items": rows[:items],
+            "counts": {"people": len(people), "groups": len(groups), "events": len(events), "items": len(rows)}}
+
+
+class RenameBody(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class MergeBody(BaseModel):
+    other: int  # folded into the entity in the URL
+
+
+class UnlinkBody(BaseModel):
+    node: int
+
+
+def _commit(s: Session, op: str, keys: list[str], value: str | None = None, data: dict | None = None) -> dict:
+    oid = overrides.add(s, op, keys, value, data)
+    overrides.apply(s)
+    s.commit()
+    return {"override_id": oid, "op": op}
+
+
+@router.post("/graph/entity/{node_id}/rename")
+def rename(node_id: int, body: RenameBody, s: Session = Depends(get_session)):
+    p = _project(s, node_id)
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(422, "name must not be blank")
+    return {**_commit(s, "rename", [_key(s, node_id)], name), "id": node_id, "was": p["name"]}
+
+
+@router.post("/graph/entity/{node_id}/hide")
+def hide(node_id: int, s: Session = Depends(get_session)):
+    _project(s, node_id)
+    return {**_commit(s, "hide", [_key(s, node_id)]), "id": node_id}
+
+
+@router.post("/graph/entity/{node_id}/merge")
+def merge(node_id: int, body: MergeBody, s: Session = Depends(get_session)):
+    """Fold `other` into this entity: its members move here and it never reappears on its own."""
+    if body.other == node_id:
+        raise HTTPException(422, "Can't merge an entity into itself")
+    _project(s, node_id)
+    _project(s, body.other)
+    return {**_commit(s, "merge", [_key(s, node_id), _key(s, body.other)]), "id": node_id}
+
+
+@router.post("/graph/entity/{node_id}/unlink")
+def unlink(node_id: int, body: UnlinkBody, s: Session = Depends(get_session)):
+    """Drop one item or person from this entity, and keep it dropped across rebuilds."""
+    _project(s, node_id)
+    edges = [dict(r) for r in s.execute(text("""
+        SELECT src, dst, type, props, extractor_version, confidence, source_item_id, span_start, span_end
+        FROM edges WHERE src = :m AND dst = :p AND extractor = :x AND type IN ('PART_OF', 'INVOLVED_IN')
+    """), {"m": body.node, "p": node_id, "x": overrides.EXTRACTOR}).mappings()]
+    if not edges:
+        raise HTTPException(404, "That isn't linked to this entity")
+    return {**_commit(s, "unlink", [_key(s, node_id), _key(s, body.node)], data={"edges": edges}), "id": node_id}
+
+
+@router.delete("/overrides/{override_id}")
+def undo(override_id: int, s: Session = Depends(get_session)):
+    """Undo one correction. Hide / rename / unlink are replayed from the table; a merge needs the folded
+    entity back, so the entity stage re-derives it."""
+    row = overrides.remove(s, override_id)
+    if row is None:
+        raise HTTPException(404, "No such correction (already undone?)")
+    if row["op"] == "merge":
+        entities.run(s, log=None)  # commits; rebuilds the folded entity, then replays the remaining overrides
+    else:
+        if row["op"] == "unlink":
+            overrides.restore_unlink(s, row["data"])
+        overrides.apply(s)
+        s.commit()
+    return {"undone": override_id, "op": row["op"]}

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from igneous.connectors.ai_exports import ExportConnector, ExportError, export_items, parse_export
 from igneous.connectors.base import run_sync
 from igneous.db import get_session
+from igneous.graph.entity_api import router as entity_router
 from igneous.graph.traversal import GraphFilters, expand, explain, neighborhood, network, people, view
 from igneous.llm import LLMDisabled
 from igneous.rag import qa
@@ -47,6 +48,7 @@ class NamedResponse(JSONResponse):
 
 app = FastAPI(title="Igneous", version="0.1.0", default_response_class=NamedResponse)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.include_router(entity_router)
 
 
 @app.get("/health")
@@ -148,7 +150,7 @@ def graph_search(q: str, type: str | None = None, limit: int = Query(20, le=100)
         WITH hit AS (
             SELECT COALESCE(c.canonical_id, n.id) AS id FROM nodes n LEFT JOIN canonical c ON c.node_id = n.id
             WHERE (n.name ILIKE :like OR n.key ILIKE :like) AND (CAST(:type AS text) IS NULL OR n.type = :type)
-              AND n.type <> 'Message'
+              AND n.type <> 'Message' AND NOT COALESCE((n.props->>'hidden')::bool, false)
             GROUP BY 1)
         SELECT n.id, n.type, n.name, n.key,
                (SELECT count(*) FROM edges e WHERE e.src = ANY(m.ids) OR e.dst = ANY(m.ids)) AS degree,
