@@ -66,7 +66,7 @@ def timeline(session: Session, a: int, b: int | None = None, limit: int = 50) ->
             UNION SELECT node_id FROM canonical WHERE canonical_id = :a
         ),
         b_cluster AS (
-            SELECT :b::bigint AS id WHERE :b IS NOT NULL
+            SELECT CAST(:b AS bigint) AS id WHERE CAST(:b AS bigint) IS NOT NULL
             UNION SELECT node_id FROM canonical WHERE canonical_id = :b
         )
         SELECT e.id, e.src, e.dst, e.type, e.src IN (SELECT id FROM a_cluster) AS a_is_src,

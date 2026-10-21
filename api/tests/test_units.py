@@ -1102,3 +1102,18 @@ def test_contacts_complete_scan_is_account_scoped(monkeypatch):
     assert isinstance(events[-1], CompletedScan)
     assert events[-1].external_ids == frozenset({"me@example.com/people/one"})
     assert events[-1].external_id_prefix == "me@example.com/"
+
+
+def test_no_sqlalchemy_param_casts_with_double_colon():
+    """`:name::bigint` breaks SQLAlchemy text(): it reads `name:` as the parameter and Postgres sees a stray
+    `:`. This crashed /timeline in production (tests with a fake session never sent the SQL to Postgres).
+    Use CAST(:name AS bigint) instead."""
+    import pathlib
+    import re
+
+    bad = []
+    for path in pathlib.Path(__file__).resolve().parents[1].joinpath("igneous").rglob("*.py"):
+        for i, line in enumerate(path.read_text().splitlines(), 1):
+            if re.search(r"(?<![:\w]):[A-Za-z_]\w*::[A-Za-z]", line):
+                bad.append(f"{path.name}:{i}: {line.strip()}")
+    assert not bad, "use CAST(:param AS type), not :param::type:\n" + "\n".join(bad)
