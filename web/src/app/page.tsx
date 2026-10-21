@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CATEGORY_COLOR, type Community } from "@/lib/graph-style";
 import Inspector from "@/components/Inspector";
@@ -28,6 +29,8 @@ export default function Explorer() {
   const [trail, setTrail] = useState<GNode[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The API answers 404 until a self node exists, i.e. until a source is connected and the graph is built.
+  const [nothingConnected, setNothingConnected] = useState(false);
 
   const [active, setActive] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -69,10 +72,12 @@ export default function Explorer() {
     const request = new AbortController();
     seedRequest.current = request;
     setError(null);
+    setNothingConnected(false);
     setLoading(true);
     try {
       const g = await api.view(node?.id, request.signal);
       if (graphGeneration.current !== generation || seedRequest.current !== request) return;
+      if (!node && g.nodes.length === 0) setNothingConnected(true);
       setCanvasKey((k) => k + 1);
       setData(g);
       setIntroducedBy(new Map());
@@ -84,7 +89,8 @@ export default function Explorer() {
       const seedNode = g.nodes.find((n) => n.id === g.seed) ?? node;
       if (push && seedNode) setTrail((t) => [...t.filter((x) => x.id !== seedNode.id), seedNode].slice(-6));
     } catch (e) {
-      if (!request.signal.aborted) setError(`Couldn't load the graph. Check that the API is running on port 8000. (${String(e)})`);
+      if (!request.signal.aborted && !node && String(e).startsWith("Error: 404")) setNothingConnected(true);
+      else if (!request.signal.aborted) setError(`Couldn't load the graph. Check that the API is running on port 8000. (${String(e)})`);
     } finally {
       if (seedRequest.current === request) {
         seedRequest.current = null;
@@ -176,7 +182,15 @@ export default function Explorer() {
           onCommunitiesAction={onLegend} />
       )}
 
-      {data.nodes.length === 0 && !loading && !error && (
+      {data.nodes.length === 0 && !loading && !error && nothingConnected && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center text-sm text-muted">
+          <p className="text-base text-ink">Your graph is empty</p>
+          <p className="max-w-sm">Connect a source, then build the graph. Setup takes a few minutes and everything stays on this computer.</p>
+          <Link href="/settings" className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-bg hover:opacity-90">Connect your first source</Link>
+        </div>
+      )}
+
+      {data.nodes.length === 0 && !loading && !error && !nothingConnected && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 px-6 text-center text-sm text-muted">
           <p className="text-base text-ink">Nothing to show yet</p>
           <p>Search for a person, conversation, or event to start. Press / to search.</p>
