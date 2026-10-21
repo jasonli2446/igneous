@@ -1643,3 +1643,12 @@ def test_organization_candidates_exclude_personal_domains_and_normalize_contact_
     assert domain_of("not-an-email") is None
     assert company_key("  1848 Ventures, LLC ") == ("company:1848-ventures-llc", "1848 Ventures, LLC")
     assert company_key(" ") is None
+
+
+def test_nul_bytes_are_stripped_before_storage():
+    import json
+
+    from igneous.connectors.base import _no_nul
+
+    assert _no_nul("a\x00b") == "ab" and _no_nul(None) is None
+    assert "\\u0000" not in json.dumps({"x": "a\x00b"}).replace("\\u0000", "")

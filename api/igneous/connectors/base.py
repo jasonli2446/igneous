@@ -80,6 +80,10 @@ RETURNING (xmax = 0) AS inserted
 """)
 
 
+def _no_nul(t: str | None) -> str | None:
+    return t.replace("\x00", "") if t else t
+
+
 def load_cursor(s: Session, connector: str, account: str) -> dict:
     row = s.execute(text("SELECT cursor FROM sync_state WHERE connector = :c AND account = :a"),
                     {"c": connector, "a": account}).first()
@@ -146,8 +150,9 @@ def run_sync(s: Session, connector: Connector, account: str = "default", limit: 
         row = s.execute(UPSERT, {
             "source": obj.source, "external_id": obj.external_id,
             "parent_external_id": obj.parent_external_id, "content_hash": obj.content_hash,
-            "mime": obj.mime, "title": obj.title, "body_text": obj.body_text,
-            "raw_meta": json.dumps(obj.raw_meta, default=str), "occurred_at": obj.occurred_at,
+            # Postgres text can't hold NUL; some PDFs and Office files extract with them.
+            "mime": obj.mime, "title": _no_nul(obj.title), "body_text": _no_nul(obj.body_text),
+            "raw_meta": json.dumps(obj.raw_meta, default=str).replace("\\u0000", ""), "occurred_at": obj.occurred_at,
         }).first()
         if row is None:
             stats["unchanged"] += 1
