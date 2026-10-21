@@ -159,10 +159,8 @@ def _thread_key(meta: dict, title: str) -> str:
 
 def _person(b: Builder, addr: dict, name: str, observed_at=None, sid: int | None = None) -> int:
     pid = b.node("Person", addr["email"], name, {"email": addr["email"]})
-    domain = addr["email"].split("@")[-1]
-    org = b.node("Organization", domain, domain)
-    # An address belongs to its domain from its first to its most recent observed communication.
-    b.edge(pid, org, "MEMBER_OF", observed_at, sid)
+    # Address domains alone are not employment evidence. Organization membership is
+    # derived later from owner-sent mail, contact-card companies, or calendar data.
     return pid
 
 
@@ -284,7 +282,7 @@ def build_contact(b: Builder, item) -> None:
     leaves alone)."""
     meta = item.raw_meta
     name = item.title
-    keys = [e for e in meta.get("emails", [])] + [p for p in meta.get("phones", []) if p]
+    keys = [e for e in meta.get("emails", [])] + [norm_phone(p) or p for p in meta.get("phones", []) if p]
     ids = []
     for k in keys:
         pid = b.node("Person", k, name, {"handle": k} if "@" not in k else {"email": k})

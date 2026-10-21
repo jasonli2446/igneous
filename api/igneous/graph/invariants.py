@@ -18,7 +18,8 @@ from sqlalchemy.orm import Session
 LEGAL_ENDPOINTS: dict[str, set[tuple[str, str]]] = {
     "SENT": {("Person", "Message")},
     "RECEIVED": {("Message", "Person")},
-    "MEMBER_OF": {("Person", "Organization")},
+    "MEMBER_OF": {("Person", "Organization")},  # legacy deterministic domain membership
+    "WORKED_AT": {("Person", "Organization")},
     "IN_THREAD": {("Message", "Thread")},
     "REPLIES_TO": {("Message", "Message")},
     "ATTACHED": {("Message", "File")},

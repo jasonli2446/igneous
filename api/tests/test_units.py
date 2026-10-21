@@ -105,7 +105,7 @@ def test_names_and_threads():
     assert _thread_key({"from": [{"email": "a@x"}], "to": [{"email": "b@x"}]}, "RE: FW: Forecast") == "subject:forecast|a@x,b@x"
 
 
-def test_spine_assigns_closed_message_intervals_and_membership_observations():
+def test_spine_assigns_closed_message_intervals_without_domain_membership():
     from igneous.graph.spine import UPSERT_EDGE, Builder, _person
 
     class Result:
@@ -126,9 +126,7 @@ def test_spine_assigns_closed_message_intervals_and_membership_observations():
     person = _person(builder, {"email": "person@example.com"}, "Person", first, 10)
     builder.edge(person, 99, "SENT", last, 11)
 
-    membership, sent = [params for statement, params in session.calls if statement == str(UPSERT_EDGE)]
-    assert membership == {"src": 1, "dst": 1, "type": "MEMBER_OF", "valid_from": first,
-                          "valid_to": first, "sid": 10}
+    (sent,) = [params for statement, params in session.calls if statement == str(UPSERT_EDGE)]
     assert sent == {"src": 1, "dst": 99, "type": "SENT", "valid_from": last,
                     "valid_to": last, "sid": 11}
     assert "LEAST(edges.valid_from, EXCLUDED.valid_from)" in str(UPSERT_EDGE)
@@ -1560,3 +1558,13 @@ def test_spine_repo_evidence_uses_shared_repository_anchor():
     build_file(builder, item)
     assert ("Folder", "repo:igneous", "igneous", {"path": "root/igneous", "kind": "repo",
             "remote": "git@github.com:a/igneous.git"}) in builder.nodes
+
+
+def test_organization_candidates_exclude_personal_domains_and_normalize_contact_companies():
+    from igneous.graph.organizations import company_key, domain_of
+
+    assert domain_of("pat@1848.vc") == "1848.vc"
+    assert domain_of("pat@gmail.com") is None
+    assert domain_of("not-an-email") is None
+    assert company_key("  1848 Ventures, LLC ") == ("company:1848-ventures-llc", "1848 Ventures, LLC")
+    assert company_key(" ") is None
