@@ -300,6 +300,42 @@ def build_contact(b: Builder, item) -> None:
         """), {"a": s0, "b": s1, "sid": item.id})
 
 
+def build_github(b: Builder, item) -> None:
+    """Represent GitHub activity as authored messages anchored to a repository.
+
+    GitHub logins are stable person keys. A verified commit email is a separate identity
+    and receives a trusted SAME_AS edge, rather than guessing from display names.
+    """
+    meta = item.raw_meta
+    repo_name = meta.get("repo", "github")
+    repo = b.node("Folder", f"repo:{repo_name.lower()}", repo_name, {"kind": "repo", "source": "github"})
+    mid = b.node("Message", f"github:{item.external_id}", item.title or repo_name, {"source": "github"}, sid=item.id)
+    b.edge(repo, mid, "CONTAINS", item.occurred_at, item.id)
+    thread = b.node("Thread", f"github:{repo_name}:{meta.get('kind')}:{meta.get('number', meta.get('day', item.external_id))}",
+                    item.title or repo_name, {"source": "github"})
+    b.edge(mid, thread, "IN_THREAD", item.occurred_at, item.id)
+    identities = [meta.get("author", {}), *meta.get("commits", [])]
+    for identity in identities:
+        login, email = identity.get("login"), identity.get("email")
+        if not login:
+            continue
+        pid = b.node("Person", f"github:{login.lower()}", login, {"github_login": login})
+        b.edge(pid, mid, "SENT", item.occurred_at, item.id)
+        if email and email.lower() != "notifications@github.com":
+            email_id = b.node("Person", email.lower(), email, {"email": email.lower()})
+            a, c = sorted((pid, email_id))
+            b.s.execute(text("""
+                INSERT INTO edges (src, dst, type, extractor, confidence, source_item_id)
+                VALUES (:a, :b, 'SAME_AS', 'github', 1.0, :sid)
+                ON CONFLICT (src, dst, type, extractor) DO NOTHING
+            """), {"a": a, "b": c, "sid": item.id})
+    for comment in meta.get("comments", []):
+        login = comment.get("login")
+        if login:
+            pid = b.node("Person", f"github:{login.lower()}", login, {"github_login": login})
+            b.edge(pid, mid, "SENT", item.occurred_at, item.id)
+
+
 def build_file(b: Builder, item) -> None:
     path = item.raw_meta.get("path", item.external_id)
     folders = item.raw_meta.get("folders")
@@ -354,6 +390,8 @@ def run(s: Session) -> int:
             build_chat(b, item)
         elif item.source == "ai_chats":
             build_ai_chat(b, item)
+        elif item.source == "github":
+            build_github(b, item)
         elif item.source == "gcal":
             build_event(b, item)
         elif item.source in ("gcontacts", "maccontacts"):

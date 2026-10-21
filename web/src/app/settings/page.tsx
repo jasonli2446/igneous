@@ -86,10 +86,13 @@ function SourceCard({ source, busy, onSync, onRefresh }: {
   const showSteps = (!setUp || open) && !sharedGoogle;
   const running = source.job?.status === "running";
   const isGoogle = source.kind === "google";
+  const isGithub = source.id === "github";
   const needsGoogle = isGoogle && source.accounts.length === 0;
 
   let action: React.ReactNode = null;
-  if (source.kind === "import") {
+  if (isGithub && source.accounts.length === 0) {
+    action = <GithubToken onSaved={onRefresh} />;
+  } else if (source.kind === "import") {
     action = <Link href="/import" className={source.items ? secondary : primary}>Open Import</Link>;
   } else if (needsGoogle) {
     action = <a href={api.googleConnectUrl()} className={primary}>Connect a Google account</a>;
@@ -168,7 +171,6 @@ function SourceCard({ source, busy, onSync, onRefresh }: {
       {showSteps && (
         <div className="mt-3 rounded-md border border-line bg-bg px-4 py-3">
           <Steps steps={source.steps} />
-          {source.id === "github" && <GithubToken onSaved={onRefresh} />}
           <Cli command={source.cli} />
         </div>
       )}

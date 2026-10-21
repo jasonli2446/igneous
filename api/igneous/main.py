@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from igneous import jobs, sources
 from igneous.config import settings
-from igneous.connectors import google_auth
+from igneous.connectors import secrets
 from igneous.connectors.ai_exports import ExportConnector, ExportError, export_items, parse_export
 from igneous.connectors.base import run_sync
 from igneous.db import SessionLocal, get_session
@@ -175,11 +175,20 @@ class GithubToken(BaseModel):
 
 @app.post("/sources/github/token")
 def github_token(body: GithubToken, s: Session = Depends(get_session)):
-    """Store a fine-grained read-only token, encrypted. The GitHub connector itself is not built yet (#88)."""
+    """Store a fine-grained read-only token encrypted at rest; it is never returned or logged."""
     token = body.token.strip()
     if len(token) < 20 or " " in token:
         raise HTTPException(422, "That does not look like a GitHub token.")
-    google_auth.save_secret(s, "github", "default", token)
+    from igneous.connectors.github import GithubClient, GithubError
+
+    try:
+        profile, _, _ = GithubClient(token).get("/user")
+    except GithubError as e:
+        raise HTTPException(422, str(e)) from e
+    login = profile.get("login") if isinstance(profile, dict) else None
+    if not login:
+        raise HTTPException(422, "GitHub did not return an account for that token.")
+    secrets.save(s, "github", login, token)
     return {"stored": True}
 
 

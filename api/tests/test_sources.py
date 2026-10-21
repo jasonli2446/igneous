@@ -8,7 +8,7 @@ from igneous import jobs, sources
 from igneous.connectors.base import Checkpoint, SourceItem
 from igneous.db import SessionLocal
 
-KINDS = {"google", "local", "import", "planned"}
+KINDS = {"google", "local", "remote", "import", "planned"}
 
 
 def test_registry_shape():
@@ -25,7 +25,7 @@ def test_registry_shape():
 def test_every_syncable_source_can_be_built(monkeypatch, tmp_path):
     monkeypatch.setattr(sources.settings, "data_dir", str(tmp_path))
     assert sources.SYNCABLE == {"gmail", "gcal", "gcontacts", "drive", "imessage", "maccontacts", "ai_chats", "fs",
-                                "email"}
+                                "email", "github"}
     for sid in sources.SYNCABLE:
         ok, message = sources.check_requirements(sid)
         assert isinstance(ok, bool) and (ok or message)
@@ -143,4 +143,5 @@ def test_describe_lists_every_source_with_status(db):
     for r in rows:
         assert r["status"] in {"not_set_up", "ready", "syncing", "needs_attention"}
         assert isinstance(r["items"], int)
-    assert next(r for r in rows if r["id"] == "github")["coming_soon"]
+    github = next(r for r in rows if r["id"] == "github")
+    assert github["can_sync"] is False and github["coming_soon"] is False

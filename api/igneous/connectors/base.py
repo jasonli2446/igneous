@@ -53,9 +53,10 @@ class CompletedScan:
 
 @dataclass
 class Tombstone:
-    """A source item explicitly removed by an incremental change feed."""
+    """A source item (or an account-safe external-ID prefix) removed by a change feed."""
     source: str
     external_id: str
+    prefix: bool = False
 
 
 class Connector(Protocol):
@@ -131,9 +132,9 @@ def run_sync(s: Session, connector: Connector, account: str = "default", limit: 
             s.commit()
             break
         if isinstance(obj, Tombstone):
-            result = s.execute(text("""
-                DELETE FROM source_items WHERE source = :source AND external_id = :external_id
-            """), {"source": obj.source, "external_id": obj.external_id})
+            where = "left(external_id, char_length(:external_id)) = :external_id" if obj.prefix else "external_id = :external_id"
+            result = s.execute(text(f"DELETE FROM source_items WHERE source = :source AND {where}"),
+                               {"source": obj.source, "external_id": obj.external_id})
             stats["deleted"] += result.rowcount
             continue
         if isinstance(obj, Checkpoint):
