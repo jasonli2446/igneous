@@ -58,11 +58,17 @@ def run(s: Session) -> int:
         SELECT si.id, si.source, si.title, si.body_text, si.occurred_at, si.updated_at, si.raw_meta,
                n.id AS node_id
         FROM source_items si
-        LEFT JOIN nodes n ON n.source_item_id = si.id AND n.type IN ('Message', 'File', 'Event')
+        LEFT JOIN nodes n ON (n.source_item_id = si.id AND n.type IN ('Message', 'File'))
+                          OR (si.source = 'gcal' AND n.type = 'Event'
+                              AND n.key = 'gcal:' || COALESCE(si.raw_meta->>'series_key', si.external_id)
+                              AND n.source_item_id = si.id)
         -- contact cards carry no text worth searching
         WHERE si.source NOT IN ('gcontacts', 'maccontacts') AND si.updated_at > :since
         ORDER BY si.updated_at, si.id
     """), {"since": since}).all()
+    # Index chat text with contact names, not numbers, so "what did Sam say" finds it (lexically and densely).
+    from igneous.graph.traversal import handle_names, name_handles
+    named = handle_names(s) if any(r.source == "imessage" for r in rows) else {}
     for item in rows:
         s.execute(text("DELETE FROM chunks WHERE source_item_id = :id"), {"id": item.id})
         if item.node_id is None:
@@ -71,6 +77,8 @@ def run(s: Session) -> int:
         meta = json.dumps({"source": item.source, "title": item.title,
                            "occurred_at": item.occurred_at.isoformat() if item.occurred_at else None})
         for ord_, c in enumerate(chunks_for(item)):
+            if item.source == "imessage":
+                c = name_handles(c, named)
             s.execute(text("""
                 INSERT INTO chunks (source_item_id, node_id, ord, text, meta)
                 VALUES (:sid, :nid, :ord, :text, CAST(:meta AS jsonb))

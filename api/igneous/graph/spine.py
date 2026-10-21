@@ -17,7 +17,8 @@ INSERT INTO nodes (type, key, name, props, source_item_id)
 VALUES (:type, :key, :name, CAST(:props AS jsonb), :sid)
 ON CONFLICT (type, key) DO UPDATE SET
     name = CASE WHEN length(EXCLUDED.name) > length(nodes.name) THEN EXCLUDED.name ELSE nodes.name END,
-    source_item_id = COALESCE(EXCLUDED.source_item_id, nodes.source_item_id)
+    source_item_id = COALESCE(EXCLUDED.source_item_id, nodes.source_item_id),
+    props = nodes.props || EXCLUDED.props
 RETURNING id
 """)
 
@@ -219,7 +220,9 @@ def build_chat(b: Builder, item) -> None:
     meta = item.raw_meta
     mid = b.node("Message", f"imessage:{item.external_id}", item.title or "(chat)", {"source": "imessage"},
                  sid=item.id)
-    tid = b.node("Thread", f"imessage-chat:{meta.get('chat')}", (item.title or "").rsplit(" — ", 1)[0] or "chat")
+    # Group chats are marked so the graph can treat them as groups ("who else is in the Draw Steel chat").
+    tid = b.node("Thread", f"imessage-chat:{meta.get('chat')}", (item.title or "").rsplit(" — ", 1)[0] or "chat",
+                 {"source": "imessage", "group": bool(meta.get("group")) or len(meta.get("participants", [])) > 1})
     b.edge(mid, tid, "IN_THREAD", item.occurred_at, item.id)
     me = b.node("Person", "me", "Me", {"self": True})
     senders = set(meta.get("senders", []))
@@ -238,11 +241,32 @@ def build_chat(b: Builder, item) -> None:
         b.edge(me, mid, "SENT", item.occurred_at, item.id)
 
 
-def build_event(b: Builder, item) -> None:
-    """Calendar event: Event node; organizer and attendees ATTENDED it (decliners excluded)."""
+def build_ai_chat(b: Builder, item) -> None:
+    """One AI session-day: a Message from you in a Thread for the session. The repo it ran in becomes a
+    Folder-like anchor (key `repo:<name>`) that the entity stage can join to the matching GitHub repo, local
+    folder, or project, which is how an assistant conversation lands in the right project."""
     meta = item.raw_meta
-    eid = b.node("Event", f"{item.source}:{item.external_id}", item.title or "(event)",
-                 {"start": meta.get("start"), "end": meta.get("end")}, sid=item.id)
+    tool = meta.get("tool", "ai")
+    mid = b.node("Message", f"ai:{item.external_id}", item.title or "(AI session)", {"source": "ai_chats", "tool": tool},
+                 sid=item.id)
+    tid = b.node("Thread", f"ai-session:{tool}/{meta.get('session')}", (item.title or "AI session").rsplit(" (", 1)[0],
+                 {"source": "ai_chats", "tool": tool})
+    b.edge(mid, tid, "IN_THREAD", item.occurred_at, item.id)
+    me = b.node("Person", "me", "Me", {"self": True})
+    b.edge(me, mid, "SENT", item.occurred_at, item.id)
+    if meta.get("repo"):
+        repo = b.node("Folder", f"repo:{meta['repo'].lower()}", meta["repo"], {"path": meta.get("cwd"), "kind": "repo"})
+        b.edge(repo, tid, "CONTAINS", item.occurred_at, item.id)
+
+
+def build_event(b: Builder, item) -> None:
+    """Calendar event: one Event node per recurring series (a weekly class is one node, not 15), so attendees'
+    ATTENDED edges dedupe to one per series. Each occurrence stays its own source item, which is what
+    relationship strength counts. Organizer and attendees ATTENDED it (decliners excluded)."""
+    meta = item.raw_meta
+    series = meta.get("series_key") or item.external_id
+    eid = b.node("Event", f"{item.source}:{series}", item.title or "(event)",
+                 {"series": bool(meta.get("recurring"))}, sid=item.id)
     people = list(meta.get("attendees", []))
     if meta.get("organizer", {}).get("email"):
         people.append({**meta["organizer"], "response": "accepted"})
@@ -325,6 +349,8 @@ def run(s: Session) -> int:
             build_email(b, item)
         elif item.source == "imessage":
             build_chat(b, item)
+        elif item.source == "ai_chats":
+            build_ai_chat(b, item)
         elif item.source == "gcal":
             build_event(b, item)
         elif item.source in ("gcontacts", "maccontacts"):

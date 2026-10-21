@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import TimelineExplorer from "@/components/TimelineExplorer";
+import { InlineError, Skeleton } from "@/components/ui";
 import { api, Explanation } from "@/lib/api";
 
 function range(a: string | null, b: string | null) {
@@ -16,6 +17,7 @@ export default function WhyConnected({ a, b, onCloseAction, onOpenAction }: {
 }) {
   const [r, setR] = useState<Explanation | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let live = true;
@@ -23,7 +25,7 @@ export default function WhyConnected({ a, b, onCloseAction, onOpenAction }: {
     setErr(null);
     api.explain(a, b).then((x) => live && setR(x)).catch((e) => live && setErr(String(e)));
     return () => { live = false; };
-  }, [a, b]);
+  }, [a, b, attempt]);
 
   return (
     <div className="space-y-4 p-4 text-sm">
@@ -35,8 +37,12 @@ export default function WhyConnected({ a, b, onCloseAction, onOpenAction }: {
           className="ml-auto rounded px-1.5 text-lg leading-none text-muted hover:bg-hover">×</button>
       </div>
 
-      {err && <p className="text-danger">Couldn&apos;t load the connection: {err}</p>}
-      {!r && !err && <p className="text-muted">Looking up what they share…</p>}
+      {err && <InlineError message={`Couldn't load the connection: ${err}`} onRetry={() => setAttempt((n) => n + 1)} />}
+      {!r && !err && (
+        <div className="space-y-2" role="status" aria-label="Loading connection">
+          <Skeleton className="h-4 w-full" /><Skeleton className="h-16 w-full" /><Skeleton className="h-16 w-full" />
+        </div>
+      )}
 
       {r && (
         <>
@@ -50,7 +56,7 @@ export default function WhyConnected({ a, b, onCloseAction, onOpenAction }: {
 
           {r.conversations.length > 0 && (
             <section>
-              <h3 className="mb-2 font-medium">Conversations</h3>
+              <h3 className="mb-2 text-xs font-medium text-muted">Conversations</h3>
               <ul className="space-y-2">
                 {r.conversations.map((c) => (
                   <li key={c.thread_id} className="rounded-md border border-line p-2.5">
@@ -74,7 +80,7 @@ export default function WhyConnected({ a, b, onCloseAction, onOpenAction }: {
 
           {r.events.length > 0 && (
             <section>
-              <h3 className="mb-2 font-medium">Events together</h3>
+              <h3 className="mb-2 text-xs font-medium text-muted">Events together</h3>
               <ul className="space-y-1">
                 {r.events.map((e) => (
                   <li key={e.id} className="flex gap-2">

@@ -174,10 +174,22 @@ def run(s: Session, threshold: float = THRESHOLD) -> dict:
     return {"same_as": merged, "clusters": refresh_canonical(s)}
 
 
+# SAME_AS from these sources is ground truth (a contact card, the signed-in account, a user correction, a
+# commit's verified email): never second-guess it with name heuristics. Without this, "Me" (first name "me")
+# could never join the user's named cluster.
+TRUSTED = ("self", "contacts", "user", "github")
+
+
 def refresh_canonical(s: Session) -> int:
-    """Union-find over SAME_AS; each cluster's canonical node is its best-connected member (most mail), so
-    the explorer shows "Kenneth Lay" with all his addresses folded in. Only multi-node clusters get rows."""
-    edges = s.execute(text("SELECT src, dst FROM edges WHERE type = 'SAME_AS'")).all()
+    """Union-find over Person SAME_AS edges; each cluster's canonical node is its best-connected member, so
+    the explorer shows "Kenneth Lay" with all his addresses folded in. Scoped to Person nodes: rows for other
+    node types (e.g. project merges) are left alone. The user's own cluster (props.self) is headed by the
+    self node, renamed to the best human name in the cluster."""
+    edges = s.execute(text("""
+        SELECT e.src, e.dst, e.confidence, e.extractor FROM edges e
+        JOIN nodes a ON a.id = e.src AND a.type = 'Person' JOIN nodes b ON b.id = e.dst AND b.type = 'Person'
+        WHERE e.type = 'SAME_AS'
+    """)).all()
     parent: dict[int, int] = {}
 
     def find(x: int) -> int:
@@ -186,22 +198,24 @@ def refresh_canonical(s: Session) -> int:
             x = parent[x]
         return x
 
-    names = dict(s.execute(text("SELECT id, name FROM nodes WHERE type = 'Person'")).all())
+    meta = {r.id: r for r in s.execute(text("SELECT id, name, props FROM nodes WHERE type = 'Person'"))}
     firsts: dict[int, set[str]] = {}  # per cluster root: the distinct full first names it contains
 
     def first_of(n: int) -> str:
-        return split_name(names.get(n, ""), "")[0]
+        m = meta.get(n)
+        if m is None or (m.props or {}).get("self"):
+            return ""  # the self node's display name ("Me") isn't a first name
+        return split_name(m.name, "")[0]
 
-    # Merge strongest links first; refuse a union that would put two incompatible first names in one cluster.
-    # Without this, a surname-only address (taylor@) bridges Liz Taylor and Larry Taylor into one person.
-    conf = dict(((a, b), c) for a, b, c in s.execute(text("SELECT src, dst, confidence FROM edges WHERE type = 'SAME_AS'")))
-    for a, b in sorted(edges, key=lambda e: -(conf.get((e[0], e[1])) or 0)):
+    # Trusted links first, then strongest; refuse a heuristic union that would put two incompatible first
+    # names in one cluster (else a surname-only address like taylor@ bridges Liz and Larry Taylor).
+    for a, b, _conf, ex in sorted(edges, key=lambda e: (e.extractor not in TRUSTED, -(e.confidence or 0))):
         ra, rb = find(a), find(b)
         if ra == rb:
             continue
         fa = firsts.get(ra, {first_of(a)} - {""} if len(first_of(a)) > 1 else set())
         fb = firsts.get(rb, {first_of(b)} - {""} if len(first_of(b)) > 1 else set())
-        if any(not same_first(x, y) for x in fa for y in fb):
+        if ex not in TRUSTED and any(not same_first(x, y) for x in fa for y in fb):
             continue
         parent[ra] = rb
         firsts[rb] = fa | fb
@@ -213,11 +227,19 @@ def refresh_canonical(s: Session) -> int:
         SELECT n, (SELECT count(*) FROM edges e WHERE (e.src = n OR e.dst = n) AND e.type IN ('SENT', 'RECEIVED'))
         FROM unnest(CAST(:ids AS bigint[])) AS n
     """), {"ids": members}).all()) if members else {}
-    s.execute(text("DELETE FROM canonical"))
+    s.execute(text("DELETE FROM canonical WHERE node_id IN (SELECT id FROM nodes WHERE type = 'Person')"))
     rows = []
     for c in clusters.values():
-        head = max(c, key=lambda n: (degree.get(n, 0), -n))
+        is_self = {n for n in c if (meta[n].props or {}).get("self")} if all(n in meta for n in c) else set()
+        head = max(c, key=lambda n: (n in is_self, degree.get(n, 0), -n))
         rows += [{"n": n, "c": head} for n in c]
+        if is_self:
+            # Name the user after their best real name in the cluster: a contact card beats an address.
+            names = [meta[n] for n in c if n not in is_self and meta[n].name and "@" not in meta[n].name
+                     and not re.fullmatch(r"\+?\d[\d\s()-]+", meta[n].name)]
+            named = sorted(names, key=lambda m: ((m.props or {}).get("named_by") != "contacts", -degree.get(m.id, 0)))
+            if named:
+                s.execute(text("UPDATE nodes SET name = :n WHERE id = :id"), {"n": named[0].name, "id": head})
     if rows:
         s.execute(text("INSERT INTO canonical (node_id, canonical_id) VALUES (:n, :c)"), rows)
     s.commit()
@@ -226,6 +248,6 @@ def refresh_canonical(s: Session) -> int:
 
 def undo(s: Session) -> int:
     n = s.execute(text("DELETE FROM edges WHERE type = 'SAME_AS' AND extractor = :ex"), {"ex": EXTRACTOR}).rowcount
-    s.execute(text("DELETE FROM canonical"))
+    s.execute(text("DELETE FROM canonical WHERE node_id IN (SELECT id FROM nodes WHERE type = 'Person')"))
     s.commit()
     return n

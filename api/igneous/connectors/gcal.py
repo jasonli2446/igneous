@@ -93,7 +93,13 @@ class CalendarConnector:
                                   "organizer": {"name": organizer.get("displayName", ""),
                                                 "email": organizer.get("email", "").lower()},
                                   "start": event.get("start"), "end": event.get("end"),
-                                  "account": self.account})
+                                  "account": self.account,
+                                  # One node per recurring series (90% of real events recur): Google's series
+                                  # id, else the shared iCalUID, else this event (a true one-off). Scoped like
+                                  # external_id (account/calendar/...) so two accounts' series can't collide.
+                                  "series_key": _external_id(self.account, f"{cid}/" + (
+                                      event.get("recurringEventId") or event.get("iCalUID") or event["id"])),
+                                  "recurring": bool(event.get("recurringEventId"))})
                 page = response.get("nextPageToken")
                 if not page:
                     if response.get("nextSyncToken"):

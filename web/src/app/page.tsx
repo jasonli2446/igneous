@@ -2,24 +2,17 @@
 
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Community } from "@/components/Graph3D";
+import { CATEGORY_COLOR, type Community } from "@/lib/graph-style";
 import Inspector from "@/components/Inspector";
 import { useTheme } from "@/components/ThemeToggle";
+import { InlineError, TopProgress } from "@/components/ui";
 import WhyConnected from "@/components/WhyConnected";
 import { api, GNode, Subgraph, TYPE_COLORS } from "@/lib/api";
 
 // WebGL libraries touch window at import time, so they can't render on the server.
 const Graph3D = dynamic(() => import("@/components/Graph3D"), { ssr: false });
-const GraphCanvas = dynamic(() => import("@/components/GraphCanvas"), { ssr: false });
 
 const EMPTY: Subgraph = { nodes: [], edges: [] };
-const HIDDEN_2D = new Set(["Organization", "Message"]);
-type View = "network" | "people" | "items";
-const VIEWS: { id: View; label: string; help: string }[] = [
-  { id: "network", label: "Network", help: "Your people in 3D, grouped by the conversations and events they share." },
-  { id: "people", label: "People", help: "Who a person writes to most. Line width is messages exchanged." },
-  { id: "items", label: "Items", help: "The raw messages, threads, and files around a node." },
-];
 
 export default function Explorer() {
   const dark = useTheme();
@@ -28,22 +21,38 @@ export default function Explorer() {
   const [data, setData] = useState<Subgraph>(EMPTY);
   const [canvasKey, setCanvasKey] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
-  const [inspected, setInspected] = useState<number | null>(null);
   const [why, setWhy] = useState<{ a: number; b: number } | null>(null);
-  const [view, setView] = useState<View>("network");
+  // Which node brought each node onto the screen, so clicking an expanded node collapses what it added.
+  const [introducedBy, setIntroducedBy] = useState<Map<number, number>>(new Map());
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [trail, setTrail] = useState<GNode[]>([]);
-  const [legend, setLegend] = useState<Community[]>([]);
-  const [legendOpen, setLegendOpen] = useState(true);
   const [loading, setLoading] = useState(false);
-  const [expansionParent, setExpansionParent] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const [active, setActive] = useState(0);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  // "/" jumps to search from anywhere that isn't a text field.
   useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || t.closest("input, textarea, select, [contenteditable]")) return;
+      e.preventDefault();
+      searchRef.current?.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  useEffect(() => {
+    setActive(0);
     if (query.trim().length < 2) return setMatches([]);
     const t = setTimeout(() => api.findNodes(query).then((r) => setMatches(r.nodes)).catch(() => {}), 200);
     return () => clearTimeout(t);
   }, [query]);
 
+  // Stale responses must never land: each new seed bumps the generation and aborts in-flight requests
+  // (a fast double search used to let the older reply overwrite the newer graph).
   const graphGeneration = useRef(0);
   const seedRequest = useRef<AbortController | null>(null);
   const expandRequest = useRef<AbortController | null>(null);
@@ -53,7 +62,7 @@ export default function Explorer() {
     expandRequest.current?.abort();
   }, []);
 
-  const load = useCallback(async (node: GNode, v: View, push = true) => {
+  const load = useCallback(async (node: GNode | null, push = true) => {
     const generation = ++graphGeneration.current;
     seedRequest.current?.abort();
     expandRequest.current?.abort();
@@ -62,20 +71,20 @@ export default function Explorer() {
     setError(null);
     setLoading(true);
     try {
-      const g = node.type !== "Person" || v === "items" ? await api.subgraph([node.id], 1, 400, {}, request.signal)
-        : v === "network" ? await api.network(node.id, 50, 30, request.signal) : await api.people(node.id, 60, request.signal);
+      const g = await api.view(node?.id, request.signal);
       if (graphGeneration.current !== generation || seedRequest.current !== request) return;
       setCanvasKey((k) => k + 1);
-      setExpansionParent(null);
       setData(g);
+      setIntroducedBy(new Map());
+      setExpanded(new Set());
       setSelected(null);
       setWhy(null);
-      setInspected(node.id);
       setMatches([]);
       setQuery("");
-      if (push) setTrail((t) => [...t.filter((x) => x.id !== node.id), node].slice(-6));
+      const seedNode = g.nodes.find((n) => n.id === g.seed) ?? node;
+      if (push && seedNode) setTrail((t) => [...t.filter((x) => x.id !== seedNode.id), seedNode].slice(-6));
     } catch (e) {
-      if (!request.signal.aborted) setError(`Couldn't load ${node.name}. Check that the API is running on port 8000. (${String(e)})`);
+      if (!request.signal.aborted) setError(`Couldn't load the graph. Check that the API is running on port 8000. (${String(e)})`);
     } finally {
       if (seedRequest.current === request) {
         seedRequest.current = null;
@@ -84,28 +93,49 @@ export default function Explorer() {
     }
   }, []);
 
-  // The canvases bind callbacks once, so read the current view through a ref.
-  const viewRef = useRef(view);
-  viewRef.current = view;
-  const expand = useCallback(async (id: number) => {
+  // Open on you: the graph starts from the account owner, no search needed.
+  useEffect(() => { load(null); }, [load]);
+
+  const retry = () => load(trail[trail.length - 1] ?? null, false);
+  const seedId = trail[trail.length - 1]?.id;
+  const dataRef = useRef(data);
+  dataRef.current = data;
+  const stateRef = useRef({ introducedBy, expanded, seedId });
+  stateRef.current = { introducedBy, expanded, seedId };
+
+  // Click a node: reveal its top connections; click it again to fold them back.
+  const toggle = useCallback(async (id: number) => {
+    const { introducedBy: ib, expanded: ex, seedId: seed } = stateRef.current;
+    if (seed === undefined) return;
+    if (ex.has(id)) {
+      const drop = new Set<number>();
+      const collect = (p: number) => ib.forEach((parent, child) => { if (parent === p && !drop.has(child)) { drop.add(child); collect(child); } });
+      collect(id);
+      setData((prev) => ({
+        nodes: prev.nodes.filter((n) => !drop.has(n.id)),
+        edges: prev.edges.filter((e) => !drop.has(e.src) && !drop.has(e.dst)),
+      }));
+      setIntroducedBy((m) => { const n = new Map(m); drop.forEach((d) => n.delete(d)); return n; });
+      setExpanded((s) => { const n = new Set(s); n.delete(id); drop.forEach((d) => n.delete(d)); return n; });
+      return;
+    }
     const generation = graphGeneration.current;
     expandRequest.current?.abort();
     const request = new AbortController();
     expandRequest.current = request;
     setError(null);
     try {
-      const v = viewRef.current;
-      const g = v === "items" ? await api.subgraph([id], 1, 200, {}, request.signal) : v === "network"
-        ? await api.network(id, 20, 12, request.signal) : await api.people(id, 30, request.signal);
-      if (graphGeneration.current !== generation || expandRequest.current !== request) return;
-      setExpansionParent(id);
+      const visible = dataRef.current.nodes.map((n) => n.id);
+      const g = await api.expandNode(seed, id, visible, 0, request.signal);
+      if (graphGeneration.current !== generation || expandRequest.current !== request || !g.nodes.length) return;
       setData((prev) => {
-        const nodes = new Map(prev.nodes.map((n) => [n.id, n]));
-        g.nodes.forEach((n) => nodes.has(n.id) || nodes.set(n.id, n)); // keep the seed first: don't reorder
+        const have = new Set(prev.nodes.map((n) => n.id));
         const edges = new Map(prev.edges.map((e) => [`${e.src}-${e.dst}-${e.type}`, e]));
-        g.edges.forEach((e) => edges.set(`${e.src}-${e.dst}-${e.type}`, { ...e, id: edges.size + 1e6 }));
-        return { nodes: [...nodes.values()], edges: [...edges.values()] };
+        g.edges.forEach((e) => edges.set(`${e.src}-${e.dst}-${e.type}`, e));
+        return { nodes: [...prev.nodes, ...g.nodes.filter((n) => !have.has(n.id))], edges: [...edges.values()] };
       });
+      setIntroducedBy((m) => { const n = new Map(m); g.nodes.forEach((x) => { if (!n.has(x.id)) n.set(x.id, id); }); return n; });
+      setExpanded((s) => new Set(s).add(id));
     } catch (e) {
       if (!request.signal.aborted) setError(String(e));
     } finally {
@@ -113,97 +143,56 @@ export default function Explorer() {
     }
   }, []);
 
-  const onLegend = useCallback((c: Community[]) => setLegend(c), []);
+  const onLegend = useCallback((_c: Community[]) => {}, []); // communities color nodes; the legend lists categories
+  const hubs = data.nodes.filter((n) => n.kind === "category");
   const current = trail[trail.length - 1];
-  const switchView = (v: View) => {
-    setView(v);
-    if (current) load(current, v, false);
-  };
   const back = () => {
     if (trail.length < 2) return;
     const prev = trail[trail.length - 2];
     setTrail((t) => t.slice(0, -1));
-    load(prev, view, false);
+    load(prev, false);
+  };
+
+  const detailId = selected !== null && selected > 0 ? selected : null;
+  const panelOpen = why !== null || detailId !== null;
+  const closePanel = () => { setWhy(null); setSelected(null); };
+
+  const onSearchKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") { setQuery(""); setMatches([]); (e.target as HTMLElement).blur(); }
+    else if (e.key === "ArrowDown" && matches.length) { e.preventDefault(); setActive((i) => (i + 1) % matches.length); }
+    else if (e.key === "ArrowUp" && matches.length) { e.preventDefault(); setActive((i) => (i - 1 + matches.length) % matches.length); }
+    else if (e.key === "Enter" && matches[active]) { e.preventDefault(); load(matches[active]); }
   };
 
   return (
-    <div className="flex h-[calc(100vh-49px)] bg-bg text-ink">
-      <aside className="w-64 shrink-0 space-y-6 overflow-y-auto border-r border-line bg-panel p-4 text-sm">
-        <div className="relative">
-          <label htmlFor="seed" className="mb-1.5 block font-medium">Start from</label>
-          <input id="seed" value={query} onChange={(e) => setQuery(e.target.value)}
-            placeholder="A person, conversation, or event"
-            className="w-full rounded-md border border-line bg-bg px-2.5 py-1.5 outline-none placeholder:text-muted focus:border-accent" />
-          {matches.length > 0 && (
-            <ul className="absolute z-20 mt-1 max-h-72 w-full overflow-y-auto rounded-md border border-line bg-panel shadow-lg">
-              {matches.map((m) => (
-                <li key={m.id}>
-                  <button onClick={() => load(m, view)} className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-hover">
-                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: TYPE_COLORS[m.type] }} />
-                    <span className="truncate">{m.name}</span>
-                    <span className="ml-auto text-xs text-muted">{m.degree}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+    <div className="relative h-[calc(100vh-49px)] overflow-hidden bg-bg text-ink">
+      <TopProgress active={loading} />
+
+      {data.nodes.length > 0 && (
+        <Graph3D key={canvasKey} data={data} dark={dark} selected={selected}
+          onSelectAction={(id) => { setSelected(id); setWhy(null); }}
+          onExpandAction={toggle}
+          onLinkAction={(a, b) => { if (a.id > 0 && b.id > 0) setWhy({ a: a.id, b: b.id }); }}
+          onCommunitiesAction={onLegend} />
+      )}
+
+      {data.nodes.length === 0 && !loading && !error && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 px-6 text-center text-sm text-muted">
+          <p className="text-base text-ink">Nothing to show yet</p>
+          <p>Search for a person, conversation, or event to start. Press / to search.</p>
         </div>
+      )}
 
-        <div>
-          <div className="mb-1.5 font-medium">View</div>
-          <div role="tablist" className="flex rounded-md border border-line p-0.5">
-            {VIEWS.map((v) => (
-              <button key={v.id} role="tab" aria-selected={view === v.id} onClick={() => switchView(v.id)}
-                className={`flex-1 rounded px-2 py-1 ${view === v.id ? "bg-ink text-bg" : "text-soft hover:bg-hover"}`}>
-                {v.label}
-              </button>
-            ))}
-          </div>
-          <p className="mt-1.5 text-xs leading-relaxed text-muted">{VIEWS.find((v) => v.id === view)!.help}</p>
-        </div>
-
-        {view === "network" && data.nodes.length > 0 && (
-          <div>
-            <div className="mb-1.5 font-medium">Moving around</div>
-            <ul className="space-y-1 text-xs leading-relaxed text-muted">
-              <li>Drag to rotate, right-drag to pan, scroll to zoom</li>
-              <li>Click a person to fly to them; double-click to bring in their people</li>
-              <li>Hover a line to see why it&apos;s there; click it for the details</li>
-              <li>Drag a dot to pin it in place</li>
-            </ul>
-          </div>
-        )}
-
-        {error && <p className="text-xs leading-relaxed text-danger">{error}</p>}
-      </aside>
-
-      <main className="relative flex-1 overflow-hidden">
-        {data.nodes.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-sm text-muted">
-            <p className="text-base text-ink">Pick someone to start with</p>
-            <p>Search on the left for a person, conversation, or event. Try “Me”.</p>
-          </div>
-        ) : view === "network" ? (
-          <Graph3D key={canvasKey} data={data} dark={dark} selected={selected}
-            onSelectAction={(id) => { setSelected(id); setWhy(null); if (id !== null) setInspected(id); }}
-            onExpandAction={expand}
-            onLinkAction={(a, b) => setWhy({ a: a.id, b: b.id })}
-            onCommunitiesAction={onLegend} />
-        ) : (
-          <div className="absolute inset-0">
-            <GraphCanvas key={canvasKey} data={data} hiddenTypes={HIDDEN_2D} selected={selected} expansionParent={expansionParent}
-              onSelectAction={(id) => { setSelected(id); if (id !== null) setInspected(id); }} onExpandAction={expand} />
-          </div>
-        )}
-
+      {/* Top row: where you are, and search. */}
+      <div className="pointer-events-none absolute inset-x-3 top-3 z-20 flex items-start gap-2">
         {current && (
-          <div className="absolute left-3 top-3 z-10 flex max-w-[70%] items-center gap-1 rounded-md border border-line bg-panel px-2 py-1 text-xs">
+          <div className="pointer-events-auto flex min-w-0 max-w-[40%] shrink-0 items-center gap-1 rounded-md border border-line bg-panel/95 px-2 py-1.5 text-xs">
             <button onClick={back} disabled={trail.length < 2} aria-label="Back"
               className="rounded px-1 text-muted hover:bg-hover disabled:opacity-30">‹</button>
             {trail.map((t, i) => (
-              <span key={t.id} className="flex min-w-0 items-center gap-1">
+              <span key={t.id} className={`flex min-w-0 items-center gap-1 ${i < trail.length - 1 ? "max-sm:hidden" : ""}`}>
                 {i > 0 && <span className="text-muted">/</span>}
-                <button onClick={() => { setTrail((tr) => tr.slice(0, i + 1)); load(t, view, false); }}
+                <button onClick={() => { setTrail((tr) => tr.slice(0, i + 1)); load(t, false); }}
                   className={`truncate ${i === trail.length - 1 ? "font-medium" : "text-muted hover:text-ink"}`}>
                   {t.name}
                 </button>
@@ -212,42 +201,65 @@ export default function Explorer() {
           </div>
         )}
 
-        {loading && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-bg/60 text-sm text-muted">
-            Building the graph…
+        <div className="pointer-events-auto relative mx-auto min-w-0 flex-1 max-w-md">
+          <div className="flex items-center gap-2 rounded-md border border-line bg-panel/95 px-3 py-1.5 text-sm focus-within:border-accent">
+            <label htmlFor="seed" className="sr-only">Search the graph</label>
+            <input id="seed" ref={searchRef} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={onSearchKey}
+              role="combobox" aria-expanded={matches.length > 0} aria-controls="seed-results" autoComplete="off"
+              placeholder="Jump to a person, conversation, or event"
+              className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted focus-visible:outline-none" />
+            <kbd className="rounded border border-line px-1.5 text-[11px] text-muted">/</kbd>
           </div>
-        )}
+          {matches.length > 0 && (
+            <ul id="seed-results" role="listbox" className="absolute z-30 mt-1 max-h-72 w-full overflow-y-auto rounded-md border border-line bg-panel shadow-lg">
+              {matches.map((m, i) => (
+                <li key={m.id} role="option" aria-selected={i === active}>
+                  <button onClick={() => load(m)} onMouseEnter={() => setActive(i)}
+                    className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm ${i === active ? "bg-hover" : ""}`}>
+                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: TYPE_COLORS[m.type] }} />
+                    <span className="truncate">{m.name}</span>
+                    <span className="ml-auto text-xs text-muted">{m.type}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
 
-        {view === "network" && legend.length > 0 && (
-          <div className="absolute bottom-3 right-3 z-10 w-60 space-y-1.5 rounded-md border border-line bg-panel/95 p-3 text-xs">
-            <button onClick={() => setLegendOpen((o) => !o)} aria-expanded={legendOpen}
-              className="flex w-full items-center font-medium">
-              Groups <span className="ml-auto text-muted">{legendOpen ? "Hide" : `${legend.length}`}</span>
-            </button>
-            {legendOpen && legend.map((c) => (
-              <div key={c.color} className="flex items-center gap-2">
-                <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: c.color }} />
-                <span className="truncate text-soft">
-                  {c.members.join(", ")}{c.size > c.members.length ? ` and ${c.size - c.members.length} more` : ""}
-                </span>
-              </div>
-            ))}
-            {legendOpen && (
-              <div className="flex items-center gap-2 pt-1 text-muted">
-                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-muted" />
-                <span>Small dots are shared conversations and events</span>
-              </div>
-            )}
-          </div>
-        )}
-      </main>
+      {error && (
+        <div className="absolute left-1/2 top-16 z-20 w-[min(32rem,calc(100%-1.5rem))] -translate-x-1/2 rounded-md border border-line bg-panel px-3 py-2 shadow-sm">
+          <InlineError message={error} onRetry={retry} />
+        </div>
+      )}
 
-      <aside className="w-96 shrink-0 overflow-y-auto border-l border-line bg-panel">
+      {/* Bottom-left: compact legend and a one-line hint. */}
+      {data.nodes.length > 0 && (
+        <div className="absolute bottom-3 left-3 z-10 max-w-[calc(100%-1.5rem)] space-y-1.5 text-xs">
+          {hubs.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {hubs.map((h) => (
+                <button key={h.id} onClick={() => toggle(h.id)} title={`Show or hide ${h.name.toLowerCase()}`}
+                  className="flex items-center gap-1.5 rounded-full border border-line bg-panel/95 px-2.5 py-1 hover:bg-hover">
+                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: CATEGORY_COLOR[h.name] ?? "#a8aca3" }} />
+                  <span className="text-soft">{h.name}</span>
+                  <span className="tabular-nums text-muted">{h.total}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          <p className="px-1 text-muted max-sm:hidden">Click a dot to open it · drag to rotate · scroll to zoom · bigger dots are closer to you</p>
+        </div>
+      )}
+
+      {/* Right: details, only while something is selected. */}
+      <aside aria-hidden={!panelOpen} inert={!panelOpen}
+        className={`absolute inset-y-0 right-0 z-20 w-full max-w-96 overflow-y-auto border-l border-line bg-panel transition-transform duration-200 ${panelOpen ? "translate-x-0" : "translate-x-full"}`}>
         {why ? (
-          <WhyConnected a={why.a} b={why.b} onCloseAction={() => setWhy(null)}
-            onOpenAction={(id) => { setWhy(null); setInspected(id); setSelected(null); }} />
+          <WhyConnected a={why.a} b={why.b} onCloseAction={closePanel}
+            onOpenAction={(id) => { setWhy(null); setSelected(id); }} />
         ) : (
-          <Inspector id={selected ?? inspected} onExpandAction={expand} />
+          <Inspector id={detailId} onExpandAction={toggle} onCloseAction={closePanel} />
         )}
       </aside>
     </div>

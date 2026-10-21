@@ -1102,3 +1102,239 @@ def test_contacts_complete_scan_is_account_scoped(monkeypatch):
     assert isinstance(events[-1], CompletedScan)
     assert events[-1].external_ids == frozenset({"me@example.com/people/one"})
     assert events[-1].external_id_prefix == "me@example.com/"
+
+
+def test_service_addresses_are_not_people():
+    from igneous.graph.self_identity import is_service_address
+
+    assert is_service_address("cfa0123@import.calendar.google.com")
+    assert is_service_address("notifications@github.com")
+    assert is_service_address("no-reply@accounts.google.com")
+    assert not is_service_address("12345+jli@users.noreply.github.com")  # a real person's commit address
+    assert not is_service_address("jyl123@case.edu") and not is_service_address("+16145551234")
+
+
+def test_redact_secrets():
+    from igneous.connectors.redact import redact
+
+    # Synthetic credentials in each real format; none of these are live.
+    fake = {
+        "gh": "ghp_" + "A" * 36, "ant": "sk-ant-api03-" + "b" * 40, "aws": "AKIA" + "Z" * 16,
+        "goog": "AIza" + "c" * 35, "jwt": "eyJ" + "a" * 12 + ".eyJ" + "b" * 12 + "." + "c" * 12,
+    }
+    text = (f"use {fake['gh']} and {fake['ant']}, aws {fake['aws']}, key {fake['goog']}, jwt {fake['jwt']}\n"
+            "DATABASE_URL=postgresql://igneous:hunter2pass@db:5432/x\nOPENAI_API_KEY=abcdefgh12345678\n"
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----")
+    out, counts = redact(text)
+    for v in fake.values():
+        assert v not in out
+    assert "hunter2pass" not in out and "abcdefgh12345678" not in out and "MIIEow" not in out
+    assert "OPENAI_API_KEY=[REDACTED:assigned_secret]" in out  # the name survives, the value doesn't
+    assert counts["github_token"] == 1 and counts["private_key"] == 1
+    # Ordinary prose is untouched.
+    assert redact("the token bucket refills at 600 units per minute")[0] == "the token bucket refills at 600 units per minute"
+    assert redact(None) == (None, {})
+
+
+def test_ai_chat_keeps_prose_drops_tools_and_redacts(tmp_path):
+    """Synthetic Claude Code session: prose kept, tools/thinking/meta/subagents dropped, secrets redacted."""
+    import json
+
+    from igneous.connectors.ai_chats import AIChatConnector
+    from igneous.connectors.base import SourceItem
+
+    proj = tmp_path / "claude" / "-Users-x-repo"
+    (proj / "sess1" / "subagents").mkdir(parents=True)
+    token = "ghp_" + "Q" * 36
+    rows = [
+        {"type": "custom-title", "customTitle": "Igneous chat connector"},
+        {"type": "user", "sessionId": "sess1", "cwd": "/Users/x/igneous", "gitBranch": "feat/chats",
+         "timestamp": "2026-10-21T10:00:00Z", "message": {"content": f"build the connector, token {token}"}},
+        {"type": "assistant", "sessionId": "sess1", "timestamp": "2026-10-21T10:01:00Z", "message": {"content": [
+            {"type": "thinking", "thinking": "SECRET_THOUGHT"},
+            {"type": "text", "text": "Plan: parse jsonl."},
+            {"type": "tool_use", "input": {"command": "cat .env"}}]}},
+        {"type": "user", "timestamp": "2026-10-21T10:02:00Z",
+         "message": {"content": [{"type": "tool_result", "content": "DB_PASSWORD=hunter2hunter2"}]}},
+        {"type": "user", "isMeta": True, "timestamp": "2026-10-21T10:03:00Z", "message": {"content": "<system note>"}},
+        {"type": "attachment", "timestamp": "2026-10-21T10:04:00Z",
+         "attachment": {"type": "queued_command", "prompt": "also redact secrets"}},
+        {"type": "attachment", "timestamp": "2026-10-21T10:05:00Z", "attachment": {"type": "environment", "snapshot": {}}},
+        {"type": "user", "timestamp": "2026-10-22T09:00:00Z", "message": {"content": "next day"}},
+    ]
+    (proj / "sess1.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
+    (proj / "sess1" / "subagents" / "agent-1.jsonl").write_text(json.dumps(
+        {"type": "user", "timestamp": "2026-10-21T10:00:00Z", "message": {"content": "SUBAGENT_TEXT"}}))
+
+    conn = AIChatConnector(claude_root=str(tmp_path / "claude"), codex_root=str(tmp_path / "none"))
+    items = [o for o in conn.sync({}) if isinstance(o, SourceItem)]
+    assert [i.raw_meta["day"] for i in items] == ["2026-10-21", "2026-10-22"]  # one item per session-day
+    day1 = items[0]
+    assert "Plan: parse jsonl." in day1.body_text and "also redact secrets" in day1.body_text
+    for leaked in (token, "SECRET_THOUGHT", "cat .env", "hunter2hunter2", "<system note>", "SUBAGENT_TEXT"):
+        assert leaked not in day1.body_text, leaked
+    assert "[REDACTED:github_token]" in day1.body_text and day1.raw_meta["redactions"] == 1
+    assert day1.raw_meta["repo"] == "igneous" and day1.raw_meta["branches"] == ["feat/chats"]
+    assert day1.title.startswith("Igneous chat connector")
+
+    # Unchanged files are skipped on the next sync (cursor = mtime + size).
+    cursor = [o for o in conn.sync({}) if not isinstance(o, SourceItem)][-1].cursor
+    assert not [o for o in conn.sync(cursor) if isinstance(o, SourceItem)]
+
+
+def test_redact_is_idempotent_and_queued_image_prompts_parse(tmp_path):
+    import json
+
+    from igneous.connectors.ai_chats import claude_turns
+    from igneous.connectors.redact import redact
+
+    once, _ = redact("DB_PASSWORD=supersecretvalue and postgres://u:pw12345@h/db")
+    twice, counts = redact(once)
+    assert twice == once and counts == {}  # placeholders aren't re-matched (a scan of stored text reads 0)
+
+    f = tmp_path / "s.jsonl"
+    f.write_text(json.dumps({"type": "attachment", "timestamp": "2026-10-21T10:00:00Z", "attachment": {
+        "type": "queued_command", "prompt": [{"type": "text", "text": "see this screenshot"}, {"type": "image"}]}}))
+    _, turns = claude_turns(str(f))
+    assert [t["text"] for t in turns] == ["see this screenshot"]
+
+
+def test_api_responses_name_numbers_but_keep_keys(monkeypatch):
+    from igneous import main
+    from igneous.graph import traversal
+
+    monkeypatch.setattr(traversal, "handle_names", lambda s: {"+16145551234": "Sam Lee", "6145551234": "Sam Lee"})
+    body = main.NamedResponse({"name": "+16145551234", "key": "+16145551234",
+                               "items": [{"text": "[14:39] +16145551234: hi"}]}).body
+    import json
+    out = json.loads(body)
+    assert out["name"] == "Sam Lee" and out["key"] == "+16145551234"
+    assert out["items"][0]["text"] == "[14:39] Sam Lee: hi"
+
+
+def test_entity_names_normalize_and_drop_generic():
+    from igneous.graph.entities import _norm, _usable
+
+    assert _norm("Draw Steel (session 4)") == "draw steel"
+    assert _norm("Igneous - weekly sync") == "igneous"
+    assert _norm("Draw Steel #12") == "draw steel"
+    assert not _usable(_norm("Lunch"))
+    assert not _usable(_norm("1:1"))
+    assert not _usable("10/21")
+    assert _usable("dealer tire")
+
+
+def _export_items(payload, provider=None, zipped=None):
+    import io
+    import json
+    import zipfile
+
+    from igneous.connectors.ai_exports import export_items, parse_export
+
+    raw = json.dumps(payload).encode()
+    if zipped:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(zipped, raw)
+        raw = buf.getvalue()
+    kind, convs = parse_export(io.BytesIO(raw), provider)
+    return kind, convs, export_items(kind, convs)
+
+
+def test_chatgpt_export_keeps_text_drops_tools_and_groups_by_day():
+    from datetime import UTC, datetime
+
+    ts = lambda d, h: datetime(2025, 3, d, h, tzinfo=UTC).timestamp()  # noqa: E731
+    token = "ghp_" + "A" * 36
+    msg = lambda role, ctype, parts, t: {"message": {"author": {"role": role}, "create_time": t,  # noqa: E731
+                                                      "content": {"content_type": ctype, "parts": parts}}}
+    mapping = {
+        "root": {"message": None},
+        "c": msg("assistant", "text", ["Use a partial index."], ts(1, 10)),  # out of order on purpose
+        "a": msg("system", "text", ["You are ChatGPT"], ts(1, 9)),
+        "b": msg("user", "text", [f"how do I speed up my query? token {token}"], ts(1, 9)),
+        "d": msg("tool", "text", ["TOOL OUTPUT"], ts(1, 10)),
+        "e": msg("assistant", "code", ["print('x')"], ts(1, 10)),
+        "f": msg("user", "multimodal_text", [{"asset_pointer": "x"}, "caption"], ts(1, 10)),
+        "g": msg("user", "text", ["thanks, next day"], ts(2, 8)),
+    }
+    data = [{"title": "SQL help", "create_time": ts(1, 9), "conversation_id": "cv1", "mapping": mapping},
+            {"title": "assistant only", "mapping": {"x": msg("assistant", "text", ["hi"], ts(1, 9))}}]
+    kind, convs, items = _export_items(data, zipped="export/conversations.json")
+    assert kind == "chatgpt" and len(convs) == 2
+    assert [i.external_id for i in items] == ["chatgpt/cv1/2025-03-01", "chatgpt/cv1/2025-03-02"]
+    body = items[0].body_text
+    assert "me: how do I speed up" in body and "assistant: Use a partial index." in body
+    assert body.index("how do I") < body.index("partial index")
+    for dropped in ("You are ChatGPT", "TOOL OUTPUT", "print(", "caption", token):
+        assert dropped not in body
+    assert "[REDACTED" in body and items[0].raw_meta["redactions"] == 1 and items[0].raw_meta["tool"] == "chatgpt"
+
+
+def test_claude_ai_export_prefers_content_blocks_and_skips_empty():
+    token = "ghp_" + "B" * 36
+    data = [{"uuid": "u1", "name": "Plan", "chat_messages": [
+        {"sender": "human", "text": f"hello {token}", "created_at": "2025-04-01T10:00:00.000000Z",
+         "content": [{"type": "text", "text": f"hello {token}"}]},
+        {"sender": "assistant", "text": "", "created_at": "2025-04-01T10:00:05Z",
+         "content": [{"type": "thinking", "thinking": "hmm"}, {"type": "text", "text": "Here is a plan."}]},
+        {"sender": "human", "text": "legacy text only", "created_at": "2025-04-02T09:00:00Z"},
+    ]}, {"uuid": "u2", "name": "none", "chat_messages": [
+        {"sender": "assistant", "text": "orphan", "created_at": "2025-04-01T10:00:00Z"}]}]
+    kind, _, items = _export_items(data)
+    assert kind == "claude_ai"
+    assert [i.external_id for i in items] == ["claude_ai/u1/2025-04-01", "claude_ai/u1/2025-04-02"]
+    assert "assistant: Here is a plan." in items[0].body_text and "hmm" not in items[0].body_text
+    assert token not in items[0].body_text and items[0].raw_meta["redactions"] == 1
+    assert "legacy text only" in items[1].body_text
+
+
+def test_gemini_takeout_groups_a_day_and_strips_html():
+    data = [
+        {"header": "Gemini Apps", "title": "Prompted second question", "time": "2025-05-01T15:00:00.000Z",
+         "safeHtmlItem": [{"html": "<p>Answer <b>two</b></p><ul><li>a</li></ul>"}]},
+        {"header": "Gemini Apps", "title": "Prompted first question", "time": "2025-05-01T14:00:00.000Z",
+         "safeHtmlItem": [{"html": "<p>Answer one</p>"}]},
+        {"header": "Gemini Apps", "title": "Used an Assistant feature", "time": "2025-05-01T16:00:00.000Z"},
+        {"header": "Gemini Apps", "title": "Prompted next day", "time": "2025-05-02T08:00:00.000Z"},
+    ]
+    kind, convs, items = _export_items(data, zipped="Takeout/My Activity/Gemini Apps/MyActivity.json")
+    assert kind == "gemini" and len(convs) == 2
+    assert [i.external_id for i in items] == ["gemini/gemini-2025-05-01/2025-05-01",
+                                              "gemini/gemini-2025-05-02/2025-05-02"]
+    body = items[0].body_text
+    assert body.index("first question") < body.index("Answer one") < body.index("second question")
+    assert "<p>" not in body and "Answer" in body and "Assistant feature" not in body
+
+
+def test_export_rejects_unknown_and_html_uploads():
+    import io
+
+    from igneous.connectors.ai_exports import ExportError, parse_export
+
+    for raw in (b'{"a": 1}', b"<html></html>", b"[]"):
+        with pytest.raises(ExportError):
+            parse_export(io.BytesIO(raw))
+
+
+def test_unknown_numbers_are_masked_in_labels_only():
+    from igneous.graph.traversal import name_handles
+
+    named = {"+16145551234": "Sam Lee"}
+    assert name_handles("+16145551234, +19995550000", named, mask=True) == "Sam Lee, ···0000"
+    assert name_handles("call +19995550000", named) == "call +19995550000"
+
+
+def test_no_sqlalchemy_param_casts_with_double_colon():
+    """`:name::bigint` breaks SQLAlchemy text(): it reads `name:` as the parameter and Postgres sees a stray
+    `:`. This crashed /timeline in production (tests with a fake session never sent the SQL to Postgres).
+    Use CAST(:name AS bigint) instead."""
+    import pathlib
+    import re
+
+    bad = []
+    for path in pathlib.Path(__file__).resolve().parents[1].joinpath("igneous").rglob("*.py"):
+        for i, line in enumerate(path.read_text().splitlines(), 1):
+            if re.search(r"(?<![:\w]):[A-Za-z_]\w*::[A-Za-z]", line):
+                bad.append(f"{path.name}:{i}: {line.strip()}")
+    assert not bad, "use CAST(:param AS type), not :param::type:\n" + "\n".join(bad)

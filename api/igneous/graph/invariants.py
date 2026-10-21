@@ -22,13 +22,16 @@ LEGAL_ENDPOINTS: dict[str, set[tuple[str, str]]] = {
     "IN_THREAD": {("Message", "Thread")},
     "REPLIES_TO": {("Message", "Message")},
     "ATTACHED": {("Message", "File")},
-    "CONTAINS": {("Folder", "Folder"), ("Folder", "File")},
+    "CONTAINS": {("Folder", "Folder"), ("Folder", "File"), ("Folder", "Thread")},  # repo -> AI session
     "ATTENDED": {("Person", "Event")},
     "AUTHORED": {("Person", "File")},
     "MENTIONS": {("Message", "Person"), ("Message", "Organization")},
     "ABOUT": {("Message", "Topic")},
     "RELATED_TO": set(),  # Any node pair is legal.
     "SAME_AS": {("Person", "Person")},
+    # Derived entities (graph/entities.py): an item or anchor belongs to a Project; people are involved in it.
+    "PART_OF": {(t, "Project") for t in ("Message", "Event", "Thread", "File", "Folder")},
+    "INVOLVED_IN": {("Person", "Project")},
 }
 
 

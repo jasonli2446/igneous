@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useState } from "react";
+import { InlineError, Skeleton } from "@/components/ui";
 import { api, AskResult, Hit } from "@/lib/api";
 
 const EXAMPLES = [
@@ -16,7 +17,7 @@ function withCitations(answer: string, ids: Set<number>, onPick: (id: number) =>
     if (!m) return <Fragment key={i}>{part}</Fragment>;
     const id = Number(m[1]);
     return ids.has(id) ? (
-      <button key={i} onClick={() => onPick(id)} className="mx-0.5 rounded bg-blue-50 px-1 font-mono text-xs text-blue-700 hover:bg-blue-100">
+      <button key={i} onClick={() => onPick(id)} className="mx-0.5 rounded bg-accent/15 px-1 font-mono text-xs text-accent hover:bg-accent/25">
         c{id}
       </button>
     ) : null; // cited something it was not shown: the server already dropped it from citations
@@ -53,50 +54,63 @@ export default function AskPage() {
   };
 
   return (
-    <div className="mx-auto max-w-3xl p-6">
-      <form onSubmit={(e) => { e.preventDefault(); run(q); }} className="flex gap-2">
+    <div className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6">
+      <h1 className="text-xl font-semibold tracking-tight">Ask</h1>
+      <p className="mt-1 text-sm text-muted">Ask a question in plain language. Answers cite the passages they came from.</p>
+      <form onSubmit={(e) => { e.preventDefault(); run(q); }} className="mt-5 flex gap-2">
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Ask a question about the corpus…"
-          className="min-w-0 flex-1 rounded border border-zinc-300 px-3 py-2 outline-none focus:border-zinc-500" />
-        <button className="rounded bg-zinc-900 px-4 py-2 text-sm text-white disabled:opacity-50" disabled={busy}>
+          className="min-w-0 flex-1 rounded-md border border-line bg-panel px-3 py-2 text-sm outline-none placeholder:text-muted focus:border-accent" />
+        <button className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-bg disabled:opacity-50" disabled={busy}>
           {busy ? "Thinking…" : "Ask"}
         </button>
       </form>
-      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-500">
-        <label className="flex items-center gap-1">
-          <input type="checkbox" checked={useGraph} onChange={(e) => setUseGraph(e.target.checked)} />
-          Graph expansion (off = baseline)
+      <div className="mt-3 flex flex-col gap-1.5 text-xs text-muted">
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" className="accent-[var(--accent)]" checked={useGraph} onChange={(e) => setUseGraph(e.target.checked)} />
+          Use the graph to find related context (turn off for plain retrieval)
         </label>
-        {EXAMPLES.map((ex) => (
-          <button key={ex} onClick={() => run(ex)} className="underline decoration-dotted hover:text-zinc-800">{ex}</button>
-        ))}
+        {!res && !busy && (
+          <ul className="mt-2 space-y-1">
+            <li className="text-muted">Try one of these</li>
+            {EXAMPLES.map((ex) => (
+              <li key={ex}><button onClick={() => run(ex)} className="text-left text-soft hover:text-ink hover:underline">{ex}</button></li>
+            ))}
+          </ul>
+        )}
       </div>
 
-      {error && <p className="mt-6 text-sm text-red-600">{error}</p>}
+      {error && <div className="mt-6"><InlineError message={error} onRetry={() => run(q)} /></div>}
 
-      {res && (
+      {busy && (
+        <div className="mt-6 space-y-2" role="status" aria-label="Thinking">
+          <Skeleton className="h-4 w-full" /><Skeleton className="h-4 w-11/12" /><Skeleton className="h-4 w-2/3" />
+        </div>
+      )}
+
+      {res && !busy && (
         <>
-          <div className={`mt-6 rounded border p-4 ${res.answerable ? "border-zinc-200" : "border-amber-200 bg-amber-50"}`}>
-            {!res.answerable && <div className="mb-1 text-xs font-medium uppercase text-amber-700">Not answerable from the evidence</div>}
+          <div className={`mt-6 rounded-md border p-4 ${res.answerable ? "border-line bg-panel" : "border-danger/40"}`}>
+            {!res.answerable && <div className="mb-1 text-xs font-medium text-danger">Not answerable from the evidence</div>}
             <p className="leading-relaxed">{withCitations(res.answer, cited, pick)}</p>
-            <div className="mt-3 text-xs text-zinc-400">
+            <div className="mt-3 text-xs text-muted">
               {res.citations.length} cited of {res.evidence.length} evidence chunks · {res.timing.total_s ?? res.timing.retrieve_s}s
             </div>
           </div>
 
-          <h3 className="mt-6 mb-2 text-sm font-medium text-zinc-700">Evidence</h3>
+          <h3 className="mt-8 mb-2 text-sm font-medium">Evidence</h3>
           <ol className="space-y-3">
             {res.evidence.map((h: Hit) => (
               <li key={h.chunk_id} id={`ev-${h.chunk_id}`}
-                className={`rounded border p-3 text-sm ${focus === h.chunk_id ? "border-blue-400 ring-2 ring-blue-100" : cited.has(h.chunk_id) ? "border-blue-200" : "border-zinc-200 opacity-70"}`}>
+                className={`rounded-md border p-3 text-sm ${focus === h.chunk_id ? "border-accent ring-2 ring-accent/25" : cited.has(h.chunk_id) ? "border-accent/50" : "border-line opacity-70"}`}>
                 <div className="flex items-baseline gap-2">
-                  <span className="font-mono text-xs text-zinc-400">c{h.chunk_id}</span>
+                  <span className="font-mono text-xs text-muted">c{h.chunk_id}</span>
                   <span className="font-medium">{h.title || "(no subject)"}</span>
-                  <span className="ml-auto shrink-0 text-xs text-zinc-400">{h.matched.join(" + ")}</span>
+                  <span className="ml-auto shrink-0 text-xs text-muted">{h.matched.join(" + ")}</span>
                 </div>
-                <div className="mt-0.5 text-xs text-zinc-500">
+                <div className="mt-0.5 text-xs text-muted">
                   {h.external_id}{h.occurred_at && ` · ${new Date(h.occurred_at).toLocaleDateString()}`}
                 </div>
-                <p className="mt-2 line-clamp-6 whitespace-pre-wrap text-zinc-700">{h.text}</p>
+                <p className="mt-2 line-clamp-6 whitespace-pre-wrap text-soft">{h.text}</p>
               </li>
             ))}
           </ol>

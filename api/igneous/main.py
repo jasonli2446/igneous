@@ -1,14 +1,18 @@
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, UploadFile
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous.connectors.ai_exports import ExportConnector, ExportError, export_items, parse_export
+from igneous.connectors.base import run_sync
 from igneous.db import get_session
-from igneous.graph.traversal import GraphFilters, explain, neighborhood, network, people
+from igneous.graph.traversal import GraphFilters, expand, explain, neighborhood, network, people, view
 from igneous.llm import LLMDisabled
 from igneous.rag import qa
 from igneous.rag.constraints import apply
@@ -16,7 +20,32 @@ from igneous.rag.search import Filters, experts, hybrid
 from igneous.sync_status import sync_status
 from igneous.timeline import EntityNotFoundError, timeline
 
-app = FastAPI(title="Igneous", version="0.1.0")
+
+class NamedResponse(JSONResponse):
+    """Every string the API returns shows contact names instead of phone numbers, wherever a number has a saved
+    contact. Identity fields (`key`, `external_id`) stay raw so clients can still address things by them."""
+    KEEP = frozenset({"key", "external_id", "chat", "handle"})
+    LABELS = frozenset({"name", "thread", "title", "a_name", "b_name"})
+
+    def render(self, content) -> bytes:
+        from igneous.db import SessionLocal
+        from igneous.graph.traversal import handle_names, name_handles
+        with SessionLocal() as s:
+            named = handle_names(s)
+
+        def walk(v, field=None):
+            if isinstance(v, str):
+                # Labels (`name`, `thread`, `title`) mask unknown numbers; body text keeps them in full.
+                return v if field in self.KEEP else name_handles(v, named, mask=field in self.LABELS)
+            if isinstance(v, dict):
+                return {k: walk(x, k) for k, x in v.items()}
+            if isinstance(v, list):
+                return [walk(x, field) for x in v]
+            return v
+        return super().render(walk(jsonable_encoder(content)))
+
+
+app = FastAPI(title="Igneous", version="0.1.0", default_response_class=NamedResponse)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -64,6 +93,21 @@ def expert_search(q: str = Query(..., min_length=1), k: int = Query(10, ge=1, le
     if not q.strip():
         raise HTTPException(422, "q must contain non-whitespace characters")
     return {"experts": experts(s, q, k=k, evidence_limit=evidence_limit, mode=mode)}
+
+
+@app.post("/import/ai-export")
+def import_ai_export(file: UploadFile, provider: Annotated[str | None, Form()] = None,
+                     s: Session = Depends(get_session)):
+    """Import a ChatGPT / claude.ai / Gemini (Takeout JSON) export, zipped or raw. Only the parsed, redacted
+    day-items are stored; the upload sits in Starlette's spooled temp file and is discarded after the request."""
+    try:
+        kind, convs = parse_export(file.file, provider or None)
+    except ExportError as e:
+        raise HTTPException(422, str(e)) from e
+    items = export_items(kind, convs)
+    stats = run_sync(s, ExportConnector(items), account=kind)
+    return {"provider": kind, "conversations": len(convs), "items_inserted": stats["inserted"],
+            "items_updated": stats["updated"], "redactions": sum(i.raw_meta["redactions"] for i in items)}
 
 
 class AskBody(BaseModel):
@@ -135,6 +179,23 @@ def graph_network(seed: int, people: int = Query(50, le=200), hubs: int = Query(
                   s: Session = Depends(get_session)):
     """People plus the group chats, threads, and events that join them (clusters, not a star)."""
     return network(s, seed, people_limit=people, hub_limit=hubs)
+
+
+@app.get("/graph/view")
+def graph_view(seed: int | None = None, per: int = Query(6, le=20), s: Session = Depends(get_session)):
+    """The single graph: seed (default: you) -> categories that exist in the data -> their top members."""
+    if seed is None:
+        seed = s.execute(text("SELECT id FROM nodes WHERE type = 'Person' AND props->>'self' = 'true' LIMIT 1")).scalar()
+        if seed is None:
+            raise HTTPException(404, "No self node yet: run `igneous pipeline --stage self`.")
+    return view(s, seed, per=per)
+
+
+@app.get("/graph/expand")
+def graph_expand(seed: int, node: int, visible: list[int] = Query([]), k: int = Query(6, le=20),
+                 offset: int = 0, s: Session = Depends(get_session)):
+    """Reveal a node's top connections that aren't already on screen."""
+    return expand(s, seed, node, visible, k=k, offset=offset)
 
 
 @app.get("/graph/explain")

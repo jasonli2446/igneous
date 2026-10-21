@@ -107,7 +107,7 @@ def connect(s: Session, open_browser: bool = True) -> str:
     from googleapiclient.discovery import build
 
     flow = InstalledAppFlow.from_client_secrets_file(str(client_secret_path()), SCOPES)
-    creds = flow.run_local_server(port=0, open_browser=open_browser, prompt="consent", access_type="offline",
+    creds = flow.run_local_server(port=0, open_browser=open_browser, prompt="consent select_account", access_type="offline",
                                   authorization_prompt_message="Sign in to Google here:\n{url}\n")
     email = build("oauth2", "v2", credentials=creds, cache_discovery=False).userinfo().get().execute()["email"]
     save(s, email, creds)
