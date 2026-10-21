@@ -81,7 +81,9 @@ application model access goes through `api/igneous/providers.py`: local FastEmbe
 cross-encoder reranker, and the existing Bedrock chat client. Select them with `IGNEOUS_EMBEDDING_PROVIDER`,
 `IGNEOUS_RERANK_PROVIDER`, and `IGNEOUS_CHAT_PROVIDER`; the supported defaults are `fastembed`, `cross_encoder`,
 and `bedrock`. `IGNEOUS_LLM_ENABLED=false` turns off hosted model calls (search and the graph keep working; `/ask`
-returns 503).
+returns 503). Automatic extraction is separately off by default: explicitly set `IGNEOUS_LLM_SOURCES` to the
+comma-separated source IDs you approve (for example `gmail,ai_chats`). This lets you import private AI-chat
+history without sending it to a hosted model; an explicit `/ask` request remains a user-initiated model call.
 
 Q&A reranks the graph-expanded candidate pool down to the top 8 evidence chunks. Set
 `IGNEOUS_RERANKER_ENABLED=false` to preserve graph retrieval order, or adjust the bounded input with

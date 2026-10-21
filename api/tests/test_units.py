@@ -412,6 +412,34 @@ def test_locate_spans():
     assert locate(body, "Ken Lay") is None and locate(body, "  ") is None
 
 
+def test_automatic_extraction_requires_explicit_source_opt_in(monkeypatch):
+    from igneous.graph import extract
+
+    assert extract.allowed_sources("") == frozenset()
+    assert extract.allowed_sources(" gmail, ai_chats ,gmail ") == frozenset({"gmail", "ai_chats"})
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, statement, params):
+            self.calls.append((str(statement), params))
+            return type("Result", (), {"all": lambda self: []})()
+
+    session = Session()
+    messages = []
+    monkeypatch.setattr(extract.settings, "llm_sources", "")
+    assert extract.run(session, log=messages.append) == 0
+    assert session.calls == []
+    assert "IGNEOUS_LLM_SOURCES" in messages[0]
+
+    monkeypatch.setattr(extract.settings, "llm_sources", "ai_chats")
+    assert extract.run(session) == 0
+    query, params = session.calls[0]
+    assert "si.source = ANY(CAST(:sources AS text[]))" in query
+    assert params["sources"] == ["ai_chats"]
+
+
 def test_extraction_spans_index_the_stored_body():
     """Regression: offsets were computed on a .strip()-ed body and stored against the original (off by one)."""
     from igneous.graph.extract import locate
