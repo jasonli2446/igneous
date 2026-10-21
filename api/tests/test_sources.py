@@ -15,7 +15,7 @@ def test_registry_shape():
     ids = [s["id"] for s in sources.SOURCES]
     assert len(ids) == len(set(ids))
     assert {"gmail", "gcal", "gcontacts", "drive", "imessage", "maccontacts", "ai_chats", "fs", "email",
-            "chatgpt", "gemini", "claude_ai", "github"} <= set(ids)
+            "chatgpt", "takeout", "claude_ai", "github"} <= set(ids)
     for s in sources.SOURCES:
         assert s["kind"] in KINDS
         assert s["name"] and s["reads"] and s["group"]

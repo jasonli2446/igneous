@@ -49,6 +49,9 @@ def chunks_for(item) -> list[str]:
         body = strip_quoted(body)
         header = f"Subject: {item.title}\n" if item.title else ""
         return [header + c for c in split(body)] or ([header.strip()] if header else [])
+    if item.source.startswith("takeout_"):  # a day of searches or visits: the title says which product and day
+        head = f"{item.title}\n" if item.title else ""
+        return [head + c for c in split(body)]
     return split(body)
 
 

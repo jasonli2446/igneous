@@ -123,6 +123,55 @@ def import_ai_export(file: UploadFile, provider: Annotated[str | None, Form()] =
             "items_updated": stats["updated"], "redactions": sum(i.raw_meta["redactions"] for i in items)}
 
 
+@app.post("/import/takeout")
+async def import_takeout(request: Request):
+    """Import a Google Takeout export (My Activity incl. Gemini, Chrome, Maps) as a background job; poll /jobs/{id}.
+    Send multipart `file` parts (the zip(s) as downloaded) or JSON/form `{"path": "<zip or folder>"}` and/or
+    `scan_downloads: true` to read ~/Downloads/takeout-*.zip in place. This API runs on your computer, so reading
+    a local path is fine and avoids pushing multi-GB zips through the browser."""
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    from igneous.connectors import takeout
+
+    tmp: str | None = None
+    try:
+        if request.headers.get("content-type", "").startswith("application/json"):
+            body = await request.json()
+            paths, scan = body.get("path") or body.get("paths"), bool(body.get("scan_downloads"))
+        else:
+            form = await request.form()
+            paths, scan = [str(p) for p in form.getlist("path") if p], str(form.get("scan_downloads", "")).lower() in ("1", "true", "on")
+            uploads = [f for f in form.getlist("file") if hasattr(f, "file")]
+            if uploads:
+                tmp = tempfile.mkdtemp(prefix="igneous-takeout-")
+                for i, up in enumerate(uploads):
+                    with open(Path(tmp) / f"{i}-{Path(up.filename or 'takeout.zip').name}", "wb") as out:
+                        shutil.copyfileobj(up.file, out)
+                paths = [*paths, tmp]
+        resolved = takeout.resolve_paths(paths, scan)
+        takeout.preflight(resolved)
+    except (takeout.TakeoutError, ValueError) as e:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+        raise HTTPException(422, str(e)) from e
+
+    def runner(sess, progress):
+        try:
+            return takeout.run_import(sess, resolved, progress)
+        finally:
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+    try:
+        return _start_job("import", "takeout", runner)
+    except HTTPException:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+        raise
+
+
 @app.get("/sources")
 def list_sources(s: Session = Depends(get_session)):
     """Every connector and import format with plain-language setup, requirement checks, and live status."""

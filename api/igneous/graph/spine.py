@@ -376,6 +376,33 @@ def build_file(b: Builder, item) -> None:
         b.edge(repo, child, "CONTAINS", item.occurred_at, item.id)
 
 
+def build_takeout(b: Builder, item) -> None:
+    """Google Takeout day-items. Each item is a File node (so it is chunked, searchable and linkable to a
+    Project by phrase match). Maps items also create Place nodes: you VISITED a place (one edge per place,
+    spanning first to last visit; counts come from the item metadata) or SAVED it (starred, listed, reviewed)."""
+    meta = item.raw_meta
+    b.node("File", f"{item.source}:{item.external_id}", item.title or item.external_id,
+           {"source": item.source, "kind": meta.get("kind") or meta.get("product", "activity")}, sid=item.id)
+    if item.source != "takeout_maps":
+        return
+    me = b.node("Person", "me", "Me", {"self": True})
+    visited = meta.get("kind") == "visits"
+    for v in meta.get("visits" if visited else "places", []):
+        name = v.get("name") or v.get("address") or "Unnamed place"
+        props = {k: v[k] for k in ("address", "lat", "lng", "place_id") if v.get(k) is not None}
+        pid = b.node("Place", v["key"], name, props)
+        start = v.get("start") or (item.occurred_at.isoformat() if item.occurred_at else None)
+        b.s.execute(text("""
+            INSERT INTO edges (src, dst, type, valid_from, valid_to, source_item_id)
+            VALUES (:src, :dst, :type, CAST(:a AS timestamptz), CAST(:z AS timestamptz), :sid)
+            ON CONFLICT (src, dst, type, extractor) DO UPDATE SET
+                valid_from = LEAST(edges.valid_from, EXCLUDED.valid_from),
+                valid_to = GREATEST(edges.valid_to, EXCLUDED.valid_to),
+                source_item_id = COALESCE(edges.source_item_id, EXCLUDED.source_item_id)
+        """), {"src": me, "dst": pid, "type": "VISITED" if visited else "SAVED", "a": start,
+               "z": v.get("end") or start, "sid": item.id})
+
+
 def backfill_temporal(s: Session, limit: int = BATCH) -> int:
     """Repair one bounded batch of legacy temporal data without blocking an upgrade."""
     params = {"types": list(POINT_IN_TIME_TYPES), "limit": limit}
@@ -401,6 +428,8 @@ def run(s: Session) -> int:
             build_ai_chat(b, item)
         elif item.source == "github":
             build_github(b, item)
+        elif item.source.startswith("takeout_"):
+            build_takeout(b, item)
         elif item.source == "gcal":
             build_event(b, item)
         elif item.source in ("gcontacts", "maccontacts"):
