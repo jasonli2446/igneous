@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import EvidenceList from "@/components/EvidenceList";
+import TimelineExplorer from "@/components/TimelineExplorer";
 import { api, NodeDetail, TYPE_COLORS } from "@/lib/api";
 
 type Props = { id: number | null; onExpandAction: (id: number) => void };
@@ -53,6 +54,8 @@ export default function Inspector({ id, onExpandAction }: Props) {
         <div className="mb-1 font-medium">What the graph knows</div>
         <EvidenceList id={node.id} />
       </div>
+
+      <TimelineExplorer a={node.id} />
 
       {src && (
         <div>

@@ -90,6 +90,29 @@ export type Explanation = {
   events: { id: number; name: string; at: string | null }[];
 };
 
+export type TimelineEdge = {
+  id: number;
+  type: string;
+  direction: "outgoing" | "incoming";
+  counterpart: { id: number; type: string };
+  interval: { from: string | null; to: string | null };
+  provenance: {
+    extractor: string;
+    extractor_version: string;
+    model: string | null;
+    confidence: number | null;
+    evidence: { source_item_id: number | null; source: string | null; occurred_at: string | null; span: { start: number; end: number } | null };
+  };
+};
+
+export type Timeline = {
+  mode: "activity" | "relationship";
+  a: { id: number; type: string };
+  b: { id: number; type: string } | null;
+  edges: TimelineEdge[];
+  truncated: boolean;
+};
+
 export type NodeDetail = GNode & {
   props: Record<string, unknown>;
   degree: Record<string, number>;
@@ -141,6 +164,8 @@ export const api = {
   },
   evidence: (id: number) => get<{ evidence: Evidence[] }>(`/graph/node/${id}/evidence`, { limit: 30 }),
   explain: (a: number, b: number) => get<Explanation>("/graph/explain", { a, b }),
+  timeline: (a: number, b?: number, limit = 50, signal?: AbortSignal) =>
+    get<Timeline>("/timeline", { a, b, limit }, signal),
   node: (id: number) => get<NodeDetail>(`/graph/node/${id}`, {}),
 };
 
