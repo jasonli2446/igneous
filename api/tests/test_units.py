@@ -239,6 +239,95 @@ def test_graph_filters_scope_discovery_and_final_serialization():
     assert graph == {"nodes": [{"id": 7, "type": "Person", "name": "Seed", "key": "seed", "degree": 3}], "edges": []}
 
 
+def test_timeline_returns_bounded_dated_metadata_without_raw_source_content():
+    from igneous.timeline import timeline
+
+    dated = datetime(2024, 2, 3)
+
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def mappings(self):
+            return self
+
+        def first(self):
+            return self.rows[0] if self.rows else None
+
+        def all(self):
+            return self.rows
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, statement, params):
+            self.calls.append((str(statement), params))
+            if "FROM nodes n" in str(statement):
+                return Result([{"id": params["node_id"], "type": "Person", "name": "Pat"}])
+            return Result([
+                {"id": 9, "src": 1, "dst": 2, "a_is_src": True, "type": "ATTENDED",
+                 "valid_from": dated, "valid_to": dated, "extractor": "spine", "extractor_version": "1",
+                 "model": None, "confidence": None, "source_item_id": 44, "span_start": None,
+                 "span_end": None, "source": "gcal", "occurred_at": dated, "other_id": 2,
+                 "other_type": "Event", "other_name": "Private calendar title"},
+                {"id": 8, "src": 1, "dst": 3, "a_is_src": True, "type": "MENTIONS",
+                 "valid_from": dated, "valid_to": dated, "extractor": "extract", "extractor_version": "2",
+                 "model": "model", "confidence": 0.8, "source_item_id": 45, "span_start": 10,
+                 "span_end": 14, "source": "gmail", "occurred_at": dated, "other_id": 3,
+                 "other_type": "Topic"},
+            ])
+
+    session = Session()
+    result = timeline(session, a=1, b=2, limit=1)
+
+    assert result["mode"] == "relationship" and result["truncated"] is True
+    assert result["edges"] == [{
+        "id": 9, "type": "ATTENDED", "direction": "outgoing",
+        "counterpart": {"id": 2, "type": "Event"},
+        "interval": {"from": dated, "to": dated},
+        "provenance": {"extractor": "spine", "extractor_version": "1", "model": None,
+                       "confidence": None, "evidence": {"source_item_id": 44, "source": "gcal",
+                                                           "occurred_at": dated, "span": None}},
+    }]
+    query, params = session.calls[-1]
+    assert "COALESCE(e.valid_from, e.valid_to, si.occurred_at) IS NOT NULL" in query
+    assert "si.body_text" not in query and "si.title" not in query and "si.raw_meta" not in query
+    assert "other.name" not in query
+    assert "Private calendar title" not in str(result)
+    assert params["limit_plus_one"] == 2 and params["a"] == 1 and params["b"] == 2
+
+
+def test_timeline_endpoint_validates_bounds_and_translates_missing_entities(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from igneous import main
+    from igneous.db import get_session
+    from igneous.timeline import EntityNotFoundError
+
+    calls = []
+    marker = object()
+    monkeypatch.setattr(main, "timeline", lambda session, **kwargs: calls.append((session, kwargs)) or {"edges": []})
+    main.app.dependency_overrides[get_session] = lambda: marker
+    try:
+        client = TestClient(main.app)
+        assert client.get("/timeline?a=0").status_code == 422
+        response = client.get("/timeline?a=1&b=2&limit=3")
+        activity = client.get("/timeline?a=1&limit=1")
+    finally:
+        main.app.dependency_overrides.clear()
+    assert response.json() == activity.json() == {"edges": []}
+    assert calls == [(marker, {"a": 1, "b": 2, "limit": 3}), (marker, {"a": 1, "b": None, "limit": 1})]
+
+    monkeypatch.setattr(main, "timeline", lambda *_args, **_kwargs: (_ for _ in ()).throw(EntityNotFoundError(9)))
+    main.app.dependency_overrides[get_session] = lambda: marker
+    try:
+        response = TestClient(main.app).get("/timeline?a=9")
+    finally:
+        main.app.dependency_overrides.clear()
+    assert response.status_code == 404
+
+
 def test_topic_normalization_is_conservative_and_similarity_requires_lexical_evidence():
     from igneous.graph.topics import Topic, normalize_key, similar_pairs
 

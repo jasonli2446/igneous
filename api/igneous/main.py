@@ -14,6 +14,7 @@ from igneous.rag import qa
 from igneous.rag.constraints import apply
 from igneous.rag.search import Filters, experts, hybrid
 from igneous.sync_status import sync_status
+from igneous.timeline import EntityNotFoundError, timeline
 
 app = FastAPI(title="Igneous", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -78,6 +79,20 @@ def ask(body: AskBody, s: Session = Depends(get_session)):
         return qa.answer(s, body.question, Filters(person=body.person), use_graph=body.use_graph, mode=body.mode)
     except LLMDisabled as e:
         raise HTTPException(503, str(e)) from e
+
+
+@app.get("/timeline")
+def relationship_timeline(a: int = Query(..., ge=1), b: int | None = Query(None, ge=1),
+                          limit: int = Query(50, ge=1, le=200), s: Session = Depends(get_session)):
+    """Dated, bounded direct edges for two entities, or one entity's dated activity.
+
+    Evidence is metadata-only: this endpoint never returns source titles, bodies,
+    external IDs, raw metadata, or extracted text spans.
+    """
+    try:
+        return timeline(s, a=a, b=b, limit=limit)
+    except EntityNotFoundError as e:
+        raise HTTPException(404, f"Entity {e.args[0]} not found") from e
 
 
 @app.get("/graph/search")
