@@ -77,12 +77,20 @@ CO-5): use the Enron DB for anything shared.
 ## Model calls
 
 Q&A uses Claude Sonnet 5.5 on Amazon Bedrock. Set `AWS_BEARER_TOKEN_BEDROCK` and `AWS_REGION` (e.g. `us-east-1`);
-everything goes through `api/igneous/llm.py`. `IGNEOUS_LLM_ENABLED=false` turns off all model calls (search and
-the graph keep working; `/ask` returns 503). Q&A also uses FastEmbed's local
-`Xenova/ms-marco-MiniLM-L-6-v2` cross-encoder to rerank the graph-expanded candidate pool down to the top
-8 evidence chunks. Set `IGNEOUS_RERANKER_ENABLED=false` to preserve graph retrieval order, or adjust the
-bounded input with `IGNEOUS_RERANKER_POOL_SIZE` (32 by default). If its model files cannot load, Q&A logs a
-warning and safely preserves that order instead.
+application model access goes through `api/igneous/providers.py`: local FastEmbed embeddings, a local FastEmbed
+cross-encoder reranker, and the existing Bedrock chat client. Select them with `IGNEOUS_EMBEDDING_PROVIDER`,
+`IGNEOUS_RERANK_PROVIDER`, and `IGNEOUS_CHAT_PROVIDER`; the supported defaults are `fastembed`, `cross_encoder`,
+and `bedrock`. `IGNEOUS_LLM_ENABLED=false` turns off hosted model calls (search and the graph keep working; `/ask`
+returns 503).
+
+Q&A reranks the graph-expanded candidate pool down to the top 8 evidence chunks. Set
+`IGNEOUS_RERANKER_ENABLED=false` to preserve graph retrieval order, or adjust the bounded input with
+`IGNEOUS_RERANKER_POOL_SIZE` (32 by default). If its model files cannot load, Q&A logs a warning and safely
+preserves that order instead.
+
+To verify providers without credentials, run `cd api && uv run python scripts/provider_smoke.py`. It exercises the
+local embedding and reranking models only. Add `--hosted` only with an explicit real `AWS_BEARER_TOKEN_BEDROCK`; that
+mode makes one paid Bedrock chat request and is never run by the test suite.
 
 ## MCP server (use the graph from Claude Code, Claude Desktop, Cursor)
 

@@ -3,17 +3,22 @@ import logging
 from functools import lru_cache
 
 from igneous.config import settings
+from igneous.providers import rerank as score_documents
 
 log = logging.getLogger(__name__)
 _load_failure: Exception | None = None
 
 
-@lru_cache(maxsize=1)
-def _model():
-    # Kept local so ordinary search and deployments without reranking support can start.
-    from fastembed.rerank.cross_encoder import TextCrossEncoder
+class _ConfiguredCrossEncoder:
+    """Compatibility adapter that keeps Q&A's safe optional-reranker behavior."""
 
-    return TextCrossEncoder(model_name=settings.reranker_model)
+    def rerank(self, question: str, documents: list[str]) -> list[float]:
+        return score_documents(question, documents)
+
+
+@lru_cache(maxsize=1)
+def _model() -> _ConfiguredCrossEncoder:
+    return _ConfiguredCrossEncoder()
 
 
 def rerank(question: str, items: list[dict], keep: int) -> list[dict]:
@@ -29,8 +34,7 @@ def rerank(question: str, items: list[dict], keep: int) -> list[dict]:
         return pool[:keep]
 
     try:
-        # TextCrossEncoder.rerank is a generator, so materialize it while handling model/inference failures.
-        scores = list(_model().rerank(question, [item["text"] for item in pool]))
+        scores = _model().rerank(question, [item["text"] for item in pool])
     except Exception as exc:  # Model download, ONNX, or optional dependency failure must not break Q&A.
         _load_failure = exc
         log.warning("Cross-encoder reranker unavailable; using retrieval order: %s", exc)
