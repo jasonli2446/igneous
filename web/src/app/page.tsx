@@ -160,6 +160,8 @@ export default function Explorer() {
   stateRef.current = { introducedBy, expanded, seedId };
 
   // Click a node: reveal its top connections; click it again to fold them back.
+  // Links each expand added (so collapsing removes exactly those, including links between nodes already shown).
+  const edgesAddedBy = useRef<Map<number, Set<string>>>(new Map());
   const toggle = useCallback(async (id: number) => {
     const { introducedBy: ib, expanded: ex, seedId: seed } = stateRef.current;
     if (seed === undefined) return;
@@ -167,10 +169,13 @@ export default function Explorer() {
       const drop = new Set<number>();
       const collect = (p: number) => ib.forEach((parent, child) => { if (parent === p && !drop.has(child)) { drop.add(child); collect(child); } });
       collect(id);
+      // Also drop the links this expand added between things that were already on screen.
+      const addedEdges = new Set([id, ...drop].flatMap((x) => [...(edgesAddedBy.current.get(x) ?? [])]));
+      [id, ...drop].forEach((x) => edgesAddedBy.current.delete(x));
       setData((prev) => ({
         ...prev,
         nodes: prev.nodes.filter((n) => !drop.has(n.id)),
-        edges: prev.edges.filter((e) => !drop.has(e.src) && !drop.has(e.dst)),
+        edges: prev.edges.filter((e) => !drop.has(e.src) && !drop.has(e.dst) && !addedEdges.has(`${e.src}-${e.dst}-${e.type}`)),
       }));
       setIntroducedBy((m) => { const n = new Map(m); drop.forEach((d) => n.delete(d)); return n; });
       setExpanded((s) => { const n = new Set(s); n.delete(id); drop.forEach((d) => n.delete(d)); return n; });
@@ -184,11 +189,14 @@ export default function Explorer() {
     try {
       const visible = dataRef.current.nodes.map((n) => n.id);
       const g = await api.expandNode(seed, id, visible, 0, request.signal);
-      if (graphGeneration.current !== generation || expandRequest.current !== request || !g.nodes.length) return;
+      if (graphGeneration.current !== generation || expandRequest.current !== request || (!g.nodes.length && !g.edges.length)) return;
+      // A group whose members are all on screen returns only links (no new nodes): keep them, they're the point.
       setData((prev) => {
         const have = new Set(prev.nodes.map((n) => n.id));
         const edges = new Map(prev.edges.map((e) => [`${e.src}-${e.dst}-${e.type}`, e]));
-        g.edges.forEach((e) => edges.set(`${e.src}-${e.dst}-${e.type}`, e));
+        const added = new Set<string>();
+        g.edges.forEach((e) => { const k = `${e.src}-${e.dst}-${e.type}`; if (!edges.has(k)) added.add(k); edges.set(k, e); });
+        edgesAddedBy.current.set(id, added);
         return { ...prev, nodes: [...prev.nodes, ...g.nodes.filter((n) => !have.has(n.id))], edges: [...edges.values()] };
       });
       setIntroducedBy((m) => { const n = new Map(m); g.nodes.forEach((x) => { if (!n.has(x.id)) n.set(x.id, id); }); return n; });
