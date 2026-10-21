@@ -195,15 +195,24 @@ def build_contact(b: Builder, item) -> None:
 
 
 def build_file(b: Builder, item) -> None:
+    path = item.raw_meta.get("path", item.external_id)
+    folders = item.raw_meta.get("folders")
+    if not isinstance(path, str):
+        path = item.external_id
+    if not isinstance(folders, list) or not all(isinstance(folder, str) for folder in folders):
+        parent = path.rsplit("/", 1)[0] if "/" in path else ""
+        folders = []
+        while parent:
+            folders.append(parent)
+            parent = parent.rsplit("/", 1)[0] if "/" in parent else ""
+        folders.reverse()
     fid = b.node("File", f"{item.source}:{item.external_id}", item.title or item.external_id,
-                 {"source": item.source, "path": item.external_id}, sid=item.id)
-    parent = item.external_id.rsplit("/", 1)[0] if "/" in item.external_id else ""
+                 {"source": item.source, "path": path}, sid=item.id)
     child = fid
-    while parent:
+    for parent in reversed(folders):
         folder = b.node("Folder", f"{item.source}:{parent}", parent.rsplit("/", 1)[-1], {"path": parent})
         b.edge(folder, child, "CONTAINS")
         child = folder
-        parent = parent.rsplit("/", 1)[0] if "/" in parent else ""
 
 
 def run(s: Session) -> int:

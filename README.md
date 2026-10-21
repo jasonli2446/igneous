@@ -19,6 +19,16 @@ Try it: on the Explorer, search `jeff.skilling` or `phillip.allen` and pick the 
 `make baseline` ingests six mailboxes (~26k emails, the set the demo uses). Ingest + graph take ~3 min;
 embedding takes ~45 min on CPU. Search works during that, it just falls back to lexical for unembedded chunks.
 
+`make synthetic-corpus` writes a small, deterministic fixture corpus to `data/synthetic-cross-source/`: five
+invented document-style files plus two ICS calendar events that reuse the public Enron demo persona addresses.
+It makes no network or model calls and **does not import** the data; it is input for the future filesystem and
+ICS importers. Every output is labeled synthetic and excludes real email text, credentials, and personal data.
+Re-run it safely to restore the exact fixture, or validate an existing output with:
+
+```bash
+cd api && uv run igneous verify-synthetic-corpus ../data/synthetic-cross-source
+```
+
 `igneous pipeline` runs spine -> chunk -> embed -> extract -> resolve. Extraction calls the model, so it's
 bounded: `make demo EXTRACT=0` skips it, `EXTRACT=500` does more. Everything is incremental: re-running only
 processes what changed.

@@ -37,10 +37,23 @@ class Checkpoint:
     cursor: dict
 
 
+@dataclass
+class CompletedScan:
+    """Final source snapshot event; only it permits reconciliation for ``source``.
+
+    ``external_ids`` contains every observed path, including files a connector chose not
+    to emit as a SourceItem. It must be the final event from a connector sync.
+    """
+    cursor: dict
+    source: str
+    external_ids: frozenset[str]
+    allow_empty_prune: bool = False
+
+
 class Connector(Protocol):
     name: str
 
-    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint]: ...
+    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | CompletedScan]: ...
 
 
 UPSERT = text("""
@@ -71,12 +84,39 @@ def save_cursor(s: Session, connector: str, account: str, cursor: dict) -> None:
     """), {"c": connector, "a": account, "cur": json.dumps(cursor)})
 
 
+def _reconcile_completed_scan(s: Session, source: str, external_ids: frozenset[str],
+                              allow_empty_prune: bool) -> int:
+    """Remove items absent from a completed, non-suspicious source snapshot."""
+    if not external_ids and not allow_empty_prune:
+        return 0
+    if external_ids:
+        result = s.execute(text("""
+            DELETE FROM source_items
+            WHERE source = :source AND external_id <> ALL(CAST(:external_ids AS text[]))
+        """), {"source": source, "external_ids": sorted(external_ids)})
+    else:
+        result = s.execute(text("DELETE FROM source_items WHERE source = :source"), {"source": source})
+    return result.rowcount
+
+
 def run_sync(s: Session, connector: Connector, account: str = "default", limit: int | None = None) -> dict:
-    """Upsert every item; unchanged content is a no-op. Commits at each checkpoint so a crash resumes."""
-    stats = {"inserted": 0, "updated": 0, "unchanged": 0}
+    """Upsert every item; reconcile deletions only after an explicit completed scan.
+
+    Checkpoints deliberately do not imply a complete scan. Thus, an exception, process
+    stop, or ``--limit`` before ``CompletedScan`` can commit discovered additions and
+    updates but can never prune unseen source items.
+    """
+    stats = {"inserted": 0, "updated": 0, "unchanged": 0, "deleted": 0}
     cursor = load_cursor(s, connector.name, account)
     seen = 0
     for obj in connector.sync(cursor):
+        if isinstance(obj, CompletedScan):
+            if limit is None:
+                stats["deleted"] += _reconcile_completed_scan(
+                    s, obj.source, obj.external_ids, obj.allow_empty_prune)
+            save_cursor(s, connector.name, account, obj.cursor)
+            s.commit()
+            break
         if isinstance(obj, Checkpoint):
             save_cursor(s, connector.name, account, obj.cursor)
             s.commit()

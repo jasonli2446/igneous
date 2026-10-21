@@ -26,19 +26,22 @@ export default function GraphCanvas({ data, hiddenTypes, selected, onSelectActio
   const container = useRef<HTMLDivElement>(null);
   const sigma = useRef<Sigma | null>(null);
   const graph = useRef(new Graph({ multi: true }));
-  // Latest props for the reducer, which sigma calls outside React's render cycle.
-  const view = useRef({ hiddenTypes, selected });
-  view.current = { hiddenTypes, selected };
+  // Latest props for the reducers, which Sigma calls outside React's render cycle.
+  // Rendering every label makes dense people views unreadable; retain labels for the most
+  // connected visible nodes and reveal the rest on hover or selection.
+  const view = useRef({ hiddenTypes, selected, hovered: null as string | null });
+  view.current.hiddenTypes = hiddenTypes;
+  view.current.selected = selected;
 
   useEffect(() => {
     const s = new Sigma(graph.current, container.current!, {
       settings: { renderEdgeLabels: false, labelRenderedSizeThreshold: 0, hideEdgesOnMove: true,
         labelDensity: 1, labelGridCellSize: 120 },
       nodeReducer: (node, data, attrs) => {
-        const { hiddenTypes, selected } = view.current;
+        const { hiddenTypes, selected, hovered } = view.current;
         const out: Partial<typeof data> = {};
         if (hiddenTypes.has(attrs.nodeType as string)) out.visibility = "hidden";
-        if (!attrs.showLabel) out.label = null;
+        if (!attrs.showLabel && node !== hovered && node !== String(selected)) out.label = null;
         if (selected !== null) {
           const g = graph.current;
           const sel = String(selected);
@@ -59,6 +62,14 @@ export default function GraphCanvas({ data, hiddenTypes, selected, onSelectActio
       },
     });
     s.on("clickNode", ({ node }) => onSelect(Number(node)));
+    s.on("enterNode", ({ node }) => {
+      view.current.hovered = node;
+      s.refresh({ skipIndexation: true });
+    });
+    s.on("leaveNode", () => {
+      view.current.hovered = null;
+      s.refresh({ skipIndexation: true });
+    });
     s.on("doubleClickNode", ({ node, event }) => {
       event.preventSigmaDefault();
       onExpand(Number(node));
@@ -84,7 +95,10 @@ export default function GraphCanvas({ data, hiddenTypes, selected, onSelectActio
     const score = (n: Subgraph["nodes"][number]) => tie.get(String(n.id)) ?? n.degree;
     const maxScore = Math.max(1, ...data.nodes.map(score));
     const labeled = new Set(
-      [...data.nodes].sort((x, y) => score(y) - score(x)).slice(0, LABEL_TOP_N).map((n) => String(n.id)),
+      [...data.nodes]
+        .sort((a, b) => score(b) - score(a) || a.name.localeCompare(b.name))
+        .slice(0, LABEL_TOP_N)
+        .map((n) => String(n.id)),
     );
     let added = 0;
     for (const n of data.nodes) {

@@ -3,6 +3,11 @@ export const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 export type GNode = { id: number; type: string; name: string; key: string; degree: number; members?: number };
 export type GEdge = { id: number; src: number; dst: number; type: string; extractor: string; confidence: number | null; weight?: number };
 export type Subgraph = { nodes: GNode[]; edges: GEdge[] };
+export type GraphFilters = { source?: string; edgeTypes?: string[]; from?: string; to?: string };
+
+function graphParams(filters: GraphFilters = {}) {
+  return { source: filters.source, types: filters.edgeTypes, from: filters.from, to: filters.to };
+}
 
 export type Hit = {
   chunk_id: number;
@@ -81,8 +86,8 @@ export const api = {
   search: (q: string, opts: { source?: string; person?: string; from?: string; to?: string; mode?: string } = {}) =>
     get<{ hits: Hit[] }>("/search", { q, ...opts }),
   findNodes: (q: string, type?: string) => get<{ nodes: GNode[] }>("/graph/search", { q, type }),
-  subgraph: (seed: number[], hops = 1, limit = 300, types?: string[]) =>
-    get<Subgraph>("/graph/subgraph", { seed, hops, limit, types }),
+  subgraph: (seed: number[], hops = 1, limit = 300, filters: GraphFilters = {}) =>
+    get<Subgraph>("/graph/subgraph", { seed, hops, limit, ...graphParams(filters) }),
   people: (seed: number, limit = 60) => get<Subgraph>("/graph/people", { seed, limit }),
   network: (seed: number, people = 50, hubs = 30) => get<Subgraph>("/graph/network", { seed, people, hubs }),
   ask: async (question: string, use_graph = true) => {

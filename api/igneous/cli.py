@@ -1,3 +1,4 @@
+import json
 import time
 from pathlib import Path
 
@@ -10,14 +11,14 @@ app = typer.Typer(no_args_is_help=True)
 
 
 @app.command()
-def sync(connector: str = typer.Argument(..., help="email | imessage | maccontacts | gmail | gcal | gcontacts"),
-         path: Path = typer.Option(None, help="maildir root (default: <data_dir>/maildir)"),
+def sync(connector: str = typer.Argument(..., help="email | imessage | maccontacts | gmail | gcal | gcontacts | fs"),
+         path: Path = typer.Option(None, help="source path; fs defaults to IGNEOUS_FILESYSTEM_ROOTS"),
          mailbox: list[str] = typer.Option(None, help="restrict to these mailboxes; repeatable"),
          limit: int = typer.Option(None, help="stop at the first checkpoint after this many items (resumable)"),
          since_days: int = typer.Option(None, help="first sync only: how far back to go (imessage, gmail, gcal)"),
          account: str = typer.Option(None, help="google: which connected account (default: the only one)"),
          all_mail: bool = typer.Option(False, help="gmail: include Promotions/Social/Forums (skipped by default)")):
-    """Pull items from a source into source_items. Resumable: re-run continues from the saved cursor."""
+    """Pull items into source_items; fs deliberately performs a fresh complete scan."""
     from igneous.connectors.base import run_sync
 
     if connector == "email":
@@ -32,6 +33,13 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | maccontac
         from igneous.connectors.mac_contacts import MacContactsConnector
 
         conn = MacContactsConnector()
+    elif connector == "fs":
+        from igneous.connectors.filesystem import FilesystemConnector
+
+        roots = [path] if path else [Path(root.strip()) for root in settings.filesystem_roots.split(",") if root.strip()]
+        if not roots:
+            raise typer.BadParameter("fs requires --path or IGNEOUS_FILESYSTEM_ROOTS")
+        conn = FilesystemConnector(roots)
     elif connector in ("gmail", "gcal", "gcontacts"):
         from igneous.connectors import google_auth
 
@@ -117,6 +125,40 @@ def export(target: str = typer.Argument(..., help="lightrag"), out: Path = typer
 
     with SessionLocal() as s:
         print(write(s, out, limit))
+
+
+@app.command("synthetic-corpus")
+def synthetic_corpus(out: Path = typer.Argument(..., help="directory for the generated fixture corpus")):
+    """Create small, deterministic synthetic files and an ICS calendar fixture."""
+    from igneous.synthetic_corpus import generate
+
+    manifest = generate(out)
+    print(f"wrote {manifest['document_count']} documents and "
+          f"{manifest['calendar_event_count']} calendar events to {out}")
+
+
+@app.command("verify-synthetic-corpus")
+def verify_synthetic_corpus(out: Path = typer.Argument(..., help="generated fixture corpus directory")):
+    """Verify a synthetic corpus was generated completely and without edits."""
+    from igneous.synthetic_corpus import verify
+
+    stats = verify(out)
+    print(f"verified {stats['documents']} documents and {stats['calendar_events']} calendar events")
+
+
+@app.command()
+def check_graph():
+    """Validate persisted graph invariants without changing any data."""
+    from igneous.graph.invariants import check_graph as run_checks
+
+    with SessionLocal() as s:
+        violations = run_checks(s)
+    if not violations:
+        print("graph check passed (0 violations)")
+        return
+    for violation in violations:
+        print(json.dumps(violation.as_dict(), sort_keys=True))
+    raise typer.Exit(code=1)
 
 
 @app.command()
