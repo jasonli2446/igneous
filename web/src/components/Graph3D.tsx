@@ -7,7 +7,7 @@ import { useEffect, useRef } from "react";
 import { Fog } from "three";
 import SpriteText from "three-spritetext";
 import { GEdge, GNode, Subgraph } from "@/lib/api";
-import { CATEGORY_COLOR } from "@/lib/graph-style";
+import { CATEGORY_COLOR, TYPE_CATEGORY } from "@/lib/graph-style";
 
 export type { Community } from "@/lib/graph-style";
 import type { Community } from "@/lib/graph-style";
@@ -157,7 +157,7 @@ export default function Graph3D({ data, dark, selected, onSelectAction, onExpand
         ...n, hub, seed: n.id === seed,
         color: n.id === seed ? (dark ? "#f2f2ee" : "#1f2420")
           : n.kind === "category" ? (CATEGORY_COLOR[n.name] ?? "#a8aca3")
-          : n.category ? (CATEGORY_COLOR[n.category] ?? "#a8aca3")
+          : (n.category ?? TYPE_CATEGORY[n.type]) ? (CATEGORY_COLOR[(n.category ?? TYPE_CATEGORY[n.type])!] ?? "#a8aca3")
           : hub ? (dark ? "#5c6159" : "#b9bcb4") : colorOf.get(n.id) ?? "#a8aca3",
         // Biggest = strongest relationship to you. Category hubs are mid-sized landmarks.
         val: n.id === seed ? 14 : n.kind === "category" ? 6

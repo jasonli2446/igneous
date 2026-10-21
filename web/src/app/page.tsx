@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { CATEGORY_COLOR, type Community } from "@/lib/graph-style";
 import Inspector from "@/components/Inspector";
 import { useTheme } from "@/components/ThemeToggle";
+import { InlineError, TopProgress } from "@/components/ui";
 import WhyConnected from "@/components/WhyConnected";
 import { api, GNode, Subgraph, TYPE_COLORS } from "@/lib/api";
 
@@ -20,7 +21,6 @@ export default function Explorer() {
   const [data, setData] = useState<Subgraph>(EMPTY);
   const [canvasKey, setCanvasKey] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
-  const [inspected, setInspected] = useState<number | null>(null);
   const [why, setWhy] = useState<{ a: number; b: number } | null>(null);
   // Which node brought each node onto the screen, so clicking an expanded node collapses what it added.
   const [introducedBy, setIntroducedBy] = useState<Map<number, number>>(new Map());
@@ -29,7 +29,23 @@ export default function Explorer() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [active, setActive] = useState(0);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  // "/" jumps to search from anywhere that isn't a text field.
   useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || t.closest("input, textarea, select, [contenteditable]")) return;
+      e.preventDefault();
+      searchRef.current?.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  useEffect(() => {
+    setActive(0);
     if (query.trim().length < 2) return setMatches([]);
     const t = setTimeout(() => api.findNodes(query).then((r) => setMatches(r.nodes)).catch(() => {}), 200);
     return () => clearTimeout(t);
@@ -63,7 +79,6 @@ export default function Explorer() {
       setExpanded(new Set());
       setSelected(null);
       setWhy(null);
-      setInspected(g.seed);
       setMatches([]);
       setQuery("");
       const seedNode = g.nodes.find((n) => n.id === g.seed) ?? node;
@@ -81,6 +96,7 @@ export default function Explorer() {
   // Open on you: the graph starts from the account owner, no search needed.
   useEffect(() => { load(null); }, [load]);
 
+  const retry = () => load(trail[trail.length - 1] ?? null, false);
   const seedId = trail[trail.length - 1]?.id;
   const dataRef = useRef(data);
   dataRef.current = data;
@@ -137,64 +153,44 @@ export default function Explorer() {
     load(prev, false);
   };
 
+  const detailId = selected !== null && selected > 0 ? selected : null;
+  const panelOpen = why !== null || detailId !== null;
+  const closePanel = () => { setWhy(null); setSelected(null); };
+
+  const onSearchKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") { setQuery(""); setMatches([]); (e.target as HTMLElement).blur(); }
+    else if (e.key === "ArrowDown" && matches.length) { e.preventDefault(); setActive((i) => (i + 1) % matches.length); }
+    else if (e.key === "ArrowUp" && matches.length) { e.preventDefault(); setActive((i) => (i - 1 + matches.length) % matches.length); }
+    else if (e.key === "Enter" && matches[active]) { e.preventDefault(); load(matches[active]); }
+  };
+
   return (
-    <div className="flex h-[calc(100vh-49px)] bg-bg text-ink">
-      <aside className="w-64 shrink-0 space-y-6 overflow-y-auto border-r border-line bg-panel p-4 text-sm">
-        <div className="relative">
-          <label htmlFor="seed" className="mb-1.5 block font-medium">Start from</label>
-          <input id="seed" value={query} onChange={(e) => setQuery(e.target.value)}
-            placeholder="A person, conversation, or event"
-            className="w-full rounded-md border border-line bg-bg px-2.5 py-1.5 outline-none placeholder:text-muted focus:border-accent" />
-          {matches.length > 0 && (
-            <ul className="absolute z-20 mt-1 max-h-72 w-full overflow-y-auto rounded-md border border-line bg-panel shadow-lg">
-              {matches.map((m) => (
-                <li key={m.id}>
-                  <button onClick={() => load(m)} className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-hover">
-                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: TYPE_COLORS[m.type] }} />
-                    <span className="truncate">{m.name}</span>
-                    <span className="ml-auto text-xs text-muted">{m.degree}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+    <div className="relative h-[calc(100vh-49px)] overflow-hidden bg-bg text-ink">
+      <TopProgress active={loading} />
+
+      {data.nodes.length > 0 && (
+        <Graph3D key={canvasKey} data={data} dark={dark} selected={selected}
+          onSelectAction={(id) => { setSelected(id); setWhy(null); }}
+          onExpandAction={toggle}
+          onLinkAction={(a, b) => { if (a.id > 0 && b.id > 0) setWhy({ a: a.id, b: b.id }); }}
+          onCommunitiesAction={onLegend} />
+      )}
+
+      {data.nodes.length === 0 && !loading && !error && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 px-6 text-center text-sm text-muted">
+          <p className="text-base text-ink">Nothing to show yet</p>
+          <p>Search for a person, conversation, or event to start. Press / to search.</p>
         </div>
+      )}
 
-        {data.nodes.length > 0 && (
-          <div>
-            <div className="mb-1.5 font-medium">Moving around</div>
-            <ul className="space-y-1 text-xs leading-relaxed text-muted">
-              <li>Click anything to open it up; click it again to fold it back</li>
-              <li>Drag to rotate, right-drag to pan, scroll to zoom</li>
-              <li>Hover a line to see why it&apos;s there; click it for the details</li>
-              <li>Drag a dot to pin it in place</li>
-            </ul>
-          </div>
-        )}
-
-        {error && <p className="text-xs leading-relaxed text-danger">{error}</p>}
-      </aside>
-
-      <main className="relative flex-1 overflow-hidden">
-        {data.nodes.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-sm text-muted">
-            <p className="text-base text-ink">Pick someone to start with</p>
-            <p>Search on the left for a person, conversation, or event. Try “Me”.</p>
-          </div>
-        ) : (
-          <Graph3D key={canvasKey} data={data} dark={dark} selected={selected}
-            onSelectAction={(id) => { setSelected(id); setWhy(null); if (id !== null) setInspected(id); }}
-            onExpandAction={toggle}
-            onLinkAction={(a, b) => { if (a.id > 0 && b.id > 0) setWhy({ a: a.id, b: b.id }); }}
-            onCommunitiesAction={onLegend} />
-        )}
-
+      {/* Top row: where you are, and search. */}
+      <div className="pointer-events-none absolute inset-x-3 top-3 z-20 flex items-start gap-2">
         {current && (
-          <div className="absolute left-3 top-3 z-10 flex max-w-[70%] items-center gap-1 rounded-md border border-line bg-panel px-2 py-1 text-xs">
+          <div className="pointer-events-auto flex min-w-0 max-w-[40%] shrink-0 items-center gap-1 rounded-md border border-line bg-panel/95 px-2 py-1.5 text-xs">
             <button onClick={back} disabled={trail.length < 2} aria-label="Back"
               className="rounded px-1 text-muted hover:bg-hover disabled:opacity-30">‹</button>
             {trail.map((t, i) => (
-              <span key={t.id} className="flex min-w-0 items-center gap-1">
+              <span key={t.id} className={`flex min-w-0 items-center gap-1 ${i < trail.length - 1 ? "max-sm:hidden" : ""}`}>
                 {i > 0 && <span className="text-muted">/</span>}
                 <button onClick={() => { setTrail((tr) => tr.slice(0, i + 1)); load(t, false); }}
                   className={`truncate ${i === trail.length - 1 ? "font-medium" : "text-muted hover:text-ink"}`}>
@@ -205,33 +201,65 @@ export default function Explorer() {
           </div>
         )}
 
-        {loading && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-bg/60 text-sm text-muted">
-            Building the graph…
+        <div className="pointer-events-auto relative mx-auto min-w-0 flex-1 max-w-md">
+          <div className="flex items-center gap-2 rounded-md border border-line bg-panel/95 px-3 py-1.5 text-sm focus-within:border-accent">
+            <label htmlFor="seed" className="sr-only">Search the graph</label>
+            <input id="seed" ref={searchRef} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={onSearchKey}
+              role="combobox" aria-expanded={matches.length > 0} aria-controls="seed-results" autoComplete="off"
+              placeholder="Jump to a person, conversation, or event"
+              className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted focus-visible:outline-none" />
+            <kbd className="rounded border border-line px-1.5 text-[11px] text-muted">/</kbd>
           </div>
-        )}
+          {matches.length > 0 && (
+            <ul id="seed-results" role="listbox" className="absolute z-30 mt-1 max-h-72 w-full overflow-y-auto rounded-md border border-line bg-panel shadow-lg">
+              {matches.map((m, i) => (
+                <li key={m.id} role="option" aria-selected={i === active}>
+                  <button onClick={() => load(m)} onMouseEnter={() => setActive(i)}
+                    className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm ${i === active ? "bg-hover" : ""}`}>
+                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: TYPE_COLORS[m.type] }} />
+                    <span className="truncate">{m.name}</span>
+                    <span className="ml-auto text-xs text-muted">{m.type}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
 
-        {hubs.length > 0 && (
-          <div className="absolute bottom-3 right-3 z-10 w-56 space-y-1.5 rounded-md border border-line bg-panel/95 p-3 text-xs">
-            <div className="font-medium">What&apos;s here</div>
-            {hubs.map((h) => (
-              <button key={h.id} onClick={() => toggle(h.id)} className="flex w-full items-center gap-2 text-left hover:text-ink">
-                <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: CATEGORY_COLOR[h.name] ?? "#a8aca3" }} />
-                <span className="text-soft">{h.name}</span>
-                <span className="ml-auto text-muted">{h.total}</span>
-              </button>
-            ))}
-            <p className="pt-1 leading-relaxed text-muted">Bigger dots are closer to you.</p>
-          </div>
-        )}
-      </main>
+      {error && (
+        <div className="absolute left-1/2 top-16 z-20 w-[min(32rem,calc(100%-1.5rem))] -translate-x-1/2 rounded-md border border-line bg-panel px-3 py-2 shadow-sm">
+          <InlineError message={error} onRetry={retry} />
+        </div>
+      )}
 
-      <aside className="w-96 shrink-0 overflow-y-auto border-l border-line bg-panel">
+      {/* Bottom-left: compact legend and a one-line hint. */}
+      {data.nodes.length > 0 && (
+        <div className="absolute bottom-3 left-3 z-10 max-w-[calc(100%-1.5rem)] space-y-1.5 text-xs">
+          {hubs.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {hubs.map((h) => (
+                <button key={h.id} onClick={() => toggle(h.id)} title={`Show or hide ${h.name.toLowerCase()}`}
+                  className="flex items-center gap-1.5 rounded-full border border-line bg-panel/95 px-2.5 py-1 hover:bg-hover">
+                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: CATEGORY_COLOR[h.name] ?? "#a8aca3" }} />
+                  <span className="text-soft">{h.name}</span>
+                  <span className="tabular-nums text-muted">{h.total}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          <p className="px-1 text-muted max-sm:hidden">Click a dot to open it · drag to rotate · scroll to zoom · bigger dots are closer to you</p>
+        </div>
+      )}
+
+      {/* Right: details, only while something is selected. */}
+      <aside aria-hidden={!panelOpen} inert={!panelOpen}
+        className={`absolute inset-y-0 right-0 z-20 w-full max-w-96 overflow-y-auto border-l border-line bg-panel transition-transform duration-200 ${panelOpen ? "translate-x-0" : "translate-x-full"}`}>
         {why ? (
-          <WhyConnected a={why.a} b={why.b} onCloseAction={() => setWhy(null)}
-            onOpenAction={(id) => { setWhy(null); setInspected(id); setSelected(null); }} />
+          <WhyConnected a={why.a} b={why.b} onCloseAction={closePanel}
+            onOpenAction={(id) => { setWhy(null); setSelected(id); }} />
         ) : (
-          <Inspector id={selected !== null && selected > 0 ? selected : inspected} onExpandAction={toggle} />
+          <Inspector id={detailId} onExpandAction={toggle} onCloseAction={closePanel} />
         )}
       </aside>
     </div>
