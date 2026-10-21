@@ -398,7 +398,7 @@ def scored_members(s: Session, head: int, per: int = 8) -> dict[str, list[dict]]
         SELECT n.id, count(DISTINCT si.id) AS occ
         FROM source_items si
         CROSS JOIN LATERAL jsonb_array_elements(si.raw_meta->'attendees') a
-        JOIN nodes n ON n.type = 'Event' AND n.key = 'gcal:' || COALESCE(si.raw_meta->>'series_key', si.external_id)
+        JOIN nodes n ON n.type = 'Event' AND n.key = COALESCE(si.raw_meta->>'event_key', 'gcal:' || COALESCE(si.raw_meta->>'series_key', si.external_id))
         WHERE si.source = 'gcal' AND lower(a->>'email') = ANY(:keys) AND COALESCE(a->>'response','') <> 'declined'
         GROUP BY n.id
     """), {"keys": keys}).all()

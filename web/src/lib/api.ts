@@ -140,15 +140,6 @@ export type EntityDetail = {
 };
 export type Correction = { override_id: number; op: string; id: number };
 
-async function send<T>(method: "POST" | "DELETE", path: string, body?: unknown) {
-  const r = await fetch(new URL(path, API), {
-    method,
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error(`${r.status} ${(await r.json().catch(() => ({}))).detail ?? path}`);
-  return (await r.json()) as T;
-}
 
 async function get<T>(
   path: string,
@@ -193,8 +184,61 @@ function importAiExport(file: File, provider?: string, onProgress?: (fraction: n
   });
 }
 
+export type Job = {
+  id: string;
+  kind: "sync" | "pipeline" | "connect";
+  source: string;
+  account: string | null;
+  status: "running" | "succeeded" | "failed";
+  started_at: string;
+  finished_at: string | null;
+  progress: { items?: number; stage?: string | null; step?: number; steps?: number };
+  result: Record<string, number> | null;
+  error: string | null;
+};
+
+export type SourceInfo = {
+  id: string;
+  kind: "google" | "local" | "import" | "planned";
+  name: string;
+  group: string;
+  reads: string;
+  steps: string[];
+  cli: string | null;
+  status: "not_set_up" | "ready" | "syncing" | "needs_attention";
+  message: string | null;
+  items: number;
+  last_sync: string | null;
+  accounts: { account: string; last_sync: string | null }[];
+  requirements_ok: boolean;
+  can_sync: boolean;
+  coming_soon: boolean;
+  job: Job | null;
+};
+
+async function send<T>(method: string, path: string, body?: unknown, params: Record<string, string> = {}) {
+  const url = new URL(path, API);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  const r = await fetch(url, {
+    method,
+    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const detail = (await r.json().catch(() => ({}))).detail;
+    throw new Error(typeof detail === "string" ? detail : `${r.status} ${path}`);
+  }
+  return (await r.json()) as T;
+}
+
 export const api = {
   importAiExport,
+  sources: (signal?: AbortSignal) => get<{ sources: SourceInfo[] }>("/sources", {}, signal),
+  jobs: (signal?: AbortSignal) => get<{ jobs: Job[] }>("/jobs", {}, signal),
+  syncSource: (id: string, account?: string) => send<Job>("POST", `/sources/${id}/sync`, undefined, account ? { account } : {}),
+  runPipeline: () => send<Job>("POST", "/pipeline/run"),
+  saveGithubToken: (token: string) => send<{ stored: boolean }>("POST", "/sources/github/token", { token }),
+  googleConnectUrl: () => new URL("/sources/google/connect", API).toString(),
   stats: () => get<{ source_items: Record<string, number>; nodes: Record<string, number>; edges: Record<string, number> }>("/stats", {}),
   sync: (signal?: AbortSignal) => get<{ syncs: SyncStatus[] }>("/sync", {}, signal),
   search: (q: string, opts: { source?: string; person?: string; from?: string; to?: string; mode?: string } = {}) =>

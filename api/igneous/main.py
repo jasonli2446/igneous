@@ -1,17 +1,21 @@
 from datetime import datetime
 from typing import Annotated, Literal
+from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous import jobs, sources
+from igneous.config import settings
+from igneous.connectors import google_auth
 from igneous.connectors.ai_exports import ExportConnector, ExportError, export_items, parse_export
 from igneous.connectors.base import run_sync
-from igneous.db import get_session
+from igneous.db import SessionLocal, get_session
 from igneous.graph.entity_api import router as entity_router
 from igneous.graph.traversal import GraphFilters, expand, explain, neighborhood, network, people, view
 from igneous.llm import LLMDisabled
@@ -49,6 +53,12 @@ class NamedResponse(JSONResponse):
 app = FastAPI(title="Igneous", version="0.1.0", default_response_class=NamedResponse)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.include_router(entity_router)
+
+
+@app.on_event("startup")
+def _fail_interrupted_jobs():
+    with SessionLocal() as s:
+        jobs.fail_interrupted(s)
 
 
 @app.get("/health")
@@ -110,6 +120,86 @@ def import_ai_export(file: UploadFile, provider: Annotated[str | None, Form()] =
     stats = run_sync(s, ExportConnector(items), account=kind)
     return {"provider": kind, "conversations": len(convs), "items_inserted": stats["inserted"],
             "items_updated": stats["updated"], "redactions": sum(i.raw_meta["redactions"] for i in items)}
+
+
+@app.get("/sources")
+def list_sources(s: Session = Depends(get_session)):
+    """Every connector and import format with plain-language setup, requirement checks, and live status."""
+    return {"sources": sources.describe(s)}
+
+
+def _start_job(kind: str, source: str, runner, account: str | None = None):
+    try:
+        return sources.job_view(jobs.start(kind, source, runner, account))
+    except jobs.JobBusy as e:
+        raise HTTPException(409, str(e)) from e
+
+
+@app.post("/sources/{source_id}/sync")
+def sync_source(source_id: str, account: str | None = None):
+    """Run `igneous sync <source_id>` in the background; poll /jobs/{id}."""
+    if source_id not in sources.SYNCABLE:
+        raise HTTPException(404, f"{source_id} is not a source you can sync from here")
+    ok, message = sources.check_requirements(source_id)
+    if not ok:
+        raise HTTPException(422, message)
+    return _start_job("sync", source_id, lambda sess, progress: sources.build(source_id, sess, account, progress),
+                      account)
+
+
+@app.get("/sources/google/connect")
+def google_connect(request: Request):
+    """Redirect to Google's consent screen; Google sends the browser back to /sources/google/callback."""
+    try:
+        url = sources.google_authorization_url(str(request.url_for("google_callback")))
+    except FileNotFoundError as e:
+        raise HTTPException(422, str(e)) from e
+    return RedirectResponse(url)
+
+
+@app.get("/sources/google/callback")
+def google_callback(state: str = "", code: str = "", error: str = "", s: Session = Depends(get_session)):
+    back = f"{settings.web_url.rstrip('/')}/settings"
+    if error or not code:
+        return RedirectResponse(f"{back}?connect_error={quote(error or 'Google sign-in was cancelled.')}")
+    try:
+        email = sources.google_finish(s, state, code)
+    except Exception as e:
+        return RedirectResponse(f"{back}?connect_error={quote(str(e)[:200] or 'Google sign-in failed.')}")
+    return RedirectResponse(f"{back}?connected={quote(email)}")
+
+
+class GithubToken(BaseModel):
+    token: str
+
+
+@app.post("/sources/github/token")
+def github_token(body: GithubToken, s: Session = Depends(get_session)):
+    """Store a fine-grained read-only token, encrypted. The GitHub connector itself is not built yet (#88)."""
+    token = body.token.strip()
+    if len(token) < 20 or " " in token:
+        raise HTTPException(422, "That does not look like a GitHub token.")
+    google_auth.save_secret(s, "github", "default", token)
+    return {"stored": True}
+
+
+@app.get("/jobs")
+def list_jobs(s: Session = Depends(get_session)):
+    return {"jobs": [sources.job_view(j) for j in jobs.recent(s)]}
+
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str, s: Session = Depends(get_session)):
+    job = jobs.get(s, job_id)
+    if job is None:
+        raise HTTPException(404)
+    return sources.job_view(job)
+
+
+@app.post("/pipeline/run")
+def run_pipeline():
+    """Build the graph from whatever is new (spine, chunk, embed, topics, entities, self, resolve; not extract)."""
+    return _start_job("pipeline", "pipeline", sources.run_pipeline)
 
 
 class AskBody(BaseModel):
