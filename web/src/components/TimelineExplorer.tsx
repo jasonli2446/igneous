@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { InlineError, Skeleton } from "@/components/ui";
 import { api, Timeline } from "@/lib/api";
 
 type Props = {
@@ -24,6 +25,7 @@ function intervalLabel(from: string | null, to: string | null) {
 export default function TimelineExplorer({ a, b, title = "Activity timeline" }: Props) {
   const [result, setResult] = useState<Timeline | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -35,22 +37,22 @@ export default function TimelineExplorer({ a, b, title = "Activity timeline" }: 
         if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "Unable to load timeline");
       });
     return () => controller.abort();
-  }, [a, b]);
+  }, [a, b, attempt]);
 
   const edges = useMemo(() => [...(result?.edges ?? [])].reverse(), [result]);
 
   return (
     <section aria-labelledby={`timeline-${a}-${b ?? "activity"}`} className="border-t border-line pt-4">
       <div className="flex items-baseline justify-between gap-2">
-        <h3 id={`timeline-${a}-${b ?? "activity"}`} className="font-medium">{title}</h3>
+        <h3 id={`timeline-${a}-${b ?? "activity"}`} className="text-xs font-medium text-muted">{title}</h3>
         {result && <span className="shrink-0 text-xs text-muted">{result.mode === "relationship" ? "Direct evidence" : "Dated graph activity"}</span>}
       </div>
       <p className="mt-1 text-xs leading-relaxed text-muted">
         Evidence metadata only — no message contents or source titles are shown here.
       </p>
 
-      {!result && !error && <p role="status" className="mt-3 text-xs text-muted">Loading dated activity…</p>}
-      {error && <p role="alert" className="mt-3 text-xs leading-relaxed text-danger">Couldn&apos;t load the timeline: {error}</p>}
+      {!result && !error && <div role="status" aria-label="Loading dated activity" className="mt-3 space-y-3"><Skeleton className="h-8 w-full" /><Skeleton className="h-8 w-full" /></div>}
+      {error && <div className="mt-3"><InlineError message={`Couldn't load the timeline: ${error}`} onRetry={() => setAttempt((n) => n + 1)} /></div>}
       {result && edges.length === 0 && (
         <p className="mt-3 rounded-md border border-dashed border-line p-3 text-xs leading-relaxed text-muted">
           No dated evidence is available for this {result.mode === "relationship" ? "relationship" : "person or entity"}.
