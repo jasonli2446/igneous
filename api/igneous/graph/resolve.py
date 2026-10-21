@@ -155,20 +155,30 @@ def score(a: P, b: P) -> tuple[float, dict]:
     return round(min(1.0, 0.4 * name_sim + 0.6 * corroboration), 3), f
 
 
+MAX_SAME_NAME = 3  # identities sharing one exact full name that are still assumed to be one person
+threshold_exact = 0.6  # score given to a rare exact-name pair (above THRESHOLD, below corroborated merges)
+
+
 def candidates(s: Session) -> list[tuple[P, P, float, dict]]:
     out = []
     people = load(s)
     # Two different addresses with the same full name and nothing else in common might be two people; then a
     # phone or mention with that name can't be safely assigned to either.
-    emails_by_name: dict[tuple[str, str], int] = defaultdict(int)
+    by_name: dict[tuple[str, str], int] = defaultdict(int)
     for p in people:
-        if p.is_email and p.first and p.last:
-            emails_by_name[(p.first, p.last)] += 1
+        if p.first and p.last and not unresolvable(p):
+            by_name[(p.first, p.last)] += 1
     for group in blocks(people).values():
         for i, a in enumerate(group):
             for b in group[i + 1:]:
                 sc, f = score(a, b)
-                if sc and (not a.is_email or not b.is_email) and emails_by_name[(a.first, a.last)] > 1:
+                same = by_name[(a.first, a.last)]
+                # A full name carried by only 2-3 identities in one person's data is almost always one human with
+                # a school address, a personal one and a phone. Merge on the exact name alone; a name on 4+
+                # identities is common enough to be different people, so it still needs corroboration.
+                if f.get("exact_name") and sc < threshold_exact and 1 < same <= MAX_SAME_NAME:
+                    sc, f = threshold_exact, {**f, "rare_exact_name": same}
+                elif sc and (not a.is_email or not b.is_email) and same > MAX_SAME_NAME:
                     sc, f = 0.0, {**f, "ambiguous_name": True}
                 out.append((a, b, sc, f))
     return out

@@ -86,6 +86,9 @@ def relationships(s: Session, head: int, limit: int) -> list[tuple[int, float, d
             UNION ALL
             SELECT {canon.format(x='dst')}, src, false FROM edges WHERE type = 'RECEIVED'),
         mine AS (SELECT m, bool_or(sent) AS i_sent FROM pm WHERE p IN (SELECT id FROM me) GROUP BY m),
+        -- How many people each conversation involves: a message in a 12-person group chat says much less about
+        -- you and any one member than a one-to-one text, so its weight is split across the others in it.
+        size AS (SELECT m, count(DISTINCT p) AS n FROM pm WHERE m IN (SELECT m FROM mine) GROUP BY m),
         theirs AS (
             SELECT pm.p, pm.m, bool_or(pm.sent) AS they_sent, bool_or(mine.i_sent) AS i_sent
             FROM pm JOIN mine USING (m) WHERE pm.p NOT IN (SELECT id FROM me) GROUP BY pm.p, pm.m),
@@ -108,13 +111,18 @@ def relationships(s: Session, head: int, limit: int) -> list[tuple[int, float, d
         SELECT t.p, count(*) AS msgs,
                count(*) FILTER (WHERE t.they_sent) AS from_them, count(*) FILTER (WHERE t.i_sent) AS from_me,
                count(DISTINCT date_trunc('week', si.occurred_at)) AS weeks,
-               count(DISTINCT si.source) AS channels, COALESCE(max(ev.n), 0) AS events,
+               count(DISTINCT si.source) FILTER (WHERE sz.n <= 4) AS channels, COALESCE(max(ev.n), 0) AS events,
                -- Recency-weighted volume: each message counts 0.5^(age/half-life), so last week ~1, a year ago ~0.06.
-               sum(power(0.5, GREATEST(0, EXTRACT(EPOCH FROM now() - si.occurred_at) / 86400) / :hl)) AS recent_msgs,
-               count(DISTINCT date_trunc('week', si.occurred_at)) FILTER (WHERE si.occurred_at > now() - interval '180 days')
-                   AS recent_weeks,
+               sum(power(0.5, GREATEST(0, EXTRACT(EPOCH FROM now() - si.occurred_at) / 86400) / :hl)
+                   / GREATEST(1, sz.n - 1)) AS recent_msgs,
+               sum(1.0 / GREATEST(1, sz.n - 1)) AS direct_msgs,
+               -- Weeks you talked one-on-one or in a small group (4 or fewer people); a busy group chat would
+               -- otherwise give every member the same "talked every week" credit.
+               count(DISTINCT date_trunc('week', si.occurred_at))
+                   FILTER (WHERE si.occurred_at > now() - interval '180 days' AND sz.n <= 4) AS recent_weeks,
                COALESCE(max(ev.recent), 0) AS recent_events, max(si.occurred_at) AS last_at
-        FROM theirs t JOIN nodes msg ON msg.id = t.m JOIN source_items si ON si.id = msg.source_item_id
+        FROM theirs t JOIN size sz ON sz.m = t.m JOIN nodes msg ON msg.id = t.m
+        JOIN source_items si ON si.id = msg.source_item_id
         LEFT JOIN events ev ON ev.p = t.p
         GROUP BY t.p
     """), {"head": head, "hl": HALF_LIFE_DAYS}).mappings().all()
@@ -128,7 +136,7 @@ def relationships(s: Session, head: int, limit: int) -> list[tuple[int, float, d
         strength = (math.log1p(float(r["recent_msgs"])) * 2.0 + math.log1p(r["recent_weeks"]) * 1.5
                     + math.log1p(float(r["recent_events"])) * 1.2
                     + (r["channels"] + (1 if r["events"] else 0) - 1) * 0.6
-                    + (math.log1p(r["msgs"]) + math.log1p(r["weeks"])) * 0.25)
+                    + (math.log1p(float(r["direct_msgs"])) + math.log1p(r["weeks"])) * 0.25)
         scored.append((r["p"], round(strength, 3), dict(r)))
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored[:limit]
@@ -530,7 +538,14 @@ def view(s: Session, seed: int, per: int = 6) -> dict:
     # The first ring is the strongest `per * 3` things overall, whatever kind they are (at least one of each
     # kind that has anything current, so a category is never invisible up front).
     ranked = sorted(((m, c) for c in order for m in cats[c]), key=lambda mc: -mc[0]["strength"])
-    first = ranked[:per * 3]
+    # People are the densest signal, so cap them at 60% of the ring: the projects, groups, trips and classes you
+    # are in always get room, even when dozens of people outscore them.
+    size = per * 3
+    people = [mc for mc in ranked if mc[1] == "People"][:int(size * 0.6)]
+    others = [mc for mc in ranked if mc[1] != "People"][:size - len(people)]
+    first = sorted(people + others, key=lambda mc: -mc[0]["strength"])
+    if len(first) < size:  # not enough of the rest: fill with more people
+        first += [mc for mc in ranked if mc[1] == "People" and mc not in first][:size - len(first)]
     for c in order:
         if cats[c] and not any(fc == c for _, fc in first) and cats[c][0]["strength"] >= 0.15:
             first.append((cats[c][0], c))
