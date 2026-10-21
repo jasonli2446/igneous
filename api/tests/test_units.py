@@ -1338,3 +1338,31 @@ def test_no_sqlalchemy_param_casts_with_double_colon():
             if re.search(r"(?<![:\w]):[A-Za-z_]\w*::[A-Za-z]", line):
                 bad.append(f"{path.name}:{i}: {line.strip()}")
     assert not bad, "use CAST(:param AS type), not :param::type:\n" + "\n".join(bad)
+
+
+def test_shared_event_and_drive_file_from_two_accounts_make_one_node():
+    from igneous.graph import spine
+
+    class B:
+        def __init__(self):
+            self.keys = []
+
+        def node(self, type_, key, name, props=None, sid=None):
+            self.keys.append((type_, key))
+            return len(self.keys)
+
+        def edge(self, *a, **k):
+            pass
+
+    class Item:
+        def __init__(self, source, external_id, meta):
+            self.source, self.external_id, self.raw_meta = source, external_id, meta
+            self.title, self.occurred_at, self.id = "x", None, 1
+
+    b = B()
+    for acct in ("a@x.com", "b@y.com"):
+        spine.build_event(b, Item("gcal", f"{acct}/primary/evt", {"event_key": "gcal:uid-123@google.com",
+                                                                   "series_key": f"{acct}/primary/evt"}))
+        spine.build_file(b, Item("drive", f"{acct}/f1", {"drive_id": "f1", "path": "drive/f1", "parents": []}))
+    assert {k for t, k in b.keys if t == "Event"} == {"gcal:uid-123@google.com"}
+    assert {k for t, k in b.keys if t == "File"} == {"drive:f1"}

@@ -69,7 +69,7 @@ def candidates(s: Session) -> dict[str, dict]:
     for nid, name, occ in s.execute(text("""
         SELECT n.id, n.name, count(si.id) FROM nodes n
         JOIN source_items si ON si.source = 'gcal'
-             AND n.key = 'gcal:' || COALESCE(si.raw_meta->>'series_key', si.external_id)
+             AND n.key = COALESCE(si.raw_meta->>'event_key', 'gcal:' || COALESCE(si.raw_meta->>'series_key', si.external_id))
         WHERE n.type = 'Event' GROUP BY n.id, n.name
     """)):
         add(name, nid, f"event series ({occ})") if occ >= MIN_EVENT_OCC else None

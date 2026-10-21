@@ -60,7 +60,7 @@ def run(s: Session) -> int:
         FROM source_items si
         LEFT JOIN nodes n ON (n.source_item_id = si.id AND n.type IN ('Message', 'File'))
                           OR (si.source = 'gcal' AND n.type = 'Event'
-                              AND n.key = 'gcal:' || COALESCE(si.raw_meta->>'series_key', si.external_id)
+                              AND n.key = COALESCE(si.raw_meta->>'event_key', 'gcal:' || COALESCE(si.raw_meta->>'series_key', si.external_id))
                               AND n.source_item_id = si.id)
         -- contact cards carry no text worth searching
         WHERE si.source NOT IN ('gcontacts', 'maccontacts') AND si.updated_at > :since
