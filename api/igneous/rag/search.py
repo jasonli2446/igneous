@@ -17,6 +17,8 @@ class Filters:
     person: str | None = None  # email address; matches sender or recipient
     since: datetime | None = None
     until: datetime | None = None
+    person_id: int | None = None  # canonical Person node id; matches sender or recipient aliases
+    sources: tuple[str, ...] = ()
 
 
 def _where(f: Filters) -> tuple[str, dict]:
@@ -24,6 +26,9 @@ def _where(f: Filters) -> tuple[str, dict]:
     if f.source:
         clauses.append("si.source = :source")
         params["source"] = f.source
+    if f.sources:
+        clauses.append("si.source = ANY(:sources)")
+        params["sources"] = list(f.sources)
     if f.since:
         clauses.append("si.occurred_at >= :since")
         params["since"] = f.since
@@ -35,6 +40,14 @@ def _where(f: Filters) -> tuple[str, dict]:
             SELECT e.dst FROM edges e JOIN nodes p ON p.id = e.src WHERE p.key = :person AND e.type = 'SENT'
             UNION SELECT e.src FROM edges e JOIN nodes p ON p.id = e.dst WHERE p.key = :person AND e.type = 'RECEIVED')""")
         params["person"] = f.person.lower()
+    if f.person_id:
+        # Include every address folded into the canonical identity as well as an unmerged canonical head.
+        clauses.append("""c.node_id IN (
+            SELECT e.dst FROM edges e WHERE e.type = 'SENT' AND e.src IN
+                (SELECT :person_id UNION SELECT node_id FROM canonical WHERE canonical_id = :person_id)
+            UNION SELECT e.src FROM edges e WHERE e.type = 'RECEIVED' AND e.dst IN
+                (SELECT :person_id UNION SELECT node_id FROM canonical WHERE canonical_id = :person_id))""")
+        params["person_id"] = f.person_id
     return (" AND " + " AND ".join(clauses)) if clauses else "", params
 
 

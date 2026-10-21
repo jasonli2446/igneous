@@ -9,8 +9,9 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous import llm
+from igneous.rag.constraints import apply
 from igneous.rag.rerank import rerank
-from igneous.rag.search import Filters, hybrid
+from igneous.rag.search import Filters, _where, hybrid
 
 CONTEXT_CHUNKS = 8
 EXPAND_PER_HIT = 2
@@ -38,7 +39,7 @@ SCHEMA = {
 }
 
 
-def expand(s: Session, hits: list[dict], per_hit: int = EXPAND_PER_HIT) -> list[dict]:
+def expand(s: Session, hits: list[dict], per_hit: int = EXPAND_PER_HIT, f: Filters | None = None) -> list[dict]:
     """Pull neighbors through the graph: other messages in the same thread as each hit. This is what finds
     the reply that answers the question when only the original mentioned the keywords."""
     seen = {h["chunk_id"] for h in hits}
@@ -46,8 +47,10 @@ def expand(s: Session, hits: list[dict], per_hit: int = EXPAND_PER_HIT) -> list[
     if not node_ids:
         return []
     # In priority order: (0) the direct reply chain (REPLIES_TO, from quoted headers); (1) other messages in the
-    # same thread; (2) messages between the same sender and a recipient within 14 days.
-    rows = s.execute(text("""
+    # same thread; (2) messages between the same sender and a recipient within 14 days. Expanded evidence must
+    # obey the same source/person/date scope as the original retrieval.
+    where, params = _where(f or Filters())
+    rows = s.execute(text(f"""
         WITH hit AS (SELECT unnest(CAST(:nodes AS bigint[])) AS node),
         reply AS (  -- direct reply chain, both directions: the most specific evidence there is
             SELECT hit.node AS via, CASE WHEN r.src = hit.node THEN r.dst ELSE r.src END AS msg, -1 AS pri
@@ -70,8 +73,9 @@ def expand(s: Session, hits: list[dict], per_hit: int = EXPAND_PER_HIT) -> list[
         FROM (SELECT * FROM reply UNION ALL SELECT * FROM thread_sib UNION ALL SELECT * FROM pair_sib) n
         JOIN chunks c ON c.node_id = n.msg AND c.ord = 0
         JOIN source_items si ON si.id = c.source_item_id
+        WHERE TRUE {where}
         ORDER BY c.id, n.pri
-    """), {"nodes": node_ids}).mappings().all()
+    """), {"nodes": node_ids, **params}).mappings().all()
     rows = sorted(rows, key=lambda r: r["pri"])
     per_via: dict[int, int] = {}
     out = []
@@ -97,8 +101,9 @@ def _evidence_block(items: list[dict]) -> str:
 def answer(s: Session, question: str, f: Filters | None = None, use_graph: bool = True,
            mode: str = "hybrid") -> dict:
     t0 = time.time()
+    f = apply(s, question, f)
     hits = hybrid(s, question, f, k=CONTEXT_CHUNKS, mode=mode)
-    candidates = hits + expand(s, hits) if use_graph else hits
+    candidates = hits + expand(s, hits, f=f) if use_graph else hits
     t_rerank = time.time()
     context = rerank(question, candidates, keep=CONTEXT_CHUNKS) if use_graph else candidates
     rerank_s = time.time() - t_rerank
