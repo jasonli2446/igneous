@@ -39,16 +39,30 @@ function initialPosition(id: string) {
   };
 }
 
-function expansionPosition(g: Graph, id: string, parentId: number | null) {
+function graphScale(g: Graph) {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  g.forEachNode((_, { x, y }) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+  });
+  return Number.isFinite(minX) ? Math.max(2, Math.hypot(maxX - minX, maxY - minY)) : 2;
+}
+
+function expansionPosition(g: Graph, id: string, parentId: number | null, scale: number) {
   const parent = parentId === null ? null : String(parentId);
   if (!parent || !g.hasNode(parent)) return initialPosition(id);
 
   const { x, y } = g.getNodeAttributes(parent);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return initialPosition(id);
 
-  const value = hash(`${parent}:${id}`);
-  const angle = (value / 0xffffffff) * Math.PI * 2;
-  const radius = 0.08 + (((value >>> 16) & 0xffff) / 0xffff) * 0.24;
+  const angle = (hash(`${parent}:${id}:angle`) / 0xffffffff) * Math.PI * 2;
+  const radius = scale * (0.03 + (hash(`${parent}:${id}:radius`) / 0xffffffff) * 0.09);
   return { x: x + Math.cos(angle) * radius, y: y + Math.sin(angle) * radius };
 }
 
