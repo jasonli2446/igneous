@@ -13,7 +13,9 @@ Two people push to this repo in parallel (Jason and Aadhav). Unsynced work has a
 2. Find the issue for the work: `gh issue list --state open`. If none exists, **create one first**, with
    labels (`area:*`, `phase:*`, `P1`/`P2`), a milestone, a task checklist and a "Done when" line, linked as a
    sub-issue of its epic (`gh api -X POST repos/jasonli2446/igneous/issues/<epic>/sub_issues -F sub_issue_id=<id>`).
-3. If the issue is assigned to someone else, or another open PR touches the same files, stop and say so
+3. Both people often work at the same time, and push several PRs an hour. Also check active remote branches
+   (`git branch -r --sort=-committerdate | head`); a recently pushed branch is work in progress even without a PR.
+   If the issue is assigned to someone else, or another open PR or active branch touches the same files, stop and say so
    before writing code.
 
 **While working**
