@@ -1197,3 +1197,96 @@ def test_redact_is_idempotent_and_queued_image_prompts_parse(tmp_path):
         "type": "queued_command", "prompt": [{"type": "text", "text": "see this screenshot"}, {"type": "image"}]}}))
     _, turns = claude_turns(str(f))
     assert [t["text"] for t in turns] == ["see this screenshot"]
+
+
+def _export_items(payload, provider=None, zipped=None):
+    import io
+    import json
+    import zipfile
+
+    from igneous.connectors.ai_exports import export_items, parse_export
+
+    raw = json.dumps(payload).encode()
+    if zipped:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(zipped, raw)
+        raw = buf.getvalue()
+    kind, convs = parse_export(io.BytesIO(raw), provider)
+    return kind, convs, export_items(kind, convs)
+
+
+def test_chatgpt_export_keeps_text_drops_tools_and_groups_by_day():
+    from datetime import UTC, datetime
+
+    ts = lambda d, h: datetime(2025, 3, d, h, tzinfo=UTC).timestamp()  # noqa: E731
+    token = "ghp_" + "A" * 36
+    msg = lambda role, ctype, parts, t: {"message": {"author": {"role": role}, "create_time": t,  # noqa: E731
+                                                      "content": {"content_type": ctype, "parts": parts}}}
+    mapping = {
+        "root": {"message": None},
+        "c": msg("assistant", "text", ["Use a partial index."], ts(1, 10)),  # out of order on purpose
+        "a": msg("system", "text", ["You are ChatGPT"], ts(1, 9)),
+        "b": msg("user", "text", [f"how do I speed up my query? token {token}"], ts(1, 9)),
+        "d": msg("tool", "text", ["TOOL OUTPUT"], ts(1, 10)),
+        "e": msg("assistant", "code", ["print('x')"], ts(1, 10)),
+        "f": msg("user", "multimodal_text", [{"asset_pointer": "x"}, "caption"], ts(1, 10)),
+        "g": msg("user", "text", ["thanks, next day"], ts(2, 8)),
+    }
+    data = [{"title": "SQL help", "create_time": ts(1, 9), "conversation_id": "cv1", "mapping": mapping},
+            {"title": "assistant only", "mapping": {"x": msg("assistant", "text", ["hi"], ts(1, 9))}}]
+    kind, convs, items = _export_items(data, zipped="export/conversations.json")
+    assert kind == "chatgpt" and len(convs) == 2
+    assert [i.external_id for i in items] == ["chatgpt/cv1/2025-03-01", "chatgpt/cv1/2025-03-02"]
+    body = items[0].body_text
+    assert "me: how do I speed up" in body and "assistant: Use a partial index." in body
+    assert body.index("how do I") < body.index("partial index")
+    for dropped in ("You are ChatGPT", "TOOL OUTPUT", "print(", "caption", token):
+        assert dropped not in body
+    assert "[REDACTED" in body and items[0].raw_meta["redactions"] == 1 and items[0].raw_meta["tool"] == "chatgpt"
+
+
+def test_claude_ai_export_prefers_content_blocks_and_skips_empty():
+    token = "ghp_" + "B" * 36
+    data = [{"uuid": "u1", "name": "Plan", "chat_messages": [
+        {"sender": "human", "text": f"hello {token}", "created_at": "2025-04-01T10:00:00.000000Z",
+         "content": [{"type": "text", "text": f"hello {token}"}]},
+        {"sender": "assistant", "text": "", "created_at": "2025-04-01T10:00:05Z",
+         "content": [{"type": "thinking", "thinking": "hmm"}, {"type": "text", "text": "Here is a plan."}]},
+        {"sender": "human", "text": "legacy text only", "created_at": "2025-04-02T09:00:00Z"},
+    ]}, {"uuid": "u2", "name": "none", "chat_messages": [
+        {"sender": "assistant", "text": "orphan", "created_at": "2025-04-01T10:00:00Z"}]}]
+    kind, _, items = _export_items(data)
+    assert kind == "claude_ai"
+    assert [i.external_id for i in items] == ["claude_ai/u1/2025-04-01", "claude_ai/u1/2025-04-02"]
+    assert "assistant: Here is a plan." in items[0].body_text and "hmm" not in items[0].body_text
+    assert token not in items[0].body_text and items[0].raw_meta["redactions"] == 1
+    assert "legacy text only" in items[1].body_text
+
+
+def test_gemini_takeout_groups_a_day_and_strips_html():
+    data = [
+        {"header": "Gemini Apps", "title": "Prompted second question", "time": "2025-05-01T15:00:00.000Z",
+         "safeHtmlItem": [{"html": "<p>Answer <b>two</b></p><ul><li>a</li></ul>"}]},
+        {"header": "Gemini Apps", "title": "Prompted first question", "time": "2025-05-01T14:00:00.000Z",
+         "safeHtmlItem": [{"html": "<p>Answer one</p>"}]},
+        {"header": "Gemini Apps", "title": "Used an Assistant feature", "time": "2025-05-01T16:00:00.000Z"},
+        {"header": "Gemini Apps", "title": "Prompted next day", "time": "2025-05-02T08:00:00.000Z"},
+    ]
+    kind, convs, items = _export_items(data, zipped="Takeout/My Activity/Gemini Apps/MyActivity.json")
+    assert kind == "gemini" and len(convs) == 2
+    assert [i.external_id for i in items] == ["gemini/gemini-2025-05-01/2025-05-01",
+                                              "gemini/gemini-2025-05-02/2025-05-02"]
+    body = items[0].body_text
+    assert body.index("first question") < body.index("Answer one") < body.index("second question")
+    assert "<p>" not in body and "Answer" in body and "Assistant feature" not in body
+
+
+def test_export_rejects_unknown_and_html_uploads():
+    import io
+
+    from igneous.connectors.ai_exports import ExportError, parse_export
+
+    for raw in (b'{"a": 1}', b"<html></html>", b"[]"):
+        with pytest.raises(ExportError):
+            parse_export(io.BytesIO(raw))

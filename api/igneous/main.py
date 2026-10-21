@@ -1,12 +1,14 @@
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous.connectors.ai_exports import ExportConnector, ExportError, export_items, parse_export
+from igneous.connectors.base import run_sync
 from igneous.db import get_session
 from igneous.graph.traversal import GraphFilters, expand, explain, neighborhood, network, people, view
 from igneous.llm import LLMDisabled
@@ -64,6 +66,21 @@ def expert_search(q: str = Query(..., min_length=1), k: int = Query(10, ge=1, le
     if not q.strip():
         raise HTTPException(422, "q must contain non-whitespace characters")
     return {"experts": experts(s, q, k=k, evidence_limit=evidence_limit, mode=mode)}
+
+
+@app.post("/import/ai-export")
+def import_ai_export(file: UploadFile, provider: Annotated[str | None, Form()] = None,
+                     s: Session = Depends(get_session)):
+    """Import a ChatGPT / claude.ai / Gemini (Takeout JSON) export, zipped or raw. Only the parsed, redacted
+    day-items are stored; the upload sits in Starlette's spooled temp file and is discarded after the request."""
+    try:
+        kind, convs = parse_export(file.file, provider or None)
+    except ExportError as e:
+        raise HTTPException(422, str(e)) from e
+    items = export_items(kind, convs)
+    stats = run_sync(s, ExportConnector(items), account=kind)
+    return {"provider": kind, "conversations": len(convs), "items_inserted": stats["inserted"],
+            "items_updated": stats["updated"], "redactions": sum(i.raw_meta["redactions"] for i in items)}
 
 
 class AskBody(BaseModel):

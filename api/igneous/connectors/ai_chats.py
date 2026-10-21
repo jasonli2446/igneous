@@ -118,6 +118,32 @@ def codex_turns(path: str) -> tuple[dict, list[dict]]:
     return meta, turns
 
 
+def day_items(tool: str, session: str, meta: dict, turns: list[dict]) -> Iterator[SourceItem]:
+    """One redacted SourceItem per day of a session. Shared by the local connector and export importers."""
+    by_day: dict[str, list[dict]] = defaultdict(list)
+    for t in turns:
+        if t["at"]:
+            by_day[t["at"].date().isoformat()].append(t)
+    for day, day_turns in sorted(by_day.items()):
+        lines, secrets = [], 0
+        for t in day_turns:
+            clean, found = redact(t["text"][:MAX_TURN_CHARS])
+            secrets += sum(found.values())
+            lines.append(f"[{t['at']:%H:%M}] {t['role']}: {clean.strip()}")
+        if not any(t["role"] == "me" for t in day_turns):
+            continue  # a day with only assistant output (e.g. a resumed tail) has nothing of yours
+        title, _ = redact(meta["title"] or "")
+        yield SourceItem(
+            source="ai_chats", external_id=f"{tool}/{session}/{day}",
+            title=f"{title or 'AI session'} ({tool.replace('_', ' ')}, {day})",
+            body_text="\n".join(lines), occurred_at=day_turns[0]["at"], mime="text/plain",
+            raw_meta={"tool": tool, "session": session, "day": day, "cwd": meta["cwd"],
+                      "repo": os.path.basename(meta["cwd"].rstrip("/")) if meta["cwd"] else None,
+                      "branches": meta["branches"], "turns": len(day_turns),
+                      "my_turns": sum(1 for t in day_turns if t["role"] == "me"),
+                      "redactions": secrets})
+
+
 class AIChatConnector:
     """Claude Code and Codex sessions on this machine. Read-only (CO-2)."""
     name = "ai_chats"
@@ -139,29 +165,8 @@ class AIChatConnector:
             if seen.get(path) == sig:
                 continue  # unchanged since last sync: don't even read it
             meta, turns = (claude_turns if tool == "claude_code" else codex_turns)(path)
-            by_day: dict[str, list[dict]] = defaultdict(list)
-            for t in turns:
-                if t["at"]:
-                    by_day[t["at"].date().isoformat()].append(t)
             session = meta["session_id"] or os.path.splitext(os.path.basename(path))[0]
-            for day, day_turns in sorted(by_day.items()):
-                lines, secrets = [], 0
-                for t in day_turns:
-                    clean, found = redact(t["text"][:MAX_TURN_CHARS])
-                    secrets += sum(found.values())
-                    lines.append(f"[{t['at']:%H:%M}] {t['role']}: {clean.strip()}")
-                if not any(t["role"] == "me" for t in day_turns):
-                    continue  # a day with only assistant output (e.g. a resumed tail) has nothing of yours
-                title, _ = redact(meta["title"] or "")
-                yield SourceItem(
-                    source="ai_chats", external_id=f"{tool}/{session}/{day}",
-                    title=f"{title or 'AI session'} ({tool.replace('_', ' ')}, {day})",
-                    body_text="\n".join(lines), occurred_at=day_turns[0]["at"], mime="text/plain",
-                    raw_meta={"tool": tool, "session": session, "day": day, "cwd": meta["cwd"],
-                              "repo": os.path.basename(meta["cwd"].rstrip("/")) if meta["cwd"] else None,
-                              "branches": meta["branches"], "turns": len(day_turns),
-                              "my_turns": sum(1 for t in day_turns if t["role"] == "me"),
-                              "redactions": secrets})
+            yield from day_items(tool, session, meta, turns)
             seen[path] = sig
             yield Checkpoint({"files": seen})
         yield Checkpoint({"files": seen})
