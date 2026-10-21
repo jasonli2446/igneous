@@ -411,6 +411,22 @@ def scored_members(s: Session, head: int, per: int = 8) -> dict[str, list[dict]]
         if ol:
             out["Organizations"] = ol
 
+    # Projects (derived by graph/entities.py): the ones you're in, by how many of their items involve you.
+    projects = s.execute(text("""
+        WITH mine AS (SELECT dst AS i FROM edges WHERE src = ANY(:me) AND type IN ('SENT', 'ATTENDED')
+                      UNION SELECT src FROM edges WHERE dst = ANY(:me) AND type = 'RECEIVED'),
+        via AS (SELECT pe.dst AS p, pe.src AS i FROM edges pe WHERE pe.type = 'PART_OF'
+                UNION SELECT pe.dst, it.src FROM edges pe JOIN edges it ON it.dst = pe.src AND it.type = 'IN_THREAD'
+                WHERE pe.type = 'PART_OF')
+        SELECT via.p, count(DISTINCT via.i) AS n,
+               (SELECT count(*) FROM edges x WHERE x.dst = via.p AND x.type = 'INVOLVED_IN') AS people
+        FROM via JOIN mine ON mine.i = via.i JOIN nodes n ON n.id = via.p AND n.type = 'Project'
+        GROUP BY via.p
+    """), {"me": me}).all()
+    pl = [{"id": p, "strength": math.log1p(n) + 0.5 * math.log1p(people)} for p, n, people in projects]
+    if pl:
+        out["Projects"] = pl
+
     for items in out.values():
         items.sort(key=lambda x: x["strength"], reverse=True)
         n = len(items)
@@ -509,6 +525,18 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
             for p, _st, _ in relationships(s, _canon_head(s, node), 40):
                 if p not in seen and p != head and len(new) < k:
                     new.append(p)
+        elif ntype == "Project":  # its people, then its group chats, events and items
+            rows = s.execute(text("""
+                SELECT src, CASE n.type WHEN 'Person' THEN 0 WHEN 'Thread' THEN 1 WHEN 'Event' THEN 2 ELSE 3 END,
+                       COALESCE((e.props->>'items')::int, (e.props->>'days')::int, 1)
+                FROM edges e JOIN nodes n ON n.id = e.src
+                WHERE e.dst = :n AND e.type IN ('PART_OF', 'INVOLVED_IN') ORDER BY 2, 3 DESC LIMIT 80
+            """), {"n": node}).all()
+            per_kind: dict[int, int] = {}
+            for p, kind, _w in rows:
+                if p not in seen and p != head and per_kind.get(kind, 0) < max(2, k // 2) and len(new) < k * 2:
+                    new.append(p)
+                    per_kind[kind] = per_kind.get(kind, 0) + 1
         else:  # a group, event, org: its members, strongest first
             rows = s.execute(text("""
                 SELECT COALESCE((SELECT canonical_id FROM canonical WHERE node_id = p), p) AS p, count(*) AS n FROM (
