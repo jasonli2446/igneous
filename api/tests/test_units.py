@@ -1210,3 +1210,15 @@ def test_api_responses_name_numbers_but_keep_keys(monkeypatch):
     out = json.loads(body)
     assert out["name"] == "Sam Lee" and out["key"] == "+16145551234"
     assert out["items"][0]["text"] == "[14:39] Sam Lee: hi"
+
+
+def test_entity_names_normalize_and_drop_generic():
+    from igneous.graph.entities import _norm, _usable
+
+    assert _norm("Draw Steel (session 4)") == "draw steel"
+    assert _norm("Igneous - weekly sync") == "igneous"
+    assert _norm("Draw Steel #12") == "draw steel"
+    assert not _usable(_norm("Lunch"))
+    assert not _usable(_norm("1:1"))
+    assert not _usable("10/21")
+    assert _usable("dealer tire")
