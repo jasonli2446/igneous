@@ -38,7 +38,8 @@ def _is_skippable_download_error(exc: HttpError) -> bool:
         return True
     content = exc.content or b""
     return exc.resp.status == 403 and any(reason in content for reason in (
-        b"fileNotDownloadable", b"exportSizeLimitExceeded", b"cannotDownloadAbusiveFile"))
+        b"fileNotDownloadable", b"exportSizeLimitExceeded", b"cannotDownloadAbusiveFile",
+        b"cannotDownloadFile", b"cannotExportFile"))  # owner disabled download for viewers
 
 
 def _is_expired_change_token(exc: HttpError) -> bool:
