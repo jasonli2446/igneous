@@ -11,7 +11,8 @@ app = typer.Typer(no_args_is_help=True)
 
 
 @app.command()
-def sync(connector: str = typer.Argument(..., help="email | imessage | maccontacts | gmail | gcal | gcontacts | drive | fs"),
+def sync(connector: str = typer.Argument(..., help="email | imessage | maccontacts | gmail | gcal | gcontacts | drive | fs "
+                                                   "| ai_chats"),
          path: Path = typer.Option(None, help="source path; fs defaults to IGNEOUS_FILESYSTEM_ROOTS"),
          mailbox: list[str] = typer.Option(None, help="restrict to these mailboxes; repeatable"),
          limit: int = typer.Option(None, help="stop at the first checkpoint after this many items (resumable)"),
@@ -29,6 +30,10 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | maccontac
         from igneous.connectors.imessage import DEFAULT_DB, MessagesConnector
 
         conn = MessagesConnector(path or DEFAULT_DB, since_days=since_days)
+    elif connector == "ai_chats":
+        from igneous.connectors.ai_chats import AIChatConnector
+
+        conn = AIChatConnector()
     elif connector == "maccontacts":
         from igneous.connectors.mac_contacts import MacContactsConnector
 

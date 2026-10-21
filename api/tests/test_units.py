@@ -1112,3 +1112,88 @@ def test_service_addresses_are_not_people():
     assert is_service_address("no-reply@accounts.google.com")
     assert not is_service_address("12345+jli@users.noreply.github.com")  # a real person's commit address
     assert not is_service_address("jyl123@case.edu") and not is_service_address("+16145551234")
+
+
+def test_redact_secrets():
+    from igneous.connectors.redact import redact
+
+    # Synthetic credentials in each real format; none of these are live.
+    fake = {
+        "gh": "ghp_" + "A" * 36, "ant": "sk-ant-api03-" + "b" * 40, "aws": "AKIA" + "Z" * 16,
+        "goog": "AIza" + "c" * 35, "jwt": "eyJ" + "a" * 12 + ".eyJ" + "b" * 12 + "." + "c" * 12,
+    }
+    text = (f"use {fake['gh']} and {fake['ant']}, aws {fake['aws']}, key {fake['goog']}, jwt {fake['jwt']}\n"
+            "DATABASE_URL=postgresql://igneous:hunter2pass@db:5432/x\nOPENAI_API_KEY=abcdefgh12345678\n"
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----")
+    out, counts = redact(text)
+    for v in fake.values():
+        assert v not in out
+    assert "hunter2pass" not in out and "abcdefgh12345678" not in out and "MIIEow" not in out
+    assert "OPENAI_API_KEY=[REDACTED:assigned_secret]" in out  # the name survives, the value doesn't
+    assert counts["github_token"] == 1 and counts["private_key"] == 1
+    # Ordinary prose is untouched.
+    assert redact("the token bucket refills at 600 units per minute")[0] == "the token bucket refills at 600 units per minute"
+    assert redact(None) == (None, {})
+
+
+def test_ai_chat_keeps_prose_drops_tools_and_redacts(tmp_path):
+    """Synthetic Claude Code session: prose kept, tools/thinking/meta/subagents dropped, secrets redacted."""
+    import json
+
+    from igneous.connectors.ai_chats import AIChatConnector
+    from igneous.connectors.base import SourceItem
+
+    proj = tmp_path / "claude" / "-Users-x-repo"
+    (proj / "sess1" / "subagents").mkdir(parents=True)
+    token = "ghp_" + "Q" * 36
+    rows = [
+        {"type": "custom-title", "customTitle": "Igneous chat connector"},
+        {"type": "user", "sessionId": "sess1", "cwd": "/Users/x/igneous", "gitBranch": "feat/chats",
+         "timestamp": "2026-10-21T10:00:00Z", "message": {"content": f"build the connector, token {token}"}},
+        {"type": "assistant", "sessionId": "sess1", "timestamp": "2026-10-21T10:01:00Z", "message": {"content": [
+            {"type": "thinking", "thinking": "SECRET_THOUGHT"},
+            {"type": "text", "text": "Plan: parse jsonl."},
+            {"type": "tool_use", "input": {"command": "cat .env"}}]}},
+        {"type": "user", "timestamp": "2026-10-21T10:02:00Z",
+         "message": {"content": [{"type": "tool_result", "content": "DB_PASSWORD=hunter2hunter2"}]}},
+        {"type": "user", "isMeta": True, "timestamp": "2026-10-21T10:03:00Z", "message": {"content": "<system note>"}},
+        {"type": "attachment", "timestamp": "2026-10-21T10:04:00Z",
+         "attachment": {"type": "queued_command", "prompt": "also redact secrets"}},
+        {"type": "attachment", "timestamp": "2026-10-21T10:05:00Z", "attachment": {"type": "environment", "snapshot": {}}},
+        {"type": "user", "timestamp": "2026-10-22T09:00:00Z", "message": {"content": "next day"}},
+    ]
+    (proj / "sess1.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
+    (proj / "sess1" / "subagents" / "agent-1.jsonl").write_text(json.dumps(
+        {"type": "user", "timestamp": "2026-10-21T10:00:00Z", "message": {"content": "SUBAGENT_TEXT"}}))
+
+    conn = AIChatConnector(claude_root=str(tmp_path / "claude"), codex_root=str(tmp_path / "none"))
+    items = [o for o in conn.sync({}) if isinstance(o, SourceItem)]
+    assert [i.raw_meta["day"] for i in items] == ["2026-10-21", "2026-10-22"]  # one item per session-day
+    day1 = items[0]
+    assert "Plan: parse jsonl." in day1.body_text and "also redact secrets" in day1.body_text
+    for leaked in (token, "SECRET_THOUGHT", "cat .env", "hunter2hunter2", "<system note>", "SUBAGENT_TEXT"):
+        assert leaked not in day1.body_text, leaked
+    assert "[REDACTED:github_token]" in day1.body_text and day1.raw_meta["redactions"] == 1
+    assert day1.raw_meta["repo"] == "igneous" and day1.raw_meta["branches"] == ["feat/chats"]
+    assert day1.title.startswith("Igneous chat connector")
+
+    # Unchanged files are skipped on the next sync (cursor = mtime + size).
+    cursor = [o for o in conn.sync({}) if not isinstance(o, SourceItem)][-1].cursor
+    assert not [o for o in conn.sync(cursor) if isinstance(o, SourceItem)]
+
+
+def test_redact_is_idempotent_and_queued_image_prompts_parse(tmp_path):
+    import json
+
+    from igneous.connectors.ai_chats import claude_turns
+    from igneous.connectors.redact import redact
+
+    once, _ = redact("DB_PASSWORD=supersecretvalue and postgres://u:pw12345@h/db")
+    twice, counts = redact(once)
+    assert twice == once and counts == {}  # placeholders aren't re-matched (a scan of stored text reads 0)
+
+    f = tmp_path / "s.jsonl"
+    f.write_text(json.dumps({"type": "attachment", "timestamp": "2026-10-21T10:00:00Z", "attachment": {
+        "type": "queued_command", "prompt": [{"type": "text", "text": "see this screenshot"}, {"type": "image"}]}}))
+    _, turns = claude_turns(str(f))
+    assert [t["text"] for t in turns] == ["see this screenshot"]
