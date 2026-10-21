@@ -2,6 +2,7 @@
 import io
 import json
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -171,6 +172,13 @@ def test_split_zips_and_extracted_folder_agree(zpath, tmp_path):
     assert snap([a, b]) == snap([zpath]) == snap([folder / "Takeout"]) == snap([folder])
 
 
+def test_folder_of_uploaded_zips(zpath, tmp_path):
+    up = tmp_path / "uploads"
+    up.mkdir()
+    (up / "0-takeout-x.zip").write_bytes(zpath.read_bytes())
+    assert sorted(i.external_id for i in takeout.parse([up])[0]) == sorted(i.external_id for i in takeout.parse([zpath])[0])
+
+
 def test_corrupt_member_is_reported_and_rest_imported(tmp_path):
     files = full_files()
     files["Chrome/History.json"] = b'{"Browser History": [{"url": "https://a.com", "time_usec": 17488'
@@ -233,6 +241,46 @@ def test_import_is_idempotent_and_builds_graph(db, zpath):
         assert hit >= 3
         from igneous.graph.invariants import check_graph
         assert [v for v in check_graph(s) if v.details and v.details.get("edge_type") in ("VISITED", "SAVED")] == []
+
+
+def test_search_joins_existing_project_after_rebuild(db, zpath):
+    """Done-when: a search mentioning an existing Project links to it. The Project comes from a synthetic
+    recurring calendar series named 'Draw Steel' (3 occurrences)."""
+    from igneous.connectors.base import SourceItem, run_sync
+    from igneous.graph import entities, spine
+    from igneous.rag import chunking
+
+    class Cal:
+        name = "takeouttest"
+
+        def sync(self, cursor):
+            for i in range(3):
+                yield SourceItem(source="gcal", external_id=f"takeouttest/{i}", title="Draw Steel",
+                                 body_text="game night", raw_meta={"series_key": "takeouttest-ds", "attendees": []},
+                                 occurred_at=datetime(2025, 5, 1 + i, tzinfo=UTC))
+
+    try:
+        with SessionLocal() as s:
+            run_sync(s, Cal(), account="t")
+            takeout.run_import(s, [zpath])
+            spine.run(s)
+            chunking.run(s)
+            entities.run(s, log=None)
+            linked = s.execute(text("""
+                SELECT DISTINCT si.source FROM edges e
+                JOIN nodes p ON p.id = e.dst AND p.type = 'Project' AND p.name ILIKE 'draw steel'
+                JOIN source_items si ON si.id = e.source_item_id
+                WHERE e.type = 'PART_OF' AND e.props->>'why' = 'mentions' AND si.source LIKE 'takeout\\_%'
+            """)).scalars().all()
+        assert {"takeout_activity", "takeout_chrome"} <= set(linked)
+    finally:
+        with SessionLocal() as s:
+            s.execute(text("DELETE FROM source_items WHERE source = 'gcal' AND external_id LIKE 'takeouttest/%'"))
+            s.execute(text("DELETE FROM nodes WHERE type = 'Event' AND key LIKE 'gcal:takeouttest%'"))
+            s.execute(text("DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = 'true'"
+                           " AND key LIKE 'project:draw steel%'"))
+            s.execute(text("DELETE FROM sync_state WHERE connector = 'takeouttest'"))
+            s.commit()
 
 
 def test_takeout_sources_are_hidden_from_models_by_default():
