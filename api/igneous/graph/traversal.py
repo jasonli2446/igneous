@@ -1,4 +1,5 @@
 """Bounded, provenance-filtered graph traversals used by the Explorer API."""
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -67,25 +68,55 @@ def neighborhood(s: Session, seeds: list[int], hops: int = 1, limit: int = 300,
     return subgraph(s, seen, filters)
 
 
-def people(s: Session, seed: int, limit: int = 60) -> dict:
-    """Person-to-person view: the seed's top correspondents by messages exchanged, plus the ties between
-    them. Edges are synthetic (type CORRESPONDS, weight = shared messages) and computed through Message nodes."""
-    # Resolve through entity resolution: every address of the seed counts as the seed, and correspondents
-    # are folded to their canonical identity (canon(x) = the cluster head, or x itself if unmerged).
+def relationships(s: Session, head: int, limit: int) -> list[tuple[int, float, dict]]:
+    """Rank the seed's correspondents by how real the relationship is, not raw volume.
+
+    A relationship needs both directions: someone who emailed you once and got no reply (a newsletter, a
+    recruiter blast) isn't one. Strength combines volume (log-scaled so one chatty thread can't dominate),
+    how many separate weeks you talked, how many channels (texts, email, events), and whether both of you
+    wrote. Returns (person, strength, stats), strongest first."""
     canon = "COALESCE((SELECT canonical_id FROM canonical WHERE node_id = {x}), {x})"
-    head = s.execute(text(f"SELECT {canon.format(x=':seed')}"), {"seed": seed}).scalar_one()
     rows = s.execute(text(f"""
         WITH me AS (SELECT :head AS id UNION SELECT node_id FROM canonical WHERE canonical_id = :head),
-        msgs AS (SELECT dst AS m FROM edges WHERE src IN (SELECT id FROM me) AND type = 'SENT'
-                 UNION SELECT src FROM edges WHERE dst IN (SELECT id FROM me) AND type = 'RECEIVED'),
-        parts AS (SELECT {canon.format(x='e.src')} AS p, e.dst AS m FROM edges e JOIN msgs ON msgs.m = e.dst
-                  WHERE e.type = 'SENT'
-                  UNION ALL
-                  SELECT {canon.format(x='e.dst')}, e.src FROM edges e JOIN msgs ON msgs.m = e.src
-                  WHERE e.type = 'RECEIVED')
-        SELECT p, count(DISTINCT m) AS w FROM parts WHERE p <> :head GROUP BY p ORDER BY w DESC LIMIT :limit
-    """), {"head": head, "limit": limit}).all()
-    ids = [head] + [r.p for r in rows]
+        pm AS (  -- (person, message, did they send it)
+            SELECT {canon.format(x='src')} AS p, dst AS m, true AS sent FROM edges WHERE type = 'SENT'
+            UNION ALL
+            SELECT {canon.format(x='dst')}, src, false FROM edges WHERE type = 'RECEIVED'),
+        mine AS (SELECT m, bool_or(sent) AS i_sent FROM pm WHERE p IN (SELECT id FROM me) GROUP BY m),
+        theirs AS (
+            SELECT pm.p, pm.m, bool_or(pm.sent) AS they_sent, bool_or(mine.i_sent) AS i_sent
+            FROM pm JOIN mine USING (m) WHERE pm.p NOT IN (SELECT id FROM me) GROUP BY pm.p, pm.m),
+        events AS (
+            SELECT {canon.format(x='o.src')} AS p, count(DISTINCT o.dst) AS n
+            FROM edges mine_e JOIN edges o ON o.dst = mine_e.dst AND o.type = 'ATTENDED' AND o.src <> mine_e.src
+            WHERE mine_e.type = 'ATTENDED' AND mine_e.src IN (SELECT id FROM me) GROUP BY 1)
+        SELECT t.p, count(*) AS msgs,
+               count(*) FILTER (WHERE t.they_sent) AS from_them, count(*) FILTER (WHERE t.i_sent) AS from_me,
+               count(DISTINCT date_trunc('week', si.occurred_at)) AS weeks,
+               count(DISTINCT si.source) AS channels, COALESCE(max(ev.n), 0) AS events
+        FROM theirs t JOIN nodes msg ON msg.id = t.m JOIN source_items si ON si.id = msg.source_item_id
+        LEFT JOIN events ev ON ev.p = t.p
+        GROUP BY t.p
+    """), {"head": head}).mappings().all()
+    scored = []
+    for r in rows:
+        two_way = r["from_them"] > 0 and r["from_me"] > 0
+        if not two_way and r["events"] == 0:
+            continue  # one-directional: mail you received and never answered, or a list you're on
+        strength = (math.log1p(r["msgs"]) * 1.0 + math.log1p(r["weeks"]) * 1.5
+                    + (r["channels"] + (1 if r["events"] else 0) - 1) * 1.2 + math.log1p(r["events"]) * 0.8)
+        scored.append((r["p"], round(strength, 3), dict(r)))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored[:limit]
+
+
+def people(s: Session, seed: int, limit: int = 60) -> dict:
+    """The seed's real relationships (see relationships()) and the ties between those people. Edge weight is
+    messages they share; each person node carries `strength`, their relationship with the seed."""
+    canon = "COALESCE((SELECT canonical_id FROM canonical WHERE node_id = {x}), {x})"
+    head = s.execute(text(f"SELECT {canon.format(x=':seed')}"), {"seed": seed}).scalar_one()
+    rel = relationships(s, head, limit)
+    ids = [head] + [p for p, _, _ in rel]
     ties = s.execute(text(f"""
         WITH parts AS (
             SELECT {canon.format(x='src')} AS p, dst AS m FROM edges WHERE type = 'SENT'
@@ -93,11 +124,14 @@ def people(s: Session, seed: int, limit: int = 60) -> dict:
         mine AS (SELECT * FROM parts WHERE p = ANY(:ids))
         SELECT a.p AS src, b.p AS dst, count(*) AS w
         FROM mine a JOIN mine b ON a.m = b.m AND a.p < b.p GROUP BY 1, 2
-        -- Always draw the seed's own ties (else one-message correspondents float unattached); between
-        -- correspondents, require 2+ shared messages to keep the picture readable.
+        -- The seed's own ties always; between others, 2+ shared messages to keep it readable.
         HAVING count(*) >= 2 OR CAST(:head AS bigint) IN (a.p, b.p)
     """), {"ids": ids, "head": head}).all()
     g = subgraph(s, ids)
+    # Rank-based 0..1 (closest = 1): raw scores bunch at the top, so sizes from them all looked the same.
+    order = {p: i for i, (p, _, _) in enumerate(rel)}
+    for n in g["nodes"]:
+        n["strength"] = 1.0 if n["id"] == head else round(1 - order.get(n["id"], len(rel)) / max(1, len(rel)), 3)
     g["edges"] = [{"id": -(i + 1), "src": t.src, "dst": t.dst, "type": "CORRESPONDS", "extractor": "derived",
                    "confidence": None, "weight": t.w} for i, t in enumerate(ties)]
     return g
@@ -138,6 +172,10 @@ def network(s: Session, seed: int, people_limit: int = 50, hub_limit: int = 30) 
     """), {"hubs": [h.hub for h in hubs]})}
     hub_ids = [h.hub for h in hubs]
     g = subgraph(s, [head, *others, *hub_ids])
+    strength = {n["id"]: n.get("strength") for n in base["nodes"]}
+    for n in g["nodes"]:
+        if strength.get(n["id"]) is not None:
+            n["strength"] = strength[n["id"]]
     # Keep every edge, including the seed's spokes: prune() decides what survives, and its spanning tree needs
     # the spokes to hold the graph together (dropping them up front left the seed floating in its own island).
     edges = list(base["edges"])
