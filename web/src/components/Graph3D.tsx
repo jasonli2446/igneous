@@ -79,8 +79,8 @@ export default function Graph3D({ data, dark, selected, onSelectAction, onExpand
           { x: n.x ?? 0, y: n.y ?? 0, z: n.z ?? 0 }, 900);
       })
       .onLinkClick((l) => {
-        const a = l.source as N, b = l.target as N;
-        cb.current.onLinkAction(a, b);
+        const a = l.source, b = l.target;
+        if (typeof a === "object" && typeof b === "object" && a && b) cb.current.onLinkAction(a as N, b as N);
       })
       .onBackgroundClick(() => cb.current.onSelectAction(null))
       .onNodeDragEnd((n) => { n.fx = n.x; n.fy = n.y; n.fz = n.z; }) // a dragged node stays where you put it
@@ -199,18 +199,29 @@ export default function Graph3D({ data, dark, selected, onSelectAction, onExpand
     const near = new Set<number>(s === null ? [] : [s]);
     if (s !== null)
       for (const l of g.graphData().links) {
-        const a = (l.source as N).id, b = (l.target as N).id;
+        const a = endId(l.source), b = endId(l.target);
+        if (a === undefined || b === undefined) continue;
         if (a === s) near.add(b);
         if (b === s) near.add(a);
       }
     g.nodeVisibility(() => true)
       .nodeOpacity(s === null ? 0.95 : 0.9)
       .nodeColor((n: N) => (s === null || near.has(n.id) ? n.color : dark ? "#2b2e29" : "#e2e3de"))
-      .linkVisibility((l: L) => s === null || (l.source as N).id === s || (l.target as N).id === s
-        || near.has((l.source as N).id) && near.has((l.target as N).id));
+      .linkVisibility((l: L) => {
+        const a = endId(l.source), b = endId(l.target);
+        if (a === undefined || b === undefined) return false;
+        return s === null || a === s || b === s || (near.has(a) && near.has(b));
+      });
   }, [selected, dark]);
 
   return <div ref={host} className="absolute inset-0 cursor-grab active:cursor-grabbing" />;
+}
+
+// The force engine replaces link endpoints (numeric ids) with node objects only on its next tick. Code that
+// reads links in between (selection, hover, a click mid-expansion) must accept either form, and must never
+// touch .x on an endpoint that is still an id, which is the "reading 'x' of undefined" crash.
+function endId(e: number | N | undefined): number | undefined {
+  return typeof e === "object" && e !== null ? e.id : e;
 }
 
 function firstName(name: string) {
@@ -228,6 +239,7 @@ function describe(n: N) {
 }
 
 function linkReason(l: L) {
+  if (typeof l.source !== "object" || typeof l.target !== "object") return "";
   const a = (l.source as N).name, b = (l.target as N).name;
   if (l.type === "HAS" || l.type === "IN_CATEGORY") return escapeHtml(b);
   if (l.type === "PART_OF") return `${escapeHtml(firstName(a))} in ${escapeHtml(b)} · ${l.weight} message${l.weight === 1 ? "" : "s"}`;
