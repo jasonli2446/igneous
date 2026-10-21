@@ -75,9 +75,20 @@ def save(s: Session, account: str, creds: Credentials) -> None:
     s.commit()
 
 
-def accounts(s: Session) -> list[str]:
+def save_secret(s: Session, provider: str, account: str, secret: str) -> None:
+    """Store a non-OAuth secret (e.g. a GitHub token) encrypted the same way. Never log or return `secret`."""
     _ensure_table(s)
-    return list(s.execute(text("SELECT account FROM oauth_tokens WHERE provider = 'google' ORDER BY 1")).scalars())
+    s.execute(text("""
+        INSERT INTO oauth_tokens (provider, account, token_enc) VALUES (:p, :a, :t)
+        ON CONFLICT (provider, account) DO UPDATE SET token_enc = EXCLUDED.token_enc, updated_at = now()
+    """), {"p": provider, "a": account, "t": _fernet().encrypt(secret.encode())})
+    s.commit()
+
+
+def accounts(s: Session, provider: str = "google") -> list[str]:
+    _ensure_table(s)
+    return list(s.execute(text("SELECT account FROM oauth_tokens WHERE provider = :p ORDER BY 1"),
+                          {"p": provider}).scalars())
 
 
 def load(s: Session, account: str | None = None) -> tuple[str, Credentials]:

@@ -6,6 +6,8 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://igneous:igneous@localhost:5432/igneous"
     data_dir: str = "../data"
+    # Where the browser UI lives; the Google sign-in callback sends you back here.
+    web_url: str = "http://localhost:3000"
     # Comma-separated filesystem roots used by ``igneous sync fs`` when --path is omitted.
     filesystem_roots: str = ""
     # Drive API page size for files.list and changes.list (1-1000).
