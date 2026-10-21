@@ -1102,3 +1102,13 @@ def test_contacts_complete_scan_is_account_scoped(monkeypatch):
     assert isinstance(events[-1], CompletedScan)
     assert events[-1].external_ids == frozenset({"me@example.com/people/one"})
     assert events[-1].external_id_prefix == "me@example.com/"
+
+
+def test_service_addresses_are_not_people():
+    from igneous.graph.self_identity import is_service_address
+
+    assert is_service_address("cfa0123@import.calendar.google.com")
+    assert is_service_address("notifications@github.com")
+    assert is_service_address("no-reply@accounts.google.com")
+    assert not is_service_address("12345+jli@users.noreply.github.com")  # a real person's commit address
+    assert not is_service_address("jyl123@case.edu") and not is_service_address("+16145551234")

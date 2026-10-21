@@ -17,7 +17,8 @@ INSERT INTO nodes (type, key, name, props, source_item_id)
 VALUES (:type, :key, :name, CAST(:props AS jsonb), :sid)
 ON CONFLICT (type, key) DO UPDATE SET
     name = CASE WHEN length(EXCLUDED.name) > length(nodes.name) THEN EXCLUDED.name ELSE nodes.name END,
-    source_item_id = COALESCE(EXCLUDED.source_item_id, nodes.source_item_id)
+    source_item_id = COALESCE(EXCLUDED.source_item_id, nodes.source_item_id),
+    props = nodes.props || EXCLUDED.props
 RETURNING id
 """)
 
@@ -239,10 +240,13 @@ def build_chat(b: Builder, item) -> None:
 
 
 def build_event(b: Builder, item) -> None:
-    """Calendar event: Event node; organizer and attendees ATTENDED it (decliners excluded)."""
+    """Calendar event: one Event node per recurring series (a weekly class is one node, not 15), so attendees'
+    ATTENDED edges dedupe to one per series. Each occurrence stays its own source item, which is what
+    relationship strength counts. Organizer and attendees ATTENDED it (decliners excluded)."""
     meta = item.raw_meta
-    eid = b.node("Event", f"{item.source}:{item.external_id}", item.title or "(event)",
-                 {"start": meta.get("start"), "end": meta.get("end")}, sid=item.id)
+    series = meta.get("series_key") or item.external_id
+    eid = b.node("Event", f"{item.source}:{series}", item.title or "(event)",
+                 {"series": bool(meta.get("recurring"))}, sid=item.id)
     people = list(meta.get("attendees", []))
     if meta.get("organizer", {}).get("email"):
         people.append({**meta["organizer"], "response": "accepted"})

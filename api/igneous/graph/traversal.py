@@ -86,10 +86,19 @@ def relationships(s: Session, head: int, limit: int) -> list[tuple[int, float, d
         theirs AS (
             SELECT pm.p, pm.m, bool_or(pm.sent) AS they_sent, bool_or(mine.i_sent) AS i_sent
             FROM pm JOIN mine USING (m) WHERE pm.p NOT IN (SELECT id FROM me) GROUP BY pm.p, pm.m),
+        -- Shared events counted by occurrence, not by series node: a weekly meeting with someone is ~15 shared
+        -- occurrences. The ATTENDED edge is one per series (UNIQUE src,dst,type), so read each occurrence's
+        -- attendee list from its source item instead.
+        my_keys AS (SELECT key FROM nodes WHERE id IN (SELECT id FROM me)),
+        occ AS (
+            SELECT si.id AS occurrence, lower(a->>'email') AS email
+            FROM source_items si, jsonb_array_elements(si.raw_meta->'attendees') a
+            WHERE si.source = 'gcal' AND COALESCE(a->>'response', '') <> 'declined'),
         events AS (
-            SELECT {canon.format(x='o.src')} AS p, count(DISTINCT o.dst) AS n
-            FROM edges mine_e JOIN edges o ON o.dst = mine_e.dst AND o.type = 'ATTENDED' AND o.src <> mine_e.src
-            WHERE mine_e.type = 'ATTENDED' AND mine_e.src IN (SELECT id FROM me) GROUP BY 1)
+            SELECT {canon.format(x='p.id')} AS p, count(DISTINCT o.occurrence) AS n
+            FROM occ mine JOIN occ o ON o.occurrence = mine.occurrence AND o.email <> mine.email
+            JOIN nodes p ON p.type = 'Person' AND p.key = o.email
+            WHERE mine.email IN (SELECT key FROM my_keys) GROUP BY 1)
         SELECT t.p, count(*) AS msgs,
                count(*) FILTER (WHERE t.they_sent) AS from_them, count(*) FILTER (WHERE t.i_sent) AS from_me,
                count(DISTINCT date_trunc('week', si.occurred_at)) AS weeks,
