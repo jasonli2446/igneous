@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import TimelineExplorer from "@/components/TimelineExplorer";
 import { api, Explanation } from "@/lib/api";
 
 function range(a: string | null, b: string | null) {
@@ -86,6 +87,7 @@ export default function WhyConnected({ a, b, onCloseAction, onOpenAction }: {
               </ul>
             </section>
           )}
+          <TimelineExplorer a={a} b={b} title="Relationship timeline" />
         </>
       )}
     </div>
