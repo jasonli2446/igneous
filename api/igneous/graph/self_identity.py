@@ -30,7 +30,11 @@ CHAT_DB = os.path.expanduser("~/Library/Messages/chat.db")
 # Protocol facts, not user rules: these addresses are automated senders even when they wear a person's name.
 SERVICE_DOMAINS = ("import.calendar.google.com", "group.calendar.google.com", "group.v.calendar.google.com",
                    "resource.calendar.google.com")
-SERVICE_LOCAL = re.compile(r"^(no-?reply|notifications?|mailer-daemon|do-?not-?reply|bounces?)([+.-].*)?$", re.I)
+SERVICE_LOCAL = re.compile(r"^(no-?reply|notifications?|mailer-daemon|do-?not-?reply|bounces?)([+.-].*)?$"
+                           r"|(^|[-_.])no-?reply([-_.+]|$)", re.I)  # comments-noreply@, drive-shares-dm-noreply@
+# Senders that relay a real person's name for a product: "Jason Li (Google Docs)", "Kaitlyn (via Google Chat)".
+RELAY_NAME = re.compile(r"\((via |Google |from )[^)]*\)\s*$", re.I)
+RELAY_DOMAINS = ("docs.google.com", "drive.google.com", "calendar-server.bounces.google.com")
 
 
 def is_service_address(addr: str) -> bool:
@@ -40,7 +44,12 @@ def is_service_address(addr: str) -> bool:
     local, domain = addr.lower().rsplit("@", 1)
     if domain.endswith("users.noreply.github.com"):
         return False  # a real person's GitHub commit address
-    return domain.endswith(SERVICE_DOMAINS) or bool(SERVICE_LOCAL.match(local))
+    return domain.endswith(SERVICE_DOMAINS + RELAY_DOMAINS) or bool(SERVICE_LOCAL.search(local))
+
+
+def is_relay_name(name: str | None) -> bool:
+    """A display name a product put on someone else's behalf ("Jason Li (Google Docs)")."""
+    return bool(name and RELAY_NAME.search(name))
 
 
 def _signals(s: Session) -> list[tuple[str, str]]:
@@ -89,8 +98,8 @@ def run(s: Session) -> dict:
     s.execute(text("DELETE FROM edges WHERE type = 'SAME_AS' AND extractor = :ex"), {"ex": EXTRACTOR})
     # Mark automated senders before linking anything, so a feed named "Jason Li Calendar" can't become the user.
     services = 0
-    for nid, key in s.execute(text("SELECT id, key FROM nodes WHERE type = 'Person'")).all():
-        if is_service_address(key):
+    for nid, key, name in s.execute(text("SELECT id, key, name FROM nodes WHERE type = 'Person'")).all():
+        if key != "me" and (is_service_address(key) or is_relay_name(name)):
             s.execute(text("""UPDATE nodes SET props = props || '{"kind": "service"}' WHERE id = :id"""), {"id": nid})
             services += 1
 

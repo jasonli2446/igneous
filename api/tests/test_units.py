@@ -1720,3 +1720,15 @@ def test_node_upsert_keeps_human_names_over_keys_and_contact_names():
     # header naming picks the most frequent display name and never overrides cards or user renames
     hs = str(NAME_FROM_HEADERS)
     assert "ORDER BY key, n DESC" in hs and "'contacts'" in hs and "renamed" in hs
+
+
+def test_product_relay_senders_are_services_not_people():
+    from igneous.graph.resolve import P, _human_name, unresolvable
+    from igneous.graph.self_identity import is_relay_name, is_service_address
+
+    assert is_service_address("comments-noreply@docs.google.com")
+    assert is_service_address("drive-shares-dm-noreply@google.com")
+    assert is_relay_name("Jason Li (Google Docs)") and is_relay_name("Kaitlyn Ng (via Google Chat)")
+    assert not is_relay_name("Jason Li") and not is_service_address("jane.doe@gmail.com")
+    assert unresolvable(P(1, "comments-noreply@docs.google.com", "Jason Li (Google Docs)", "jason", "li", set()))
+    assert not _human_name("Jason Li (Google Docs)", set())

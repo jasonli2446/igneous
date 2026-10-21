@@ -96,9 +96,12 @@ def split_name(name: str, key: str) -> tuple[str, str]:
 
 
 def unresolvable(p: P) -> bool:
-    """Exchange-mangled stubs ("e-mail <.john@enron.com>") and role mailboxes can't be one person."""
+    """Exchange-mangled stubs ("e-mail <.john@enron.com>"), role mailboxes and product relays ("Jason Li
+    (Google Docs)", which carries someone else's name) can't be one person."""
+    from igneous.graph.self_identity import is_relay_name, is_service_address
     return (p.local.startswith(".") or p.name.lower() in ROLE_WORDS or p.local in ROLE_WORDS
-            or bool(ROLE_PATTERN.search(p.key)) or not p.last)
+            or bool(ROLE_PATTERN.search(p.key)) or not p.last or is_relay_name(p.name)
+            or ("@" in p.key and is_service_address(p.key)))
 
 
 def load(s: Session) -> list[P]:
@@ -213,8 +216,10 @@ TRUSTED = ("self", "contacts", "user", "github")
 
 
 def _human_name(name: str, handles: set[str]) -> bool:
-    """'Jane Doe', not 'Jdoe2446': two or more words, no digits, not one of the person's address handles."""
-    return len(name.split()) >= 2 and name.replace(" ", "").lower() not in handles and not re.search(r"\d", name)
+    """'Jane Doe', not 'Jdoe2446' or 'Jane Doe (Google Docs)': two or more words, no digits, no parenthetical,
+    not one of the person's address handles."""
+    return (len(name.split()) >= 2 and name.replace(" ", "").lower() not in handles and not re.search(r"\d", name)
+            and "(" not in name)
 
 
 def refresh_canonical(s: Session) -> int:
