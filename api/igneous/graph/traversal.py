@@ -1,7 +1,7 @@
 """Bounded, provenance-filtered graph traversals used by the Explorer API."""
+import re
 from dataclasses import dataclass
 from datetime import datetime
-import re
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
