@@ -156,5 +156,9 @@ def run_sync(s: Session, connector: Connector, account: str = "default", limit: 
         else:
             stats["updated"] += 1
         seen += 1
+    if stats["deleted"]:
+        # Deleted rows cannot reach spine; force dependent evidence stages to rebuild.
+        from igneous.graph import dirty
+        dirty.mark_rebuild(s)
     s.commit()
     return stats

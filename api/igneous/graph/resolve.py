@@ -14,6 +14,8 @@ from difflib import SequenceMatcher
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous.graph import dirty
+
 EXTRACTOR = "er"
 VERSION = "1"
 THRESHOLD = 0.5  # chosen on AI-reviewed labels: P 0.938 R 0.944 F1 0.941 (eval/README.md)
@@ -159,6 +161,8 @@ def candidates(s: Session) -> list[tuple[P, P, float, dict]]:
 
 
 def run(s: Session, threshold: float = THRESHOLD) -> dict:
+    if not dirty.pending(s):
+        return {"same_as": 0, "clusters": 0}
     s.execute(text("DELETE FROM edges WHERE type = 'SAME_AS' AND extractor = :ex"), {"ex": EXTRACTOR})  # not 'contacts'
     merged = 0
     for a, b, sc, f in candidates(s):
@@ -171,7 +175,11 @@ def run(s: Session, threshold: float = THRESHOLD) -> dict:
             """), {"a": src, "b": dst, "p": json.dumps(f), "ex": EXTRACTOR, "v": VERSION, "c": sc})
             merged += 1
     s.commit()
-    return {"same_as": merged, "clusters": refresh_canonical(s)}
+    clusters = refresh_canonical(s)
+    dirty.clear(s)
+    dirty.touch(s)
+    s.commit()
+    return {"same_as": merged, "clusters": clusters}
 
 
 # SAME_AS from these sources is ground truth (a contact card, the signed-in account, a user correction, a

@@ -105,6 +105,33 @@ export default function Explorer() {
   const retry = () => load(trail[trail.length - 1] ?? null, false);
   const seedId = trail[trail.length - 1]?.id;
   const dataRef = useRef(data);
+
+  // The graph is long-lived: only fetch its full shape when the server change token moves.
+  // Merge the refreshed seed view so locally expanded branches and the current selection stay put.
+  useEffect(() => {
+    if (!data.nodes.length) return;
+    let cancelled = false;
+    let version = "";
+    const refresh = async () => {
+      try {
+        const next = await api.graphVersion();
+        if (cancelled || next.version === version) return;
+        version = next.version;
+        const incoming = await api.view(seedId);
+        if (cancelled) return;
+        setData((previous) => {
+          const nodes = new Map(previous.nodes.map((node) => [node.id, node]));
+          incoming.nodes.forEach((node) => nodes.set(node.id, node));
+          const edges = new Map(previous.edges.map((edge) => [`${edge.src}-${edge.dst}-${edge.type}`, edge]));
+          incoming.edges.forEach((edge) => edges.set(`${edge.src}-${edge.dst}-${edge.type}`, edge));
+          return { nodes: [...nodes.values()], edges: [...edges.values()] };
+        });
+      } catch { /* a transient API outage should not disrupt an open graph */ }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 30_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [seedId, data.nodes.length]);
   dataRef.current = data;
   const stateRef = useRef({ introducedBy, expanded, seedId });
   stateRef.current = { introducedBy, expanded, seedId };

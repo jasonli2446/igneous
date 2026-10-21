@@ -260,6 +260,7 @@ export const api = {
     return (await r.json()) as AskResult;
   },
   evidence: (id: number) => get<{ evidence: Evidence[] }>(`/graph/node/${id}/evidence`, { limit: 30 }),
+  graphVersion: (signal?: AbortSignal) => get<{ version: string }>("/graph/version", {}, signal),
   view: (seed?: number, signal?: AbortSignal) => get<Subgraph & { seed: number }>("/graph/view", { seed }, signal),
   expandNode: (seed: number, node: number, visible: number[], offset = 0, signal?: AbortSignal) =>
     get<Subgraph>("/graph/expand", { seed, node, visible, offset }, signal),

@@ -1,4 +1,5 @@
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -8,6 +9,37 @@ from igneous.config import settings
 from igneous.db import SessionLocal
 
 app = typer.Typer(no_args_is_help=True)
+schedule_app = typer.Typer(no_args_is_help=True)
+app.add_typer(schedule_app, name="schedule")
+
+
+@schedule_app.command("install")
+def schedule_install():
+    """Install the 30-minute macOS incremental sync LaunchAgent."""
+    from igneous import schedule
+    path = schedule.install([sys.executable, "-m", "igneous.cli"])
+    print(f"installed {path}; logs: ~/Library/Logs/igneous.log")
+
+
+@schedule_app.command("status")
+def schedule_status():
+    """Show whether the macOS scheduled sync is installed."""
+    from igneous import schedule
+    print(json.dumps(schedule.status()))
+
+
+@schedule_app.command("uninstall")
+def schedule_uninstall():
+    """Remove the macOS scheduled sync LaunchAgent."""
+    from igneous import schedule
+    print("removed" if schedule.uninstall() else "not installed")
+
+
+@schedule_app.command("run", hidden=True)
+def schedule_run():
+    """LaunchAgent entry point; sources are serialized before one incremental pipeline rebuild."""
+    from igneous import schedule
+    print(json.dumps(schedule.run_now(), default=str))
 
 
 @app.command()

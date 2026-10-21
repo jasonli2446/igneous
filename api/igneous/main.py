@@ -240,6 +240,13 @@ def relationship_timeline(a: int = Query(..., ge=1), b: int | None = Query(None,
         raise HTTPException(404, f"Entity {e.args[0]} not found") from e
 
 
+@app.get("/graph/version")
+def graph_version(s: Session = Depends(get_session)):
+    """Cheap change token for clients to refresh an open graph without polling its data."""
+    from igneous.graph import dirty
+    return {"version": str(dirty.version(s))}
+
+
 @app.get("/graph/search")
 def graph_search(q: str, type: str | None = None, limit: int = Query(20, le=100),
                  s: Session = Depends(get_session)):
