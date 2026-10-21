@@ -11,6 +11,7 @@ from igneous.db import get_session
 from igneous.graph.traversal import GraphFilters, explain, neighborhood, network, people
 from igneous.llm import LLMDisabled
 from igneous.rag import qa
+from igneous.rag.constraints import apply
 from igneous.rag.search import Filters, experts, hybrid
 from igneous.sync_status import sync_status
 
@@ -50,7 +51,7 @@ def search(q: str, source: str | None = None, person: str | None = None,
            since: datetime | None = Query(None, alias="from"), until: datetime | None = Query(None, alias="to"),
            k: int = Query(10, le=50), mode: str = Query("hybrid", pattern="^(hybrid|lexical|dense)$"),
            s: Session = Depends(get_session)):
-    return {"hits": hybrid(s, q, Filters(source, person, since, until), k=k, mode=mode)}
+    return {"hits": hybrid(s, q, apply(s, q, Filters(source, person, since, until)), k=k, mode=mode)}
 
 
 @app.get("/experts")

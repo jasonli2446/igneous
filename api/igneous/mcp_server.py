@@ -13,6 +13,7 @@ from sqlalchemy import text
 from igneous.db import SessionLocal
 from igneous.graph.traversal import people
 from igneous.rag import qa
+from igneous.rag.constraints import apply
 from igneous.rag.search import Filters, hybrid
 
 server = MCPServer(
@@ -35,7 +36,7 @@ def search(query: str, person: str | None = None, k: int = 8) -> list[dict]:
     """Hybrid keyword + semantic search over all content. `person` (an email address) restricts to items they
     sent or received. Returns chunks with chunk_id, node_id, title, date, and a text excerpt."""
     with SessionLocal() as s:
-        hits = hybrid(s, query, Filters(person=person), k=min(k, 20))
+        hits = hybrid(s, query, apply(s, query, Filters(person=person)), k=min(k, 20))
     return [{"chunk_id": h["chunk_id"], "node_id": h["node_id"], "title": h["title"], "source": h["source"],
              "date": h["occurred_at"].isoformat() if h["occurred_at"] else None, "excerpt": _clip(h["text"])}
             for h in hits]
