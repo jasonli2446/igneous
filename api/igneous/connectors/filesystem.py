@@ -16,6 +16,9 @@ CHECKPOINT_EVERY = 100
 IGNORED_DIRECTORIES = frozenset({
     ".git", ".hg", ".svn", ".tox", ".venv", "__pycache__", "node_modules", "vendor",
     "dist", "build", ".next", ".pytest_cache", ".mypy_cache",
+    # Agent worktrees are full copies of a repo (every file would be imported once per worktree), and the
+    # .claude folder holds session state, not documents.
+    ".claude", "worktrees",
 })
 # These files are never read or represented, even as metadata. They commonly hold credentials.
 SECRET_NAMES = re.compile(r"^(?:\.env(?:\..*)?|id_.*|credentials.*)$", re.I)
