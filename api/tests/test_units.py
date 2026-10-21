@@ -328,7 +328,6 @@ def test_gmail_backfill_resumes_mid_page(monkeypatch):
     assert fetched == ["m4", "m5"]  # resumes after m3, not from m0
 
 
-<<<<<<< HEAD
 def test_phone_normalization():
     from igneous.connectors.mac_contacts import norm_phone
 
