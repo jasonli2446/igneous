@@ -2,13 +2,14 @@
 
 import dynamic from "next/dynamic";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CATEGORY_COLOR, type Community } from "@/lib/graph-style";
+import { CATEGORY_COLOR, TYPE_CATEGORY, type Community } from "@/lib/graph-style";
 import Inspector from "@/components/Inspector";
 import { useTheme } from "@/components/ThemeToggle";
 import { InlineError, TopProgress } from "@/components/ui";
 import WhyConnected from "@/components/WhyConnected";
-import { api, GNode, Subgraph, TYPE_COLORS } from "@/lib/api";
+import { api, GNode, Subgraph, Thing } from "@/lib/api";
 
 // WebGL libraries touch window at import time, so they can't render on the server.
 const Graph3D = dynamic(() => import("@/components/Graph3D"), { ssr: false });
@@ -18,7 +19,9 @@ const EMPTY: Subgraph = { nodes: [], edges: [] };
 export default function Explorer() {
   const dark = useTheme();
   const [query, setQuery] = useState("");
-  const [matches, setMatches] = useState<GNode[]>([]);
+  const router = useRouter();
+  const [matches, setMatches] = useState<Thing[]>([]);
+  const [searching, setSearching] = useState(false);
   const [data, setData] = useState<Subgraph>(EMPTY);
   const [canvasKey, setCanvasKey] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
@@ -47,11 +50,19 @@ export default function Explorer() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // Entities only (people, projects, groups, events, ...), best match first. Messages live behind the last option.
+  const seedForSearch = useRef<number | undefined>(undefined);
   useEffect(() => {
     setActive(0);
-    if (query.trim().length < 2) return setMatches([]);
-    const t = setTimeout(() => api.findNodes(query).then((r) => setMatches(r.nodes)).catch(() => {}), 200);
-    return () => clearTimeout(t);
+    if (query.trim().length < 2) { setSearching(false); return setMatches([]); }
+    const request = new AbortController();
+    setSearching(true);
+    const t = setTimeout(() => {
+      api.findThings(query.trim(), seedForSearch.current, request.signal)
+        .then((r) => { setMatches(r.results); setSearching(false); })
+        .catch(() => { if (!request.signal.aborted) setSearching(false); });
+    }, 150);
+    return () => { clearTimeout(t); request.abort(); };
   }, [query]);
 
   // Stale responses must never land: each new seed bumps the generation and aborts in-flight requests
@@ -104,6 +115,7 @@ export default function Explorer() {
 
   const retry = () => load(trail[trail.length - 1] ?? null, false);
   const seedId = trail[trail.length - 1]?.id;
+  seedForSearch.current = seedId;
   const dataRef = useRef(data);
 
   // The graph is long-lived: only fetch its full shape when the server change token moves.
@@ -124,7 +136,7 @@ export default function Explorer() {
           incoming.nodes.forEach((node) => nodes.set(node.id, node));
           const edges = new Map(previous.edges.map((edge) => [`${edge.src}-${edge.dst}-${edge.type}`, edge]));
           incoming.edges.forEach((edge) => edges.set(`${edge.src}-${edge.dst}-${edge.type}`, edge));
-          return { nodes: [...nodes.values()], edges: [...edges.values()] };
+          return { nodes: [...nodes.values()], edges: [...edges.values()], categories: incoming.categories ?? previous.categories };
         });
       } catch { /* a transient API outage should not disrupt an open graph */ }
     };
@@ -188,16 +200,40 @@ export default function Explorer() {
     load(prev, false);
   };
 
+  // A connection picked in the panel: highlight it if it is on screen, else recentre the graph on it.
+  const openFromPanel = (id: number) => {
+    if (dataRef.current.nodes.some((n) => n.id === id)) return setSelected(id);
+    void load({ id, type: "", name: "", key: "", degree: 0 });
+  };
+
   const detailId = selected !== null && selected > 0 ? selected : null;
   const panelOpen = why !== null || detailId !== null;
   const closePanel = () => { setWhy(null); setSelected(null); };
 
+  // Results plus a final "search messages" option, all reachable by keyboard.
+  const searchOpen = query.trim().length >= 2;
+  const optionCount = matches.length + 1;
+  const searchMessages = () => router.push(`/search?q=${encodeURIComponent(query.trim())}`);
+  const choose = (i: number) => (i < matches.length
+    ? load({ id: matches[i].id, type: matches[i].type, name: matches[i].name, key: "", degree: 0 })
+    : searchMessages());
   const onSearchKey = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") { setQuery(""); setMatches([]); (e.target as HTMLElement).blur(); }
-    else if (e.key === "ArrowDown" && matches.length) { e.preventDefault(); setActive((i) => (i + 1) % matches.length); }
-    else if (e.key === "ArrowUp" && matches.length) { e.preventDefault(); setActive((i) => (i - 1 + matches.length) % matches.length); }
-    else if (e.key === "Enter" && matches[active]) { e.preventDefault(); load(matches[active]); }
+    else if (e.key === "ArrowDown" && searchOpen) { e.preventDefault(); setActive((i) => (i + 1) % optionCount); }
+    else if (e.key === "ArrowUp" && searchOpen) { e.preventDefault(); setActive((i) => (i - 1 + optionCount) % optionCount); }
+    else if (e.key === "Enter" && searchOpen && !searching) { e.preventDefault(); choose(Math.min(active, optionCount - 1)); }
   };
+
+  // Escape closes the details panel when nothing else (search box, a text field) is using it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || (e.target as HTMLElement).closest("input, textarea, select, [contenteditable]")) return;
+      setWhy(null);
+      setSelected(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   return (
     <div className="relative h-[calc(100vh-49px)] overflow-hidden bg-bg text-ink">
@@ -248,23 +284,42 @@ export default function Explorer() {
           <div className="flex items-center gap-2 rounded-md border border-line bg-panel/95 px-3 py-1.5 text-sm focus-within:border-accent">
             <label htmlFor="seed" className="sr-only">Search the graph</label>
             <input id="seed" ref={searchRef} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={onSearchKey}
-              role="combobox" aria-expanded={matches.length > 0} aria-controls="seed-results" autoComplete="off"
-              placeholder="Jump to a person, conversation, or event"
+              role="combobox" aria-expanded={searchOpen} aria-controls="seed-results" autoComplete="off"
+              placeholder="Find a person, project, group or event"
               className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted focus-visible:outline-none" />
             <kbd className="rounded border border-line px-1.5 text-[11px] text-muted">/</kbd>
           </div>
-          {matches.length > 0 && (
-            <ul id="seed-results" role="listbox" className="absolute z-30 mt-1 max-h-72 w-full overflow-y-auto rounded-md border border-line bg-panel shadow-lg">
-              {matches.map((m, i) => (
-                <li key={m.id} role="option" aria-selected={i === active}>
-                  <button onClick={() => load(m)} onMouseEnter={() => setActive(i)}
-                    className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm ${i === active ? "bg-hover" : ""}`}>
-                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: TYPE_COLORS[m.type] }} />
-                    <span className="truncate">{m.name}</span>
-                    <span className="ml-auto text-xs text-muted">{m.type}</span>
-                  </button>
+          {searchOpen && (
+            <ul id="seed-results" role="listbox" className="absolute z-30 mt-1 max-h-96 w-full overflow-y-auto rounded-md border border-line bg-panel py-1 shadow-lg">
+              {matches.map((m, i) => {
+                const cat = m.category ?? TYPE_CATEGORY[m.type] ?? "";
+                const first = i === 0 || (matches[i - 1].category ?? TYPE_CATEGORY[matches[i - 1].type]) !== cat;
+                return (
+                  <li key={m.id} role="option" aria-selected={i === active}>
+                    {first && <div className="px-3 pt-1.5 pb-0.5 text-[11px] font-medium text-muted">{cat || m.type}</div>}
+                    <button onClick={() => choose(i)} onMouseEnter={() => setActive(i)}
+                      className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-left ${i === active ? "bg-hover" : ""}`}>
+                      <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: CATEGORY_COLOR[cat] ?? "#a8aca3" }} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm">{m.name}</span>
+                        <span className="block truncate text-xs text-muted">{m.context}</span>
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+              {matches.length === 0 && (
+                <li role="presentation" className="px-3 py-2 text-xs text-muted">
+                  {searching ? "Searching..." : `No people, projects or groups match "${query.trim()}".`}
                 </li>
-              ))}
+              )}
+              <li role="option" aria-selected={active === matches.length} className={matches.length ? "mt-1 border-t border-line pt-1" : ""}>
+                <button onClick={searchMessages} onMouseEnter={() => setActive(matches.length)}
+                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm ${active === matches.length ? "bg-hover" : ""}`}>
+                  <span aria-hidden className="text-muted">&#8981;</span>
+                  <span className="truncate">Search messages for &ldquo;{query.trim()}&rdquo;</span>
+                </button>
+              </li>
             </ul>
           )}
         </div>
@@ -300,10 +355,10 @@ export default function Explorer() {
         className={`absolute inset-y-0 right-0 z-20 w-full max-w-96 overflow-y-auto border-l border-line bg-panel transition-transform duration-200 ${panelOpen ? "translate-x-0" : "translate-x-full"}`}>
         {why ? (
           <WhyConnected a={why.a} b={why.b} onCloseAction={closePanel}
-            onOpenAction={(id) => { setWhy(null); setSelected(id); }} />
+            onOpenAction={(id) => { setWhy(null); openFromPanel(id); }} />
         ) : (
           <Inspector id={detailId} onExpandAction={toggle} onCloseAction={closePanel}
-            onSelectAction={(id) => setSelected(id)}
+            onSelectAction={openFromPanel}
             onChangedAction={async (keep) => { await load(trail[trail.length - 1] ?? null, false); if (keep !== null) setSelected(keep); }} />
         )}
       </aside>
