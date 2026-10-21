@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     chat_provider: str = "bedrock"
     # Kill switch for every outbound model call (CO-1). Search and the graph still work without it.
     llm_enabled: bool = True
+    # Sources eligible for automatic hosted-model extraction. Empty is deliberately
+    # safe: importing/syncing a source never sends it to a model unless named here.
+    llm_sources: str = ""
     llm_model: str = "us.anthropic.claude-sonnet-5-5"
     hosted_retries: int = 2
     hosted_retry_seconds: float = 1.0
