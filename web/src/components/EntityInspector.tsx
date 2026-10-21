@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import NodeSummary from "@/components/NodeSummary";
 import { InlineError, Skeleton } from "@/components/ui";
 import { api, Correction, EntityDetail, GNode, TYPE_COLORS } from "@/lib/api";
 
@@ -175,6 +176,8 @@ export default function EntityInspector({ id, onSelectAction, onCloseAction, onC
         {e.hidden && <div className="mt-1 text-xs text-danger">Hidden from the graph. Undo to bring it back.</div>}
         {error && <div className="mt-2"><InlineError message={error} /></div>}
       </header>
+
+      <NodeSummary id={id} onSelectAction={onSelectAction} showConnections={false} />
 
       {e.anchors.length > 0 && (
         <Section title="Known from">

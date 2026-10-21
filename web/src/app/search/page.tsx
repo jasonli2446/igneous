@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { InlineError, Skeleton } from "@/components/ui";
 import { api, Expert, Hit } from "@/lib/api";
 
@@ -15,15 +15,15 @@ export default function SearchPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const run = async (e?: React.FormEvent) => {
+  const run = async (e?: React.FormEvent, text = q) => {
     e?.preventDefault();
-    if (!q.trim()) return;
+    if (!text.trim()) return;
     setBusy(true);
     setError(null);
     try {
       const [searchResult, expertResult] = await Promise.all([
-        api.search(q, { person: person || undefined, mode }),
-        api.experts(q, { mode }),
+        api.search(text, { person: person || undefined, mode }),
+        api.experts(text, { mode }),
       ]);
       setHits(searchResult.hits);
       setExperts(expertResult.experts);
@@ -33,6 +33,13 @@ export default function SearchPage() {
       setBusy(false);
     }
   };
+
+  // The explorer's "Search messages for ..." option lands here with ?q=.
+  useEffect(() => {
+    const initial = new URLSearchParams(window.location.search).get("q");
+    if (initial) { setQ(initial); void run(undefined, initial); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6">

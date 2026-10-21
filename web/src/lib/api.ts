@@ -5,6 +5,13 @@ export type GNode = {
   strength?: number; kind?: "seed" | "category" | "entity"; category?: string | null; total?: number; expandable?: boolean;
 };
 export type GEdge = { id: number; src: number; dst: number; type: string; extractor: string; confidence: number | null; weight?: number };
+export type Thing = { id: number; type: string; name: string; category: string | null; context: string; score: number };
+export type NodeSummary = {
+  summary: string;
+  highlights: { id: number; name: string; type: string; category: string | null; why: string }[];
+  sources: number[];
+  generated_by: "model" | "fallback";
+};
 export type Subgraph = { nodes: GNode[]; edges: GEdge[]; categories?: GNode[] };
 export type GraphFilters = { source?: string; edgeTypes?: string[]; from?: string; to?: string };
 
@@ -275,6 +282,9 @@ export const api = {
   search: (q: string, opts: { source?: string; person?: string; from?: string; to?: string; mode?: string } = {}) =>
     get<{ hits: Hit[] }>("/search", { q, ...opts }),
   experts: (q: string, opts: { mode?: string } = {}) => get<{ experts: Expert[] }>("/experts", { q, ...opts }),
+  findThings: (q: string, seed?: number, signal?: AbortSignal) =>
+    get<{ results: Thing[] }>("/graph/find", { q, seed }, signal),
+  nodeSummary: (id: number, signal?: AbortSignal) => get<NodeSummary>(`/graph/node/${id}/summary`, {}, signal),
   findNodes: (q: string, type?: string) => get<{ nodes: GNode[] }>("/graph/search", { q, type }),
   subgraph: (seed: number[], hops = 1, limit = 300, filters: GraphFilters = {}, signal?: AbortSignal) =>
     get<Subgraph>("/graph/subgraph", { seed, hops, limit, ...graphParams(filters) }, signal),

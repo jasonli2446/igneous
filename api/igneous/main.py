@@ -351,6 +351,14 @@ def graph_search(q: str, type: str | None = None, limit: int = Query(20, le=100)
     return {"nodes": [dict(r) for r in rows]}
 
 
+@app.get("/graph/find")
+def graph_find(q: str, seed: int | None = None, limit: int = Query(8, ge=1, le=20), s: Session = Depends(get_session)):
+    """Explorer "Jump to": a few well-ranked things (people, projects, groups, events, orgs, places, files)
+    for the query, deduped by identity. Messages are never returned; use /search for those."""
+    from igneous.graph.find import find
+    return {"results": find(s, q, seed, limit)}
+
+
 @app.get("/graph/subgraph")
 def graph_subgraph(seed: list[int] = Query(...), hops: int = Query(1, le=3), limit: int = Query(300, le=5000),
                    source: str | None = None, types: list[str] | None = Query(None),
@@ -410,6 +418,17 @@ def graph_node(node_id: int, s: Session = Depends(get_session)):
             FROM source_items WHERE id = :id
         """), {"id": n["source_item_id"]}).mappings().first()
     return {**dict(n), "degree": degree, "source_item": dict(source) if source else None}
+
+
+@app.get("/graph/node/{node_id}/summary")
+def graph_node_summary(node_id: int, s: Session = Depends(get_session)):
+    """2-4 plain sentences on how this node connects to the rest of the graph, its top connections, and the
+    source items the summary drew on. Cached; a deterministic summary stands in when the model is off."""
+    from igneous.graph.summary import summarize
+    out = summarize(s, node_id)
+    if out is None:
+        raise HTTPException(404)
+    return out
 
 
 def cluster(s: Session, node_id: int) -> list[int]:
