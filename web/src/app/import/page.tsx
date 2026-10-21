@@ -162,7 +162,7 @@ function ProviderCard({ provider }: { provider: Provider }) {
             {status.kind === "done" && (
               <div>
                 <p className="text-accent">Imported {LABEL[status.result.provider] ?? status.result.provider} chats.</p>
-                <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
+                <div className="mt-3 grid grid-cols-2 gap-4">
                   <Stat label="Conversations" value={status.result.conversations} />
                   <Stat label="New days" value={status.result.items_inserted} />
                   <Stat label="Updated" value={status.result.items_updated} />
