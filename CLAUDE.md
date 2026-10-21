@@ -31,6 +31,13 @@ Two people push to this repo in parallel (Jason and Aadhav). Unsynced work has a
   Partial work gets a progress comment and stays open.
 - Never close or edit an issue someone else owns without saying so in the issue.
 
+## Setup lives in the UI
+
+A new user should only have to start the stack and follow the **Sources** page (`web/src/app/settings`, #101).
+Whenever you add or change a connector, an import format, a required permission, or a pipeline stage, update
+that page (and `GET /sources`) in the same PR: what it reads, how to connect it step by step, and its status.
+Same for the Import page (`web/src/app/import`) when an export format is added.
+
 ## Data and privacy (proposal constraints CO-1, CO-2, CO-5)
 
 - **Two databases.** `igneous` is the Enron demo corpus: shareable, used for demos and eval.
