@@ -83,10 +83,17 @@ SOURCES: list[dict] = [
      "reads": "Your ChatGPT conversation history from OpenAI's data export.",
      "steps": ["Request the export in ChatGPT settings (Data controls, Export data).",
                "Open Import and upload the .zip you receive by email."]},
-    {"id": "gemini", "kind": "import", "name": "Gemini export", "group": "Exports",
-     "reads": "Your Gemini prompts and replies from Google Takeout (My Activity, JSON format).",
-     "steps": ["Request a Takeout export of My Activity, Gemini Apps only, in JSON format.",
-               "Open Import and upload the .zip you receive by email."]},
+    {"id": "takeout", "kind": "import", "name": "Google Takeout", "group": "Exports",
+     "reads": "Your Google My Activity (Search, YouTube, Maps, Gemini and the rest), Chrome history and bookmarks, "
+              "and Maps places and visits. Gemini chats are part of My Activity (a Gemini-only export works too). "
+              "Takeout data stays local and is never sent to a model unless you opt in (IGNEOUS_LLM_SOURCES).",
+     "steps": ["Go to takeout.google.com and click Deselect all.",
+               "Tick My Activity, Chrome, and Maps (your places). If you see Location History (Timeline), tick it too.",
+               "On My Activity click Multiple formats and change Activity records from HTML to JSON. HTML is not read.",
+               "Click Next step, keep one-time export and .zip, then Create export. It usually takes hours and may "
+               "arrive as several zips.",
+               "Download every zip. On Import choose Scan Downloads for takeout-*.zip, give a path, or upload them."],
+     "cli": "igneous import takeout ~/Downloads/takeout-*.zip"},
     {"id": "claude_ai", "kind": "import", "name": "Claude.ai export", "group": "Exports",
      "reads": "Your claude.ai conversation history from Anthropic's data export.",
      "steps": ["Request the export in claude.ai settings (Privacy, Export data).",
@@ -180,7 +187,9 @@ def describe(s: Session) -> list[dict]:
         sid, kind = src["id"], src["kind"]
         row = {k: src[k] for k in ("id", "kind", "name", "group", "reads", "steps")}
         row["cli"] = src.get("cli")
-        if kind == "import":
+        if sid == "takeout":
+            count = sum(n for src_, n in counts.items() if src_.startswith("takeout_")) + export_counts.get("gemini", 0)
+        elif kind == "import":
             count = export_counts.get(sid, 0)
         elif sid == "ai_chats":
             count = ai_local

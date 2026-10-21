@@ -134,6 +134,32 @@ def _google_connector(connector: str, creds, account: str, since_days: int | Non
     return ContactsConnector(creds, account)
 
 
+import_app = typer.Typer(no_args_is_help=True, help="Import exports you downloaded.")
+app.add_typer(import_app, name="import")
+
+
+@import_app.command("takeout")
+def import_takeout(paths: list[Path] = typer.Argument(None, help="Takeout .zip file(s) (pass every part of a split "
+                                                                 "export), or an extracted folder"),
+                   downloads: bool = typer.Option(False, "--downloads", help="also use ~/Downloads/takeout-*.zip")):
+    """Google Takeout: My Activity (incl. Gemini), Chrome, Maps and Location History. Re-running is a no-op."""
+    from igneous.connectors import takeout
+
+    try:
+        resolved = takeout.resolve_paths([str(p) for p in paths or []], downloads)
+        takeout.preflight(resolved)
+    except takeout.TakeoutError as e:
+        raise typer.BadParameter(str(e)) from e
+    t = time.time()
+    with SessionLocal() as s:
+        result = takeout.run_import(s, resolved, lambda p, force=False: print(
+            f"\r  {p.get('items', 0)}/{p['items_total']} items" if "items_total" in p else "", end="", flush=True))
+    print()
+    for note in result.pop("notes", []):
+        print("note:", note)
+    print(result, f"in {time.time() - t:.1f}s")
+
+
 @app.command()
 def connect(provider: str = typer.Argument(..., help="google"),
             browser: bool = typer.Option(True, help="open the browser; --no-browser just prints the URL")):

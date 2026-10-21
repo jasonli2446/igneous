@@ -184,15 +184,44 @@ function importAiExport(file: File, provider?: string, onProgress?: (fraction: n
   });
 }
 
+export type TakeoutResult = {
+  inserted: number; updated: number; unchanged: number; places: number; redactions: number;
+  parts: Record<string, number>; counts: Record<string, number>; notes: string[];
+};
+
+// A Takeout zip can be several GB: prefer { path } or { scan_downloads } (this API runs on your computer) over upload.
+function importTakeout(input: { files?: File[]; path?: string; scanDownloads?: boolean }, onProgress?: (fraction: number) => void) {
+  return new Promise<Job>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", new URL("/import/takeout", API).toString());
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
+    xhr.onerror = () => reject(new Error("Could not reach the API."));
+    xhr.onload = () => {
+      let body: { detail?: unknown } = {};
+      try { body = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(body as unknown as Job);
+      reject(new Error(typeof body.detail === "string" ? body.detail : `Import failed (${xhr.status}).`));
+    };
+    const form = new FormData();
+    for (const f of input.files ?? []) form.append("file", f);
+    if (input.path?.trim()) form.append("path", input.path.trim());
+    if (input.scanDownloads) form.append("scan_downloads", "true");
+    xhr.send(form);
+  });
+}
+
 export type Job = {
   id: string;
-  kind: "sync" | "pipeline" | "connect";
+  kind: "sync" | "pipeline" | "connect" | "import";
   source: string;
   account: string | null;
   status: "running" | "succeeded" | "failed";
   started_at: string;
   finished_at: string | null;
-  progress: { items?: number; stage?: string | null; step?: number; steps?: number };
+  progress: {
+    items?: number; items_total?: number; stage?: string | null; step?: number; steps?: number;
+    file?: string; files_done?: number; files_total?: number;
+  };
   result: Record<string, number> | null;
   error: string | null;
 };
@@ -233,6 +262,8 @@ async function send<T>(method: string, path: string, body?: unknown, params: Rec
 
 export const api = {
   importAiExport,
+  importTakeout,
+  job: (id: string, signal?: AbortSignal) => get<Job>(`/jobs/${id}`, {}, signal),
   sources: (signal?: AbortSignal) => get<{ sources: SourceInfo[] }>("/sources", {}, signal),
   jobs: (signal?: AbortSignal) => get<{ jobs: Job[] }>("/jobs", {}, signal),
   syncSource: (id: string, account?: string) => send<Job>("POST", `/sources/${id}/sync`, undefined, account ? { account } : {}),
@@ -286,4 +317,5 @@ export const TYPE_COLORS: Record<string, string> = {
   Event: "#db2777",
   Topic: "#ea580c",
   Project: "#4f46e5",
+  Place: "#ca8a04",
 };

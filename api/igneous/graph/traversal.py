@@ -352,7 +352,8 @@ def subgraph(s: Session, node_ids: list[int], filters: GraphFilters = NO_FILTERS
 
 # How a node type is shown. Presentational only; a type with no members in the data never appears.
 CATEGORY = {"Person": "People", "Group": "Groups", "Event": "Events", "Organization": "Organizations",
-            "Project": "Projects", "Course": "Courses", "Repo": "Code", "File": "Files", "Topic": "Topics"}
+            "Project": "Projects", "Course": "Courses", "Repo": "Code", "File": "Files", "Topic": "Topics",
+            "Place": "Places"}
 HUB_ID_BASE = -1000  # category hubs are virtual nodes with stable negative ids
 
 
@@ -436,6 +437,26 @@ def scored_members(s: Session, head: int, per: int = 8) -> dict[str, list[dict]]
     pl = [{"id": p, "strength": math.log1p(n) + 0.5 * math.log1p(people)} for p, n, people in projects]
     if pl:
         out["Projects"] = pl
+
+    # Places (Google Takeout Maps): where you actually go, by visit count and distinct days; saved places count too.
+    if s.execute(text("SELECT EXISTS (SELECT 1 FROM nodes WHERE id = ANY(:me) AND props->>'self' = 'true')"),
+                 {"me": me}).scalar():
+        places = s.execute(text("""
+            WITH v AS (
+                SELECT x->>'key' AS key, CAST(x->>'start' AS timestamptz) AS at
+                FROM source_items si CROSS JOIN LATERAL jsonb_array_elements(si.raw_meta->'visits') x
+                WHERE si.source = 'takeout_maps' AND si.raw_meta->>'kind' = 'visits'),
+            seen AS (SELECT n.id, count(*) AS visits, count(DISTINCT CAST(v.at AS date)) AS days
+                     FROM v JOIN nodes n ON n.type = 'Place' AND n.key = v.key GROUP BY n.id),
+            saved AS (SELECT DISTINCT dst AS id FROM edges WHERE src = ANY(:me) AND type = 'SAVED')
+            SELECT COALESCE(seen.id, saved.id), COALESCE(seen.visits, 0), COALESCE(seen.days, 0),
+                   (saved.id IS NOT NULL) AS is_saved
+            FROM seen FULL JOIN saved ON saved.id = seen.id
+            WHERE saved.id IS NOT NULL OR seen.days >= 2
+        """), {"me": me}).all()
+        pl = [{"id": p, "strength": math.log1p(v) + math.log1p(d) + (1.0 if sv else 0.0)} for p, v, d, sv in places]
+        if pl:
+            out["Places"] = pl
 
     for items in out.values():
         items.sort(key=lambda x: x["strength"], reverse=True)
