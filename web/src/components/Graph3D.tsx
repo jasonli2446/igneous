@@ -56,6 +56,7 @@ export default function Graph3D({ data, dark, selected, onSelectAction, onExpand
   useEffect(() => {
     const el = host.current!;
     const g = new ForceGraph3D(el, { controlType: "orbit" }) as unknown as ForceGraph3DInstance<N, L>;
+    guardOrbitPointerUp(g.controls() as unknown as OrbitInternals);
     g.width(el.clientWidth).height(el.clientHeight)
       .showNavInfo(false)
       .nodeId("id")
@@ -248,4 +249,35 @@ function linkReason(l: L) {
 
 function escapeHtml(s: string) {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+}
+
+type OrbitInternals = {
+  domElement: HTMLElement;
+  _pointers: number[];
+  _pointerPositions: Record<number, unknown>;
+  _onPointerUp: (e: PointerEvent) => void;
+};
+
+/** Ending a node drag makes 3d-force-graph dispatch a synthetic pointerup with an id OrbitControls never saw.
+ *  OrbitControls then thinks a pointer is still down whose position it already forgot, and crashes reading
+ *  `position.x`. Drop pointers without a position before the real handler runs. */
+function guardOrbitPointerUp(c: OrbitInternals) {
+  if (!c?._onPointerUp || !c.domElement) return;
+  const doc = c.domElement.ownerDocument;
+  const original = c._onPointerUp;
+  const safe = (e: PointerEvent) => {
+    c._pointers = c._pointers.filter((id) => id === e.pointerId || c._pointerPositions[id] !== undefined);
+    // The synthetic event's pointer was never captured, so releasePointerCapture throws NotFoundError.
+    if (!c._pointers.includes(e.pointerId)) return;
+    try {
+      original(e);
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === "NotFoundError")) throw err;
+    }
+  };
+  doc.removeEventListener("pointerup", original);
+  c.domElement.removeEventListener("pointercancel", original);
+  c._onPointerUp = safe;
+  doc.addEventListener("pointerup", safe);
+  c.domElement.addEventListener("pointercancel", safe);
 }

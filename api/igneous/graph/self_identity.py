@@ -35,7 +35,8 @@ SERVICE_LOCAL = re.compile(r"^(no-?reply|notifications?|mailer-daemon|do-?not-?r
 
 def is_service_address(addr: str) -> bool:
     if "@" not in addr:
-        return False
+        # SMS short codes (banks, verification codes, delivery alerts) are 5-6 digits: automated, never a person.
+        return bool(re.fullmatch(r"\d{3,6}", addr.strip()))
     local, domain = addr.lower().rsplit("@", 1)
     if domain.endswith("users.noreply.github.com"):
         return False  # a real person's GitHub commit address
@@ -88,7 +89,7 @@ def run(s: Session) -> dict:
     s.execute(text("DELETE FROM edges WHERE type = 'SAME_AS' AND extractor = :ex"), {"ex": EXTRACTOR})
     # Mark automated senders before linking anything, so a feed named "Jason Li Calendar" can't become the user.
     services = 0
-    for nid, key in s.execute(text("SELECT id, key FROM nodes WHERE type = 'Person' AND key LIKE '%@%'")).all():
+    for nid, key in s.execute(text("SELECT id, key FROM nodes WHERE type = 'Person'")).all():
         if is_service_address(key):
             s.execute(text("""UPDATE nodes SET props = props || '{"kind": "service"}' WHERE id = :id"""), {"id": nid})
             services += 1

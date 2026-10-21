@@ -318,7 +318,7 @@ def test_timeline_returns_bounded_dated_metadata_without_raw_source_content():
     assert result["mode"] == "relationship" and result["truncated"] is True
     assert result["edges"] == [{
         "id": 9, "type": "ATTENDED", "direction": "outgoing",
-        "counterpart": {"id": 2, "type": "Event"},
+        "counterpart": {"id": 2, "type": "Event", "name": "Private calendar title"},
         "interval": {"from": dated, "to": dated},
         "provenance": {"extractor": "spine", "extractor_version": "1", "model": None,
                        "confidence": None, "evidence": {"source_item_id": 44, "source": "gcal",
@@ -327,8 +327,9 @@ def test_timeline_returns_bounded_dated_metadata_without_raw_source_content():
     query, params = session.calls[-1]
     assert "COALESCE(e.valid_from, e.valid_to, si.occurred_at) IS NOT NULL" in query
     assert "si.body_text" not in query and "si.title" not in query and "si.raw_meta" not in query
-    assert "other.name" not in query
-    assert "Private calendar title" not in str(result)
+    # Message bodies, titles and raw metadata stay out; only the counterpart's display name is shown (the UI
+    # names things instead of showing "Event #2").
+    assert "other.name AS other_name" in query
     assert params["limit_plus_one"] == 2 and params["a"] == 1 and params["b"] == 2
 
 
@@ -1652,3 +1653,37 @@ def test_nul_bytes_are_stripped_before_storage():
 
     assert _no_nul("a\x00b") == "ab" and _no_nul(None) is None
     assert "\\u0000" not in json.dumps({"x": "a\x00b"}).replace("\\u0000", "")
+
+
+def test_phone_contact_merges_with_email_on_exact_name_unless_ambiguous():
+    from igneous.graph.resolve import P, score, split_name
+
+    def p(i, key, name):
+        first, last = split_name(name, key)
+        return P(i, key, name, first, last, set())
+
+    phone, email = p(1, "+16145551234", "Sam Lee"), p(2, "sam.lee@x.com", "Sam Lee")
+    assert phone.is_phone and not phone.is_email and email.is_email
+    assert score(phone, email)[0] >= 0.5
+    assert score(phone, p(3, "s.lee@y.com", "Sara Lee"))[0] == 0
+
+
+def test_self_is_named_with_a_real_name_not_a_handle():
+    from igneous.graph.resolve import _human_name
+
+    assert not _human_name("Jdoe2446", {"jdoe2446"})
+    assert not _human_name("Jane", set())
+    assert _human_name("Jane Doe", {"jdoe2446"})
+
+
+def test_recency_half_life_and_cross_category_scale():
+    from igneous.graph.traversal import HALF_LIFE_DAYS
+
+    weight = lambda days: 0.5 ** (days / HALF_LIFE_DAYS)  # noqa: E731
+    assert weight(7) > 0.9 and weight(180) < 0.3 and weight(730) < 0.01
+
+    # A category whose best item is weak can't outrank a strong one at the top of the first ring.
+    tops = {"People": 10.0, "Events": 1.0}
+    overall = max(tops.values())
+    scaled = lambda c, raw: raw / tops[c] * (0.4 + 0.6 * tops[c] / overall)  # noqa: E731
+    assert scaled("People", 10.0) == 1.0 and scaled("Events", 1.0) < 0.5

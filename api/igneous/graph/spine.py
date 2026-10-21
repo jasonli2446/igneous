@@ -358,8 +358,12 @@ def build_file(b: Builder, item) -> None:
     # which cannot be represented faithfully by a single filesystem-style path.
     parents = item.raw_meta.get("parents")
     if isinstance(parents, list) and all(isinstance(parent, str) for parent in parents):
+        names = item.raw_meta.get("parent_names") or {}
         for parent in parents:
-            folder = b.node("Folder", f"{item.source}:drive/{parent}", parent, {"path": f"drive/{parent}"})
+            folder = b.node("Folder", f"{item.source}:drive/{parent}", names.get(parent) or "Drive folder",
+                            {"path": f"drive/{parent}"})
+            if names.get(parent):  # a name learned later replaces the placeholder (UPSERT keeps the longer one)
+                b.s.execute(text("UPDATE nodes SET name = :n WHERE id = :id"), {"n": names[parent], "id": folder})
             b.edge(folder, fid, "CONTAINS")
         return
     child = fid

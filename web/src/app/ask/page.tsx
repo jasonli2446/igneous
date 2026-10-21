@@ -103,12 +103,11 @@ export default function AskPage() {
               <li key={h.chunk_id} id={`ev-${h.chunk_id}`}
                 className={`rounded-md border p-3 text-sm ${focus === h.chunk_id ? "border-accent ring-2 ring-accent/25" : cited.has(h.chunk_id) ? "border-accent/50" : "border-line opacity-70"}`}>
                 <div className="flex items-baseline gap-2">
-                  <span className="font-mono text-xs text-muted">c{h.chunk_id}</span>
                   <span className="font-medium">{h.title || "(no subject)"}</span>
                   <span className="ml-auto shrink-0 text-xs text-muted">{h.matched.join(" + ")}</span>
                 </div>
                 <div className="mt-0.5 text-xs text-muted">
-                  {h.external_id}{h.occurred_at && ` · ${new Date(h.occurred_at).toLocaleDateString()}`}
+                  {sourceLabel(h.source)}{h.occurred_at && ` · ${new Date(h.occurred_at).toLocaleDateString()}`}
                 </div>
                 <p className="mt-2 line-clamp-6 whitespace-pre-wrap text-soft">{h.text}</p>
               </li>
@@ -118,4 +117,14 @@ export default function AskPage() {
       )}
     </div>
   );
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  gmail: "Email", email: "Email", imessage: "Messages", gcal: "Calendar", drive: "Drive", fs: "Files",
+  ai_chats: "AI chat", apple_notes: "Notes", github: "GitHub", takeout_activity: "Google activity",
+  takeout_chrome: "Browsing", takeout_meet: "Meet", takeout_chat: "Google Chat", takeout_tasks: "Tasks",
+};
+
+function sourceLabel(source: string) {
+  return SOURCE_LABELS[source] ?? source.replaceAll("_", " ");
 }

@@ -5,7 +5,7 @@ export type GNode = {
   strength?: number; kind?: "seed" | "category" | "entity"; category?: string | null; total?: number; expandable?: boolean;
 };
 export type GEdge = { id: number; src: number; dst: number; type: string; extractor: string; confidence: number | null; weight?: number };
-export type Subgraph = { nodes: GNode[]; edges: GEdge[] };
+export type Subgraph = { nodes: GNode[]; edges: GEdge[]; categories?: GNode[] };
 export type GraphFilters = { source?: string; edgeTypes?: string[]; from?: string; to?: string };
 
 export type SyncStatus = {
@@ -97,7 +97,7 @@ export type TimelineEdge = {
   id: number;
   type: string;
   direction: "outgoing" | "incoming";
-  counterpart: { id: number; type: string };
+  counterpart: { id: number; type: string; name?: string | null };
   interval: { from: string | null; to: string | null };
   provenance: {
     extractor: string;

@@ -145,6 +145,7 @@ export default function Explorer() {
       const collect = (p: number) => ib.forEach((parent, child) => { if (parent === p && !drop.has(child)) { drop.add(child); collect(child); } });
       collect(id);
       setData((prev) => ({
+        ...prev,
         nodes: prev.nodes.filter((n) => !drop.has(n.id)),
         edges: prev.edges.filter((e) => !drop.has(e.src) && !drop.has(e.dst)),
       }));
@@ -165,7 +166,7 @@ export default function Explorer() {
         const have = new Set(prev.nodes.map((n) => n.id));
         const edges = new Map(prev.edges.map((e) => [`${e.src}-${e.dst}-${e.type}`, e]));
         g.edges.forEach((e) => edges.set(`${e.src}-${e.dst}-${e.type}`, e));
-        return { nodes: [...prev.nodes, ...g.nodes.filter((n) => !have.has(n.id))], edges: [...edges.values()] };
+        return { ...prev, nodes: [...prev.nodes, ...g.nodes.filter((n) => !have.has(n.id))], edges: [...edges.values()] };
       });
       setIntroducedBy((m) => { const n = new Map(m); g.nodes.forEach((x) => { if (!n.has(x.id)) n.set(x.id, id); }); return n; });
       setExpanded((s) => new Set(s).add(id));
@@ -177,7 +178,8 @@ export default function Explorer() {
   }, []);
 
   const onLegend = useCallback((_c: Community[]) => {}, []); // communities color nodes; the legend lists categories
-  const hubs = data.nodes.filter((n) => n.kind === "category");
+  // Categories aren't nodes: they color the dots, and the legend lists them (click to show more of one).
+  const hubs = data.categories ?? [];
   const current = trail[trail.length - 1];
   const back = () => {
     if (trail.length < 2) return;
@@ -280,7 +282,7 @@ export default function Explorer() {
           {hubs.length > 0 && (
             <div className="flex flex-wrap gap-1">
               {hubs.map((h) => (
-                <button key={h.id} onClick={() => toggle(h.id)} title={`Show or hide ${h.name.toLowerCase()}`}
+                <button key={h.id} onClick={() => toggle(h.id)} title={expanded.has(h.id) ? `Show fewer ${h.name.toLowerCase()}` : `Show more ${h.name.toLowerCase()}`}
                   className="flex items-center gap-1.5 rounded-full border border-line bg-panel/95 px-2.5 py-1 hover:bg-hover">
                   <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: CATEGORY_COLOR[h.name] ?? "#a8aca3" }} />
                   <span className="text-soft">{h.name}</span>

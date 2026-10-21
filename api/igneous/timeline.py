@@ -32,7 +32,7 @@ def _edge_payload(row: Mapping) -> dict:
         "id": row["id"],
         "type": row["type"],
         "direction": "outgoing" if row["a_is_src"] else "incoming",
-        "counterpart": {"id": row["other_id"], "type": row["other_type"]},
+        "counterpart": {"id": row["other_id"], "type": row["other_type"], "name": row.get("other_name")},
         "interval": {"from": start, "to": end},
         "provenance": {
             "extractor": row["extractor"],
@@ -74,7 +74,7 @@ def timeline(session: Session, a: int, b: int | None = None, limit: int = 50) ->
                e.extractor, e.extractor_version, e.model, e.confidence,
                e.source_item_id, e.span_start, e.span_end,
                si.source, si.occurred_at,
-               other.id AS other_id, other.type AS other_type
+               other.id AS other_id, other.type AS other_type, other.name AS other_name
         FROM edges e
         LEFT JOIN source_items si ON si.id = e.source_item_id
         JOIN nodes other ON other.id = COALESCE(

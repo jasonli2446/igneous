@@ -31,7 +31,6 @@ class NamedResponse(JSONResponse):
     """Every string the API returns shows contact names instead of phone numbers, wherever a number has a saved
     contact. Identity fields (`key`, `external_id`) stay raw so clients can still address things by them."""
     KEEP = frozenset({"key", "external_id", "chat", "handle"})
-    LABELS = frozenset({"name", "thread", "title", "a_name", "b_name"})
 
     def render(self, content) -> bytes:
         from igneous.db import SessionLocal
@@ -41,8 +40,8 @@ class NamedResponse(JSONResponse):
 
         def walk(v, field=None):
             if isinstance(v, str):
-                # Labels (`name`, `thread`, `title`) mask unknown numbers; body text keeps them in full.
-                return v if field in self.KEEP else name_handles(v, named, mask=field in self.LABELS)
+                # Names for known numbers everywhere; unknown numbers shortened to their last 4 digits too.
+                return v if field in self.KEEP else name_handles(v, named, mask=True)
             if isinstance(v, dict):
                 return {k: walk(x, k) for k, x in v.items()}
             if isinstance(v, list):
