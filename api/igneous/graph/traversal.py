@@ -30,10 +30,12 @@ def _edge_where(filters: GraphFilters, edge: str = "e", item: str = "si") -> str
         clauses.append(f"{edge}.type = ANY(:types)")
     if filters.source:
         clauses.append(f"{item}.source = :source")
+    # Date filters select intervals that overlap the requested window. Point-in-time communication edges
+    # have equal bounds; MEMBER_OF remains visible throughout its observed membership span.
     if filters.since:
-        clauses.append(f"COALESCE({item}.occurred_at, {edge}.valid_from) >= :since")
+        clauses.append(f"COALESCE({edge}.valid_to, {item}.occurred_at, {edge}.valid_from) >= :since")
     if filters.until:
-        clauses.append(f"COALESCE({item}.occurred_at, {edge}.valid_from) <= :until")
+        clauses.append(f"COALESCE({edge}.valid_from, {item}.occurred_at, {edge}.valid_to) <= :until")
     return " AND ".join(clauses) if clauses else "TRUE"
 
 

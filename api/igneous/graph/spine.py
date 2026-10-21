@@ -21,10 +21,85 @@ ON CONFLICT (type, key) DO UPDATE SET
 RETURNING id
 """)
 
+# These edges represent a discrete message or event, rather than an ongoing relationship.
+POINT_IN_TIME_TYPES = frozenset({"SENT", "RECEIVED", "IN_THREAD", "REPLIES_TO", "ATTENDED"})
+
 UPSERT_EDGE = text("""
-INSERT INTO edges (src, dst, type, valid_from, source_item_id)
-VALUES (:src, :dst, :type, :at, :sid)
-ON CONFLICT (src, dst, type, extractor) DO NOTHING
+INSERT INTO edges (src, dst, type, valid_from, valid_to, source_item_id)
+VALUES (:src, :dst, :type, :valid_from, :valid_to, :sid)
+ON CONFLICT (src, dst, type, extractor) DO UPDATE SET
+    valid_from = CASE
+        WHEN edges.type = 'MEMBER_OF' AND EXCLUDED.valid_from IS NOT NULL THEN
+            CASE WHEN edges.valid_from IS NULL THEN EXCLUDED.valid_from
+                 ELSE LEAST(edges.valid_from, EXCLUDED.valid_from) END
+        ELSE COALESCE(edges.valid_from, EXCLUDED.valid_from)
+    END,
+    valid_to = CASE
+        WHEN edges.type = 'MEMBER_OF' AND EXCLUDED.valid_to IS NOT NULL THEN
+            CASE WHEN edges.valid_to IS NULL THEN EXCLUDED.valid_to
+                 ELSE GREATEST(edges.valid_to, EXCLUDED.valid_to) END
+        ELSE COALESCE(edges.valid_to, EXCLUDED.valid_to)
+    END,
+    source_item_id = COALESCE(edges.source_item_id, EXCLUDED.source_item_id)
+""")
+
+# Each invocation repairs at most BATCH legacy edges.  It is deliberately outside the Alembic migration:
+# deployments can upgrade quickly, while normal spine runs resume this idempotent backfill safely.
+BACKFILL_POINT_EDGES = text("""
+WITH candidates AS (
+    SELECT e.id, COALESCE(si.occurred_at, source_item.occurred_at, e.valid_from) AS observed_at
+    FROM edges e
+    LEFT JOIN source_items si ON si.id = e.source_item_id
+    LEFT JOIN nodes source_node ON source_node.id = e.src
+    LEFT JOIN source_items source_item ON source_item.id = source_node.source_item_id
+    WHERE e.type = ANY(:types)
+      AND (e.valid_from IS NULL OR e.valid_to IS NULL)
+      AND COALESCE(si.occurred_at, source_item.occurred_at, e.valid_from) IS NOT NULL
+    ORDER BY e.id
+    LIMIT :limit
+)
+UPDATE edges e
+SET valid_from = c.observed_at, valid_to = c.observed_at
+FROM candidates c
+WHERE e.id = c.id
+""")
+
+BACKFILL_MEMBERSHIPS = text("""
+WITH candidates AS (
+    SELECT m.id
+    FROM edges m
+    JOIN nodes person ON person.id = m.src AND person.type = 'Person'
+    JOIN nodes organization ON organization.id = m.dst AND organization.type = 'Organization'
+    WHERE m.type = 'MEMBER_OF'
+      AND (m.valid_from IS NULL OR m.valid_to IS NULL)
+      AND EXISTS (
+          SELECT 1
+          FROM edges observed
+          LEFT JOIN source_items si ON si.id = observed.source_item_id
+          WHERE observed.type = ANY(:types)
+            AND ((observed.src = person.id AND observed.type IN ('SENT', 'ATTENDED'))
+                 OR (observed.dst = person.id AND observed.type = 'RECEIVED'))
+            AND COALESCE(si.occurred_at, observed.valid_from) IS NOT NULL
+      )
+    ORDER BY m.id
+    LIMIT :limit
+), bounds AS (
+    SELECT m.id,
+           min(COALESCE(si.occurred_at, observed.valid_from)) AS valid_from,
+           max(COALESCE(si.occurred_at, observed.valid_from)) AS valid_to
+    FROM edges m
+    JOIN nodes person ON person.id = m.src
+    JOIN candidates c ON c.id = m.id
+    JOIN edges observed ON ((observed.src = person.id AND observed.type IN ('SENT', 'ATTENDED'))
+                         OR (observed.dst = person.id AND observed.type = 'RECEIVED'))
+    LEFT JOIN source_items si ON si.id = observed.source_item_id
+    WHERE observed.type = ANY(:types)
+    GROUP BY m.id
+)
+UPDATE edges m
+SET valid_from = bounds.valid_from, valid_to = bounds.valid_to
+FROM bounds
+WHERE m.id = bounds.id
 """)
 
 
@@ -42,7 +117,10 @@ class Builder:
         return self.cache[k]
 
     def edge(self, src: int, dst: int, type_: str, at=None, sid: int | None = None):
-        self.s.execute(UPSERT_EDGE, {"src": src, "dst": dst, "type": type_, "at": at, "sid": sid})
+        # Point-in-time edges have a closed interval. MEMBER_OF uses every observation to widen its interval.
+        valid_to = at if type_ in POINT_IN_TIME_TYPES or type_ == "MEMBER_OF" else None
+        self.s.execute(UPSERT_EDGE, {"src": src, "dst": dst, "type": type_,
+                                     "valid_from": at, "valid_to": valid_to, "sid": sid})
 
 
 def _name_from(addr: dict, x_from: str | None) -> str:
@@ -78,11 +156,12 @@ def _thread_key(meta: dict, title: str) -> str:
     return f"subject:{subj}|{','.join(people)}"
 
 
-def _person(b: Builder, addr: dict, name: str) -> int:
+def _person(b: Builder, addr: dict, name: str, observed_at=None, sid: int | None = None) -> int:
     pid = b.node("Person", addr["email"], name, {"email": addr["email"]})
     domain = addr["email"].split("@")[-1]
     org = b.node("Organization", domain, domain)
-    b.edge(pid, org, "MEMBER_OF")
+    # An address belongs to its domain from its first to its most recent observed communication.
+    b.edge(pid, org, "MEMBER_OF", observed_at, sid)
     return pid
 
 
@@ -92,10 +171,12 @@ def build_email(b: Builder, item) -> None:
     mid = b.node("Message", msg_key, item.title or "(no subject)", {"source": item.source}, sid=item.id)
 
     for addr in meta.get("from", [])[:1]:
-        b.edge(_person(b, addr, _name_from(addr, meta.get("x_from"))), mid, "SENT", item.occurred_at, item.id)
+        b.edge(_person(b, addr, _name_from(addr, meta.get("x_from")), item.occurred_at, item.id), mid,
+               "SENT", item.occurred_at, item.id)
     for field in ("to", "cc", "bcc"):
         for addr in meta.get(field, []):
-            b.edge(mid, _person(b, addr, _name_from(addr, None)), "RECEIVED", item.occurred_at, item.id)
+            b.edge(mid, _person(b, addr, _name_from(addr, None), item.occurred_at, item.id), "RECEIVED",
+                   item.occurred_at, item.id)
 
     tkey = _thread_key(meta, item.title)
     tid = b.node("Thread", tkey, REPLY_PREFIX.sub("", item.title or "") or "(no subject)")
@@ -118,8 +199,8 @@ WITH m AS (
     WHERE msg.type = 'Message' AND si.occurred_at IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM edges r WHERE r.src = msg.id AND r.type = 'REPLIES_TO')
 )
-INSERT INTO edges (src, dst, type, valid_from, extractor)
-SELECT child.id, parent.id, 'REPLIES_TO', child.occurred_at, 'spine-inferred'
+INSERT INTO edges (src, dst, type, valid_from, valid_to, extractor)
+SELECT child.id, parent.id, 'REPLIES_TO', child.occurred_at, child.occurred_at, 'spine-inferred'
 FROM m child
 CROSS JOIN LATERAL (
     SELECT p.id FROM m p
@@ -168,7 +249,8 @@ def build_event(b: Builder, item) -> None:
     for a in people:
         if a.get("response") == "declined" or "@" not in a.get("email", ""):
             continue
-        b.edge(_person(b, a, _name_from(a, None)), eid, "ATTENDED", item.occurred_at, item.id)
+        b.edge(_person(b, a, _name_from(a, None), item.occurred_at, item.id), eid, "ATTENDED",
+               item.occurred_at, item.id)
 
 
 def build_contact(b: Builder, item) -> None:
@@ -215,6 +297,14 @@ def build_file(b: Builder, item) -> None:
         child = folder
 
 
+def backfill_temporal(s: Session, limit: int = BATCH) -> int:
+    """Repair one bounded batch of legacy temporal data without blocking an upgrade."""
+    params = {"types": list(POINT_IN_TIME_TYPES), "limit": limit}
+    points = s.execute(BACKFILL_POINT_EDGES, params).rowcount or 0
+    memberships = s.execute(BACKFILL_MEMBERSHIPS, params).rowcount or 0
+    return points + memberships
+
+
 def run(s: Session) -> int:
     since = watermark(s, STAGE)
     rows = s.execute(text("""
@@ -243,5 +333,6 @@ def run(s: Session) -> int:
 
         quoted.run(s)               # exact parents from quoted "Original Message" headers first
         s.execute(INFER_REPLIES)    # then the subject+participant heuristic for whatever is left
+    backfill_temporal(s)
     s.commit()
     return len(rows)
