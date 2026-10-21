@@ -104,13 +104,14 @@ claude mcp add igneous -e AWS_REGION=us-east-1 -e AWS_BEARER_TOKEN_BEDROCK=$AWS_
 The model credentials only matter for `ask`; MCP clients don't pass your shell's environment through, so
 set them with `-e` as above (other tools work without them). Postgres must be running (`make db`).
 
-## Google (Gmail, Calendar, Contacts)
+## Google (Gmail, Drive, Calendar, Contacts)
 
 1. Put the OAuth desktop client JSON at `data/google/client_secret.json` (git-ignored).
 2. `cd api && uv run igneous connect google` opens Google sign-in (read-only scopes). Click **Continue** past
    "Google hasn't verified this app": the project is in Testing mode, so tokens expire after 7 days; re-run it then.
-3. `uv run igneous sync gcal`, `uv run igneous sync gcontacts`, `uv run igneous sync gmail --since-days 90`, then
-   `uv run igneous pipeline`.
+3. `uv run igneous sync drive`, `uv run igneous sync gcal`, `uv run igneous sync gcontacts`,
+   `uv run igneous sync gmail --since-days 90`, then `uv run igneous pipeline`. Drive backfills files once,
+   then uses the Changes API; Google Docs, Sheets, and Slides export to parser-friendly text formats.
 
 Gmail skips Promotions/Social/Forums by default (`--all-mail` to include them); in a real inbox they were 94% of mail.
 **Quota:** this Testing-mode project measured about 730 units/min, so roughly 120 messages/min, far below Google's

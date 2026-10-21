@@ -37,7 +37,7 @@ def stats(s: Session = Depends(get_session)):
 
 @app.get("/sync")
 def sync(
-    connector: Literal["email", "imessage", "gmail", "gcal", "gcontacts"] | None = None,
+    connector: Literal["email", "imessage", "gmail", "gcal", "gcontacts", "drive", "fs"] | None = None,
     account: str | None = None,
     s: Session = Depends(get_session),
 ):

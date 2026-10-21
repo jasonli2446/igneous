@@ -50,6 +50,13 @@ class CompletedScan:
     allow_empty_prune: bool = False
 
 
+@dataclass
+class Tombstone:
+    """A source item explicitly removed by an incremental change feed."""
+    source: str
+    external_id: str
+
+
 class Connector(Protocol):
     name: str
 
@@ -117,6 +124,12 @@ def run_sync(s: Session, connector: Connector, account: str = "default", limit: 
             save_cursor(s, connector.name, account, obj.cursor)
             s.commit()
             break
+        if isinstance(obj, Tombstone):
+            result = s.execute(text("""
+                DELETE FROM source_items WHERE source = :source AND external_id = :external_id
+            """), {"source": obj.source, "external_id": obj.external_id})
+            stats["deleted"] += result.rowcount
+            continue
         if isinstance(obj, Checkpoint):
             save_cursor(s, connector.name, account, obj.cursor)
             s.commit()

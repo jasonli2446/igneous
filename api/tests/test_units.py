@@ -763,3 +763,114 @@ def test_filesystem_connector_rejects_missing_roots(tmp_path):
 
     with pytest.raises(ValueError, match="must be directories"):
         FilesystemConnector(tmp_path / "does-not-exist")
+
+
+def test_drive_backfill_exports_workspace_files_and_preserves_all_parent_ids(monkeypatch):
+    from igneous.connectors.base import CompletedScan, SourceItem
+    from igneous.connectors.drive import DriveConnector
+
+    class Request:
+        def __init__(self, value):
+            self.value = value
+
+        def execute(self):
+            return self.value
+
+    class Files:
+        def list(self, **kwargs):
+            return Request({"files": [
+                {"id": "doc-1", "name": "Plan", "mimeType": "application/vnd.google-apps.document",
+                 "parents": ["folder-a", "folder-b"], "modifiedTime": "2026-10-21T12:00:00Z"},
+                {"id": "image-1", "name": "photo.jpg", "mimeType": "image/jpeg"},
+            ]})
+
+        def export(self, **kwargs):
+            assert kwargs == {"fileId": "doc-1", "mimeType": "text/plain"}
+            return Request(b"ship it")
+
+        def get_media(self, **kwargs):
+            return Request(b"not parseable")
+
+    class Changes:
+        def getStartPageToken(self, **kwargs):
+            return Request({"startPageToken": "before-backfill"})
+
+    connector = object.__new__(DriveConnector)
+    connector.svc = type("Service", (), {"files": lambda self: Files(), "changes": lambda self: Changes()})()
+    connector.account = "me@example.com"
+    monkeypatch.setattr("igneous.connectors.drive.settings.drive_page_size", 100)
+
+    events = list(connector.sync({}))
+    item = next(event for event in events if isinstance(event, SourceItem))
+    assert item.external_id == "doc-1"
+    assert item.body_text == "ship it"
+    assert item.raw_meta["parents"] == ["folder-a", "folder-b"]
+    assert item.raw_meta["path"] == "drive/doc-1"
+    completed = events[-1]
+    assert isinstance(completed, CompletedScan)
+    assert completed.cursor == {"start_page_token": "before-backfill"}
+    assert completed.external_ids == frozenset({"doc-1", "image-1"})
+
+
+def test_drive_changes_emit_tombstones_and_advance_only_at_final_page(monkeypatch):
+    from igneous.connectors.base import Checkpoint, Tombstone
+    from igneous.connectors.drive import DriveConnector
+
+    class Request:
+        def __init__(self, value):
+            self.value = value
+
+        def execute(self):
+            return self.value
+
+    class Changes:
+        def list(self, **kwargs):
+            assert kwargs["pageToken"] == "cursor-1"
+            return Request({"changes": [
+                {"fileId": "deleted", "removed": True},
+                {"fileId": "trashed", "file": {"id": "trashed", "trashed": True}},
+            ], "newStartPageToken": "cursor-2"})
+
+    connector = object.__new__(DriveConnector)
+    connector.svc = type("Service", (), {"changes": lambda self: Changes()})()
+    connector.account = "me@example.com"
+    monkeypatch.setattr("igneous.connectors.drive.settings.drive_page_size", 100)
+
+    events = list(connector.sync({"start_page_token": "cursor-1"}))
+    assert [(event.source, event.external_id) for event in events if isinstance(event, Tombstone)] == [
+        ("drive", "deleted"), ("drive", "trashed")]
+    assert events[-1] == Checkpoint({"start_page_token": "cursor-2"})
+
+
+def test_run_sync_applies_explicit_tombstones(monkeypatch):
+    from igneous.connectors import base
+
+    class Result:
+        rowcount = 1
+
+        def first(self):
+            return None
+
+    class Session:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, statement, values=None):
+            self.statements.append((str(statement), values))
+            return Result()
+
+        def commit(self):
+            pass
+
+    class DriveChanges:
+        name = "drive"
+
+        def sync(self, cursor):
+            yield base.Tombstone("drive", "gone")
+            yield base.Checkpoint({"start_page_token": "next"})
+
+    session = Session()
+    monkeypatch.setattr(base, "load_cursor", lambda *args: {"start_page_token": "old"})
+    monkeypatch.setattr(base, "save_cursor", lambda *args: None)
+    assert base.run_sync(session, DriveChanges())["deleted"] == 1
+    assert any(values == {"source": "drive", "external_id": "gone"} for _, values in session.statements)
