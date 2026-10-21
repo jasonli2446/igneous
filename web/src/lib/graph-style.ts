@@ -14,3 +14,15 @@ export const TYPE_CATEGORY: Record<string, string> = {
   Person: "People", Thread: "Groups", Event: "Events", Organization: "Organizations",
   Topic: "Topics", File: "Files", Folder: "Files", Project: "Projects", Course: "Courses", Repo: "Code", Place: "Places",
 };
+
+/** What to call a node's type in the UI (the stored type names are internal). */
+export const TYPE_LABEL: Record<string, string> = {
+  Person: "Person", Thread: "Conversation", Message: "Message", Event: "Event", Organization: "Organization",
+  Project: "Project", Place: "Place", File: "File", Folder: "Folder", Repo: "Repository", Course: "Course",
+  Topic: "Topic", Commitment: "Commitment", Decision: "Decision",
+};
+
+export function typeLabel(type: string, props?: { group?: boolean } | null) {
+  if (type === "Thread") return props?.group ? "Group chat" : "Conversation";
+  return TYPE_LABEL[type] ?? type;
+}

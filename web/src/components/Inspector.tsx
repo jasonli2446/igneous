@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import EntityInspector from "@/components/EntityInspector";
 import NodeSummary from "@/components/NodeSummary";
 import { InlineError, Skeleton } from "@/components/ui";
+import { typeLabel } from "@/lib/graph-style";
 import { api, NodeDetail, TYPE_COLORS } from "@/lib/api";
 
 type Props = {
@@ -78,7 +79,7 @@ export default function Inspector({ id, onExpandAction, onCloseAction, onSelectA
       <header>
         <div className="flex items-center gap-2 text-xs text-muted">
           <span className="h-2 w-2 rounded-full" style={{ background: TYPE_COLORS[node.type] }} />
-          {node.type}
+          {typeLabel(node.type, node.props as { group?: boolean } | undefined)}
           {onCloseAction && (
             <button onClick={onCloseAction} aria-label="Close details"
               className="ml-auto rounded px-1.5 text-lg leading-none hover:bg-hover hover:text-ink">×</button>
