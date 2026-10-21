@@ -1687,3 +1687,24 @@ def test_recency_half_life_and_cross_category_scale():
     overall = max(tops.values())
     scaled = lambda c, raw: raw / tops[c] * (0.4 + 0.6 * tops[c] / overall)  # noqa: E731
     assert scaled("People", 10.0) == 1.0 and scaled("Events", 1.0) < 0.5
+
+
+def test_ai_session_repo_comes_from_files_touched_not_launch_dir(tmp_path):
+    import json
+
+    from igneous.connectors.ai_chats import claude_turns
+
+    repo = tmp_path / "work" / "igneous"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "api").mkdir()
+    f = tmp_path / "s.jsonl"
+    rows = [
+        {"type": "user", "cwd": str(tmp_path), "timestamp": "2026-10-21T10:00:00Z",
+         "message": {"content": "fix the api"}},
+        {"type": "assistant", "timestamp": "2026-10-21T10:01:00Z", "message": {"content": [
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": str(repo / "api" / "main.py")}},
+            {"type": "tool_use", "name": "Bash", "input": {"command": f"cd {repo}/api && pytest"}}]}},
+    ]
+    f.write_text("\n".join(json.dumps(r) for r in rows))
+    meta, _ = claude_turns(str(f))
+    assert meta["repo_path"] == str(repo)
