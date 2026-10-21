@@ -28,6 +28,27 @@ def _when(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC) if value else None
 
 
+def _external_id(account: str, file_id: str) -> str:
+    """Scope opaque Drive IDs to the connected account for source-wide reconciliation."""
+    return f"{account}/{file_id}"
+
+
+def _is_skippable_download_error(exc: HttpError) -> bool:
+    if exc.resp.status == 404:
+        return True
+    content = exc.content or b""
+    return exc.resp.status == 403 and any(reason in content for reason in (
+        b"fileNotDownloadable", b"exportSizeLimitExceeded", b"cannotDownloadAbusiveFile"))
+
+
+def _is_expired_change_token(exc: HttpError) -> bool:
+    if exc.resp.status == 410:
+        return True
+    content = exc.content or b""
+    return exc.resp.status in (400, 404) and any(reason in content for reason in (
+        b"pageNotFound", b"invalidPageToken", b"pageToken"))
+
+
 class DriveConnector:
     """Synchronize Drive files by immutable Drive ID, never by a synthesized path.
 
@@ -44,9 +65,14 @@ class DriveConnector:
         self.account = account
 
     def _source_item(self, file: dict) -> SourceItem | None:
-        if file.get("mimeType") == FOLDER_MIME or file.get("trashed"):
+        mime_type = file.get("mimeType")
+        if mime_type == FOLDER_MIME or file.get("trashed"):
             return None
-        export = WORKSPACE_EXPORTS.get(file.get("mimeType"))
+        export = WORKSPACE_EXPORTS.get(mime_type)
+        # Workspace types without an export format (Forms, Sites, shortcuts, etc.) cannot
+        # be downloaded. They remain observed during a full scan but have no SourceItem.
+        if mime_type and mime_type.startswith("application/vnd.google-apps.") and not export:
+            return None
         try:
             if export:
                 export_mime, suffix = export
@@ -56,8 +82,8 @@ class DriveConnector:
                 data = _retry(self.svc.files().get_media(fileId=file["id"], supportsAllDrives=True))
                 filename, parser_mime = file.get("name", file["id"]), file.get("mimeType")
         except HttpError as exc:
-            if exc.resp.status == 404:
-                return None  # It disappeared after list; the next Changes pass will record its tombstone.
+            if _is_skippable_download_error(exc):
+                return None
             raise
         parsed = parse_document(data, filename, parser_mime)
         if parsed.status != "ok":
@@ -80,7 +106,7 @@ class DriveConnector:
         digest = hashlib.sha256(data + b"\0" + json.dumps(raw_meta, sort_keys=True).encode()).hexdigest()
         return SourceItem(
             source=self.name,
-            external_id=file["id"],
+            external_id=_external_id(self.account, file["id"]),
             title=file.get("name") or file["id"],
             body_text=parsed.text,
             occurred_at=_when(file.get("modifiedTime") or file.get("createdTime")),
@@ -99,7 +125,7 @@ class DriveConnector:
                 fields=f"nextPageToken,files({FILE_FIELDS})", orderBy="name", supportsAllDrives=True,
                 includeItemsFromAllDrives=True))
             for file in response.get("files", []):
-                observed.add(file["id"])
+                observed.add(_external_id(self.account, file["id"]))
                 item = self._source_item(file)
                 if item:
                     yield item
@@ -115,14 +141,27 @@ class DriveConnector:
         start = cursor["start_page_token"]
         page = cursor.get("changes_page_token")
         while True:
-            response = _retry(self.svc.changes().list(
-                pageToken=page or start, spaces="drive", pageSize=settings.drive_page_size,
-                fields=f"nextPageToken,newStartPageToken,changes(fileId,removed,file({FILE_FIELDS}))",
-                includeRemoved=True, supportsAllDrives=True, includeItemsFromAllDrives=True))
+            try:
+                response = _retry(self.svc.changes().list(
+                    pageToken=page or start, spaces="drive", pageSize=settings.drive_page_size,
+                    fields=f"nextPageToken,newStartPageToken,changes(changeType,fileId,removed,file({FILE_FIELDS}))",
+                    includeRemoved=True, supportsAllDrives=True, includeItemsFromAllDrives=True))
+            except HttpError as exc:
+                if _is_expired_change_token(exc):
+                    yield from self._backfill()
+                    return
+                raise
             for change in response.get("changes", []):
-                file_id, file = change["fileId"], change.get("file")
+                # Shared-drive metadata changes have no file ID and do not affect files.
+                if change.get("changeType", "file") != "file":
+                    continue
+                file_id = change.get("fileId")
+                if not file_id:
+                    continue
+                external_id = _external_id(self.account, file_id)
+                file = change.get("file")
                 if change.get("removed") or not file or file.get("trashed"):
-                    yield Tombstone(self.name, file_id)
+                    yield Tombstone(self.name, external_id)
                     continue
                 item = self._source_item(file)
                 if item:
