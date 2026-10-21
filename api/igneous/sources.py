@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from igneous import jobs
 from igneous.config import settings
-from igneous.connectors import ai_chats, google_auth, imessage, mac_contacts
+from igneous.connectors import ai_chats, github, google_auth, imessage, mac_contacts, secrets
 
 FDA_STEPS = [
     "Open System Settings, then Privacy & Security, then Full Disk Access.",
@@ -33,7 +33,7 @@ GOOGLE_NOTE = ("Sign-in returns to this computer at /sources/google/callback on 
                "clients allow that automatically (any http://localhost address); a Web-type client would need "
                "that exact redirect URI added.")
 
-# kind: google | local | import | planned.  cli: the equivalent command, shown in small muted text.
+# kind: google | local | remote | import | planned. cli: equivalent command shown in muted text.
 SOURCES: list[dict] = [
     {"id": "gmail", "kind": "google", "name": "Gmail", "group": "Google",
      "reads": "Your email: senders, recipients, subjects, bodies, and threads. Promotions, Social and Forums are skipped.",
@@ -84,15 +84,14 @@ SOURCES: list[dict] = [
      "reads": "Your claude.ai conversation history from Anthropic's data export.",
      "steps": ["Request the export in claude.ai settings (Privacy, Export data).",
                "Open Import and upload the .zip you receive by email."]},
-    {"id": "github", "kind": "planned", "name": "GitHub", "group": "Coming soon",
-     "reads": "Your repositories, issues, and pull requests (read-only). The connector is not built yet (#88); "
-              "you can store a token now so it is ready.",
+    {"id": "github", "kind": "remote", "name": "GitHub", "group": "Code",
+     "reads": "Your repositories, README files, issues, pull requests, comments, and daily commit activity (read-only).",
      "steps": ["On github.com open Settings, Developer settings, Fine-grained tokens, and generate a token.",
                "Give it read-only access (Contents, Issues, Pull requests: Read) to the repositories you want.",
                "Paste it below. It is stored encrypted on this computer and never shown again."]},
 ]
 BY_ID = {s["id"]: s for s in SOURCES}
-SYNCABLE = {s["id"] for s in SOURCES if s["kind"] in ("google", "local")}
+SYNCABLE = {s["id"] for s in SOURCES if s["kind"] in ("google", "local", "remote")}
 IMPORT_TOOL = {"chatgpt", "gemini", "claude_ai"}  # raw_meta.tool values stored under source 'ai_chats'
 
 
@@ -178,13 +177,15 @@ def describe(s: Session) -> list[dict]:
         if kind == "google":
             by_account = dict(states.get(sid, []))
             accounts = [{"account": a, "last_sync": by_account.get(a)} for a in google_accounts]
-        elif kind == "planned":
-            accounts = [{"account": "token saved", "last_sync": None} for _ in github_accounts]
+        elif sid == "github":
+            by_account = dict(states.get(sid, []))
+            accounts = [{"account": a, "last_sync": by_account.get(a)} for a in github_accounts]
         job = latest.get(sid)
         status = "ready"
         if kind == "planned":
-            status = "not_set_up"
-            message = "Coming soon." + (" Token saved." if github_accounts else "")
+            status, message = "not_set_up", "Coming soon."
+        elif sid == "github" and not github_accounts:
+            status, message = "not_set_up", "Save a read-only GitHub token to connect."
         elif kind == "import":
             status = "ready" if count else "not_set_up"
         elif kind == "google" and not google_accounts:
@@ -195,10 +196,11 @@ def describe(s: Session) -> list[dict]:
             status, message = "not_set_up", None
         if job and job["status"] == "running":
             status, message = "syncing", None
-        elif job and job["status"] == "failed" and kind in ("google", "local") and (kind != "google" or google_accounts):
+        elif job and job["status"] == "failed" and kind in ("google", "local", "remote") and (kind != "google" or google_accounts):
             status, message = "needs_attention", job["error"]
         row.update(status=status, message=message, items=count, last_sync=last, accounts=accounts,
-                   requirements_ok=ok, can_sync=sid in SYNCABLE and ok and (kind != "google" or bool(google_accounts)),
+                   requirements_ok=ok, can_sync=sid in SYNCABLE and ok and (kind != "google" or bool(google_accounts))
+                   and (sid != "github" or bool(github_accounts)),
                    coming_soon=kind == "planned", job=job_view(job) if job else None)
         out.append(row)
     return out
@@ -228,6 +230,17 @@ def build(source_id: str, s: Session, account: str | None, progress: Callable[..
             for k in total:
                 total[k] += stats[k]
             done += stats["inserted"] + stats["updated"] + stats["unchanged"]
+        return total
+    if source_id == "github":
+        targets = [account] if account else secrets.accounts(s, "github")
+        if not targets:
+            raise RuntimeError("No GitHub token connected. Save a read-only token first.")
+        total = {"inserted": 0, "updated": 0, "unchanged": 0, "deleted": 0}
+        for acct in targets:
+            _, token = secrets.load(s, "github", acct)
+            stats = jobs.run_connector(s, github.GithubConnector(token, acct), acct, progress)
+            for key in total:
+                total[key] += stats[key]
         return total
     if source_id == "imessage":
         conn, acct = imessage.MessagesConnector(imessage.DEFAULT_DB), "default"

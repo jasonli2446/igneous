@@ -12,7 +12,7 @@ app = typer.Typer(no_args_is_help=True)
 
 @app.command()
 def sync(connector: str = typer.Argument(..., help="email | imessage | maccontacts | gmail | gcal | gcontacts | drive | fs "
-                                                   "| ai_chats"),
+                                                   "| ai_chats | github"),
          path: Path = typer.Option(None, help="source path; fs defaults to IGNEOUS_FILESYSTEM_ROOTS"),
          mailbox: list[str] = typer.Option(None, help="restrict to these mailboxes; repeatable"),
          limit: int = typer.Option(None, help="stop at the first checkpoint after this many items (resumable)"),
@@ -45,6 +45,16 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | maccontac
         if not roots:
             raise typer.BadParameter("fs requires --path or IGNEOUS_FILESYSTEM_ROOTS")
         conn = FilesystemConnector(roots)
+    elif connector == "github":
+        from igneous.connectors import secrets
+        from igneous.connectors.github import GithubConnector
+
+        with SessionLocal() as s:
+            acct, token = secrets.load(s, "github", account)
+        conn = GithubConnector(token, acct)
+        with SessionLocal() as s:
+            print(run_sync(s, conn, account=acct, limit=limit), flush=True)
+        return
     elif connector in ("gmail", "gcal", "gcontacts", "drive"):
         from igneous.connectors import google_auth
 

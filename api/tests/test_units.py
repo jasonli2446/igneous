@@ -37,6 +37,42 @@ def test_synthetic_cross_source_corpus_is_deterministic_and_valid(tmp_path):
     assert "phillip.allen@enron.com" in (first / "files/2001-05-14-forecast-memo.md").read_text()
 
 
+def test_github_connector_groups_commits_and_uses_read_only_gets():
+    from igneous.connectors.github import GithubConnector
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, path, params=None, etag=None, allow_not_found=False):
+            self.calls.append(("get", path, params, etag))
+            if path.endswith("/readme"):
+                return {"encoding": "base64", "content": "IyBSRUFETUU="}, None, None
+            return None, None, None
+
+        def pages(self, path, params=None, etag=None):
+            self.calls.append(("pages", path, params, etag))
+            if path == "/user/repos":
+                return [{"full_name": "me/repo", "name": "repo", "updated_at": "2024-01-02T00:00:00Z", "default_branch": "main"}], '"repos"'
+            if path.endswith("/issues"):
+                return [{"number": 3, "title": "Bug", "body": "details", "updated_at": "2024-01-02T00:00:00Z", "user": {"login": "me"}}], None
+            if path.endswith("/pulls"):
+                return [{"number": 4, "title": "Fix", "body": "done", "updated_at": "2024-01-02T00:00:00Z", "user": {"login": "me"}}], None
+            if path.endswith("/comments"):
+                return [{"body": "looks good", "user": {"login": "reviewer"}, "created_at": "2024-01-02T00:00:00Z"}], None
+            if path.endswith("/commits"):
+                return [{"sha": "abcdef0123", "commit": {"message": "ship it", "author": {"date": "2024-01-02T12:00:00Z", "email": "me@example.com"}}, "author": {"login": "me"}}], None
+            return [], None
+
+    client = Client()
+    events = list(GithubConnector("token", "me", client).sync({}))
+    items = [e for e in events if hasattr(e, "external_id")]
+    assert {i.external_id for i in items} == {"me/me/repo/repo/repo", "me/me/repo/readme", "me/me/repo/issue/3", "me/me/repo/pr/4", "me/me/repo/commits/2024-01-02"}
+    assert any("reviewer:\nlooks good" in (i.body_text or "") for i in items)
+    assert all(call[0] in {"get", "pages"} for call in client.calls)
+    assert events[-1].external_id_prefix == "me/"
+
+
 def test_parse_message():
     item = parse_message(RAW, "allen-p/sent/1.")
     m = item.raw_meta

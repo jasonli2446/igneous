@@ -8,17 +8,15 @@ The Google Cloud project is in Testing mode (FD-1), so refresh tokens expire aft
 the connectors raise ReauthRequired and you re-run `igneous connect google`.
 """
 import json
-import os
 from pathlib import Path
 
-from cryptography.fernet import Fernet
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.config import settings
+from igneous.connectors import secrets
 
 SCOPES = [  # read-only everywhere (CO-2)
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -47,68 +45,29 @@ def client_secret_path() -> Path:
     return p
 
 
-def _fernet() -> Fernet:
-    key_file = _dir() / "token.key"
-    if not key_file.exists():
-        key_file.write_bytes(Fernet.generate_key())
-        os.chmod(key_file, 0o600)
-    return Fernet(key_file.read_bytes())
-
-
-def _ensure_table(s: Session) -> None:
-    s.execute(text("""
-        CREATE TABLE IF NOT EXISTS oauth_tokens (
-            provider   text NOT NULL,
-            account    text NOT NULL,
-            token_enc  bytea NOT NULL,       -- Fernet-encrypted authorized-user JSON
-            updated_at timestamptz NOT NULL DEFAULT now(),
-            PRIMARY KEY (provider, account))
-    """))
-
-
 def save(s: Session, account: str, creds: Credentials) -> None:
-    _ensure_table(s)
-    s.execute(text("""
-        INSERT INTO oauth_tokens (provider, account, token_enc) VALUES ('google', :a, :t)
-        ON CONFLICT (provider, account) DO UPDATE SET token_enc = EXCLUDED.token_enc, updated_at = now()
-    """), {"a": account, "t": _fernet().encrypt(creds.to_json().encode())})
-    s.commit()
-
-
-def save_secret(s: Session, provider: str, account: str, secret: str) -> None:
-    """Store a non-OAuth secret (e.g. a GitHub token) encrypted the same way. Never log or return `secret`."""
-    _ensure_table(s)
-    s.execute(text("""
-        INSERT INTO oauth_tokens (provider, account, token_enc) VALUES (:p, :a, :t)
-        ON CONFLICT (provider, account) DO UPDATE SET token_enc = EXCLUDED.token_enc, updated_at = now()
-    """), {"p": provider, "a": account, "t": _fernet().encrypt(secret.encode())})
-    s.commit()
+    secrets.save(s, "google", account, creds.to_json())
 
 
 def accounts(s: Session, provider: str = "google") -> list[str]:
-    _ensure_table(s)
-    return list(s.execute(text("SELECT account FROM oauth_tokens WHERE provider = :p ORDER BY 1"),
-                          {"p": provider}).scalars())
+    return secrets.accounts(s, provider)
 
 
 def load(s: Session, account: str | None = None) -> tuple[str, Credentials]:
     """Credentials for `account` (or the only connected account), refreshed and re-saved if needed."""
-    _ensure_table(s)
-    row = s.execute(text("""
-        SELECT account, token_enc FROM oauth_tokens WHERE provider = 'google'
-          AND (CAST(:a AS text) IS NULL OR account = :a) ORDER BY updated_at DESC LIMIT 1
-    """), {"a": account}).first()
-    if row is None:
-        raise ReauthRequired("no Google account connected: run `igneous connect google`")
-    creds = Credentials.from_authorized_user_info(json.loads(_fernet().decrypt(bytes(row.token_enc))), SCOPES)
+    try:
+        saved_account, saved = secrets.load(s, "google", account)
+    except RuntimeError as e:
+        raise ReauthRequired("no Google account connected: run `igneous connect google`") from e
+    creds = Credentials.from_authorized_user_info(json.loads(saved), SCOPES)
     if not creds.valid:
         try:
             creds.refresh(Request())
         except RefreshError as e:  # Testing-mode tokens die after 7 days
-            raise ReauthRequired(f"Google token for {row.account} expired or was revoked: "
+            raise ReauthRequired(f"Google token for {saved_account} expired or was revoked: "
                                  "run `igneous connect google` again") from e
-        save(s, row.account, creds)
-    return row.account, creds
+        save(s, saved_account, creds)
+    return saved_account, creds
 
 
 def connect(s: Session, open_browser: bool = True) -> str:

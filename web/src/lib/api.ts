@@ -187,7 +187,7 @@ export type Job = {
 
 export type SourceInfo = {
   id: string;
-  kind: "google" | "local" | "import" | "planned";
+  kind: "google" | "local" | "remote" | "import" | "planned";
   name: string;
   group: string;
   reads: string;
