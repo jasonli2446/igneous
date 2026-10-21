@@ -1260,6 +1260,63 @@ def test_entity_names_normalize_and_drop_generic():
     assert _usable("dealer tire")
 
 
+def test_entity_screening_caches_verdicts_in_database(monkeypatch):
+    from igneous.graph import entities
+
+    class Result:
+        def __init__(self, value=None):
+            self.value = value
+
+        def scalar(self):
+            return self.value
+
+    class Session:
+        def __init__(self):
+            self.cache, self.calls = {}, []
+
+        def execute(self, statement, params):
+            sql = str(statement)
+            self.calls.append((sql, params))
+            if "SELECT response FROM llm_cache" in sql:
+                return Result(self.cache.get(params["key"]))
+            if "INSERT INTO llm_cache" in sql:
+                self.cache[params["key"]] = __import__("json").loads(params["response"])
+            return Result()
+
+    session = Session()
+    calls = []
+    monkeypatch.setattr(entities, "_screen", lambda names: calls.append(names) or set(names))
+    assert entities._screened(session, ["igneous"]) == {"igneous"}
+    assert entities._screened(session, ["igneous"]) == {"igneous"}
+    assert calls == [["igneous"]]
+    assert any("llm_cache" in sql for sql, _ in session.calls)
+
+
+def test_project_merge_requires_two_shared_people():
+    from igneous.graph.entities import _shared_people
+
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+    class Session:
+        def __init__(self, rows):
+            self.rows, self.params = rows, None
+
+        def execute(self, _statement, params):
+            self.params = params
+            return Result(self.rows)
+
+    session = Session([(1,), (2,)])
+    assert _shared_people(session, [10, 20])
+    assert session.params == {"anchors": [10, 20]}
+    assert not _shared_people(Session([]), [10, 20])
+    assert not _shared_people(Session([(1,), (2,)]), [10])
+
+
 def _export_items(payload, provider=None, zipped=None):
     import io
     import json
