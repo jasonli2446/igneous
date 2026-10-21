@@ -438,6 +438,18 @@ def test_automatic_extraction_requires_explicit_source_opt_in(monkeypatch):
     assert params["sources"] == ["ai_chats"]
 
 
+def test_ask_retrieves_only_explicitly_approved_sources(monkeypatch):
+    from igneous.rag import qa
+    from igneous.rag.search import Filters
+
+    captured = []
+    monkeypatch.setattr(qa, "apply", lambda _s, _q, f: f or Filters())
+    monkeypatch.setattr(qa, "allowed_sources", lambda: frozenset({"ai_chats"}))
+    monkeypatch.setattr(qa, "hybrid", lambda _s, _q, f, **_kwargs: captured.append(f) or [])
+    assert qa.answer(object(), "What did I decide?")["answerable"] is False
+    assert captured[0].sources == ("ai_chats",)
+
+
 def test_extraction_spans_index_the_stored_body():
     """Regression: offsets were computed on a .strip()-ed body and stored against the original (off by one)."""
     from igneous.graph.extract import locate

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from igneous import llm
 from igneous.config import settings
+from igneous.graph.extract import allowed_sources
 from igneous.rag.constraints import apply
 from igneous.rag.rerank import rerank
 from igneous.rag.search import Filters, _where, hybrid
@@ -103,6 +104,10 @@ def answer(s: Session, question: str, f: Filters | None = None, use_graph: bool 
            mode: str = "hybrid") -> dict:
     t0 = time.time()
     f = apply(s, question, f)
+    # A question is explicit consent to ask a model, not to disclose every local source.
+    # Keep retrieval and graph expansion inside the same source allow-list as extraction.
+    approved = allowed_sources()
+    f.sources = tuple(sorted(approved.intersection(f.sources) if f.sources else approved))
     hits = hybrid(s, question, f, k=CONTEXT_CHUNKS, mode=mode)
     # Local filesystem and Notes evidence is searchable in the UI, but cannot be supplied to any model
     # (reranker, embedder, or LLM) until the owner has explicitly opted in.

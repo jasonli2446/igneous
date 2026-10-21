@@ -31,9 +31,9 @@ cd api && uv run igneous verify-synthetic-corpus ../data/synthetic-cross-source
 
 `igneous pipeline` runs spine -> chunk -> embed -> extract -> topics -> resolve. The topics stage lowercases and
 conservatively lemmatizes keys, merges only high-similarity local-embedding duplicates, and adds `RELATED_TO` after
-three shared messages; moved `ABOUT` edges keep their original provenance. Extraction calls the model, so it's
-bounded: `make demo EXTRACT=0` skips it, `EXTRACT=500` does more. Everything is incremental: re-running only
-processes what changed.
+three shared messages; moved `ABOUT` edges keep their original provenance. Extraction calls the model only for
+sources explicitly listed in `IGNEOUS_LLM_SOURCES`; set it to `email` before `make demo`, then use `EXTRACT=0` to
+skip calls or `EXTRACT=500` to process more. Everything is incremental: re-running only processes what changed.
 `docker compose up` also runs the api and web in containers.
 
 ## Layout

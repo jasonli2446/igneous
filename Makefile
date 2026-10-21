@@ -3,7 +3,7 @@ BASELINE_BOXES := lay-k skilling-j allen-p arnold-j delainey-d lavorato-j
 ALL_BOXES := $(BASELINE_BOXES) kaminski-v kean-s dasovich-j beck-s
 
 IGN := cd api && uv run igneous
-# Messages to LLM-extract per run (needs AWS_BEARER_TOKEN_BEDROCK). EXTRACT=0 skips model calls.
+# Messages to LLM-extract per run (needs AWS_BEARER_TOKEN_BEDROCK and IGNEOUS_LLM_SOURCES=email). EXTRACT=0 skips model calls.
 EXTRACT ?= 100
 
 .PHONY: enron synthetic-corpus db migrate demo baseline api web test
