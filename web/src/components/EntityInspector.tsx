@@ -161,7 +161,7 @@ export default function EntityInspector({ id, onSelectAction, onCloseAction, onC
           )}
         </div>
         {editing ? (
-          <input autoFocus value={draft} onChange={(x) => setDraft(x.target.value)} onBlur={saveName} aria-label="Project name"
+          <input autoFocus value={draft} onChange={(x) => setDraft(x.target.value)} onBlur={saveName} onFocus={(x) => x.target.select()} aria-label="Project name"
             onKeyDown={(x) => { if (x.key === "Enter") saveName(); if (x.key === "Escape") setEditing(false); }}
             className="mt-1 w-full rounded border border-accent bg-bg px-2 py-1 text-lg font-semibold outline-none" />
         ) : (
