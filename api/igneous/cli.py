@@ -78,15 +78,16 @@ def connect(provider: str = typer.Argument(..., help="google"),
 
 
 @app.command()
-def pipeline(stage: list[str] = typer.Option(None, help="spine, chunk, embed, extract, resolve; default all"),
+def pipeline(stage: list[str] = typer.Option(None, help="spine, chunk, embed, extract, topics, resolve; default all"),
              extract: int = typer.Option(0, help="LLM-extract up to N newest messages (costs money; 0 = skip)")):
     """Build the graph and index from whatever is new since the last run. Every stage is incremental."""
     from igneous.graph import extract as ex
-    from igneous.graph import resolve, spine
+    from igneous.graph import resolve, spine, topics
     from igneous.rag import chunking, embed
 
     stages = {"spine": spine.run, "chunk": chunking.run, "embed": embed.run,
               "extract": lambda s: ex.run(s, limit=extract) if extract else 0,
+              "topics": topics.run,
               "resolve": lambda s: resolve.run(s)["same_as"]}
     with SessionLocal() as s:
         for name in stage or stages:

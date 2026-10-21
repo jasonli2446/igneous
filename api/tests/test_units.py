@@ -116,6 +116,44 @@ def test_graph_filters_scope_discovery_and_final_serialization():
     assert graph == {"nodes": [{"id": 7, "type": "Person", "name": "Seed", "key": "seed", "degree": 3}], "edges": []}
 
 
+def test_topic_normalization_is_conservative_and_similarity_requires_lexical_evidence():
+    from igneous.graph.topics import Topic, normalize_key, similar_pairs
+
+    assert normalize_key("California Price Caps") == "california-price-cap"
+    assert normalize_key("Quarterly Analyses") == "quarterly-analysis"
+    assert normalize_key("Business News") == "business-news"  # not a plural noun we can safely change
+
+    topics = [Topic(1, "california-price-cap", "California price cap"),
+              Topic(2, "price-cap-policy", "California price cap policy"),
+              Topic(3, "unrelated", "Houston operations")]
+    pairs = list(similar_pairs(topics, [[1.0, 0.0], [0.999, 0.001], [1.0, 0.0]], threshold=0.96))
+    assert [(left.id, right.id) for left, right, _ in pairs] == [(1, 2)]
+
+
+def test_topic_related_to_uses_distinct_message_cooccurrences_and_own_extractor():
+    from igneous.graph.topics import EXTRACTOR, _related
+
+    class Result:
+        rowcount = 4
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, statement, params):
+            self.calls.append((str(statement), params))
+            return Result()
+
+    session = Session()
+    assert _related(session, 3) == 4
+    delete, insert = session.calls
+    assert "DELETE FROM edges WHERE type = 'RELATED_TO'" in delete[0]
+    assert delete[1] == {"ex": EXTRACTOR}
+    assert "count(DISTINCT a.src)" in insert[0]
+    assert "a.dst < b.dst" in insert[0]
+    assert insert[1]["minimum"] == 3 and insert[1]["ex"] == EXTRACTOR
+
+
 def test_locate_spans():
     from igneous.graph.extract import locate
 

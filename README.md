@@ -29,7 +29,9 @@ Re-run it safely to restore the exact fixture, or validate an existing output wi
 cd api && uv run igneous verify-synthetic-corpus ../data/synthetic-cross-source
 ```
 
-`igneous pipeline` runs spine -> chunk -> embed -> extract -> resolve. Extraction calls the model, so it's
+`igneous pipeline` runs spine -> chunk -> embed -> extract -> topics -> resolve. The topics stage lowercases and
+conservatively lemmatizes keys, merges only high-similarity local-embedding duplicates, and adds `RELATED_TO` after
+three shared messages; moved `ABOUT` edges keep their original provenance. Extraction calls the model, so it's
 bounded: `make demo EXTRACT=0` skips it, `EXTRACT=500` does more. Everything is incremental: re-running only
 processes what changed.
 `docker compose up` also runs the api and web in containers.
