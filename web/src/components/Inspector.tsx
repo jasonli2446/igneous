@@ -2,8 +2,7 @@
 
 import { useEffect, useState } from "react";
 import EntityInspector from "@/components/EntityInspector";
-import EvidenceList from "@/components/EvidenceList";
-import TimelineExplorer from "@/components/TimelineExplorer";
+import NodeSummary from "@/components/NodeSummary";
 import { InlineError, Skeleton } from "@/components/ui";
 import { api, NodeDetail, TYPE_COLORS } from "@/lib/api";
 
@@ -11,11 +10,6 @@ type Props = {
   id: number | null; onExpandAction: (id: number) => void; onCloseAction?: () => void;
   // Projects are editable: selecting one of their members, and re-fetching the graph after a correction.
   onSelectAction?: (id: number) => void; onChangedAction?: (keep: number | null) => void;
-};
-
-const LABELS: Record<string, string> = {
-  SENT: "Sent", RECEIVED: "Received", MEMBER_OF: "Organizations", WORKED_AT: "Worked at", IN_THREAD: "In conversations",
-  REPLIES_TO: "Replies", ATTENDED: "Events attended", MENTIONS: "Mentioned", ABOUT: "Topics", SAME_AS: "Other addresses",
 };
 
 const when = (iso: string) =>
@@ -51,6 +45,7 @@ export default function Inspector({ id, onExpandAction, onCloseAction, onSelectA
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [fullText, setFullText] = useState(false);
+  const [showOriginal, setShowOriginal] = useState(false);
 
   useEffect(() => {
     if (id === null) return setNode(null);
@@ -58,6 +53,7 @@ export default function Inspector({ id, onExpandAction, onCloseAction, onSelectA
     setNode(null);
     setError(null);
     setFullText(false);
+    setShowOriginal(false);
     api.node(id).then((n) => live && setNode(n)).catch((e) => live && setError(`Couldn't load details. (${String(e)})`));
     return () => { live = false; };
   }, [id, attempt]);
@@ -90,28 +86,18 @@ export default function Inspector({ id, onExpandAction, onCloseAction, onSelectA
           <div className="mt-0.5 text-xs break-all text-muted">{node.key}</div>)}
       </header>
 
-      <Section title="Connections">
-        <ul className="space-y-1">
-          {Object.entries(node.degree).map(([t, n]) => (
-            <li key={t} className="flex justify-between text-xs text-soft">
-              <span>{LABELS[t] ?? t}</span><span className="tabular-nums">{n}</span>
-            </li>
-          ))}
-        </ul>
-        <button onClick={() => onExpandAction(node.id)}
-          className="mt-3 rounded-md border border-line px-2.5 py-1 text-xs hover:bg-hover">
-          Show or hide their connections
-        </button>
-      </Section>
+      <NodeSummary id={node.id} onSelectAction={(x) => onSelectAction?.(x)} />
 
-      <Section title="Why the graph believes this">
-        <EvidenceList id={node.id} />
-      </Section>
-
-      <TimelineExplorer a={node.id} />
+      <button onClick={() => onExpandAction(node.id)}
+        className="rounded-md border border-line px-2.5 py-1 text-xs hover:bg-hover">
+        Show or hide their connections on the graph
+      </button>
 
       {src && (
         <Section title="Original">
+          <button onClick={() => setShowOriginal((v) => !v)} aria-expanded={showOriginal}
+            className="text-xs text-accent hover:underline">{showOriginal ? "Hide original" : "Show original"}</button>
+          {showOriginal && <>
           <div className="space-y-0.5 text-xs text-soft">
             {src.occurred_at && <div>{when(src.occurred_at)}</div>}
             {meta.from?.[0] && <div className="break-words">From {meta.from[0].email}</div>}
@@ -123,6 +109,7 @@ export default function Inspector({ id, onExpandAction, onCloseAction, onSelectA
               {fullText ? "Show less" : "Show full text"}
             </button>
           )}
+          </>}
         </Section>
       )}
     </div>
