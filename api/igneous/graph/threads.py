@@ -240,9 +240,11 @@ def _judge(s: Session, c: dict) -> dict:
                                 "confidence": {"type": "number"},
                                 "defining_terms": {"type": "array", "items": {"type": "string"}},
                                 "members": {"type": "array", "items": {"type": "integer"}}}},
-                max_tokens=900)
+                max_tokens=1200)
         except LLMDisabled:
             return fallback
+        except Exception:  # a failed judgment skips this candidate rather than stopping the run
+            return {**fallback, "keep": False}
         s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb)) "
                        "ON CONFLICT (cache_key) DO NOTHING"), {"k": key, "r": json.dumps(cached)})
     judged_ids = [shown[i].id for i in cached.get("members", []) if 0 <= i < len(shown)]

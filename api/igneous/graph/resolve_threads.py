@@ -87,25 +87,31 @@ def judge(s: Session, a: dict, b: dict) -> dict:
     if not settings.llm_enabled:
         return fallback
     prompt = f"A: {_card(s, a)}\n\nB: {_card(s, b)}"
-    key = "thread-pair:v1:" + hashlib.sha256(prompt.encode()).hexdigest()
+    key = "thread-pair:v2:" + hashlib.sha256(prompt.encode()).hexdigest()
     cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
     if cached is not None:
         return cached
     try:
         out, _ = structured(
             "Two threads were found in someone's records (projects, trips, classes, jobs). Decide how they relate. "
-            "'same': they are the same thing under different names or found twice (the same project, product, "
-            "trip, course). 'related': different things that belong together (one led to the other, one is part "
-            "of the other, a project and its interviews, two projects of the same client); give the relation in "
-            "a few words ('interviews for', 'part of', 'same client as'). 'distinct': unrelated. Give a confidence "
-            "0-1 and a short reason.",
+            "'same' ONLY if they are one and the same thing found twice: the same named project or product, the "
+            "same trip, the same course. You must be able to name what they both are; sharing people, a time "
+            "period, an organization or a topic is NOT enough (two trips in one summer are different trips; two "
+            "projects of one lab are different projects). 'related': different things that belong together (one "
+            "led to the other, one is part of the other, same client or lab); give the relation in a few words. "
+            "'distinct': not meaningfully related. When unsure between same and related, choose related. "
+            "Give a confidence 0-1 and a short reason that names the thing if 'same'.",
             prompt,
-            {"type": "object", "additionalProperties": False, "required": ["relation", "label", "confidence", "reason"],
+            {"type": "object", "additionalProperties": False,
+             "required": ["relation", "label", "confidence", "reason", "shared_identity"],
              "properties": {"relation": {"enum": ["same", "related", "distinct"]}, "label": {"type": "string"},
+                            "shared_identity": {"type": "string"},
                             "confidence": {"type": "number"}, "reason": {"type": "string"}}},
-            max_tokens=200)
+            max_tokens=500)
     except LLMDisabled:
         return fallback
+    except Exception:  # one failed judgment must not stop the run; unjudged pairs stay separate
+        return {"relation": "distinct", "label": "", "confidence": 0.0, "reason": "not judged"}
     s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb)) "
                    "ON CONFLICT (cache_key) DO NOTHING"), {"k": key, "r": json.dumps(out)})
     return out
@@ -122,19 +128,35 @@ def run(s: Session, log=print) -> dict:
             x = parent[x]
         return x
 
-    related, stats = [], {"pairs": 0, "same": 0, "related": 0, "distinct": 0}
+    related, stats = [], {"pairs": 0, "same": 0, "related": 0, "distinct": 0, "same_not_merged": 0}
+    verdicts: dict[tuple[int, int], dict] = {}
     for a, b in candidate_pairs(ts):
         v = judge(s, a, b)
+        verdicts[(min(a["id"], b["id"]), max(a["id"], b["id"]))] = v
         stats["pairs"] += 1
-        rel = v.get("relation", "distinct")
-        if rel == "same" and (v.get("confidence") or 0) >= 0.7:
-            parent[find(a["id"])] = find(b["id"])
-            stats["same"] += 1
-        elif rel == "related" and (v.get("confidence") or 0) >= 0.6:
-            related.append((a, b, v))
-            stats["related"] += 1
+        stats[v.get("relation", "distinct")] = stats.get(v.get("relation", "distinct"), 0) + 1
+
+    def is_same(x: int, y: int) -> bool:
+        v = verdicts.get((min(x, y), max(x, y)))
+        return bool(v) and v.get("relation") == "same" and (v.get("confidence") or 0) >= 0.8
+
+    members_of: dict[int, set[int]] = {t["id"]: {t["id"]} for t in ts}
+    # Complete-link merging, strongest first: two clusters merge only if EVERY pair across them was judged the
+    # same thing. One eager judgment can't chain unrelated threads together (how a trip got swallowed before).
+    for (x, y), v in sorted(verdicts.items(), key=lambda kv: -(kv[1].get("confidence") or 0)):
+        if not is_same(x, y):
+            if v.get("relation") == "related" and (v.get("confidence") or 0) >= 0.6:
+                related.append((x, y, v))
+            continue
+        rx, ry = find(x), find(y)
+        if rx == ry:
+            continue
+        if all(is_same(p, q) for p in members_of[rx] for q in members_of[ry]):
+            parent[rx] = ry
+            members_of[ry] |= members_of.pop(rx)
         else:
-            stats["distinct"] += 1
+            stats["same_not_merged"] += 1
+            related.append((x, y, {**v, "label": v.get("label") or "closely related"}))
 
     # Merge: each cluster keeps its biggest thread (most records), named after it; the others fold in.
     clusters: dict[int, list[dict]] = defaultdict(list)
@@ -162,8 +184,8 @@ def run(s: Session, log=print) -> dict:
                 WHERE id = :keep"""), {"keep": keep["id"], "alias": t["name"]})
             s.execute(text("DELETE FROM nodes WHERE id = :gone"), {"gone": t["id"]})
     # Link related threads (after merging, so links land on survivors).
-    for a, b, v in related:
-        ia, ib = folded_into.get(a["id"], a["id"]), folded_into.get(b["id"], b["id"])
+    for x, y, v in related:
+        ia, ib = folded_into.get(x, x), folded_into.get(y, y)
         if ia == ib:
             continue  # they ended up merged after all
         s.execute(text("""

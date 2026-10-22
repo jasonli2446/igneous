@@ -205,8 +205,10 @@ def _judge_batch(s: Session, claim: tuple[str, str], batch: list[tuple[dict, str
                                                           "verdict": {"enum": ["keep", "drop", "unsure"]},
                                                           "confidence": {"type": "number"},
                                                           "reason": {"type": "string"}}}}}},
-            max_tokens=200 + 120 * len(batch))
+            max_tokens=400 + 160 * len(batch))
     except LLMDisabled:
+        return []
+    except Exception:  # leave this batch unjudged; it's retried next run
         return []
     by_i = {r["edge"]: r for r in out.get("edges", [])}
     return [by_i.get(i, {"verdict": "unsure", "confidence": 0.0, "reason": "not judged"}) for i in range(len(batch))]
