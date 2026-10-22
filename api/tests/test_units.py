@@ -1783,3 +1783,18 @@ def test_verifier_snippets_claims_and_merge_safety():
     assert ("SAME_AS", "er") in verify.CLAIMS and ("PART_OF", "hierarchy") in verify.CLAIMS
     import inspect
     assert "v.confidence >= 0.8" in inspect.getsource(verify.apply_verdicts)
+
+
+def test_ask_suggestions_templates_skip_missing_slots():
+    from igneous.suggestions import build
+
+    assert build([], []) == []
+    assert build(["Ana"], []) == ["What have Ana and I talked about lately?"]
+    full = build(["Ana", "Bo"], [{"name": "Lisbon", "kind": "trip"}, {"name": "Atlas", "kind": "project"},
+                                 {"name": "CSDS 395", "kind": "class"}, {"name": "Extra", "kind": "thread"}])
+    assert full == ["Who's working on Atlas with me?", "When is the Lisbon?",
+                    "What have Ana and I talked about lately?", "What did we decide about CSDS 395?",
+                    "What have Bo and I talked about lately?"]
+    assert build([], [{"name": "Atlas", "kind": "project"}]) == [
+        "Who's working on Atlas with me?", "What did we decide about Atlas?"]
+    assert build([], [{"name": "Lisbon", "kind": "trip"}]) == ["When is the Lisbon?"]
