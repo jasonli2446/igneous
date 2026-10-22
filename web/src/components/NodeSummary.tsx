@@ -3,10 +3,10 @@
 import { useEffect, useState } from "react";
 import { InlineError, Skeleton } from "@/components/ui";
 import { api, NodeSummary as Summary } from "@/lib/api";
-import { CATEGORY_COLOR, TYPE_CATEGORY } from "@/lib/graph-style";
+import { categoryColor, TYPE_CATEGORY } from "@/lib/graph-style";
 
 const colorOf = (h: { type: string; category: string | null }) =>
-  CATEGORY_COLOR[h.category ?? TYPE_CATEGORY[h.type] ?? ""] ?? "#a8aca3";
+  categoryColor(h.category ?? TYPE_CATEGORY[h.type]);
 
 /** How a node connects to the rest of the graph, in a few plain sentences, then its top connections by category. */
 export default function NodeSummary({ id, onSelectAction, showConnections = true }: {
