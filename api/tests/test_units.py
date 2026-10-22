@@ -1821,3 +1821,12 @@ def test_thread_terms_match_whole_words_and_course_codes_cross_list():
     assert "course:395" in _tokens("CSDS 395") & _tokens("ECSE 395 Junior Engineering Design Seminar")
     pat = re.compile(r"(?<![a-z0-9])(eta)(?![a-z0-9])")
     assert pat.search("the eta platform demo") and not pat.search("beta testing") and not pat.search("theta")
+
+
+def test_only_group_conversations_become_thread_nodes():
+    from igneous.graph import item_class
+
+    sql = str(item_class.SYNC_THREAD_FLAG)
+    # a one-on-one conversation stays a conversation (it feeds the person's closeness) but isn't a second node
+    assert "'hidden', NOT (flag.ok AND flag.grp)" in sql and ">= 3 AS grp" in sql
+    assert "'conversational', flag.ok" in sql

@@ -119,8 +119,10 @@ WHERE n.type = 'Message' AND n.source_item_id = si.id AND si.item_class IS NOT N
   AND n.props->>'item_class' IS DISTINCT FROM si.item_class
 """)
 
-# A thread is a conversation node when it holds a conversation message and either a second one or a message
-# the user wrote. A lone received message nobody answered is an item, not a node.
+# A thread is a conversation when it holds a conversation message and either a second one or a message the
+# user wrote; a lone received message nobody answered is an item. A conversation is shown as its own node only
+# when it's a group (3+ people): a one-on-one conversation IS the relationship with that person, so it counts
+# toward them (conversational stays true; its messages stay visible) but isn't a second node beside them.
 SYNC_THREAD_FLAG = text(f"""
 WITH t AS (
     SELECT it.dst AS id,
@@ -130,9 +132,18 @@ WITH t AS (
     FROM edges it JOIN nodes m ON m.id = it.src AND m.type = 'Message'
     LEFT JOIN source_items si ON si.id = m.source_item_id
     WHERE it.type = 'IN_THREAD' GROUP BY it.dst),
-flag AS (SELECT id, (conv >= 2 OR (conv >= 1 AND replied)) AS ok FROM t)
-UPDATE nodes th SET props = th.props || jsonb_build_object('conversational', flag.ok, 'hidden', NOT flag.ok)
-FROM flag WHERE th.id = flag.id AND th.type = 'Thread' AND th.props->'conversational' IS DISTINCT FROM to_jsonb(flag.ok)
+people AS (
+    SELECT it.dst AS id, count(DISTINCT COALESCE(c.canonical_id, x.dst)) AS n
+    FROM edges it JOIN edges x ON x.src = it.src AND x.type = 'RECEIVED'
+    LEFT JOIN canonical c ON c.node_id = x.dst
+    WHERE it.type = 'IN_THREAD' GROUP BY it.dst),
+flag AS (SELECT t.id, (conv >= 2 OR (conv >= 1 AND replied)) AS ok, COALESCE(people.n, 0) >= 3 AS grp
+         FROM t LEFT JOIN people USING (id))
+UPDATE nodes th SET props = th.props || jsonb_build_object('conversational', flag.ok,
+                                                           'hidden', NOT (flag.ok AND flag.grp))
+FROM flag WHERE th.id = flag.id AND th.type = 'Thread'
+  AND (th.props->'conversational' IS DISTINCT FROM to_jsonb(flag.ok)
+       OR th.props->'hidden' IS DISTINCT FROM to_jsonb(NOT (flag.ok AND flag.grp)))
 """)
 
 # Traversal hides a node when props.hidden is true: a Message that isn't a conversation, or any message in a
