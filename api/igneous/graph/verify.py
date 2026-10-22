@@ -28,7 +28,10 @@ VERSION = "1"
 # Relationships derived by heuristics, and what they claim, phrased for the judge.
 CLAIMS = {
     ("PART_OF", "threads"): "the item is part of this thread of the person's life (trip, class, job, project...)",
-    ("INVOLVED_IN", "threads"): "this person is actually involved in this thread (takes part, not just mentioned)",
+    ("INVOLVED_IN", "threads"): "this person took part in this thread (went on the trip, took the class, worked on "
+                                "the project). Asking about it, hearing about it afterwards, or planning a different "
+                                "one (another year) is NOT taking part",
+    ("RELATED_TO", "threads"): "this person is connected to this thread (talked about it, helped, was told about it)",
     ("PART_OF", "entities"): "the item belongs to this project",
     ("INVOLVED_IN", "entities"): "this person works on or takes part in this project",
     ("WORKED_AT", "organizations"): "this person worked at / was a member of this organization",

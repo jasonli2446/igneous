@@ -651,7 +651,10 @@ def scored_members(s: Session, head: int, per: int = 8) -> dict[str, list[dict]]
     for p, n, people, recent in projects:
         cat = section_for_kind(kinds.get(p))
         out.setdefault(cat, []).append(
-            {"id": p, "strength": math.log1p(float(recent)) * 2 + math.log1p(n) * 0.25 + 0.5 * math.log1p(people)})
+            # Mostly about now: a one-time hangout years ago fades like an old friendship does. Size and people
+            # only count in proportion to how recent the thing is.
+            {"id": p, "strength": math.log1p(float(recent)) * 2
+                + (math.log1p(n) * 0.25 + 0.5 * math.log1p(people)) * min(1.0, float(recent) / max(1.0, n * 0.05))})
 
     # Places (Google Takeout Maps): where you actually go, by visit count and distinct days; saved places count too.
     if s.execute(text("SELECT EXISTS (SELECT 1 FROM nodes WHERE id = ANY(:me) AND props->>'self' = 'true')"),

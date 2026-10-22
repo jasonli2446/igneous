@@ -333,6 +333,7 @@ export const api = {
   renameEntity: (id: number, name: string) => send<Correction>("POST", `/graph/entity/${id}/rename`, { name }),
   hideEntity: (id: number) => send<Correction>("POST", `/graph/entity/${id}/hide`),
   mergeEntity: (id: number, other: number) => send<Correction>("POST", `/graph/entity/${id}/merge`, { other }),
+  mergePeople: (id: number, other: number) => send<{ merged: number[]; person: number }>("POST", `/graph/person/${id}/merge`, { other }),
   unlinkFromEntity: (id: number, node: number) => send<Correction>("POST", `/graph/entity/${id}/unlink`, { node }),
   undoCorrection: (overrideId: number) => send<{ undone: number }>("DELETE", `/overrides/${overrideId}`),
   node: (id: number) => get<NodeDetail>(`/graph/node/${id}`, {}),
