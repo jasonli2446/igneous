@@ -863,6 +863,9 @@ def earned_cut(scored: list[tuple[int, float]], lo: int = 1, hi: int = 12) -> li
     """Keep the strong ones: sort by score and cut at the largest relative drop (a project with two real children
     shows two, one with ten shows ten), between lo and hi."""
     scored = sorted(scored, key=lambda x: -x[1])
+    # Many children of similar size (a university's classes): no natural cut, so show the top `hi` rather than
+    # stop at the first small gap among the biggest few.
+    lo = max(lo, min(hi, len(scored) // 4))
     if len(scored) <= lo:
         return [i for i, _ in scored]
     cut, best = len(scored[:hi]), 0.0
@@ -884,7 +887,11 @@ def children(s: Session, node: int, ntype: str) -> list[int]:
         return []
     if ntype == "Organization" and own:
         # An org from your resume stands for its thread (graph/backbone.py): it opens to what's under it.
-        return [c for c in children(s, own, "Project") if c != node]
+        # A child that is itself an org's thread (xLab under Case Western) is shown as that org.
+        stands = dict(s.execute(text("""SELECT (props->>'thread')::bigint, id FROM nodes
+                                        WHERE type = 'Organization' AND props ? 'thread'""")).all())
+        out = [stands.get(c, c) for c in children(s, own, "Project")]
+        return [c for c in dict.fromkeys(out) if c != node]
     # Projects/threads under it (umbrellas, employers), weighted by their own size.
     # Children you stated (or your resume did) always show; others earn their place by size.
     stated = s.execute(text("""

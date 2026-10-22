@@ -574,6 +574,9 @@ def run(s: Session, log=print) -> int:
     from igneous.graph import resolve_threads
     resolve_threads.run(s, log=None)
     keep_keys[:] = s.execute(text("SELECT key FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'")).scalars().all()
+    s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND COALESCE((props->>'umbrella')::bool, false)
+                      AND NOT COALESCE((props->>'pinned')::bool, false)"""))
+    keep_keys[:] = [k for k in keep_keys if not k.startswith("umbrella:")]
     built += umbrellas(s, keep_keys)
     pinned_parents(s)  # stated structure (xLab over its projects) always holds
     attach_groups(s)   # named group chats / event series that belong to a thread (the Bellfield chats -> Bellfield house)
@@ -611,12 +614,19 @@ def umbrellas(s: Session, keep_keys: list[str]) -> int:
     built = 0
     thread_names = {re.sub(r"\s+", " ", n.lower()).strip() for n in s.execute(text(
         "SELECT name FROM nodes WHERE type = 'Project' AND key = ANY(:keep)"), {"keep": keep_keys}).scalars()}
+    # Orgs from your resume already hold their threads (graph/backbone.py): a term that is part of one's name
+    # ("Western Reserve University" in Case Western Reserve University) is that org, not a new umbrella.
+    org_names = [f" {re.sub(r'[^a-z0-9]+', ' ', n.lower()).strip()} " for n in s.execute(text("""
+        SELECT o.name FROM edges e JOIN nodes o ON o.id = e.dst
+        WHERE e.type = 'WORKED_AT' AND e.extractor IN ('profile', 'user')""")).scalars()]
     for term, by_thread in share.items():
         if len(by_thread) < UMBRELLA_THREADS:
             continue
         # A course is never over other courses (two classes share a prereq's name in their mail), and a term that
         # already names a thread is that thread, not a second thing above its neighbours.
-        if COURSE_CODE.fullmatch(term.strip()) or re.sub(r"\s+", " ", term.lower()).strip() in thread_names:
+        norm = re.sub(r"[^a-z0-9]+", " ", term.lower()).strip()
+        if (COURSE_CODE.fullmatch(term.strip()) or norm in thread_names
+                or (len(norm.split()) >= 2 and any(f" {norm} " in o for o in org_names))):
             continue
         months = s.execute(text("""
             SELECT count(DISTINCT date_trunc('month', occurred_at)) FROM source_items
