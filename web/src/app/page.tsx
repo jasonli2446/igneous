@@ -160,6 +160,17 @@ export default function Explorer() {
   stateRef.current = { introducedBy, expanded, seedId };
 
   // Click a node: reveal its top connections; click it again to fold them back.
+  // "This is wrong": take that link off the screen in place (no reload, no reflow). A node that was only on screen
+  // because of it goes too; one with other links stays.
+  const dropLink = useCallback(({ src, dst }: { src: number; dst: number }) => {
+    setData((prev) => {
+      const edges = prev.edges.filter((e) => !((e.src === src && e.dst === dst) || (e.src === dst && e.dst === src)));
+      const linked = new Set(edges.flatMap((e) => [e.src, e.dst]));
+      const seed = prev.nodes.find((n) => n.kind === "seed")?.id;
+      return { ...prev, edges, nodes: prev.nodes.filter((n) => n.id === seed || linked.has(n.id)) };
+    });
+  }, []);
+
   // Links each expand added (so collapsing removes exactly those, including links between nodes already shown).
   const edgesAddedBy = useRef<Map<number, Set<string>>>(new Map());
   const toggle = useCallback(async (id: number) => {
@@ -362,7 +373,7 @@ export default function Explorer() {
         {why ? (
           <WhyConnected a={why.a} b={why.b} onCloseAction={closePanel}
             onOpenAction={(id) => { setWhy(null); openFromPanel(id); }}
-            onChangedAction={() => { void load(trail[trail.length - 1] ?? null, false); }} />
+            onChangedAction={dropLink} />
         ) : (
           <Inspector id={detailId} onExpandAction={toggle} onCloseAction={closePanel}
             expanded={detailId !== null && expanded.has(detailId)}

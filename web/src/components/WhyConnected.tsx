@@ -23,7 +23,7 @@ const REL: Record<string, string> = {
 };
 
 /** One link: who and how, the verifier's reason when it has judged it, and the items it came from. */
-function EdgeCard({ e, terms, onWrong }: { e: WhyEdge; terms: string[]; onWrong?: (id: number) => void }) {
+function EdgeCard({ e, terms, onWrong }: { e: WhyEdge; terms: string[]; onWrong?: (e: WhyEdge) => void }) {
   return (
     <li className="rounded-md border border-line p-2.5">
       <div className="flex items-start gap-2">
@@ -37,7 +37,7 @@ function EdgeCard({ e, terms, onWrong }: { e: WhyEdge; terms: string[]; onWrong?
         : <p className="mt-1 text-xs text-muted">{ORIGIN[e.extractor] ?? "Inferred automatically; not checked yet."}</p>}
       {e.evidence.length > 0 && <div className="mt-2"><SourceRows items={e.evidence} highlight={terms} /></div>}
       {e.extractor !== "spine" && onWrong && (
-        <button onClick={() => onWrong(e.id)} className="mt-2 text-xs text-muted hover:text-danger hover:underline">
+        <button onClick={() => onWrong(e)} className="mt-2 text-xs text-muted hover:text-danger hover:underline">
           This is wrong
         </button>
       )}
@@ -54,15 +54,16 @@ function range(a: string | null, b: string | null) {
 /** The evidence behind a link: what two people actually share. */
 export default function WhyConnected({ a, b, onCloseAction, onOpenAction, onChangedAction }: {
   a: number; b: number; onCloseAction: () => void; onOpenAction: (id: number) => void;
-  /** The graph changed (a link was removed): the page reloads what's on screen. */
-  onChangedAction?: () => void;
+  /** A link was removed: the page drops it (and anything only it was holding) from what's on screen. */
+  onChangedAction?: (removed: { src: number; dst: number }) => void;
 }) {
   const [r, setR] = useState<Explanation | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   // "This is wrong": your verdict removes the link now and keeps it gone on every rebuild.
-  const wrong = (edge: number) => {
-    api.edgeIsWrong(edge).then(() => { setAttempt((n) => n + 1); onChangedAction?.(); }).catch((e) => setErr(String(e)));
+  const wrong = (edge: WhyEdge) => {
+    api.edgeIsWrong(edge.id).then(() => { setAttempt((n) => n + 1); onChangedAction?.({ src: edge.src, dst: edge.dst }); })
+      .catch((e) => setErr(String(e)));
   };
 
   useEffect(() => {
