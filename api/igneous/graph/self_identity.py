@@ -32,7 +32,7 @@ SERVICE_DOMAINS = ("import.calendar.google.com", "group.calendar.google.com", "g
                    "resource.calendar.google.com")
 SERVICE_LOCAL = re.compile(r"^(no-?reply|notifications?|mailer-daemon|do-?not-?reply|bounces?)([+.-].*)?$"
                            r"|(^|[-_.])no-?reply([-_.+]|$)", re.I)  # comments-noreply@, drive-shares-dm-noreply@
-# Senders that relay a real person's name for a product: "Jason Li (Google Docs)", "Kaitlyn (via Google Chat)".
+# Senders that relay a real person's name for a product: "Sam Lee (Google Docs)", "Alex (via Google Chat)".
 RELAY_NAME = re.compile(r"\((via |Google |from )[^)]*\)\s*$", re.I)
 RELAY_DOMAINS = ("docs.google.com", "drive.google.com", "calendar-server.bounces.google.com")
 
@@ -53,7 +53,7 @@ def is_service_address(addr: str) -> bool:
 
 
 def is_relay_name(name: str | None) -> bool:
-    """A display name a product put on someone else's behalf ("Jason Li (Google Docs)")."""
+    """A display name a product put on someone else's behalf ("Sam Lee (Google Docs)")."""
     return bool(name and RELAY_NAME.search(name))
 
 
@@ -135,7 +135,7 @@ WHERE p.id = sent.p AND p.type = 'Person' AND p.key LIKE '%@%'
 
 def run(s: Session) -> dict:
     s.execute(text("DELETE FROM edges WHERE type = 'SAME_AS' AND extractor = :ex"), {"ex": EXTRACTOR})
-    # Mark automated senders before linking anything, so a feed named "Jason Li Calendar" can't become the user.
+    # Mark automated senders before linking anything, so a feed named "Sam Lee Calendar" can't become the user.
     services = 0
     for nid, key, name in s.execute(text("SELECT id, key, name FROM nodes WHERE type = 'Person'")).all():
         if key != "me" and (is_service_address(key) or is_relay_name(name)):

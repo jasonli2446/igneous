@@ -7,7 +7,7 @@ you use. So the biggest parts of your life come from there first, and everything
      roles and dates. Every version is read once (cached by content), newest first.
   2. One structured extraction per version: experience {org, title, start, end}, education {school, degree,
      start, end}, projects {name, description}. Each fact keeps the document it came from.
-  3. Experience -> you WORKED_AT an Organization named as you name it ("KKR", "1848 Ventures"), with dates and the
+  3. Experience -> you WORKED_AT an Organization named as you name it ("BigCo", "Startup Studio"), with dates and the
      domain it matches. Projects -> pinned threads named as you name them. Education -> your school.
      All are pinned (origin 'profile'): never dropped by the verifier, and the gold-set equivalent of what you'd say.
   4. Older versions keep roles that later versions drop (history), newer versions win on titles and dates.
@@ -73,13 +73,13 @@ def extract(s: Session, doc) -> dict | None:
     try:
         out, _ = structured(
             "Read a document and, if it describes its owner (a resume, CV or profile), extract their history as "
-            "they state it. Use the organization and project names exactly as written ('KKR', '1848 Ventures', "
-            "'xLab'). An entry's org is the organization alone: when a heading combines an institution, an "
-            "organization and a project or client ('CWRU xLab - Dealer Tire'), org is the organization ('xLab'), "
-            "parent is the larger institution it belongs to ('Case Western Reserve University', spelled out), and "
-            "project is the project or client ('Dealer Tire'); otherwise parent and project are ''. Dates as YYYY-MM "
+            "they state it. Use the organization and project names exactly as written ('BigCo', 'Startup Studio', "
+            "'Robotics Lab'). An entry's org is the organization alone: when a heading combines an institution, an "
+            "organization and a project or client ('State U Robotics Lab - Acme Client'), org is the organization ('Robotics Lab'), "
+            "parent is the larger institution it belongs to ('State University', spelled out), and "
+            "project is the project or client ('Acme Client'); otherwise parent and project are ''. Dates as YYYY-MM "
             "(or YYYY, or 'present'). domain_hint: the organization's or school's own email/web domain if you can "
-            "tell (kkr.com, case.edu), else ''; a lab or program inside a university has no domain of its own (''). "
+            "tell (employer.com, university.edu), else ''; a lab or program inside a university has no domain of its own (''). "
             "A project's org: the employer or lab it was done for, else ''. If the "
             "document isn't about its owner, is_about_owner=false and leave the lists empty. person_name: the full "
             "name of the person the document is about, exactly as written at the top.",

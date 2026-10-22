@@ -67,7 +67,7 @@ class DriveConnector:
 
     def _folder_name(self, folder_id: str) -> str | None:
         """A parent folder's human name (one read-only lookup per folder per sync), so the graph shows
-        "Draw Steel" rather than a Drive id. None when the folder isn't visible to this account."""
+        "Gloomhaven Night" rather than a Drive id. None when the folder isn't visible to this account."""
         cache = self.__dict__.setdefault("_folder_names", {})
         if folder_id not in cache:
             try:

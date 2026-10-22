@@ -156,7 +156,7 @@ CONTAINED = 0.8  # share of two people's common records inside one project or gr
 
 def contexts_of(s: Session, a: int, others: list[int]) -> dict[int, int]:
     """{other: context} for each person whose whole shared history with `a` sits in one project or group chat
-    (Praveen and Aadhav only ever overlap on the CSDS 393 project): that context explains the tie, so the other
+    (Taylor and Sam only ever overlap on the CS 401 project): that context explains the tie, so the other
     person belongs under it, not beside `a`. Pairs with history of their own (outside any single context) stay."""
     if not others:
         return {}
@@ -320,7 +320,7 @@ def edge_view(row: dict, evidence: list[dict]) -> dict:
     return {"id": row["id"], "type": row["type"], "extractor": row["extractor"],
             "src": row["src"], "dst": row["dst"], "src_name": row.get("src_name"), "dst_name": row.get("dst_name"),
             "verdict": p.get("verdict"), "reason": p.get("reason"),
-            # What the rule that made it saw ("62% of its conversations involve case.edu"), for unjudged links.
+            # What the rule that made it saw ("62% of its conversations involve university.edu"), for unjudged links.
             "why": p["why"] if isinstance(p.get("why"), str) else "; ".join(p.get("why") or []) or None,
             "confidence": p.get("confidence", row.get("confidence")), "evidence": evidence}
 
@@ -807,7 +807,7 @@ def view(s: Session, seed: int, per: int = 6) -> dict:
 
 
 def _structure(s: Session, ids: list[int]) -> list[dict]:
-    """What's part of what among the visible nodes (ETA in xLab, xLab in Case Western), as stored. An org that
+    """What's part of what among the visible nodes (Project Atlas in the Lab, the Lab in State University), as stored. An org that
     stands for a thread carries that thread's links."""
     alias = dict(s.execute(text("""SELECT (props->>'thread')::bigint, id FROM nodes
                                    WHERE id = ANY(:i) AND type = 'Organization' AND props ? 'thread'"""), {"i": ids}).all())
@@ -938,7 +938,7 @@ def children(s: Session, node: int, ntype: str) -> list[int]:
         return []
     if ntype == "Organization" and own:
         # An org from your resume stands for its thread (graph/backbone.py): it opens to what's under it.
-        # A child that is itself an org's thread (xLab under Case Western) is shown as that org.
+        # A child that is itself an org's thread (the Lab under State University) is shown as that org.
         stands = dict(s.execute(text("""SELECT (props->>'thread')::bigint, id FROM nodes
                                         WHERE type = 'Organization' AND props ? 'thread'""")).all())
         out = [stands.get(c, c) for c in children(s, own, "Project")]
@@ -1033,7 +1033,7 @@ def fallback_neighbors(s: Session, node: int, head: int, exclude: set[int], k: i
     person = s.execute(text("SELECT type = 'Person' FROM nodes WHERE id = :n"), {"n": node}).scalar()
     rows = s.execute(text(f"""
         WITH direct AS (
-            -- Never the node's own parent (what it's part of): opening xLab must not list Case Western in it.
+            -- Never the node's own parent (what it's part of): opening the Lab must not list State University in it.
             SELECT CASE WHEN e.src = :n THEN e.dst ELSE e.src END AS o,
                    (CASE WHEN e.props->>'verdict' = 'keep' OR e.extractor IN ('user', 'profile', 'contacts', 'spine')
                          THEN 2 ELSE 1 END) + COALESCE(e.confidence, 0.5) AS w

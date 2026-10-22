@@ -96,7 +96,7 @@ def split_name(name: str, key: str) -> tuple[str, str]:
 
 
 def unresolvable(p: P) -> bool:
-    """Exchange-mangled stubs ("e-mail <.john@enron.com>"), role mailboxes and product relays ("Jason Li
+    """Exchange-mangled stubs ("e-mail <.john@enron.com>"), role mailboxes and product relays ("Sam Lee
     (Google Docs)", which carries someone else's name) can't be one person."""
     from igneous.graph.self_identity import is_relay_name, is_service_address
     return (p.local.startswith(".") or p.name.lower() in ROLE_WORDS or p.local in ROLE_WORDS
@@ -165,7 +165,7 @@ threshold_exact = 0.6  # score given to a rare exact-name pair (above THRESHOLD,
 def _same_bearer(a: P, b: P) -> bool:
     """Cheap evidence two identities with one name belong to the same human: a shared correspondent, or the same
     organizational mail domain (two addresses at your school). A phone isn't evidence on its own (two different
-    people named Drew can each have one), so it joins a bearer only through those."""
+    people named Jordan can each have one), so it joins a bearer only through those."""
     if a.peers & b.peers:
         return True
     return bool(a.is_email and b.is_email and a.domain == b.domain and a.domain not in (
@@ -300,7 +300,7 @@ def refresh_canonical(s: Session) -> int:
         if c:
             names = [meta[n] for n in c if n not in is_self and meta[n].name and "@" not in meta[n].name
                      and not re.fullmatch(r"\+?\d[\d\s()-]+", meta[n].name)]
-            # A real name has a first and last name and isn't an address handle ("jasonli2446"); prefer it over
+            # A real name has a first and last name and isn't an address handle ("jlee2026"); prefer it over
             # a single-token card name, then prefer contact cards, then the best-connected identity.
             handles = {k.split("@")[0].lower() for k in (meta[n].key for n in c) if "@" in k}
             named = sorted(names, key=lambda m, h=handles: (not _human_name(m.name, h),

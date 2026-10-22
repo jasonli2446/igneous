@@ -1,10 +1,10 @@
 """Life threads: the trips, classes, jobs, hobbies and projects that no single record names.
 
-A Seattle trip is a flight email, an itinerary doc, browsing, a calendar block and a group chat, and nothing
+A weekend trip is a flight email, an itinerary doc, browsing, a calendar block and a group chat, and nothing
 labels all of them. What they share is a distinctive term that suddenly shows up in several kinds of source at
 once. So a thread is found, not configured:
 
-  1. Terms: capitalized phrases from item titles and text ("Seattle", "Pike Place", "CSDS 395", "Draw Steel").
+  1. Terms: capitalized phrases from item titles and text ("Portland", "Powell's", "CS 401", "Gloomhaven Night").
   2. Burst: a term that appears in 3+ distinct sources within a <= BURST_DAYS window, and is not everywhere all
      the time (document-frequency cap), is a candidate. The densest window is its span.
   3. Members: items in the window that mention the term; people involved in 2+ of them.
@@ -12,7 +12,7 @@ once. So a thread is found, not configured:
   5. Judge: with the model enabled and sources opted in (IGNEOUS_LLM_SOURCES), one cached structured call per
      candidate decides keep / kind (trip, class, job, hobby, project, ... free text) / the name the user would
      use, from titles and short snippets of opted-in sources only (counts for the rest). Without it, a thread
-     is named by its term and month ("Seattle · Aug 2026"), kind "thread". Low confidence is kept as a
+     is named by its term and month ("Portland · Aug 2026"), kind "thread". Low confidence is kept as a
      suggestion (props.suggested), never silently promoted.
 
 Writes `Project` nodes with props.kind and props.derived='threads', PART_OF (item -> thread) and INVOLVED_IN
@@ -46,7 +46,7 @@ SOURCES = ("gmail", "email", "imessage", "gcal", "drive", "fs", "notes", "ai_cha
            "takeout_activity", "takeout_chrome", "takeout_tasks", "takeout_meet", "takeout_chat")
 
 COURSE_CODE = re.compile(r"[A-Za-z]{2,5}\s?\d{3}[A-Za-z]?")
-# Capitalized phrases (1-3 words), or course-style codes ("CSDS 395").
+# Capitalized phrases (1-3 words), or course-style codes ("CS 401").
 TERM = re.compile(r"\b(?:[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,}){0,2}|[A-Z]{2,5}\s?\d{3})\b")
 STOP = {
     # sentence starters, days, months, generic product/UI words and greetings that are capitalized for other reasons
@@ -59,7 +59,7 @@ STOP = {
     "Google", "Gmail", "Chrome", "Search", "Maps", "Drive", "Docs", "Calendar", "Meet", "Messages", "Message",
     "Email", "Mail", "Inbox", "Account", "Password", "Security", "Notification", "Update", "Order", "Receipt",
     "Unsubscribe", "Privacy", "Terms", "Click", "View", "Read", "More", "New", "Re", "Fwd", "Fw", "Visited",
-    "Searched", "Watched", "Used", "Viewed", "Assistant", "User", "Jason", "Igneous",  # the user + this tool
+    "Searched", "Watched", "Used", "Viewed", "Assistant", "User", "Igneous",  # AI chat roles + this tool
 }
 
 
@@ -84,7 +84,7 @@ def _items(s: Session) -> list:
         LEFT JOIN nodes n ON n.source_item_id = si.id AND n.type IN ('Message', 'File', 'Event')
         WHERE si.source = ANY(:src) AND si.occurred_at IS NOT NULL
           -- Notifications and marketing never make or join a thread (they stay searchable and as evidence):
-          -- a promo that mentions "Little Italy" isn't part of anything.
+          -- a promo that mentions "Chinatown" isn't part of anything.
           AND COALESCE(si.item_class, 'conversation') NOT IN ('notification', 'marketing')
         ORDER BY si.id, n.id
     """), {"src": list(SOURCES)}).all()
@@ -92,7 +92,7 @@ def _items(s: Session) -> list:
 
 def _bursts(its: list) -> list[tuple[int, int]]:
     """Windows where a term is far denser than its own background: (lo, hi) index ranges into the time-sorted
-    items. A place mentioned for years (Seattle) can still have a trip-shaped spike; each spike is a candidate."""
+    items. A place mentioned for years (Portland) can still have a trip-shaped spike; each spike is a candidate."""
     if len(its) < MIN_ITEMS:
         return []
     span_days = max(1.0, (its[-1].occurred_at - its[0].occurred_at).total_seconds() / 86400)
@@ -127,6 +127,11 @@ def candidates(s: Session) -> list[dict]:
             by_term[t].append(it)
     people = {r[0] for r in s.execute(text(
         "SELECT lower(name) FROM nodes WHERE type = 'Person' AND name ~ ' '"))}
+    # The owner's own name words ("Sam", "Lee") are on everything they write: never a thread on their own.
+    people |= {w.lower() for (n,) in s.execute(text("""
+        SELECT n.name FROM nodes n WHERE n.type = 'Person' AND (COALESCE((n.props->>'self')::bool, false)
+           OR n.id IN (SELECT c.node_id FROM canonical c JOIN nodes h ON h.id = c.canonical_id
+                       WHERE COALESCE((h.props->>'self')::bool, false)))""")) for w in (n or "").split() if "@" not in w}
     n_items = len(items)
     out = []
     for term, its in by_term.items():
@@ -143,7 +148,7 @@ def candidates(s: Session) -> list[dict]:
 
 
 def _merge(cands: list[dict]) -> list[dict]:
-    """Candidates over mostly the same items in overlapping windows are one thread ("Seattle" + "Pike Place")."""
+    """Candidates over mostly the same items in overlapping windows are one thread ("Portland" + "Powell's")."""
     cands.sort(key=lambda c: (-len(c["sources"]), -len(c["items"])))
     merged: list[dict] = []
     for c in cands:
@@ -248,8 +253,8 @@ def _judge(s: Session, c: dict) -> dict:
                 "You find the threads of someone's life in their records: a trip, a class, a job or internship, a "
                 "hobby, a project, a club, an event they planned. These records were grouped because they share "
                 "some words within a time window, but sharing a word doesn't make them one thing. Decide: is "
-                "there a real thread here? If yes: name it the way the person would say it ('Seattle trip', "
-                "'CSDS 395', 'Draw Steel'), say what kind of thing it is, list the words that actually identify "
+                "there a real thread here? If yes: name it the way the person would say it ('weekend trip', "
+                "'CS 401', 'Gloomhaven Night'), say what kind of thing it is, list the words that actually identify "
                 "it (its name, nicknames, codes, not generic words like 'other', 'meeting', 'notes'), and list "
                 "the numbers of ONLY the records that are about it. Leave out records that merely share a word "
                 "(an unrelated meeting, a newsletter). If there is no single thread, keep=false.",
@@ -421,7 +426,7 @@ def _registered_all(rows, items: list) -> dict[str, dict]:
             lo, hi = row.span_start - _td(days=30), row.span_end + _td(days=30)
         specs.append((row.key, terms, lo, hi))
     # Whole-word matching: a short defining term ("eta") must not match inside other words ("beta", "theta").
-    # A course code matches with or without its space ("csds 395" / "csds395"), and only with its department.
+    # A course code matches with or without its space ("CS 401" / "cs401"), and only with its department.
     def pat(t: str) -> str:
         m = re.fullmatch(r"([a-z]{2,5})\s?(\d{3})", t)
         return rf"{m.group(1)}\s?{m.group(2)}" if m else re.escape(t)
@@ -456,7 +461,7 @@ def _write_thread(s: Session, key: str, name: str, kind: str | None, terms: list
             _edge(s, it.node_id, tid, "PART_OF", {"why": f"mentions {terms[0]}"}, it.id, 0.6)
     # Who took part comes from the strongest evidence: the thread's own group chat (the chat that most of its
     # conversation happened in) and the attendees of its events. Someone who only talked about it with you ("how
-    # was Europe?") is related to it, not part of it.
+    # was the summer trip?") is related to it, not part of it.
     participants = _participants(s, tid, [r.id for r in members])
     # No group chat or events to say who took part (a trip planned over email and one-on-one texts): then the
     # people in its small conversations are the best evidence we have; the verifier checks each one.
@@ -520,7 +525,7 @@ def run(s: Session, log=print) -> int:
     _migrate_registry(s)
     items = _items(s)
     items_by_id = {r.id: r for r in items}
-    # Your stated links ('user') are never deleted: viewers mid-rebuild must not see xLab lose its projects.
+    # Your stated links ('user') are never deleted: viewers mid-rebuild must not see the Lab lose its projects.
     s.execute(text("DELETE FROM edges WHERE extractor IN (:x, 'hierarchy', 'thread-resolution')"), {"x": EXTRACTOR})
     keep_keys: list[str] = []
     claimed: set[int] = set()
@@ -599,9 +604,9 @@ def run(s: Session, log=print) -> int:
                       AND NOT COALESCE((props->>'pinned')::bool, false)"""))
     keep_keys[:] = [k for k in keep_keys if not k.startswith("umbrella:")]
     built += umbrellas(s, keep_keys)
-    pinned_parents(s)  # stated structure (xLab over its projects) always holds
+    pinned_parents(s)  # stated structure (the Lab over its projects) always holds
     _short_named(s)    # chats named by an ambiguous token ("395") go to the thread they fit, if one clearly does
-    attach_groups(s)   # named group chats / event series that belong to a thread (the Bellfield chats -> Bellfield house)
+    attach_groups(s)   # named group chats / event series that belong to a thread (the Maple St chats -> the shared house)
     s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'
                       AND NOT (key = ANY(:keep)) AND NOT COALESCE((props->>'pinned')::bool, false)"""),
               {"keep": keep_keys})
@@ -611,8 +616,8 @@ def run(s: Session, log=print) -> int:
 
 
 def umbrellas(s: Session, keep_keys: list[str]) -> int:
-    """Long-running things several threads sit under: an org, lab, program or club ("xLab" over Dealer Tire,
-    ETA and the avatar kiosk). The opposite of a thread: persistent (many months, no single burst) and
+    """Long-running things several threads sit under: an org, lab, program or club ("the Lab" over Acme Client,
+    Project Atlas and the kiosk prototype). The opposite of a thread: persistent (many months, no single burst) and
     concentrated in a group of threads. Proposes thread PART_OF umbrella edges; the verifier checks each."""
     threads_ = s.execute(text("""
         SELECT t.id, t.key FROM nodes t WHERE t.type = 'Project' AND t.props->>'derived' = 'threads'
@@ -637,7 +642,7 @@ def umbrellas(s: Session, keep_keys: list[str]) -> int:
     thread_names = {re.sub(r"\s+", " ", n.lower()).strip() for n in s.execute(text(
         "SELECT name FROM nodes WHERE type = 'Project' AND key = ANY(:keep)"), {"keep": keep_keys}).scalars()}
     # Orgs from your resume already hold their threads (graph/backbone.py): a term that is part of one's name
-    # ("Western Reserve University" in Case Western Reserve University) is that org, not a new umbrella.
+    # ("Reserve University" in Western Reserve University) is that org, not a new umbrella.
     org_names = [f" {re.sub(r'[^a-z0-9]+', ' ', n.lower()).strip()} " for n in s.execute(text("""
         SELECT o.name FROM edges e JOIN nodes o ON o.id = e.dst
         WHERE e.type = 'WORKED_AT' AND e.extractor IN ('profile', 'user')""")).scalars()]
@@ -766,7 +771,7 @@ def pin_gold(s: Session, gold: dict) -> int:
 
 def _short_named(s: Session) -> int:
     """A chat named by a short or ambiguous token ("395": the class group chat) can't be matched by name alone, since
-    "395" is CSDS 395 and ECSE 395 alike. Among the threads whose terms contain that token, the chat goes to the one
+    "401" is CS 401 and EE 401 alike. Among the threads whose terms contain that token, the chat goes to the one
     it fits best (the share of its active days inside the thread's span, plus people they share), and only when
     that one clearly fits better than the others. The verifier then checks the link."""
     chats = s.execute(text("""
@@ -815,8 +820,8 @@ def _short_named(s: Session) -> int:
 
 
 def attach_groups(s: Session) -> int:
-    """A named group chat or a recurring event is often *about* a thread: three chats called "Bellfield" and
-    "Bellfield party planning" belong to the Bellfield house. Propose chat/event PART_OF thread when the chat's
+    """A named group chat or a recurring event is often *about* a thread: three chats called "Maple St" and
+    "Maple St party planning" belong to the shared house. Propose chat/event PART_OF thread when the chat's
     name contains one of the thread's defining terms; the verifier then checks each link."""
     threads_ = s.execute(text("""
         SELECT p.id, r.terms FROM nodes p JOIN thread_registry r ON r.key = p.key

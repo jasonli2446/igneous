@@ -1,14 +1,14 @@
 """Hang your life's threads on its backbone: the organizations and schools you worked at or studied at.
 
 Your resume (graph/profile.py) says where you were; the threads stage (graph/threads.py) finds what you did. Neither
-knows the other, which left "xLab" as both an organization and a thread, and Case Western with no classes under
+knows the other, which left "the Lab" as both an organization and a thread, and State University with no classes under
 it. This stage joins them, from evidence only, for every org in your backbone:
 
   1. Same thing: a thread named exactly like the org (or a name it's also known by) IS the org. It becomes the
      org's own thread: its sub-projects, records and people show under the org, and the duplicate leaves the view.
   2. Stated: projects your resume lists under the org (`props.resume_projects`) are part of it.
   3. Mostly theirs: a thread most of whose correspondence involves the org's email domain (a class whose mail
-     comes from case.edu, a job thread on kkr.com) is part of it. Only the most specific org takes a thread
+     comes from university.edu, a job thread on employer.com) is part of it. Only the most specific org takes a thread
      (a lab before its university), and an org you never wrote to doesn't. Your own addresses don't count.
   4. Classes: a thread judged a class or course, inside your dates at exactly one school, was taken there
      (a class run in group chats has no school email to go on).
@@ -74,7 +74,7 @@ def _org_thread(s: Session, org: dict, threads: list[dict]) -> int:
     names = {_norm(org["name"]), *(_norm(a) for a in (org["props"] or {}).get("aliases", []))}
 
     def same_name(n: str) -> bool:
-        # Exactly, or one name inside the other word for word with 2+ words ("Case Western Reserve" is the
+        # Exactly, or one name inside the other word for word with 2+ words ("State University" is the
         # university); a single shared word ("Case") is not enough.
         return n in names or any(len(n.split()) >= 2 and len(m.split()) >= 2 and (f" {n} " in f" {m} " or f" {m} " in f" {n} ")
                                  for m in names)
@@ -163,7 +163,7 @@ def run(s: Session, log=print) -> dict:
     stats = {"orgs": len(orgs), "stated": 0, "by_domain": 0, "nested": 0}
     for o in orgs:
         ot = org_thread[o["id"]]
-        # An org inside an org (xLab in Case Western): its thread is under the parent's.
+        # An org inside an org (the Lab in State University): its thread is under the parent's.
         if o["parent"] in org_thread:
             _link(s, ot, org_thread[o["parent"]], "part of it, per your resume", 1.0, [], stated=True)
             stats["nested"] += 1

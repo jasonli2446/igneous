@@ -15,7 +15,7 @@ from igneous.db import SessionLocal
 TOKEN = "ghp_" + "Z" * 36
 ACTIVITY = {
     "Search": [
-        {"header": "Search", "title": "Searched for draw steel rules", "time": "2025-06-01T14:02:00.000Z",
+        {"header": "Search", "title": "Searched for gloomhaven night rules", "time": "2025-06-01T14:02:00.000Z",
          "titleUrl": "https://www.google.com/search?q=draw+steel+rules", "products": ["Search"]},
         {"header": "Search", "title": f"Searched for token {TOKEN}", "time": "2025-06-01T15:00:00.000Z"},
         {"header": "Search", "title": "Used Google Search", "time": "2025-06-01T16:00:00.000Z", "products": ["Search"]},
@@ -25,7 +25,7 @@ ACTIVITY = {
          "details": [{"name": "From Google Ads"}]},
     ],
     "YouTube": [
-        {"header": "YouTube", "title": "Watched Draw Steel actual play", "time": "2025-06-02T20:00:00.000Z",
+        {"header": "YouTube", "title": "Watched Gloomhaven Night actual play", "time": "2025-06-02T20:00:00.000Z",
          "subtitles": [{"name": "Some Channel"}]},
     ],
     "Gemini Apps": [
@@ -36,15 +36,15 @@ ACTIVITY = {
     ],
 }
 HISTORY = {"Browser History": [
-    {"title": "Draw Steel wiki", "url": "https://wiki.example.com/draw-steel?utm_campaign=a&page=2#top",
+    {"title": "Gloomhaven Night wiki", "url": "https://wiki.example.com/gloomhaven-night?utm_campaign=a&page=2#top",
      "time_usec": 1748800000000000, "page_transition": "LINK"},
-    {"title": "Draw Steel wiki", "url": "https://wiki.example.com/draw-steel?page=2&utm_medium=b",
+    {"title": "Gloomhaven Night wiki", "url": "https://wiki.example.com/gloomhaven-night?page=2&utm_medium=b",
      "time_usec": 1748800600000000, "page_transition": "LINK"},
     {"title": "Other", "url": "https://other.example.org/", "time_usec": 1748801200000000},
     {"title": "no", "url": "chrome://settings", "time_usec": 1748801200000000},
 ]}
 BOOKMARKS = (b'<!DOCTYPE NETSCAPE-Bookmark-file-1><DL><p><DT><H3>Games</H3><DL><p>'
-             b'<DT><A HREF="https://example.com/ds?utm_source=x">Draw Steel</A></DL><p>'
+             b'<DT><A HREF="https://example.com/ds?utm_source=x">Gloomhaven Night</A></DL><p>'
              b'<DT><A HREF="https://example.com/top">Top</A></DL>')
 SAVED = {"type": "FeatureCollection", "features": [
     {"geometry": {"coordinates": [-81.6, 41.5], "type": "Point"},
@@ -77,7 +77,7 @@ def build_zip(path: Path, files: dict[str, bytes | dict]) -> Path:
 
 CHAT_MSGS = {"messages": [
     {"creator": {"name": "Sam Lee", "email": "sam@example.com", "user_type": "Human"},
-     "created_date": "Tuesday, May 6, 2025 at 3:04:05\u202fPM UTC", "text": f"see you at draw steel {TOKEN}",
+     "created_date": "Tuesday, May 6, 2025 at 3:04:05\u202fPM UTC", "text": f"see you at gloomhaven night {TOKEN}",
      "topic_id": "t", "message_id": "m1"},
     {"creator": {"name": "Me", "email": "me@example.com", "user_type": "Human"},
      "created_date": "Tuesday, May 6, 2025 at 3:09:00\u202fPM UTC", "text": "ok", "topic_id": "t", "message_id": "m2"}]}
@@ -131,15 +131,15 @@ def test_parse_items_cover_all_parts(zpath):
     assert "do not import" not in "".join(i.body_text for i in items)
     assert "Buy dice [completed, done 2025-05-02]" in ids["tasks/l1"].body_text and "d10s" in ids["tasks/l1"].body_text
     chat = ids["chat/dm-abc/2025-05-06"]
-    assert chat.occurred_at.hour == 15 and "Sam Lee: see you at draw steel [REDACTED" in chat.body_text
+    assert chat.occurred_at.hour == 15 and "Sam Lee: see you at gloomhaven night [REDACTED" in chat.body_text
     assert chat.raw_meta["participants"] == ["me@example.com", "sam@example.com"]
     assert ids["meet/conf1"].raw_meta["event_id"] == "EVT123" and "Meeting abc-defg-hij (0:30:00)" in ids["meet/conf1"].body_text
     assert "read.example.com/x)" in ids["chrome/reading-list"].body_text
     assert any("Records.json" in n for n in report["notes"])
     search = ids["activity/search/2025-06-01"]
-    assert "[14:02] Searched for draw steel rules" in search.body_text
+    assert "[14:02] Searched for gloomhaven night rules" in search.body_text
     assert "Used Google Search" not in search.body_text and "Viewed ad" not in search.body_text
-    assert "Watched Draw Steel actual play" in ids["activity/youtube/2025-06-02"].body_text
+    assert "Watched Gloomhaven Night actual play" in ids["activity/youtube/2025-06-02"].body_text
     assert search.source == "takeout_activity" and ids["maps/visits/2025-06-03"].source == "takeout_maps"
 
 
@@ -151,7 +151,7 @@ def test_redaction_and_url_cleaning(zpath):
     ids = by_id(items)
     assert "Visited Example Page (example.com)" in ids["activity/search/2025-06-01"].body_text
     chrome = ids["chrome/history/2025-06-01"].body_text
-    assert "Draw Steel wiki (wiki.example.com) x2" in chrome  # repeats collapsed
+    assert "Gloomhaven Night wiki (wiki.example.com) x2" in chrome  # repeats collapsed
     assert "chrome://" not in chrome and "settings" not in chrome
     assert "https://example.com/ds)" in ids["chrome/bookmarks"].body_text
     assert takeout.clean_url("https://a.com/p?utm_source=x&q=1&gclid=2#f") == "https://a.com/p?q=1"
@@ -267,10 +267,10 @@ def test_import_is_idempotent_and_builds_graph(db, zpath):
                               WHERE dst = :p AND type = 'VISITED'"""), {"p": place}).one()
         assert e[0] == 1 and str(e[1]) == "2025-06-03" and str(e[2]) == "2025-06-10"
         assert s.execute(text("SELECT count(*) FROM edges WHERE type = 'SAVED'")).scalar() >= 2
-        # activity is chunked with a node, so entities.py phrase matching can see "draw steel"
+        # activity is chunked with a node, so entities.py phrase matching can see "gloomhaven night"
         hit = s.execute(text("""SELECT count(*) FROM chunks c JOIN source_items si ON si.id = c.source_item_id
                                 WHERE si.source LIKE 'takeout\\_%' AND c.node_id IS NOT NULL
-                                  AND c.tsv @@ phraseto_tsquery('english', 'draw steel')""")).scalar()
+                                  AND c.tsv @@ phraseto_tsquery('english', 'gloomhaven night')""")).scalar()
         assert hit >= 3
         from igneous.graph.invariants import check_graph
         assert [v for v in check_graph(s) if v.details and v.details.get("edge_type") in ("VISITED", "SAVED")] == []
@@ -313,7 +313,7 @@ def test_chat_people_and_meet_event_link(db, zpath):
 
 def test_search_joins_existing_project_after_rebuild(db, zpath):
     """Done-when: a search mentioning an existing Project links to it. The Project comes from a synthetic
-    recurring calendar series named 'Draw Steel' (3 occurrences)."""
+    recurring calendar series named 'Gloomhaven Night' (3 occurrences)."""
     from igneous.connectors.base import SourceItem, run_sync
     from igneous.graph import entities, spine
     from igneous.rag import chunking
@@ -323,7 +323,7 @@ def test_search_joins_existing_project_after_rebuild(db, zpath):
 
         def sync(self, cursor):
             for i in range(3):
-                yield SourceItem(source="gcal", external_id=f"takeouttest/{i}", title="Draw Steel",
+                yield SourceItem(source="gcal", external_id=f"takeouttest/{i}", title="Gloomhaven Night",
                                  body_text="game night", raw_meta={"series_key": "takeouttest-ds", "attendees": []},
                                  occurred_at=datetime(2025, 5, 1 + i, tzinfo=UTC))
 
@@ -336,7 +336,7 @@ def test_search_joins_existing_project_after_rebuild(db, zpath):
             entities.run(s, log=None)
             linked = s.execute(text("""
                 SELECT DISTINCT si.source FROM edges e
-                JOIN nodes p ON p.id = e.dst AND p.type = 'Project' AND p.name ILIKE 'draw steel'
+                JOIN nodes p ON p.id = e.dst AND p.type = 'Project' AND p.name ILIKE 'gloomhaven night'
                 JOIN source_items si ON si.id = e.source_item_id
                 WHERE e.type = 'PART_OF' AND e.props->>'why' = 'mentions' AND si.source LIKE 'takeout\\_%'
             """)).scalars().all()
@@ -346,7 +346,7 @@ def test_search_joins_existing_project_after_rebuild(db, zpath):
             s.execute(text("DELETE FROM source_items WHERE source = 'gcal' AND external_id LIKE 'takeouttest/%'"))
             s.execute(text("DELETE FROM nodes WHERE type = 'Event' AND key LIKE 'gcal:takeouttest%'"))
             s.execute(text("DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = 'true'"
-                           " AND key LIKE 'project:draw steel%'"))
+                           " AND key LIKE 'project:gloomhaven night%'"))
             s.execute(text("DELETE FROM sync_state WHERE connector = 'takeouttest'"))
             s.commit()
 
