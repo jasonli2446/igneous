@@ -705,25 +705,47 @@ def view(s: Session, seed: int, per: int = 6) -> dict:
     colored by category (no hub nodes), plus the strongest ties among them. `categories` lists every category
     with its total, for the legend; clicking one there reveals more of its members (see `expand`)."""
     head = _canon_head(s, seed)
+    me = _my_ids(s, head)
     cats = scored_members(s, head, per)
+    # Where you work and study (your resume, or what you told it): always part of your graph, at the top.
+    life = s.execute(text("""
+        SELECT DISTINCT e.dst, (e.props->>'school') IS NOT NULL AS school, e.valid_to
+        FROM edges e JOIN nodes o ON o.id = e.dst
+        WHERE e.src = ANY(:me) AND e.type = 'WORKED_AT' AND e.extractor IN ('profile', 'user')
+    """), {"me": me}).all()
+    if life:
+        have = {m["id"] for c in cats.values() for m in c}
+        cats["Organizations"] = [m for m in cats.get("Organizations", []) if m["id"] not in {x[0] for x in life}]
+        cats["Organizations"] = [{"id": o, "strength": 1.0 if to is None else 0.9} for o, _sch, to in life] \
+            + cats["Organizations"]
+        _ = have
     # Order categories by how much they matter: summed strength of their top members, normalized by size.
     order = sorted(cats, key=lambda c: -sum(m["strength"] for m in cats[c][:10]))
     shown: list[int] = [head]
     edges: list[dict] = []
-    # The first ring is the strongest `per * 3` things overall, whatever kind they are (at least one of each
-    # kind that has anything current, so a category is never invisible up front).
+    # The first ring is the most meaningful things in your life, not the top item of every kind:
+    #  1. your backbone, stated by you: where you work/worked and studied (your resume), and your pinned threads;
+    #  2. then the strongest people and things overall, where a thread must be sustained (weeks of activity, many
+    #     of your own records): a single dinner or a one-off flight is reachable by expanding, never up front.
     ranked = sorted(((m, c) for c in order for m in cats[c]), key=lambda mc: -mc[0]["strength"])
-    # People are the densest signal, so cap them at 60% of the ring: the projects, groups, trips and classes you
-    # are in always get room, even when dozens of people outscore them.
+    backbone_ids = set(s.execute(text("""
+        SELECT e.dst FROM edges e WHERE e.src = ANY(:me) AND e.type = 'WORKED_AT' AND e.extractor IN ('profile', 'user')
+        UNION SELECT n.id FROM nodes n JOIN thread_registry r ON r.key = n.key
+              WHERE n.type = 'Project' AND r.pinned AND r.status = 'active'
+    """), {"me": me}).scalars()) if me else set()
+    sustained = {p for (p,) in s.execute(text("""
+        SELECT id FROM nodes WHERE type = 'Project' AND COALESCE((props->>'records')::int, 0) >= 10
+          AND (props->>'end')::timestamptz - (props->>'start')::timestamptz >= interval '21 days'
+    """))}
     size = per * 3
-    people = [mc for mc in ranked if mc[1] == "People"][:int(size * 0.6)]
-    others = [mc for mc in ranked if mc[1] != "People"][:size - len(people)]
-    first = sorted(people + others, key=lambda mc: -mc[0]["strength"])
-    if len(first) < size:  # not enough of the rest: fill with more people
-        first += [mc for mc in ranked if mc[1] == "People" and mc not in first][:size - len(first)]
-    for c in order:
-        if cats[c] and not any(fc == c for _, fc in first) and cats[c][0]["strength"] >= 0.15:
-            first.append((cats[c][0], c))
+    meaningful = [mc for mc in ranked
+                  if mc[0]["id"] in backbone_ids or mc[1] == "People" or mc[1] == "Groups"
+                  or (mc[0]["id"] in sustained and mc[1] not in ("Events",))]
+    backbone = [mc for mc in meaningful if mc[0]["id"] in backbone_ids]
+    rest = [mc for mc in meaningful if mc[0]["id"] not in backbone_ids]
+    people = [mc for mc in rest if mc[1] == "People"][:int(size * 0.5)]
+    things = [mc for mc in rest if mc[1] != "People"][:max(0, size - len(backbone) - len(people))]
+    first = backbone + sorted(people + things, key=lambda mc: -mc[0]["strength"])
     for m, _c in first:
         shown.append(m["id"])
         edges.append({"id": -(len(edges) + 1) * 7, "src": head, "dst": m["id"], "type": "RELATED",
