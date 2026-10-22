@@ -19,6 +19,7 @@ from igneous.db import SessionLocal, get_session
 from igneous.graph.entity_api import router as entity_router
 from igneous.graph.history import commitments, decisions, relationship_history
 from igneous.graph.traversal import GraphFilters, expand, explain, neighborhood, network, people, view
+from igneous.items import router as items_router
 from igneous.llm import LLMDisabled
 from igneous.rag import qa
 from igneous.rag.constraints import apply
@@ -53,6 +54,7 @@ class NamedResponse(JSONResponse):
 app = FastAPI(title="Igneous", version="0.1.0", default_response_class=NamedResponse)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.include_router(entity_router)
+app.include_router(items_router)
 
 
 @app.on_event("startup")

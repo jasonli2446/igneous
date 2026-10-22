@@ -98,6 +98,25 @@ export type Explanation = {
   conversations: { thread_id: number; thread: string; messages: number; people: number; first: string | null;
     last: string | null; source: string; excerpt: string | null }[];
   events: { id: number; name: string; at: string | null }[];
+  shared: SourceCard[];
+  direct: WhyEdge[];
+  path: WhyEdge[] | null;
+};
+
+/** A source item as lists show it: enough to display, Open and View. */
+export type SourceCard = {
+  id: number; source: string; title: string | null; date: string | null; snippet: string;
+  open_url: string | null; open_label: string | null; local_file: boolean; kind?: string;
+};
+export type ItemDetail = {
+  id: number; source: string; title: string | null; occurred_at: string | null; text: string;
+  meta: Record<string, unknown>; open_url: string | null; open_label: string | null; local_path: string | null;
+};
+/** One edge with the verifier's reason (when it has run) and the items it was derived from. */
+export type WhyEdge = {
+  id: number; type: string; extractor: string; src: number; dst: number; src_name: string | null; dst_name: string | null;
+  verdict: "keep" | "drop" | "unsure" | null; reason: string | null; confidence: number | null; evidence: SourceCard[];
+  from?: number; to?: number;
 };
 
 export type TimelineEdge = {
@@ -315,6 +334,10 @@ export const api = {
   unlinkFromEntity: (id: number, node: number) => send<Correction>("POST", `/graph/entity/${id}/unlink`, { node }),
   undoCorrection: (overrideId: number) => send<{ undone: number }>("DELETE", `/overrides/${overrideId}`),
   node: (id: number) => get<NodeDetail>(`/graph/node/${id}`, {}),
+  item: (id: number, signal?: AbortSignal) => get<ItemDetail>(`/items/${id}`, {}, signal),
+  openItem: (id: number) => send<{ opened: string }>("POST", `/items/${id}/open`),
+  nodeSources: (id: number, offset = 0, limit = 8, signal?: AbortSignal) =>
+    get<{ items: SourceCard[]; more: boolean }>(`/graph/node/${id}/sources`, { offset, limit }, signal),
 };
 
 export const TYPE_COLORS: Record<string, string> = {

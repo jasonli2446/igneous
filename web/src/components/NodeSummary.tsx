@@ -9,8 +9,8 @@ const colorOf = (h: { type: string; category: string | null }) =>
   categoryColor(h.category ?? TYPE_CATEGORY[h.type]);
 
 /** How a node connects to the rest of the graph, in a few plain sentences, then its top connections by category. */
-export default function NodeSummary({ id, onSelectAction, showConnections = true }: {
-  id: number; onSelectAction: (id: number) => void; showConnections?: boolean;
+export default function NodeSummary({ id, onSelectAction, onWhyAction, showConnections = true }: {
+  id: number; onSelectAction: (id: number) => void; onWhyAction?: (a: number, b: number) => void; showConnections?: boolean;
 }) {
   const [data, setData] = useState<Summary | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -58,12 +58,17 @@ export default function NodeSummary({ id, onSelectAction, showConnections = true
                 </div>
                 <ul>
                   {items.map((h) => (
-                    <li key={h.id}>
+                    <li key={h.id} className="flex items-center gap-1">
                       <button onClick={() => onSelectAction(h.id)}
-                        className="flex w-full flex-col rounded px-1.5 py-1 text-left hover:bg-hover">
+                        className="flex min-w-0 flex-1 flex-col rounded px-1.5 py-1 text-left hover:bg-hover">
                         <span className="truncate text-sm">{h.name}</span>
                         <span className="truncate text-xs text-muted">{h.why}</span>
                       </button>
+                      {onWhyAction && (
+                        <button onClick={() => onWhyAction(id, h.id)} aria-label={`Why is ${h.name} connected?`}
+                          title={`Why is ${h.name} connected?`}
+                          className="shrink-0 rounded border border-line px-1.5 py-0.5 text-[11px] text-soft hover:bg-hover hover:text-ink">Why</button>
+                      )}
                     </li>
                   ))}
                 </ul>

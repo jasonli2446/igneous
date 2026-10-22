@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import NodeSummary from "@/components/NodeSummary";
+import Sources from "@/components/SourceList";
 import { InlineError, Skeleton } from "@/components/ui";
 import { api, Correction, EntityDetail, GNode, TYPE_COLORS } from "@/lib/api";
 
@@ -252,6 +253,10 @@ export default function EntityInspector({ id, onSelectAction, onCloseAction, onC
           </ul>
         )}
         {e.counts.items > e.items.length && <p className="mt-2 text-xs text-muted">Showing the {e.items.length} most recent.</p>}
+      </Section>
+
+      <Section title="Sources">
+        <Sources id={id} highlight={[e.name, ...e.aliases]} />
       </Section>
 
       <Section title="Fix this project">
