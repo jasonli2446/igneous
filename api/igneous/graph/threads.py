@@ -152,17 +152,27 @@ def _merge(cands: list[dict]) -> list[dict]:
 
 
 def _people(s: Session, item_ids: list[int]) -> list[tuple[int, int]]:
-    """(canonical person, items they're in) for people in 2+ of the thread's items, excluding services."""
+    """(canonical person, qualifying items) for people who are really in the thread, excluding services and you.
+
+    Being one of many recipients of a mention (a club mailing that names the game) isn't membership. An item
+    counts for a person if they wrote it, or it's a small conversation (<= 4 people), or it's an event they
+    attended. Two qualifying items make a member."""
     return s.execute(text("""
-        WITH msg AS (SELECT n.id FROM nodes n WHERE n.source_item_id = ANY(:ids)),
+        WITH msg AS (SELECT n.id, n.type FROM nodes n WHERE n.source_item_id = ANY(:ids)),
+        size AS (SELECT m.id, (SELECT count(*) FROM edges r WHERE (r.src = m.id AND r.type = 'RECEIVED')
+                                                          OR (r.dst = m.id AND r.type IN ('SENT', 'ATTENDED'))) AS n
+                 FROM msg m),
         ppl AS (
-            SELECT e.src AS p, e.dst AS m FROM edges e JOIN msg ON msg.id = e.dst WHERE e.type IN ('SENT', 'ATTENDED')
-            UNION SELECT e.dst, e.src FROM edges e JOIN msg ON msg.id = e.src WHERE e.type = 'RECEIVED')
-        SELECT COALESCE(c.canonical_id, ppl.p) AS p, count(DISTINCT ppl.m) AS n
-        FROM ppl LEFT JOIN canonical c ON c.node_id = ppl.p JOIN nodes pn ON pn.id = ppl.p
+            SELECT e.src AS p, e.dst AS m, true AS wrote FROM edges e JOIN msg ON msg.id = e.dst
+            WHERE e.type IN ('SENT', 'ATTENDED')
+            UNION SELECT e.dst, e.src, false FROM edges e JOIN msg ON msg.id = e.src WHERE e.type = 'RECEIVED'),
+        ok AS (SELECT ppl.p, ppl.m FROM ppl JOIN size ON size.id = ppl.m JOIN msg ON msg.id = ppl.m
+               WHERE ppl.wrote OR size.n <= 4 OR msg.type = 'Event')
+        SELECT COALESCE(c.canonical_id, ok.p) AS p, count(DISTINCT ok.m) AS n
+        FROM ok LEFT JOIN canonical c ON c.node_id = ok.p JOIN nodes pn ON pn.id = ok.p
         WHERE pn.type = 'Person' AND COALESCE(pn.props->>'kind', '') <> 'service'
           AND NOT COALESCE((pn.props->>'self')::bool, false)
-        GROUP BY 1 HAVING count(DISTINCT ppl.m) >= 2 ORDER BY 2 DESC LIMIT 30
+        GROUP BY 1 HAVING count(DISTINCT ok.m) >= 2 ORDER BY 2 DESC LIMIT 30
     """), {"ids": item_ids}).all()
 
 
@@ -250,7 +260,8 @@ def run(s: Session, log=print) -> int:
             if it.node_id:
                 _edge(s, it.node_id, tid, "PART_OF", {"why": "mentions " + c["terms"][0]}, it.id, 0.6)
         for p, n in _people(s, list(c["items"].keys())):
-            _edge(s, p, tid, "INVOLVED_IN", {"why": "in thread items", "items": n}, None, 0.6)
+            _edge(s, p, tid, "INVOLVED_IN", {"why": f"wrote or was in a small conversation about it ({n} items)",
+                                             "items": n}, None, 0.6)
         built += 1
         log(f"  thread {props['kind']:10s} sources={len(c['sources'])} items={len(c['items'])}") if log else None
     # Threads that no longer qualify go away (corrections in overrides survive: they key on node keys).
