@@ -1892,3 +1892,73 @@ def test_expand_tops_up_to_a_minimum():
     src = inspect.getsource(traversal.expand)
     assert "fallback_neighbors" in src and "len(new) < MIN_SHOWN" in src
     assert "drop" in inspect.getsource(traversal.fallback_neighbors)  # never tops up with a link the verifier dropped
+
+
+def test_threads_naming_each_other_are_judged_even_far_apart():
+    from datetime import datetime
+
+    from igneous.graph.resolve_threads import candidate_pairs
+
+    a = {"id": 1, "name": "CSDS 395", "items": {1}, "people": set(), "a": datetime(2025, 1, 1), "b": datetime(2025, 5, 1)}
+    b = {"id": 2, "name": "Igneous", "items": {9}, "people": set(), "a": datetime(2026, 4, 1), "b": datetime(2026, 10, 1)}
+    assert candidate_pairs([a, b]) == []                     # nothing shared and far apart: not judged
+    assert len(candidate_pairs([a, b], {(2, 1)})) == 1       # Igneous's records name CSDS 395: judged
+
+
+def test_people_are_judged_against_the_threads_core():
+    from igneous.graph.threads import relative_members
+
+    busy = [(1, 22), (2, 20), (3, 18), (4, 2), (5, 1), (6, 3)]
+    assert relative_members(busy) == {1, 2, 3, 6}            # bar = max(2, 0.15*20) = 3
+    assert relative_members(busy, keep={5}) == {1, 2, 3, 5, 6}  # in the group chat: always stays
+    small = [(1, 3), (2, 2), (3, 2)]
+    assert relative_members(small) == {1, 2, 3}             # small thread: everyone counts
+
+
+def test_a_persons_messages_and_one_on_one_chats_fold_into_them():
+    import inspect
+
+    from igneous.graph import traversal
+
+    world = inspect.getsource(traversal.person_world)
+    assert "'Message'" not in world and "it.src IN (SELECT m FROM mine)" not in world
+    assert "x.type = 'Message'" in inspect.getsource(traversal.fallback_neighbors)
+
+
+def test_a_shared_context_explains_a_tie_and_services_are_never_relationships():
+    import inspect
+
+    from igneous.graph import traversal
+
+    assert traversal.CONTAINED >= 0.75
+    assert "contexts_of" in inspect.getsource(traversal.expand) and "contexts_of" in inspect.getsource(traversal._ties)
+    assert "'service'" in inspect.getsource(traversal.relationships)
+
+
+def test_bot_accounts_are_services():
+    from igneous.graph.self_identity import is_service_address
+
+    assert is_service_address("github:vercel[bot]") and is_service_address("github:dependabot[bot]")
+    assert not is_service_address("github:aadhavsb")
+    assert not is_service_address("1+someone@users.noreply.github.com")
+
+
+def test_a_projects_people_get_one_cut_not_two():
+    from igneous.graph.traversal import _core_people
+
+    # One traveller texted about the trip far more than the others: all three still show.
+    assert _core_people([(1, 28.0), (2, 8.0), (3, 7.0)]) == [1, 2, 3]
+    assert _core_people([(1, 30.0), (2, 25.0), (3, 22.0), (4, 1.0)]) == [1, 2, 3]  # a passing mention goes
+
+
+def test_mcp_server_starts_light_and_exposes_graph_tools():
+    import subprocess
+    import sys
+
+    # The model/search stacks must not load at import: a slow start races the client's first tool call.
+    code = "import sys, igneous.mcp_server as m; print('igneous.rag.search' in sys.modules, 'anthropic' in sys.modules)"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.split()
+    assert out == ["False", "False"]
+    from igneous import mcp_server as m
+    for tool in ("me", "find", "open_node", "why_connected", "sources", "read_item", "search", "ask"):
+        assert callable(getattr(m, tool))

@@ -25,7 +25,8 @@ type Props = {
   dark: boolean;
   selected: number | null;
   onSelectAction: (id: number | null) => void;
-  onExpandAction: (id: number) => void;
+  /** "open" reveals connections if hidden (never hides); "toggle" also hides them when shown. */
+  onExpandAction: (id: number, mode?: "open" | "toggle") => void;
   onLinkAction: (a: GNode, b: GNode) => void;
   onCommunitiesAction: (c: Community[]) => void;
 };
@@ -47,8 +48,8 @@ export default function Graph3D({ data, dark, selected, onSelectAction, onExpand
   onCommunitiesAction }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const fg = useRef<ForceGraph3DInstance<N, L> | null>(null);
-  const cb = useRef({ onSelectAction, onExpandAction, onLinkAction });
-  cb.current = { onSelectAction, onExpandAction, onLinkAction };
+  const cb = useRef({ onSelectAction, onExpandAction, onLinkAction, selected });
+  cb.current = { onSelectAction, onExpandAction, onLinkAction, selected };
   const sel = useRef<number | null>(selected);
   sel.current = selected;
   const fitted = useRef(false);
@@ -78,9 +79,11 @@ export default function Graph3D({ data, dark, selected, onSelectAction, onExpand
       .nodeLabel((n) => `<div class="g3-tip"><b>${escapeHtml(n.name)}</b><span>${describe(n)}</span></div>`)
       .linkLabel((l) => `<div class="g3-tip"><span>${linkReason(l)}</span><em>Click to see why</em></div>`)
       .onNodeClick((n) => {
-        // One click: select it and reveal its top connections (clicking again collapses them).
+        // Clicking opens a node: select it and reveal its connections. Coming back to it later (after clicking
+        // elsewhere) keeps them; only clicking it again while it's the selected one hides them.
+        const again = cb.current.selected === n.id;
         cb.current.onSelectAction(n.id);
-        if (n.expandable !== false) cb.current.onExpandAction(n.id);
+        if (n.expandable !== false) cb.current.onExpandAction(n.id, again ? "toggle" : "open");
       })
       .onLinkClick((l) => {
         const a = l.source, b = l.target;

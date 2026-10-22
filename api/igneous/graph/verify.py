@@ -238,6 +238,21 @@ def apply_verdicts(s: Session) -> int:
                valid_from, valid_to, extractor, extractor_version, model, confidence, source_item_id, span_start, span_end
         FROM d
     """)).rowcount
+    # "These two aren't related" covers every kind of derived link between them, either direction: rejecting
+    # Igneous-RELATED_TO-Epic must also stop a later Igneous-PART_OF-Epic guess.
+    moved += s.execute(text("""
+        WITH d AS (
+            DELETE FROM edges e USING nodes a, nodes b, edge_verdicts v
+            WHERE a.id = e.src AND b.id = e.dst AND a.type = 'Project' AND b.type = 'Project'
+              AND v.source = 'user' AND v.verdict = 'drop'
+              AND ((v.src_key = a.type || ':' || a.key AND v.dst_key = b.type || ':' || b.key)
+                   OR (v.src_key = b.type || ':' || b.key AND v.dst_key = a.type || ':' || a.key))
+              AND e.extractor NOT IN ('user', 'profile')
+            RETURNING e.*, v.reason AS _reason)
+        INSERT INTO edges_dropped SELECT id, src, dst, type, props || jsonb_build_object('verdict', 'drop', 'reason', _reason),
+               valid_from, valid_to, extractor, extractor_version, model, confidence, source_item_id, span_start, span_end
+        FROM d ON CONFLICT DO NOTHING
+    """)).rowcount
     return moved + s.execute(text("""
         UPDATE edges e SET props = e.props || jsonb_build_object('verdict', v.verdict, 'reason', v.reason,
                                                                   'confidence', v.confidence, 'verified_by', v.source)

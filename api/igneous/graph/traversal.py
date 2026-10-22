@@ -130,6 +130,9 @@ def relationships(s: Session, head: int, limit: int) -> list[tuple[int, float, d
         FROM theirs t JOIN size sz ON sz.m = t.m JOIN nodes msg ON msg.id = t.m
         JOIN source_items si ON si.id = msg.source_item_id
         LEFT JOIN events ev ON ev.p = t.p
+        JOIN nodes tp ON tp.id = t.p
+        -- Services (GitHub mailing you under your own name, a bank) are never relationships, however much mail.
+        WHERE COALESCE(tp.props->>'kind', '') <> 'service' AND NOT COALESCE((tp.props->>'self')::bool, false)
         GROUP BY t.p
     """), {"head": head, "hl": HALF_LIFE_DAYS}).mappings().all()
     scored = []
@@ -146,6 +149,35 @@ def relationships(s: Session, head: int, limit: int) -> list[tuple[int, float, d
         scored.append((r["p"], round(strength, 3), dict(r)))
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored[:limit]
+
+
+CONTAINED = 0.8  # share of two people's common records inside one project or group chat that makes it "that's how they know each other"
+
+
+def contexts_of(s: Session, a: int, others: list[int]) -> dict[int, int]:
+    """{other: context} for each person whose whole shared history with `a` sits in one project or group chat
+    (Praveen and Aadhav only ever overlap on the CSDS 393 project): that context explains the tie, so the other
+    person belongs under it, not beside `a`. Pairs with history of their own (outside any single context) stay."""
+    if not others:
+        return {}
+    canon = "COALESCE((SELECT canonical_id FROM canonical WHERE node_id = {x}), {x})"
+    rows = s.execute(text(f"""
+        WITH pm AS (SELECT {canon.format(x='src')} AS p, dst AS m FROM edges WHERE type IN ('SENT', 'ATTENDED')
+                    UNION SELECT {canon.format(x='dst')}, src FROM edges WHERE type = 'RECEIVED'),
+        shared AS (SELECT b.p AS o, a.m FROM pm a JOIN pm b ON a.m = b.m
+                   WHERE a.p = :a AND b.p = ANY(:o) AND b.p <> :a),
+        tot AS (SELECT o, count(DISTINCT m) AS n FROM shared GROUP BY o),
+        ctx AS (  -- each shared record's contexts: its group chat, and the projects it is part of
+            SELECT sh.o, it.dst AS c, sh.m FROM shared sh JOIN edges it ON it.src = sh.m AND it.type = 'IN_THREAD'
+            JOIN nodes g ON g.id = it.dst AND COALESCE((g.props->>'group')::bool, false)
+            UNION SELECT sh.o, pe.dst, sh.m FROM shared sh JOIN edges pe ON pe.src = sh.m AND pe.type = 'PART_OF'
+            JOIN nodes pj ON pj.id = pe.dst AND pj.type = 'Project' AND NOT COALESCE((pj.props->>'hidden')::bool, false)
+              AND NOT COALESCE((pj.props->>'umbrella')::bool, false)),
+        best AS (SELECT DISTINCT ON (ctx.o) ctx.o, ctx.c, count(DISTINCT ctx.m) AS n FROM ctx
+                 GROUP BY ctx.o, ctx.c ORDER BY ctx.o, count(DISTINCT ctx.m) DESC, ctx.c)
+        SELECT best.o, best.c FROM best JOIN tot USING (o) WHERE best.n >= :share * tot.n
+    """), {"a": a, "o": others, "share": CONTAINED}).all()
+    return {o: c for o, c in rows}
 
 
 def people(s: Session, seed: int, limit: int = 60) -> dict:
@@ -816,6 +848,13 @@ def _ties(s: Session, ids: list[int], per_node: int = 2) -> list[dict]:
             WHERE part.p IN (SELECT id FROM vis) AND part.hub IN (SELECT id FROM vis))
         SELECT x, y, w, t FROM pp UNION ALL SELECT x, y, w, t FROM ph
     """), {"ids": ids}).all()
+    # Two people who only overlap inside one project or group chat know each other through it: the line goes
+    # through that context (if it's on screen, they're both linked to it), not straight between them.
+    contained: set[tuple[int, int]] = set()
+    for x in {x for x, _y, _w, t in rows if t == "CORRESPONDS"}:
+        for y in contexts_of(s, x, [y for xx, y, _w, t in rows if xx == x and t == "CORRESPONDS"]):
+            contained.add((x, y))
+    rows = [r for r in rows if not (r[3] == "CORRESPONDS" and (r[0], r[1]) in contained)]
     edges = [{"id": -(500000 + i), "src": x, "dst": y, "type": t, "weight": int(w)} for i, (x, y, w, t) in enumerate(rows)]
     by: dict[int, list[dict]] = {}
     for e in edges:
@@ -839,11 +878,12 @@ def person_world(s: Session, pid: int, you: int) -> list[tuple[int, str, float]]
         recent AS (SELECT m, power(0.5, GREATEST(0, EXTRACT(EPOCH FROM now() - si.occurred_at) / 86400) / :hl) AS w
                    FROM theirs JOIN nodes n ON n.id = theirs.m LEFT JOIN source_items si ON si.id = n.source_item_id)
         -- group chats / threads they're in
-        SELECT it.dst, CASE WHEN t.type = 'Thread' AND COALESCE((t.props->>'group')::bool, false) THEN 'Thread'
-                            ELSE 'Message' END, sum(r.w)
+        -- Only group chats: your one-on-one messages and email threads with them ARE the relationship (they're in
+        -- the person's sources and closeness), not separate things beside them.
+        SELECT it.dst, 'Thread', sum(r.w)
         FROM recent r JOIN edges it ON it.src = r.m AND it.type = 'IN_THREAD' JOIN nodes t ON t.id = it.dst
-        WHERE t.type = 'Thread' AND (COALESCE((t.props->>'group')::bool, false) OR it.src IN (SELECT m FROM mine))
-        GROUP BY it.dst, t.type, t.props
+        WHERE t.type = 'Thread' AND COALESCE((t.props->>'group')::bool, false)
+        GROUP BY it.dst
         UNION ALL  -- projects and life threads
         SELECT e.dst, 'Project', 1 + COALESCE((e.props->>'items')::float, 1)
         FROM edges e JOIN nodes p ON p.id = e.dst AND p.type = 'Project'
@@ -876,6 +916,16 @@ def earned_cut(scored: list[tuple[int, float]], lo: int = 1, hi: int = 12) -> li
         if drop > best and drop >= 0.4:
             cut, best = i, drop
     return [i for i, _ in scored[:cut]]
+
+
+def _core_people(people: list[tuple[int, float]], hi: int = 10, keep: set[int] = frozenset()) -> list[int]:
+    """A project's people, without the ones who only passed by: measured against its most active few. `keep`
+    (members of its own group chats) is direct evidence and always stays."""
+    from igneous.graph.threads import relative_members
+    real = relative_members([(p, int(w)) for p, w in people], keep)
+    # Who's in it was decided above; the strongest `hi` of them show (no second cut at the biggest gap, which
+    # dropped a trip's travellers because one of them texted about it four times as much).
+    return [p for p, _w in sorted(people, key=lambda x: -x[1]) if p in real][:hi]
 
 
 def children(s: Session, node: int, ntype: str) -> list[int]:
@@ -918,25 +968,59 @@ def children(s: Session, node: int, ntype: str) -> list[int]:
         return list(stated) + earned_cut([(i, w * 2) for i, w in subs]) + earned_cut([(i, float(w)) for i, w in people], hi=8)
     if subs or stated:  # an umbrella: its projects are the picture; their detail is one click deeper
         return list(stated) + [i for i in earned_cut([(i, w) for i, w in subs]) if i not in stated]
+    # Where the work lives: the repository or folder that holds most of its records (the GitHub repo for a
+    # coding project), one link instead of its issues one by one.
+    homes = s.execute(text("""
+        SELECT f.id, count(*) FROM edges pe JOIN edges ct ON ct.dst = pe.src AND ct.type = 'CONTAINS'
+        JOIN nodes f ON f.id = ct.src AND f.type = 'Folder'
+        WHERE pe.dst = :n AND pe.type = 'PART_OF' AND NOT COALESCE((f.props->>'hidden')::bool, false)
+        GROUP BY f.id HAVING count(*) >= 3
+    """), {"n": node}).all()
+    # Its group chats, ranked by how much of its own people they hold (the trip's chat is the one its travellers
+    # are in), plus how many of its records happened there.
+    convs = s.execute(text(f"""
+        WITH tp AS (SELECT COALESCE(c.canonical_id, e.src) AS p FROM edges e LEFT JOIN canonical c ON c.node_id = e.src
+                    WHERE e.dst = :n AND e.type = 'INVOLVED_IN' AND COALESCE(e.props->>'verdict', '') <> 'drop'),
+        ch AS (SELECT it.dst AS g, count(DISTINCT m.id) AS msgs FROM edges pe JOIN nodes m ON m.id = pe.src AND m.type = 'Message'
+               JOIN edges it ON it.src = m.id AND it.type = 'IN_THREAD' JOIN nodes t ON t.id = it.dst
+               WHERE pe.dst = :n AND pe.type = 'PART_OF' AND t.id NOT IN {HIDDEN}
+                 AND COALESCE((t.props->>'group')::bool, false) GROUP BY it.dst),
+        mem AS (SELECT ch.g, count(DISTINCT COALESCE(c.canonical_id, x.dst)) FILTER (WHERE COALESCE(c.canonical_id, x.dst) IN (SELECT p FROM tp)) AS shared
+                FROM ch JOIN edges it ON it.dst = ch.g AND it.type = 'IN_THREAD'
+                JOIN edges x ON x.src = it.src AND x.type = 'RECEIVED' LEFT JOIN canonical c ON c.node_id = x.dst GROUP BY ch.g)
+        SELECT ch.g, ch.msgs + 20 * COALESCE(mem.shared, 0) FROM ch LEFT JOIN mem USING (g)
+        UNION ALL  -- a chat attached to it as a whole (named after it, or the class group chat)
+        SELECT g.id, 50 FROM edges pe JOIN nodes g ON g.id = pe.src AND g.type = 'Thread'
+        WHERE pe.dst = :n AND pe.type = 'PART_OF' AND g.id NOT IN {HIDDEN}
+          AND COALESCE(pe.props->>'verdict', '') <> 'drop'
+    """), {"n": node}).all()
+    # Its people: checked (or stated) ones, plus anyone the verifier was unsure about who is in one of its own
+    # group chats; being in the trip's chat is the direct evidence the verifier didn't have.
+    chats = [g for g, _w in convs]
     people = s.execute(text("""
         SELECT e.src, COALESCE((e.props->>'items')::float, 1) FROM edges e JOIN nodes p ON p.id = e.src
         WHERE e.dst = :n AND e.type = 'INVOLVED_IN' AND p.type = 'Person'
-          AND (e.props->>'verdict' = 'keep' OR e.extractor IN ('user', 'profile', 'contacts'))
-    """), {"n": node}).all()
-    convs = s.execute(text(f"""
-        SELECT it.dst, count(*) FROM edges pe JOIN nodes m ON m.id = pe.src AND m.type = 'Message'
-        JOIN edges it ON it.src = m.id AND it.type = 'IN_THREAD' JOIN nodes t ON t.id = it.dst
-        WHERE pe.dst = :n AND pe.type = 'PART_OF' AND t.id NOT IN {HIDDEN}
-          AND COALESCE((t.props->>'group')::bool, false)
-        GROUP BY it.dst
-    """), {"n": node}).all()
+          AND (e.props->>'verdict' = 'keep' OR e.extractor IN ('user', 'profile', 'contacts')
+               OR (e.props->>'verdict' = 'unsure' AND EXISTS (
+                   SELECT 1 FROM edges it JOIN edges x ON x.src = it.src AND x.type IN ('RECEIVED', 'SENT')
+                   LEFT JOIN canonical c ON c.node_id = CASE WHEN x.type = 'RECEIVED' THEN x.dst ELSE x.src END
+                   WHERE it.dst = ANY(:chats) AND it.type = 'IN_THREAD'
+                     AND COALESCE(c.canonical_id, CASE WHEN x.type = 'RECEIVED' THEN x.dst ELSE x.src END) = e.src)))
+    """), {"n": node, "chats": chats}).all()
+    in_chats = set(s.execute(text("""
+        SELECT DISTINCT COALESCE(c.canonical_id, CASE WHEN x.type = 'RECEIVED' THEN x.dst ELSE x.src END)
+        FROM edges it JOIN edges x ON x.src = it.src AND x.type IN ('RECEIVED', 'SENT')
+        LEFT JOIN canonical c ON c.node_id = CASE WHEN x.type = 'RECEIVED' THEN x.dst ELSE x.src END
+        WHERE it.dst = ANY(:chats) AND it.type = 'IN_THREAD'"""), {"chats": chats[:5]}).scalars())
     docs = s.execute(text(r"""
         SELECT f.id, 1 + length(coalesce(si.body_text, '')) / 4000.0 FROM edges pe JOIN nodes f ON f.id = pe.src
         JOIN source_items si ON si.id = f.source_item_id
         WHERE pe.dst = :n AND pe.type = 'PART_OF' AND f.type = 'File'
           AND f.name !~* '\.(ts|tsx|js|jsx|mjs|py|go|rs|java|c|h|cpp|json|ya?ml|toml|lock|css|scss|html?|sh|sql|txt|env|md)$'
     """), {"n": node}).all()
-    return (earned_cut([(i, w) for i, w in people], hi=10) + earned_cut([(i, float(w)) for i, w in convs], hi=5)
+    return (earned_cut([(i, float(w)) for i, w in homes], hi=2)
+            + _core_people(people, keep={p for p, _w in people} & in_chats)
+            + earned_cut([(i, float(w)) for i, w in convs], hi=5)
             + earned_cut([(i, float(w)) for i, w in docs], hi=4))
 
 
@@ -946,12 +1030,16 @@ def fallback_neighbors(s: Session, node: int, head: int, exclude: set[int], k: i
     file's conversation). People are folded to one identity; hidden, service, and code-file nodes are skipped."""
     if k <= 0:
         return []
+    person = s.execute(text("SELECT type = 'Person' FROM nodes WHERE id = :n"), {"n": node}).scalar()
     rows = s.execute(text(f"""
         WITH direct AS (
+            -- Never the node's own parent (what it's part of): opening xLab must not list Case Western in it.
             SELECT CASE WHEN e.src = :n THEN e.dst ELSE e.src END AS o,
                    (CASE WHEN e.props->>'verdict' = 'keep' OR e.extractor IN ('user', 'profile', 'contacts', 'spine')
                          THEN 2 ELSE 1 END) + COALESCE(e.confidence, 0.5) AS w
-            FROM edges e WHERE (e.src = :n OR e.dst = :n) AND COALESCE(e.props->>'verdict', '') <> 'drop'),
+            FROM edges e WHERE (e.src = :n OR e.dst = :n) AND COALESCE(e.props->>'verdict', '') <> 'drop'
+              AND NOT (e.src = :n AND e.type = 'PART_OF')
+              AND NOT (e.src = (SELECT (props->>'thread')::bigint FROM nodes WHERE id = :n) AND e.type = 'PART_OF')),
         via AS (  -- one step through the node's records: the message's thread, the org's members' threads
             SELECT CASE WHEN e2.src = d.o THEN e2.dst ELSE e2.src END AS o, 0.5 AS w
             FROM direct d JOIN nodes dn ON dn.id = d.o AND dn.type IN ('Message', 'Event', 'File')
@@ -960,12 +1048,34 @@ def fallback_neighbors(s: Session, node: int, head: int, exclude: set[int], k: i
         SELECT COALESCE(c.canonical_id, a.o) AS o, max(a.w) + 0.1 * ln(1 + count(*)) AS w
         FROM allc a LEFT JOIN canonical c ON c.node_id = a.o JOIN nodes x ON x.id = COALESCE(c.canonical_id, a.o)
         WHERE x.id NOT IN {HIDDEN} AND COALESCE(x.props->>'kind', '') <> 'service'
+          -- A person's messages and one-on-one chats are the person; only bigger things or other people go beside.
+          AND NOT (:person AND (x.type = 'Message' OR (x.type = 'Thread' AND NOT COALESCE((x.props->>'group')::bool, false))))
           AND NOT (x.type = 'File' AND x.name ~* '\.(ts|tsx|js|jsx|mjs|py|go|rs|java|c|h|cpp|json|ya?ml|toml|lock|css|scss|sh|sql|env)$')
         GROUP BY 1 ORDER BY 2 DESC LIMIT 60
-    """), {"n": node}).all()
+    """), {"n": node, "person": bool(person)}).all()
+    # A single message stands for its conversation: the group chat it's in, else the person it's with. Only a
+    # message with neither (a note to yourself) stands for itself, and only after everything else.
+    ids = [o for o, _w in rows]
+    rep = dict(s.execute(text("""
+        SELECT m.id, COALESCE(
+            (SELECT it.dst FROM edges it JOIN nodes g ON g.id = it.dst
+             WHERE it.src = m.id AND it.type = 'IN_THREAD' AND COALESCE((g.props->>'group')::bool, false)
+               AND NOT COALESCE((g.props->>'hidden')::bool, false) LIMIT 1),
+            (SELECT COALESCE(c.canonical_id, x.p) FROM (
+                 SELECT dst AS p FROM edges WHERE src = m.id AND type = 'RECEIVED'
+                 UNION SELECT src FROM edges WHERE dst = m.id AND type = 'SENT') x
+             LEFT JOIN canonical c ON c.node_id = x.p JOIN nodes pn ON pn.id = COALESCE(c.canonical_id, x.p)
+             WHERE NOT COALESCE((pn.props->>'self')::bool, false) AND COALESCE(pn.props->>'kind', '') <> 'service'
+             LIMIT 1))
+        FROM nodes m WHERE m.id = ANY(:i) AND m.type = 'Message'"""), {"i": ids}).all())
+    lone = [o for o in ids if o in rep and rep[o] is None]
+    # A folder is where a file sits, not what it's connected to: last, like a lone message.
+    folders = set(s.execute(text("SELECT id FROM nodes WHERE id = ANY(:i) AND type = 'Folder'"), {"i": ids}).scalars())
+    lone += [o for o in ids if o in folders]
+    ids = [o for o in ids if o not in folders]
     out: list[int] = []
-    for o, _w in rows:
-        if o not in exclude and o not in (node, head) and o not in out:
+    for o in [rep.get(o, o) for o in ids if o not in lone] + lone:
+        if o is not None and o not in exclude and o not in (node, head) and o not in out:
             out.append(o)
             if len(out) == k:
                 break
@@ -995,9 +1105,13 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
             # chats, projects/threads and events they're in, and the files and email threads you share.
             pid = _canon_head(s, node)
             people = [p for p, _st, _ in relationships(s, pid, 40) if p not in seen and p != head]
+            # Someone this person only knows through one project or group chat goes under it, not beside them:
+            # the context takes their place (once), and they appear when it's opened.
+            ctx = contexts_of(s, pid, people)
+            people = list(dict.fromkeys(ctx.get(p, p) for p in people))
             things = person_world(s, pid, head)
             picked: list[int] = []
-            quota = {"Person": max(3, k // 2), "Thread": 3, "Project": 3, "Event": 2, "File": 2, "Message": 2}
+            quota = {"Person": max(3, k // 2), "Thread": 3, "Project": 3, "Event": 2, "File": 2}
             used: dict[str, int] = {}
             for p in people:
                 if used.get("Person", 0) < quota["Person"]:

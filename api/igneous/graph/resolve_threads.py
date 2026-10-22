@@ -56,20 +56,43 @@ def _tokens(name: str) -> set[str]:
     return words | {f"course:{c}{d}" for c, d in codes}
 
 
-def candidate_pairs(ts: list[dict]) -> list[tuple[dict, dict]]:
-    """Pairs worth judging: shared records/people or a shared name word, with spans that overlap or nearly do."""
+MENTIONS_MIN = 2  # records of one thread naming another, for the pair to be judged ("CSDS 395" in Igneous's proposal)
+
+
+def _mentions(s: Session, ts: list[dict]) -> set[tuple[int, int]]:
+    """(a, b): a's records name b outright. Only distinctive names (a course code, or 2+ words), whole words."""
+    out: set[tuple[int, int]] = set()
+    for b in ts:
+        name = (b["name"] or "").strip()
+        code = re.fullmatch(r"([A-Za-z]{2,5})\s?(\d{3})", name)
+        if not code and len(name.split()) < 2:
+            continue
+        pat = rf"\m{code.group(1)}\s?{code.group(2)}\M" if code else r"\m" + re.escape(name) + r"\M"
+        for (tid,) in s.execute(text("""
+            SELECT e.dst FROM edges e JOIN nodes n ON n.id = e.src JOIN source_items si ON si.id = n.source_item_id
+            WHERE e.type = 'PART_OF' AND e.extractor = 'threads' AND e.dst <> :b
+              AND (si.title || ' ' || coalesce(si.body_text, '')) ~* :p
+            GROUP BY e.dst HAVING count(*) >= :m"""), {"b": b["id"], "p": pat, "m": MENTIONS_MIN}):
+            out.add((tid, b["id"]))
+    return out
+
+
+def candidate_pairs(ts: list[dict], mentions: set[tuple[int, int]] = frozenset()) -> list[tuple[dict, dict]]:
+    """Pairs worth judging: shared records/people or a shared name word, with spans that overlap or nearly do,
+    or one naming the other in its records (a project done for a class)."""
     out = []
     for i, a in enumerate(ts):
         for b in ts[i + 1:]:
-            if a["a"] and b["a"] and a["b"] and b["b"]:
+            named = (a["id"], b["id"]) in mentions or (b["id"], a["id"]) in mentions
+            if not named and a["a"] and b["a"] and a["b"] and b["b"]:
                 gap = max((b["a"] - a["b"]).days, (a["a"] - b["b"]).days)
                 if gap > NEAR_DAYS:
                     continue
             jr = len(a["items"] & b["items"]) / max(1, len(a["items"] | b["items"]))
             jp = len(a["people"] & b["people"]) / max(1, len(a["people"] | b["people"]))
             jn = len(_tokens(a["name"]) & _tokens(b["name"])) / max(1, len(_tokens(a["name"]) | _tokens(b["name"])))
-            if max(jr, jp) >= MIN_SHARED or jn >= 0.34:
-                out.append((max(jr, jp, jn), a, b))
+            if max(jr, jp) >= MIN_SHARED or jn >= 0.34 or named:
+                out.append((max(jr, jp, jn, 0.3 if named else 0), a, b))
     out.sort(key=lambda x: -x[0])
     return [(a, b) for _, a, b in out[:MAX_PAIRS]]
 
@@ -93,11 +116,12 @@ def judge(s: Session, a: dict, b: dict) -> dict:
                 "label": "", "confidence": 0.5, "reason": "same name"}
     if not settings.llm_enabled:
         return fallback
+    a, b = sorted((a, b), key=lambda t: t["key"])  # a stable A/B, so the cached direction means the same thing
     prompt = f"A: {_card(s, a)}\n\nB: {_card(s, b)}"
     # Keyed by the two threads' identities, not their exact current records: a judgment is reused while the
     # threads stay the same things, so it doesn't re-roll every time a few records shift.
     ident = "|".join(sorted([a["key"], b["key"]]))
-    key = "thread-pair:v3:" + hashlib.sha256(ident.encode()).hexdigest()
+    key = "thread-pair:v4:" + hashlib.sha256(ident.encode()).hexdigest()
     cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
     if cached is not None:
         return cached
@@ -107,12 +131,14 @@ def judge(s: Session, a: dict, b: dict) -> dict:
             "same trip, the same course. You must be able to name what they both are; sharing people, a time "
             "period, an organization or a topic is NOT enough (two trips in one summer are different trips; two "
             "projects of one lab are different projects). 'related': different things that belong together (one "
-            "led to the other, one is part of the other, same client or lab); give the relation in a few words. "
+            "led to the other, same client or lab); give the relation in a few words. 'a_part_of_b' / "
+            "'b_part_of_a': one was done within or for the other (a project built for a class, a sub-project of a "
+            "larger project, an interview round of a job search); the records must show it, not just a shared topic. "
             "'distinct': not meaningfully related. When unsure between same and related, choose related. "
             "Give a confidence 0-1 and a short reason that names the thing if 'same'.")
         schema = {"type": "object", "additionalProperties": False,
              "required": ["relation", "label", "confidence", "reason", "shared_identity"],
-             "properties": {"relation": {"enum": ["same", "related", "distinct"]}, "label": {"type": "string"},
+             "properties": {"relation": {"enum": ["same", "a_part_of_b", "b_part_of_a", "related", "distinct"]}, "label": {"type": "string"},
                             "shared_identity": {"type": "string"},
                             "confidence": {"type": "number"}, "reason": {"type": "string"}}}
         out, _ = structured(system, prompt, schema,
@@ -160,7 +186,7 @@ def run(s: Session, log=print) -> dict:
 
     related, stats = [], {"pairs": 0, "same": 0, "related": 0, "distinct": 0, "same_not_merged": 0}
     verdicts: dict[tuple[int, int], dict] = {}
-    for a, b in candidate_pairs(ts):
+    for a, b in candidate_pairs(ts, _mentions(s, ts)):
         v = judge(s, a, b)
         verdicts[(min(a["id"], b["id"]), max(a["id"], b["id"]))] = v
         stats["pairs"] += 1
@@ -175,7 +201,7 @@ def run(s: Session, log=print) -> dict:
     # same thing. One eager judgment can't chain unrelated threads together (how a trip got swallowed before).
     for (x, y), v in sorted(verdicts.items(), key=lambda kv: -(kv[1].get("confidence") or 0)):
         if not is_same(x, y):
-            if v.get("relation") == "related" and (v.get("confidence") or 0) >= 0.6:
+            if v.get("relation") in ("related", "a_part_of_b", "b_part_of_a") and (v.get("confidence") or 0) >= 0.6:
                 related.append((x, y, v))
             continue
         rx, ry = find(x), find(y)
@@ -222,10 +248,27 @@ def run(s: Session, log=print) -> dict:
             s.execute(text("UPDATE thread_registry SET status = 'merged', merged_into = :keep, updated_at = now() "
                            "WHERE key = :gone AND NOT pinned"), {"keep": keep["key"], "gone": t["key"]})
     # Link related threads (after merging, so links land on survivors).
+    key_of = {t["id"]: t["key"] for t in ts}
     for x, y, v in related:
         ia, ib = folded_into.get(x, x), folded_into.get(y, y)
         if ia == ib:
             continue  # they ended up merged after all
+        if v.get("relation") in ("a_part_of_b", "b_part_of_a"):
+            # A was judged with the smaller key; map the direction back onto these two ids.
+            first, second = sorted((x, y), key=lambda i: key_of[i])
+            child, parent = (first, second) if v["relation"] == "a_part_of_b" else (second, first)
+            child, parent = folded_into.get(child, child), folded_into.get(parent, parent)
+            if child == parent or not s.execute(text("SELECT count(*) = 2 FROM nodes WHERE id IN (:a, :b)"),
+                                                {"a": child, "b": parent}).scalar():
+                continue  # one side was merged away (or into the other) earlier in this run
+            s.execute(text("""
+                INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence)
+                VALUES (:a, :b, 'PART_OF', CAST(:p AS jsonb), 'hierarchy', :v, :c)
+                ON CONFLICT (src, dst, type, extractor) DO UPDATE SET props = EXCLUDED.props
+            """), {"a": child, "b": parent, "v": VERSION, "c": v.get("confidence"),
+                   "p": json.dumps({"why": v.get("label") or "part of it", "reason": v.get("reason")})})
+            stats["part_of"] = stats.get("part_of", 0) + 1
+            continue
         s.execute(text("""
             INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence)
             VALUES (:a, :b, 'RELATED_TO', CAST(:p AS jsonb), :x, :v, :c)

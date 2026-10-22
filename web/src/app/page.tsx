@@ -86,7 +86,7 @@ export default function Explorer() {
     expandRequest.current?.abort();
   }, []);
 
-  const load = useCallback(async (node: GNode | null, push = true) => {
+  const load = useCallback(async (node: GNode | null, push = true, expandHead = false) => {
     const generation = ++graphGeneration.current;
     seedRequest.current?.abort();
     expandRequest.current?.abort();
@@ -109,6 +109,11 @@ export default function Explorer() {
       setQuery("");
       const seedNode = g.nodes.find((n) => n.id === g.seed) ?? node;
       if (push && seedNode) setTrail((t) => [...t.filter((x) => x.id !== seedNode.id), seedNode].slice(-6));
+      // A centre you searched for opens already showing what it's made of, and its panel.
+      if (expandHead && g.seed !== undefined) {
+        setSelected(g.seed);
+        setPendingExpand(g.seed);  // once the new graph is on screen (see the effect below)
+      }
     } catch (e) {
       if (!request.signal.aborted && !node && String(e).startsWith("Error: 404")) setNothingConnected(true);
       else if (!request.signal.aborted) setError(`Couldn't load the graph. Check that the API is running on port 8000. (${String(e)})`);
@@ -198,9 +203,11 @@ export default function Explorer() {
 
   // Links each expand added (so collapsing removes exactly those, including links between nodes already shown).
   const edgesAddedBy = useRef<Map<number, Set<string>>>(new Map());
-  const toggle = useCallback(async (id: number) => {
+  const [pendingExpand, setPendingExpand] = useState<number | null>(null);
+  const toggle = useCallback(async (id: number, mode: "open" | "toggle" = "toggle") => {
     const { introducedBy: ib, expanded: ex, seedId: seed } = stateRef.current;
     if (seed === undefined) return;
+    if (ex.has(id) && mode === "open") return; // already showing its connections: coming back keeps them
     if (ex.has(id)) {
       const drop = new Set<number>();
       const collect = (p: number) => ib.forEach((parent, child) => { if (parent === p && !drop.has(child)) { drop.add(child); collect(child); } });
@@ -244,6 +251,13 @@ export default function Explorer() {
     }
   }, []);
 
+  // Expand a searched-for centre after its graph has rendered, so the expand sees the new graph, not the old one.
+  useEffect(() => {
+    if (pendingExpand === null || seedId !== pendingExpand || !data.nodes.some((n) => n.id === pendingExpand)) return;
+    setPendingExpand(null);
+    void toggle(pendingExpand, "open");
+  }, [pendingExpand, seedId, data, toggle]);
+
   const onLegend = useCallback((_c: Community[]) => {}, []); // communities color nodes; the legend lists categories
   const current = trail[trail.length - 1];
   const back = () => {
@@ -253,10 +267,26 @@ export default function Explorer() {
     load(prev, false);
   };
 
-  // A connection picked in the panel: highlight it if it is on screen, else recentre the graph on it.
-  const openFromPanel = (id: number) => {
+  // A connection picked in the panel joins the graph you're on, linked to what you were looking at: the graph is
+  // only rebuilt from scratch on page load or when you search for a new centre.
+  const openFromPanel = async (id: number, from: number | null = selected) => {
     if (dataRef.current.nodes.some((n) => n.id === id)) return setSelected(id);
-    void load({ id, type: "", name: "", key: "", degree: 0 });
+    try {
+      const g = await api.subgraph([id], 0, 1);
+      const node = g.nodes.find((n) => n.id === id);
+      if (!node) return;
+      const anchor = from !== null && dataRef.current.nodes.some((n) => n.id === from) ? from : stateRef.current.seedId;
+      setData((prev) => ({
+        ...prev,
+        nodes: [...prev.nodes, { ...node, kind: "entity", expandable: true, strength: 0.5 }],
+        edges: anchor === undefined || anchor === null ? prev.edges
+          : [...prev.edges, { id: -(700000 + id), src: anchor, dst: id, type: "RELATED", extractor: "derived", confidence: null, weight: 1 }],
+      }));
+      if (anchor !== undefined && anchor !== null) setIntroducedBy((m) => new Map(m).set(id, anchor));
+      setSelected(id);
+    } catch (e) {
+      setError(String(e));
+    }
   };
 
   const detailId = selected !== null && selected > 0 ? selected : null;
@@ -268,7 +298,7 @@ export default function Explorer() {
   const optionCount = matches.length + 1;
   const searchMessages = () => router.push(`/search?q=${encodeURIComponent(query.trim())}`);
   const choose = (i: number) => (i < matches.length
-    ? load({ id: matches[i].id, type: matches[i].type, name: matches[i].name, key: "", degree: 0 })
+    ? load({ id: matches[i].id, type: matches[i].type, name: matches[i].name, key: "", degree: 0 }, true, true)
     : searchMessages());
   const onSearchKey = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") { setQuery(""); setMatches([]); (e.target as HTMLElement).blur(); }
@@ -319,18 +349,17 @@ export default function Explorer() {
       {/* Top row: where you are, and search. */}
       <div className="pointer-events-none absolute inset-x-3 top-3 z-20 flex items-start gap-2">
         {current && (
-          <div className="pointer-events-auto flex min-w-0 max-w-[40%] shrink-0 items-center gap-1 rounded-md border border-line bg-panel/95 px-2 py-1.5 text-xs">
-            <button onClick={back} disabled={trail.length < 2} aria-label="Back"
-              className="rounded px-1 text-muted hover:bg-hover disabled:opacity-30">‹</button>
-            {trail.map((t, i) => (
-              <span key={t.id} className={`flex min-w-0 items-center gap-1 ${i < trail.length - 1 ? "max-sm:hidden" : ""}`}>
-                {i > 0 && <span className="text-muted">/</span>}
-                <button onClick={() => { setTrail((tr) => tr.slice(0, i + 1)); load(t, false); }}
-                  className={`truncate ${i === trail.length - 1 ? "font-medium" : "text-muted hover:text-ink"}`}>
-                  {t.name}
-                </button>
-              </span>
-            ))}
+          // Whose graph this is. Only searching changes it; when you're centred on someone else, one click goes
+          // back to where you were (or to you).
+          <div className="pointer-events-auto flex min-w-0 max-w-[40%] shrink-0 items-center gap-2 rounded-md border border-line bg-panel/95 px-2.5 py-1.5 text-xs">
+            <span className="h-2 w-2 shrink-0 rounded-full bg-ink" aria-hidden />
+            <span className="truncate"><span className="text-muted">Centred on </span><span className="font-medium">{current.name}</span></span>
+            {trail.length > 1 && (
+              <button onClick={back} className="shrink-0 rounded px-1.5 py-0.5 text-muted hover:bg-hover hover:text-ink"
+                title={`Back to ${trail[trail.length - 2].name}`}>
+                Back to {trail[trail.length - 2].name.split(" ")[0]}
+              </button>
+            )}
           </div>
         )}
 
