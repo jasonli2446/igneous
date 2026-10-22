@@ -799,6 +799,8 @@ def person_world(s: Session, pid: int, you: int) -> list[tuple[int, str, float]]
         SELECT e.dst, 'Project', 1 + COALESCE((e.props->>'items')::float, 1)
         FROM edges e JOIN nodes p ON p.id = e.dst AND p.type = 'Project'
         WHERE e.src = ANY(:ids) AND e.type = 'INVOLVED_IN' AND NOT COALESCE((p.props->>'hidden')::bool, false)
+          -- a person's projects/trips are only shown once checked (or stated by you): no unverified guesses as fact
+          AND (e.props->>'verdict' = 'keep' OR e.extractor IN ('user', 'profile', 'contacts'))
         UNION ALL  -- events
         SELECT e.dst, 'Event', 1 FROM edges e JOIN nodes ev ON ev.id = e.dst AND ev.type = 'Event'
         WHERE e.src = ANY(:ids) AND e.type = 'ATTENDED'
@@ -854,7 +856,10 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
                 WITH m AS (SELECT e.src AS x, n.type, COALESCE((e.props->>'items')::float, (e.props->>'days')::float, 1) AS w,
                                   si.occurred_at AS at
                            FROM edges e JOIN nodes n ON n.id = e.src LEFT JOIN source_items si ON si.id = n.source_item_id
-                           WHERE e.dst = :n AND e.type IN ('PART_OF', 'INVOLVED_IN') AND e.src NOT IN {HIDDEN}),
+                           WHERE e.dst = :n AND e.type IN ('PART_OF', 'INVOLVED_IN') AND e.src NOT IN {HIDDEN}
+                             -- people shown in a thread are checked ones (or stated by you); records may be unchecked
+                             AND (e.type <> 'INVOLVED_IN' OR e.props->>'verdict' = 'keep'
+                                  OR e.extractor IN ('user', 'profile', 'contacts'))),
                 -- messages collapse into their conversation: one email thread / chat per conversation
                 conv AS (SELECT it.dst AS x, 'Thread' AS type, count(*)::float AS w, max(m.at) AS at
                          FROM m JOIN edges it ON it.src = m.x AND it.type = 'IN_THREAD'
