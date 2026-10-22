@@ -277,6 +277,13 @@ def ask(body: AskBody, s: Session = Depends(get_session)):
         raise HTTPException(503, str(e)) from e
 
 
+@app.get("/ask/suggestions")
+def ask_suggestions(s: Session = Depends(get_session)):
+    """Starter questions about the user's own people and projects; [] on an empty graph."""
+    from igneous.suggestions import suggestions
+    return suggestions(s)
+
+
 @app.get("/timeline")
 def relationship_timeline(a: int = Query(..., ge=1), b: int | None = Query(None, ge=1),
                           limit: int = Query(50, ge=1, le=200), s: Session = Depends(get_session)):

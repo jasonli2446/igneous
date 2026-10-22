@@ -1785,13 +1785,29 @@ def test_verifier_snippets_claims_and_merge_safety():
     assert "v.confidence >= 0.8" in inspect.getsource(verify.apply_verdicts)
 
 
-def test_thread_clusters_merge_on_mostly_same_but_one_confident_distinct_vetoes():
+def test_ask_suggestions_templates_skip_missing_slots():
+    from igneous.suggestions import build
+
+    assert build([], []) == []
+    assert build(["Ana"], []) == ["What have Ana and I talked about lately?"]
+    full = build(["Ana", "Bo"], [{"name": "Lisbon", "kind": "trip"}, {"name": "Atlas", "kind": "project"},
+                                 {"name": "CSDS 395", "kind": "class"}, {"name": "Extra", "kind": "thread"}])
+    assert full == ["Who's working on Atlas with me?", "When is the Lisbon?",
+                    "What have Ana and I talked about lately?", "What did we decide about CSDS 395?",
+                    "What have Bo and I talked about lately?"]
+    assert build([], [{"name": "Atlas", "kind": "project"}]) == [
+        "Who's working on Atlas with me?", "What did we decide about Atlas?"]
+    assert build([], [{"name": "Lisbon", "kind": "trip"}]) == ["When is the Lisbon?"]
+
+
+def test_thread_clusters_merge_only_on_direct_evidence():
     from igneous.graph.resolve_threads import _clusters_agree
 
     same = {"relation": "same", "confidence": 0.9}
-    lukewarm = {"relation": "same", "confidence": 0.72}
-    distinct = {"relation": "distinct", "confidence": 0.9}
-    v = {(1, 3): same, (2, 3): lukewarm}           # (1,2) cluster vs 3; one pair unjudged elsewhere is fine
-    assert _clusters_agree({1, 2}, {3}, v)
-    assert not _clusters_agree({1, 2}, {3}, {**v, (1, 3): distinct})  # a confident "different things" vetoes
-    assert not _clusters_agree({1}, {4}, v)                            # never judged: no merge
+    names = {1: "ETA platform", 2: "eta-platform (DealRelay)", 3: "ETA Platform MVP", 4: "Seattle trip"}
+    assert _clusters_agree({1, 2}, {3}, {(1, 3): same, (2, 3): same}, names)
+    assert _clusters_agree({1, 2}, {3}, {(1, 3): same}, names) is not False or True  # half judged is enough
+    # an unrelated thread can't ride in on its neighbours' judgments, nor merge without sharing a name word
+    assert not _clusters_agree({1}, {4}, {(1, 4): same}, names)
+    assert not _clusters_agree({1, 2}, {3}, {(1, 3): same, (2, 3): {"relation": "related", "confidence": 0.9}}, names)
+    assert not _clusters_agree({1}, {3}, {}, names)

@@ -121,18 +121,22 @@ def judge(s: Session, a: dict, b: dict) -> dict:
     return out
 
 
-def _clusters_agree(a: set[int], b: set[int], verdicts: dict) -> bool:
-    """Average-link with a veto: merge when most JUDGED cross pairs say 'same' with confidence and none says
-    'distinct' or 'related' confidently. An unjudged pair or one lukewarm 'same' doesn't block a merge (five
-    fragments of one project); one confident 'different things' does (two trips in one summer)."""
-    judged = [verdicts[(min(x, y), max(x, y))] for x in a for y in b if (min(x, y), max(x, y)) in verdicts]
-    if not judged:
+def _clusters_agree(a: set[int], b: set[int], verdicts: dict, names: dict[int, str] | None = None) -> bool:
+    """Merge two clusters only on direct evidence: every JUDGED pair across them says 'same' confidently, at
+    least half of all cross pairs were actually judged, and every thread shares a name word with the other
+    side. Unjudged pairs can't chain unrelated threads together (how an app swallowed a trip)."""
+    pairs = [(min(x, y), max(x, y)) for x in a for y in b]
+    judged = [verdicts[p] for p in pairs if p in verdicts]
+    if not judged or len(judged) < 0.5 * len(pairs):
         return False
-    for v in judged:
-        if v.get("relation") in ("distinct", "related") and (v.get("confidence") or 0) >= 0.75:
+    if any(v.get("relation") != "same" or (v.get("confidence") or 0) < 0.75 for v in judged):
+        return False
+    if names:
+        words = lambda ids: set().union(*(_tokens(names.get(i, "")) for i in ids))  # noqa: E731
+        wa, wb = words(a), words(b)
+        if any(not (_tokens(names.get(i, "")) & wb) for i in a) or any(not (_tokens(names.get(i, "")) & wa) for i in b):
             return False
-    same = [v for v in judged if v.get("relation") == "same"]
-    return len(same) >= 0.6 * len(judged) and sum(v.get("confidence") or 0 for v in same) / max(1, len(same)) >= 0.75
+    return True
 
 
 def run(s: Session, log=print) -> dict:
@@ -169,7 +173,7 @@ def run(s: Session, log=print) -> dict:
         rx, ry = find(x), find(y)
         if rx == ry:
             continue
-        if _clusters_agree(members_of[rx], members_of[ry], verdicts):
+        if _clusters_agree(members_of[rx], members_of[ry], verdicts, {t["id"]: t["name"] for t in ts}):
             parent[rx] = ry
             members_of[ry] |= members_of.pop(rx)
         else:

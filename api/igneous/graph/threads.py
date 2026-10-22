@@ -483,6 +483,7 @@ def run(s: Session, log=print) -> int:
     keep_keys[:] = s.execute(text("SELECT key FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'")).scalars().all()
     built += umbrellas(s, keep_keys)
     pinned_parents(s)  # stated structure (xLab over its projects) always holds
+    attach_groups(s)   # named group chats / event series that belong to a thread (the Bellfield chats -> Bellfield house)
     s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'
                       AND NOT (key = ANY(:keep)) AND NOT COALESCE((props->>'pinned')::bool, false)"""),
               {"keep": keep_keys})
@@ -629,4 +630,32 @@ def pin_gold(s: Session, gold: dict) -> int:
             s.execute(text("INSERT INTO thread_parents (child_key, parent_key) VALUES (:c, :p) ON CONFLICT DO NOTHING"),
                       {"c": gkey(g["name"]), "p": gkey(g["parent"])})
     s.commit()
+    return n
+
+
+def attach_groups(s: Session) -> int:
+    """A named group chat or a recurring event is often *about* a thread: three chats called "Bellfield" and
+    "Bellfield party planning" belong to the Bellfield house. Propose chat/event PART_OF thread when the chat's
+    name contains one of the thread's defining terms; the verifier then checks each link."""
+    threads_ = s.execute(text("""
+        SELECT p.id, r.terms FROM nodes p JOIN thread_registry r ON r.key = p.key
+        WHERE p.type = 'Project' AND r.status = 'active'""")).all()
+    n = 0
+    for tid, terms in threads_:
+        for term in [t for t in (terms or []) if len(t) >= 4]:
+            rows = s.execute(text("""
+                SELECT g.id FROM nodes g
+                WHERE ((g.type = 'Thread' AND COALESCE((g.props->>'group')::bool, false)
+                        AND NOT COALESCE((g.props->>'hidden')::bool, false))
+                       OR g.type = 'Event')
+                  AND g.name ILIKE :q
+                  AND NOT EXISTS (SELECT 1 FROM edges x WHERE x.src = g.id AND x.dst = :t AND x.type = 'PART_OF')
+                LIMIT 20"""), {"q": f"%{term}%", "t": tid}).scalars().all()
+            for gid in rows:
+                s.execute(text("""
+                    INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence)
+                    VALUES (:g, :t, 'PART_OF', CAST(:p AS jsonb), 'hierarchy', :v, 0.7)
+                    ON CONFLICT (src, dst, type, extractor) DO NOTHING
+                """), {"g": gid, "t": tid, "v": VERSION, "p": json.dumps({"why": f"named after {term}"})})
+                n += 1
     return n

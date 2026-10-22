@@ -59,6 +59,11 @@ def parse_message(raw: bytes, external_id: str) -> SourceItem:
         "x_from": str(msg.get("x-from", "")) or None,
         "folder": str(msg.get("x-folder", "")) or None,
     }
+    # Bulk-mail markers, stored only when present so ordinary messages keep their content hash.
+    if msg.get("list-unsubscribe"):
+        meta["list_unsubscribe"] = True
+    if precedence := str(msg.get("precedence", "")).strip().lower():
+        meta["precedence"] = precedence
     return SourceItem(source="email", external_id=external_id, title=str(msg.get("subject", "")).strip(),
                       body_text=body, occurred_at=occurred, mime="message/rfc822", raw_meta=meta)
 

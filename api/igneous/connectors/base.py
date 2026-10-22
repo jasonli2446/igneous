@@ -74,7 +74,7 @@ VALUES (:source, :external_id,
 ON CONFLICT (source, external_id) DO UPDATE SET
     content_hash = EXCLUDED.content_hash, mime = EXCLUDED.mime, title = EXCLUDED.title,
     body_text = EXCLUDED.body_text, raw_meta = EXCLUDED.raw_meta, occurred_at = EXCLUDED.occurred_at,
-    parent_id = EXCLUDED.parent_id, updated_at = now()
+    parent_id = EXCLUDED.parent_id, item_class = NULL, updated_at = now()
 WHERE source_items.content_hash <> EXCLUDED.content_hash
 RETURNING (xmax = 0) AS inserted
 """)
