@@ -1813,12 +1813,15 @@ def test_thread_clusters_merge_only_on_direct_evidence():
     assert not _clusters_agree({1}, {3}, {}, names)
 
 
-def test_thread_terms_match_whole_words_and_course_codes_cross_list():
+def test_thread_terms_match_whole_words_and_course_codes_are_whole():
     import re
 
     from igneous.graph.resolve_threads import _tokens
 
-    assert "course:395" in _tokens("CSDS 395") & _tokens("ECSE 395 Junior Engineering Design Seminar")
+    # Same number, different department: different courses, nothing shared.
+    assert not _tokens("CSDS 395") & _tokens("ECSE 395 Junior Engineering Design Seminar")
+    assert _tokens("CSDS 395") & _tokens("csds395 final presentation")
+    assert "course:ecse395" in _tokens("ECSE 395") & _tokens("ECSE 395 Junior Engineering Design Seminar")
     pat = re.compile(r"(?<![a-z0-9])(eta)(?![a-z0-9])")
     assert pat.search("the eta platform demo") and not pat.search("beta testing") and not pat.search("theta")
 

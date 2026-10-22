@@ -115,7 +115,7 @@ export type ItemDetail = {
 /** One edge with the verifier's reason (when it has run) and the items it was derived from. */
 export type WhyEdge = {
   id: number; type: string; extractor: string; src: number; dst: number; src_name: string | null; dst_name: string | null;
-  verdict: "keep" | "drop" | "unsure" | null; reason: string | null; confidence: number | null; evidence: SourceCard[];
+  verdict: "keep" | "drop" | "unsure" | null; reason: string | null; why?: string | null; confidence: number | null; evidence: SourceCard[];
   from?: number; to?: number;
 };
 

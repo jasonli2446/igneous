@@ -45,6 +45,7 @@ UMBRELLA_THREADS = 2     # ...at least this many threads
 SOURCES = ("gmail", "email", "imessage", "gcal", "drive", "fs", "notes", "ai_chats", "github",
            "takeout_activity", "takeout_chrome", "takeout_tasks", "takeout_meet", "takeout_chat")
 
+COURSE_CODE = re.compile(r"[A-Za-z]{2,5}\s?\d{3}[A-Za-z]?")
 # Capitalized phrases (1-3 words), or course-style codes ("CSDS 395").
 TERM = re.compile(r"\b(?:[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,}){0,2}|[A-Z]{2,5}\s?\d{3})\b")
 STOP = {
@@ -395,7 +396,8 @@ def _registered_all(rows, items: list) -> dict[str, dict]:
 
     specs = []
     for row in rows:
-        terms = [t.lower() for t in (row.terms or []) if len(t) >= 3]
+        # A bare number ("395") is shared by different courses, rooms and years: never a defining term alone.
+        terms = [t.lower() for t in (row.terms or []) if len(t) >= 3 and not t.strip().isdigit()]
         if not terms:
             continue
         lo = hi = None
@@ -403,7 +405,11 @@ def _registered_all(rows, items: list) -> dict[str, dict]:
             lo, hi = row.span_start - _td(days=30), row.span_end + _td(days=30)
         specs.append((row.key, terms, lo, hi))
     # Whole-word matching: a short defining term ("eta") must not match inside other words ("beta", "theta").
-    patterns = {key: re.compile(r"(?<![a-z0-9])(" + "|".join(re.escape(t) for t in terms) + r")(?![a-z0-9])")
+    # A course code matches with or without its space ("csds 395" / "csds395"), and only with its department.
+    def pat(t: str) -> str:
+        m = re.fullmatch(r"([a-z]{2,5})\s?(\d{3})", t)
+        return rf"{m.group(1)}\s?{m.group(2)}" if m else re.escape(t)
+    patterns = {key: re.compile(r"(?<![a-z0-9])(" + "|".join(pat(t) for t in terms) + r")(?![a-z0-9])")
                 for key, terms, _lo, _hi in specs}
     out: dict[str, dict] = {k: {} for k, *_ in specs}
     for it in items:
@@ -568,6 +574,9 @@ def run(s: Session, log=print) -> int:
     from igneous.graph import resolve_threads
     resolve_threads.run(s, log=None)
     keep_keys[:] = s.execute(text("SELECT key FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'")).scalars().all()
+    s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND COALESCE((props->>'umbrella')::bool, false)
+                      AND NOT COALESCE((props->>'pinned')::bool, false)"""))
+    keep_keys[:] = [k for k in keep_keys if not k.startswith("umbrella:")]
     built += umbrellas(s, keep_keys)
     pinned_parents(s)  # stated structure (xLab over its projects) always holds
     attach_groups(s)   # named group chats / event series that belong to a thread (the Bellfield chats -> Bellfield house)
@@ -603,8 +612,21 @@ def umbrellas(s: Session, keep_keys: list[str]) -> int:
             if n / len(rows) >= UMBRELLA_SHARE:
                 share[term][tid] = n / len(rows)
     built = 0
+    thread_names = {re.sub(r"\s+", " ", n.lower()).strip() for n in s.execute(text(
+        "SELECT name FROM nodes WHERE type = 'Project' AND key = ANY(:keep)"), {"keep": keep_keys}).scalars()}
+    # Orgs from your resume already hold their threads (graph/backbone.py): a term that is part of one's name
+    # ("Western Reserve University" in Case Western Reserve University) is that org, not a new umbrella.
+    org_names = [f" {re.sub(r'[^a-z0-9]+', ' ', n.lower()).strip()} " for n in s.execute(text("""
+        SELECT o.name FROM edges e JOIN nodes o ON o.id = e.dst
+        WHERE e.type = 'WORKED_AT' AND e.extractor IN ('profile', 'user')""")).scalars()]
     for term, by_thread in share.items():
         if len(by_thread) < UMBRELLA_THREADS:
+            continue
+        # A course is never over other courses (two classes share a prereq's name in their mail), and a term that
+        # already names a thread is that thread, not a second thing above its neighbours.
+        norm = re.sub(r"[^a-z0-9]+", " ", term.lower()).strip()
+        if (COURSE_CODE.fullmatch(term.strip()) or norm in thread_names
+                or (len(norm.split()) >= 2 and any(f" {norm} " in o for o in org_names))):
             continue
         months = s.execute(text("""
             SELECT count(DISTINCT date_trunc('month', occurred_at)) FROM source_items

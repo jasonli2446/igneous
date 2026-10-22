@@ -288,6 +288,8 @@ def edge_view(row: dict, evidence: list[dict]) -> dict:
     return {"id": row["id"], "type": row["type"], "extractor": row["extractor"],
             "src": row["src"], "dst": row["dst"], "src_name": row.get("src_name"), "dst_name": row.get("dst_name"),
             "verdict": p.get("verdict"), "reason": p.get("reason"),
+            # What the rule that made it saw ("62% of its conversations involve case.edu"), for unjudged links.
+            "why": p["why"] if isinstance(p.get("why"), str) else "; ".join(p.get("why") or []) or None,
             "confidence": p.get("confidence", row.get("confidence")), "evidence": evidence}
 
 
@@ -746,6 +748,10 @@ def view(s: Session, seed: int, per: int = 6) -> dict:
     people = [mc for mc in rest if mc[1] == "People"][:int(size * 0.5)]
     things = [mc for mc in rest if mc[1] != "People"][:max(0, size - len(backbone) - len(people))]
     first = backbone + sorted(people + things, key=lambda mc: -mc[0]["strength"])
+    # An org from your resume stands for its own thread (graph/backbone.py): show it once, as the org.
+    stands = dict(s.execute(text("""SELECT (props->>'thread')::bigint, id FROM nodes
+                                    WHERE type = 'Organization' AND props ? 'thread'""")).all())
+    first = [(m, c) for m, c in first if m["id"] not in stands]
     for m, _c in first:
         shown.append(m["id"])
         edges.append({"id": -(len(edges) + 1) * 7, "src": head, "dst": m["id"], "type": "RELATED",
@@ -760,11 +766,31 @@ def view(s: Session, seed: int, per: int = 6) -> dict:
     for n in g["nodes"]:
         if n["type"] == "Thread":
             n["name"] = pretty_thread(n["name"], named) or n["name"]
-    g["edges"] = edges + _ties(s, [x for x in shown if x != head], per_node=2)
+    g["edges"] = edges + _structure(s, [x for x in shown if x != head]) + _ties(s, [x for x in shown if x != head], per_node=2)
     g["categories"] = [_hub(c, len(cats[c]), round(sum(m["strength"] for m in cats[c][:10]) / 10, 3))
                        for c in order]
     g["seed"] = head
     return g
+
+
+def _structure(s: Session, ids: list[int]) -> list[dict]:
+    """What's part of what among the visible nodes (ETA in xLab, xLab in Case Western), as stored. An org that
+    stands for a thread carries that thread's links."""
+    alias = dict(s.execute(text("""SELECT (props->>'thread')::bigint, id FROM nodes
+                                   WHERE id = ANY(:i) AND type = 'Organization' AND props ? 'thread'"""), {"i": ids}).all())
+    under = list(set(ids) | set(alias))
+    rows = s.execute(text("""
+        SELECT e.id, e.src, e.dst FROM edges e
+        WHERE e.type = 'PART_OF' AND e.src = ANY(:i) AND e.dst = ANY(:i)
+          AND (SELECT type FROM nodes WHERE id = e.src) IN ('Project', 'Organization')
+    """), {"i": under}).all()
+    out, seen = [], set()
+    for eid, a, b in rows:
+        a, b = alias.get(a, a), alias.get(b, b)
+        if a != b and (a, b) not in seen:
+            seen.add((a, b))
+            out.append({"id": eid, "src": a, "dst": b, "type": "PART_OF", "weight": 3})
+    return out
 
 
 def _ties(s: Session, ids: list[int], per_node: int = 2) -> list[dict]:
@@ -837,6 +863,9 @@ def earned_cut(scored: list[tuple[int, float]], lo: int = 1, hi: int = 12) -> li
     """Keep the strong ones: sort by score and cut at the largest relative drop (a project with two real children
     shows two, one with ten shows ten), between lo and hi."""
     scored = sorted(scored, key=lambda x: -x[1])
+    # Many children of similar size (a university's classes): no natural cut, so show the top `hi` rather than
+    # stop at the first small gap among the biggest few.
+    lo = max(lo, min(hi, len(scored) // 4))
     if len(scored) <= lo:
         return [i for i, _ in scored]
     cut, best = len(scored[:hi]), 0.0
@@ -852,8 +881,17 @@ def children(s: Session, node: int, ntype: str) -> list[int]:
     """A project's or org's children, the bigger picture first: the projects under it, then (for a project) its
     checked people, its main group conversations and its key documents. Code files and one-off notices are detail
     that lives inside a project, not next to it."""
-    if s.execute(text("SELECT COALESCE((props->>'hidden')::bool, false) FROM nodes WHERE id = :n"), {"n": node}).scalar():
+    hidden, own = s.execute(text("""SELECT COALESCE((props->>'hidden')::bool, false), (props->>'thread')::bigint
+                                     FROM nodes WHERE id = :n"""), {"n": node}).one()
+    if hidden:
         return []
+    if ntype == "Organization" and own:
+        # An org from your resume stands for its thread (graph/backbone.py): it opens to what's under it.
+        # A child that is itself an org's thread (xLab under Case Western) is shown as that org.
+        stands = dict(s.execute(text("""SELECT (props->>'thread')::bigint, id FROM nodes
+                                        WHERE type = 'Organization' AND props ? 'thread'""")).all())
+        out = [stands.get(c, c) for c in children(s, own, "Project")]
+        return [c for c in dict.fromkeys(out) if c != node]
     # Projects/threads under it (umbrellas, employers), weighted by their own size.
     # Children you stated (or your resume did) always show; others earn their place by size.
     stated = s.execute(text("""
@@ -978,5 +1016,9 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
             n["name"] = pretty_thread(n["name"], named) or n["name"]
     # Among a group's members, show how they relate to each other too (who talks to whom), not one tie each.
     ties = 3 if ntype not in ("Person", "Project") else 1
-    g["edges"] = edges + _ties(s, [*new, *[v for v in visible if v > 0]], per_node=ties)
+    vis = [*new, *[v for v in visible if v > 0], node]
+    struct = [e for e in _structure(s, vis) if e["src"] in new or e["dst"] in new]
+    linked = {(e["src"], e["dst"]) for e in struct} | {(e["dst"], e["src"]) for e in struct}
+    edges = [e for e in edges if (e["src"], e["dst"]) not in linked]  # the real "part of" replaces the generic tie
+    g["edges"] = edges + struct + _ties(s, vis[:-1], per_node=ties)
     return g

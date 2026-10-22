@@ -14,6 +14,10 @@ const ORIGIN: Record<string, string> = {
   "thread-resolution": "Suggested automatically; not checked yet.",
   er: "Matched automatically by name and contacts; not checked yet.",
   organizations: "Suggested from email domains and work history; not checked yet.",
+  backbone: "Placed under your school or workplace from its emails and dates; not checked yet.",
+  profile: "From your resume or LinkedIn.",
+  user: "You added this.",
+  self: "These are your own addresses and numbers.",
 };
 
 const REL: Record<string, string> = {
@@ -34,7 +38,10 @@ function EdgeCard({ e, terms, onWrong }: { e: WhyEdge; terms: string[]; onWrong?
       </div>
       {e.reason
         ? <p className="mt-1 text-xs leading-relaxed text-soft">{e.reason}</p>
-        : <p className="mt-1 text-xs text-muted">{ORIGIN[e.extractor] ?? "Inferred automatically; not checked yet."}</p>}
+        : <p className="mt-1 text-xs text-muted">
+            {e.why && <span className="text-soft">{e.why[0].toUpperCase() + e.why.slice(1)}. </span>}
+            {ORIGIN[e.extractor] ?? "Inferred automatically; not checked yet."}
+          </p>}
       {e.evidence.length > 0 && <div className="mt-2"><SourceRows items={e.evidence} highlight={terms} /></div>}
       {e.extractor !== "spine" && onWrong && (
         <button onClick={() => onWrong(e)} className="mt-2 text-xs text-muted hover:text-danger hover:underline">
