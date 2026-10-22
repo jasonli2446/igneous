@@ -326,7 +326,12 @@ export const api = {
   expandNode: (seed: number, node: number, visible: number[], offset = 0, signal?: AbortSignal) =>
     get<Subgraph>("/graph/expand", { seed, node, visible, offset }, signal),
   explain: (a: number, b: number) => get<Explanation>("/graph/explain", { a, b }),
-  edgeIsWrong: (edge: number) => send<{ removed: number }>("POST", "/graph/edge/wrong", { edge }),
+  edgeIsWrong: (edge: number) => send<{ removed: number; also_removed: number; edges: number[] }>("POST", "/graph/edge/wrong", { edge }),
+  restoreEdges: (edges: number[]) => send<{ restored: number[] }>("POST", "/graph/edge/restore", { edges }),
+  linkOptions: (a: number, b: number) =>
+    get<{ options: { label: string; type: string; src: number; dst: number }[] }>("/graph/link/options", { a, b }),
+  addLink: (src: number, dst: number, type: string, note?: string) =>
+    send<{ id: number; src: number; dst: number; type: string }>("POST", "/graph/link", { src, dst, type, note }),
   timeline: (a: number, b?: number, limit = 50, signal?: AbortSignal) =>
     get<Timeline>("/timeline", { a, b, limit }, signal),
   entity: (id: number) => get<EntityDetail>(`/graph/entity/${id}`, {}),

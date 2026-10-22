@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import ConnectTo from "@/components/ConnectTo";
 import NodeSummary from "@/components/NodeSummary";
 import Sources from "@/components/SourceList";
 import { InlineError, Skeleton } from "@/components/ui";
-import { api, Correction, EntityDetail, GNode, TYPE_COLORS } from "@/lib/api";
+import { api, Correction, EntityDetail, GEdge, GNode, TYPE_COLORS } from "@/lib/api";
 
 type Props = {
   id: number;
@@ -12,6 +13,8 @@ type Props = {
   onCloseAction?: () => void;
   /** Called after any correction or undo so the graph can re-fetch; `keep` is the node to stay on, if any. */
   onChangedAction: (keep: number | null) => void;
+  /** A connection you added: shown on the graph in place. */
+  onLinkedAction?: (node: GNode, edge: GEdge) => void;
 };
 
 const ANCHOR_SENTENCES: [RegExp, (m: RegExpMatchArray) => string][] = [
@@ -84,7 +87,7 @@ function MergePicker({ self, onPick, onCancel }: { self: number; onPick: (n: GNo
   );
 }
 
-export default function EntityInspector({ id, onSelectAction, onCloseAction, onChangedAction }: Props) {
+export default function EntityInspector({ id, onSelectAction, onCloseAction, onChangedAction, onLinkedAction }: Props) {
   const [e, setE] = useState<EntityDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -179,6 +182,8 @@ export default function EntityInspector({ id, onSelectAction, onCloseAction, onC
       </header>
 
       <NodeSummary id={id} onSelectAction={onSelectAction} showConnections={false} />
+
+      <ConnectTo id={id} name={e.name} onLinkedAction={onLinkedAction} />
 
       {e.anchors.length > 0 && (
         <Section title="Known from">

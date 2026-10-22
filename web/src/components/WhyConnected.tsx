@@ -55,15 +55,19 @@ function range(a: string | null, b: string | null) {
 export default function WhyConnected({ a, b, onCloseAction, onOpenAction, onChangedAction }: {
   a: number; b: number; onCloseAction: () => void; onOpenAction: (id: number) => void;
   /** A link was removed: the page drops it (and anything only it was holding) from what's on screen. */
-  onChangedAction?: (removed: { src: number; dst: number }) => void;
+  onChangedAction?: (removed: { src: number; dst: number; edges: number[]; text: string }) => void;
 }) {
   const [r, setR] = useState<Explanation | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   // "This is wrong": your verdict removes the link now and keeps it gone on every rebuild.
   const wrong = (edge: WhyEdge) => {
-    api.edgeIsWrong(edge.id).then(() => { setAttempt((n) => n + 1); onChangedAction?.({ src: edge.src, dst: edge.dst }); })
-      .catch((e) => setErr(String(e)));
+    api.edgeIsWrong(edge.id).then((r) => {
+      setAttempt((n) => n + 1);
+      const more = r.also_removed ? ` (and ${r.also_removed} other message${r.also_removed === 1 ? "" : "s"} in that conversation)` : "";
+      onChangedAction?.({ src: edge.src, dst: edge.dst, edges: r.edges,
+                          text: `Removed "${edge.src_name}" from "${edge.dst_name}"${more}.` });
+    }).catch((e) => setErr(String(e)));
   };
 
   useEffect(() => {
