@@ -7,7 +7,6 @@ const LINKS = [
   { href: "/", label: "Graph" },
   { href: "/ask", label: "Ask" },
   { href: "/search", label: "Search" },
-  { href: "/import", label: "Import" },
   { href: "/settings", label: "Sources" },
 ];
 

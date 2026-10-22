@@ -35,66 +35,32 @@ GOOGLE_NOTE = ("Sign-in returns to this computer at /sources/google/callback on 
 
 # kind: google | local | remote | import | planned. cli: equivalent command shown in muted text.
 SOURCES: list[dict] = [
-    {"id": "gmail", "kind": "google", "name": "Gmail", "group": "Google",
+    {"id": "gmail", "kind": "google", "name": "Gmail", "group": "Connected accounts",
      "reads": "Your email: senders, recipients, subjects, bodies, and threads. Promotions, Social and Forums are skipped.",
      "steps": GOOGLE_STEPS, "cli": "igneous connect google && igneous sync gmail"},
-    {"id": "gcal", "kind": "google", "name": "Google Calendar", "group": "Google",
+    {"id": "gcal", "kind": "google", "name": "Google Calendar", "group": "Connected accounts",
      "reads": "Your events: titles, times, attendees, and places.",
      "steps": GOOGLE_STEPS, "cli": "igneous sync gcal"},
-    {"id": "gcontacts", "kind": "google", "name": "Google Contacts", "group": "Google",
+    {"id": "gcontacts", "kind": "google", "name": "Google Contacts", "group": "Connected accounts",
      "reads": "Names, emails, phone numbers, and organizations on your contact cards. Helps merge duplicate people.",
      "steps": GOOGLE_STEPS, "cli": "igneous sync gcontacts"},
-    {"id": "drive", "kind": "google", "name": "Google Drive", "group": "Google",
+    {"id": "drive", "kind": "google", "name": "Google Drive", "group": "Connected accounts",
      "reads": "The text of your Docs, Sheets, Slides, PDFs, and other readable files.",
      "steps": GOOGLE_STEPS, "cli": "igneous sync drive"},
-    {"id": "imessage", "kind": "local", "name": "Messages", "group": "This Mac",
-     "reads": "iMessage and SMS conversations on this Mac, grouped into one entry per conversation per day.",
-     "steps": ["Messages must be signed in on this Mac so the history is on disk.", *FDA_STEPS,
-               "Press Sync now. The first sync reads the last 90 days."],
-     "cli": "igneous sync imessage --since-days 90"},
-    {"id": "maccontacts", "kind": "local", "name": "Contacts", "group": "This Mac",
-     "reads": "Contacts.app cards (where iPhone contacts sync): names, phone numbers, and emails. "
-              "Lets Messages show names instead of numbers.",
-     "steps": [*FDA_STEPS, "Press Sync now."], "cli": "igneous sync maccontacts"},
-    {"id": "ai_chats", "kind": "local", "name": "Claude Code and Codex chats", "group": "This Mac",
-     "reads": "Your prompts and the assistant's written replies from coding sessions on this Mac. Tool output and "
-              "file contents are skipped, and secrets are redacted.",
-     "steps": ["Nothing to set up: it reads ~/.claude/projects and ~/.codex/sessions if you use those tools.",
-               "Press Sync now."],
-     "cli": "igneous sync ai_chats"},
-    {"id": "fs", "kind": "local", "name": "Local files", "group": "This Mac",
-     "reads": "Metadata for every non-secret file in the folders you choose, plus text from readable documents. "
-              "Secrets are skipped and document text is redacted. Local text never reaches a model unless "
-              "IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true.",
-     "steps": ["Set IGNEOUS_FILESYSTEM_ROOTS to a comma-separated list of folders (in api/.env or the API's "
-               "environment), then restart the API. With no setting, existing Documents, Desktop, Downloads, and "
-               "iCloud Drive folders are used.",
-               "Press Sync now. Each sync reconciles deletions without reopening unchanged file bodies."],
-     "cli": "igneous sync fs --path ~/Documents/notes"},
-    {"id": "notes", "kind": "local", "name": "Apple Notes", "group": "This Mac",
-     "reads": "Unlocked Notes.app titles and bodies from the local database. Bodies are redacted and never sent "
-              "to a model unless IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true.",
-     "steps": [*FDA_STEPS, "Press Sync now. Locked notes are skipped."], "cli": "igneous sync notes"},
-    {"id": "email", "kind": "local", "name": "Enron demo mailbox", "group": "Demo",
-     "reads": "The public Enron email corpus. For demos and evaluation only; never mix it with your own data.",
-     "steps": ["Run make enron once to download the mailboxes into data/maildir.", "Press Sync now."],
-     "cli": "igneous sync email --mailbox allen-p"},
-    {"id": "chatgpt", "kind": "import", "name": "ChatGPT export", "group": "Exports",
+    {"id": "github", "kind": "remote", "name": "GitHub", "group": "Connected accounts",
+     "reads": "Your repositories, README files, issues, pull requests, comments, and daily commit activity (read-only).",
+     "steps": ["On github.com open Settings, Developer settings, Fine-grained tokens, and generate a token.",
+               "Give it read-only access (Contents, Issues, Pull requests: Read) to the repositories you want.",
+               "Paste it below. It is stored encrypted on this computer and never shown again."]},
+    {"id": "chatgpt", "kind": "import", "name": "ChatGPT export", "group": "Exports you upload",
      "reads": "Your ChatGPT conversation history from OpenAI's data export.",
      "steps": ["Request the export in ChatGPT settings (Data controls, Export data).",
-               "Open Import and upload the .zip you receive by email."]},
-    {"id": "takeout", "kind": "import", "name": "Google Takeout", "group": "Exports",
-     "reads": "Your Google My Activity (Search, YouTube, Maps, Gemini and the rest), Chrome history and bookmarks, "
-              "and Maps places and visits. Gemini chats are part of My Activity (a Gemini-only export works too). "
-              "Takeout data stays local and is never sent to a model unless you opt in (IGNEOUS_LLM_SOURCES).",
-     "steps": ["Go to takeout.google.com and click Deselect all.",
-               "Tick My Activity, Chrome, and Maps (your places). If you see Location History (Timeline), tick it too.",
-               "On My Activity click Multiple formats and change Activity records from HTML to JSON. HTML is not read.",
-               "Click Next step, keep one-time export and .zip, then Create export. It usually takes hours and may "
-               "arrive as several zips.",
-               "Download every zip. On Import choose Scan Downloads for takeout-*.zip, give a path, or upload them."],
-     "cli": "igneous import takeout ~/Downloads/takeout-*.zip"},
-    {"id": "linkedin", "kind": "import", "name": "LinkedIn", "group": "Exports",
+               "Upload the .zip you receive by email in the box below."]},
+    {"id": "claude_ai", "kind": "import", "name": "Claude.ai export", "group": "Exports you upload",
+     "reads": "Your claude.ai conversation history from Anthropic's data export.",
+     "steps": ["Request the export in claude.ai settings (Privacy, Export data).",
+               "Upload the .zip you receive by email in the box below."]},
+    {"id": "linkedin", "kind": "import", "name": "LinkedIn", "group": "Exports you upload",
      "reads": "Your LinkedIn profile (positions, education, projects, skills) and your connections with their company, "
               "position and connection date. Positions and education become your employers and schools; connections "
               "become named people linked to their companies. Login data is never read, and the data stays local "
@@ -104,17 +70,51 @@ SOURCES: list[dict] = [
                "For positions, education, projects and skills choose Download larger data archive "
                "(it can take up to 24 hours).",
                "Click Request archive and confirm your password. LinkedIn emails you a download link.",
-               "Download the .zip. On Import upload it, or give its path or an extracted folder."],
+               "Download the .zip. In the box below upload it, or give its path or an extracted folder."],
      "cli": "igneous import linkedin ~/Downloads/Basic_LinkedInDataExport.zip"},
-    {"id": "claude_ai", "kind": "import", "name": "Claude.ai export", "group": "Exports",
-     "reads": "Your claude.ai conversation history from Anthropic's data export.",
-     "steps": ["Request the export in claude.ai settings (Privacy, Export data).",
-               "Open Import and upload the .zip you receive by email."]},
-    {"id": "github", "kind": "remote", "name": "GitHub", "group": "Code",
-     "reads": "Your repositories, README files, issues, pull requests, comments, and daily commit activity (read-only).",
-     "steps": ["On github.com open Settings, Developer settings, Fine-grained tokens, and generate a token.",
-               "Give it read-only access (Contents, Issues, Pull requests: Read) to the repositories you want.",
-               "Paste it below. It is stored encrypted on this computer and never shown again."]},
+    {"id": "takeout", "kind": "import", "name": "Google Takeout", "group": "Exports you upload",
+     "reads": "Your Google My Activity (Search, YouTube, Maps, Gemini and the rest), Chrome history and bookmarks, "
+              "and Maps places and visits. Gemini chats are part of My Activity (a Gemini-only export works too). "
+              "Takeout data stays local and is never sent to a model unless you opt in (IGNEOUS_LLM_SOURCES).",
+     "steps": ["Go to takeout.google.com and click Deselect all.",
+               "Tick My Activity, Chrome, and Maps (your places). If you see Location History (Timeline), tick it too.",
+               "On My Activity click Multiple formats and change Activity records from HTML to JSON. HTML is not read.",
+               "Click Next step, keep one-time export and .zip, then Create export. It usually takes hours and may "
+               "arrive as several zips.",
+               "Download every zip. In the box below choose Scan Downloads for takeout-*.zip, give a path, or upload them."],
+     "cli": "igneous import takeout ~/Downloads/takeout-*.zip"},
+    {"id": "imessage", "kind": "local", "name": "Messages", "group": "On this computer",
+     "reads": "iMessage and SMS conversations on this Mac, grouped into one entry per conversation per day.",
+     "steps": ["Messages must be signed in on this Mac so the history is on disk.", *FDA_STEPS,
+               "Press Sync now. The first sync reads the last 90 days."],
+     "cli": "igneous sync imessage --since-days 90"},
+    {"id": "maccontacts", "kind": "local", "name": "Contacts", "group": "On this computer",
+     "reads": "Contacts.app cards (where iPhone contacts sync): names, phone numbers, and emails. "
+              "Lets Messages show names instead of numbers.",
+     "steps": [*FDA_STEPS, "Press Sync now."], "cli": "igneous sync maccontacts"},
+    {"id": "ai_chats", "kind": "local", "name": "Claude Code and Codex chats", "group": "On this computer",
+     "reads": "Your prompts and the assistant's written replies from coding sessions on this Mac. Tool output and "
+              "file contents are skipped, and secrets are redacted.",
+     "steps": ["Nothing to set up: it reads ~/.claude/projects and ~/.codex/sessions if you use those tools.",
+               "Press Sync now."],
+     "cli": "igneous sync ai_chats"},
+    {"id": "fs", "kind": "local", "name": "Local files", "group": "On this computer",
+     "reads": "Metadata for every non-secret file in the folders you choose, plus text from readable documents. "
+              "Secrets are skipped and document text is redacted. Local text never reaches a model unless "
+              "IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true.",
+     "steps": ["Set IGNEOUS_FILESYSTEM_ROOTS to a comma-separated list of folders (in api/.env or the API's "
+               "environment), then restart the API. With no setting, existing Documents, Desktop, Downloads, and "
+               "iCloud Drive folders are used.",
+               "Press Sync now. Each sync reconciles deletions without reopening unchanged file bodies."],
+     "cli": "igneous sync fs --path ~/Documents/notes"},
+    {"id": "notes", "kind": "local", "name": "Apple Notes", "group": "On this computer",
+     "reads": "Unlocked Notes.app titles and bodies from the local database. Bodies are redacted and never sent "
+              "to a model unless IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true.",
+     "steps": [*FDA_STEPS, "Press Sync now. Locked notes are skipped."], "cli": "igneous sync notes"},
+    {"id": "email", "kind": "local", "name": "Enron demo mailbox", "group": "Demo",
+     "reads": "The public Enron email corpus. For demos and evaluation only; never mix it with your own data.",
+     "steps": ["Run make enron once to download the mailboxes into data/maildir.", "Press Sync now."],
+     "cli": "igneous sync email --mailbox allen-p"},
 ]
 BY_ID = {s["id"]: s for s in SOURCES}
 SYNCABLE = {s["id"] for s in SOURCES if s["kind"] in ("google", "local", "remote")}
@@ -186,6 +186,9 @@ def describe(s: Session) -> list[dict]:
     counts = dict(s.execute(text("SELECT source, count(*) FROM source_items GROUP BY 1")).all())
     export_counts = dict(s.execute(text("""
         SELECT raw_meta->>'tool', count(*) FROM source_items WHERE source = 'ai_chats' GROUP BY 1""")).all())
+    latest_item = dict(s.execute(text("SELECT source, max(updated_at) FROM source_items GROUP BY 1")).all())
+    latest_export = dict(s.execute(text("""
+        SELECT raw_meta->>'tool', max(updated_at) FROM source_items WHERE source = 'ai_chats' GROUP BY 1""")).all())
     states: dict[str, list[tuple[str, object]]] = {}
     for connector, account, updated in s.execute(text("SELECT connector, account, updated_at FROM sync_state")):
         states.setdefault(connector, []).append((account, updated))
@@ -210,6 +213,10 @@ def describe(s: Session) -> list[dict]:
         else:
             count = counts.get(sid, 0)
         last = max((u for _, u in states.get(sid, [])), default=None)
+        if kind == "import":  # imports have no sync checkpoint: last import = newest item they wrote
+            stamps = ([t for k, t in latest_item.items() if k.startswith("takeout_")] + [latest_export.get("gemini")]
+                      if sid == "takeout" else [latest_item.get(sid) if sid == "linkedin" else latest_export.get(sid)])
+            last = max((t for t in stamps if t), default=None)
         ok, message = check_requirements(sid) if kind in ("google", "local") else (True, None)
         accounts = []
         if kind == "google":
