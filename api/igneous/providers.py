@@ -111,11 +111,13 @@ class BedrockProvider:
         conversation = [message for message in messages if message["role"] != "system"]
         if not conversation:
             raise ValueError("chat requires at least one non-system message")
+        model_id = model or self.model_name
         kwargs: dict[str, Any] = {
-            "model": model or self.model_name,
+            "model": model_id,
             "max_tokens": max_tokens,
             "messages": conversation,
-            "output_config": {"effort": effort},
+            # Haiku takes a JSON schema but not an effort level; sending one is a 400.
+            "output_config": {} if "haiku" in model_id else {"effort": effort},
         }
         if system:
             kwargs["system"] = system

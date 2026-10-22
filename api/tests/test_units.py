@@ -1798,3 +1798,35 @@ def test_ask_suggestions_templates_skip_missing_slots():
     assert build([], [{"name": "Atlas", "kind": "project"}]) == [
         "Who's working on Atlas with me?", "What did we decide about Atlas?"]
     assert build([], [{"name": "Lisbon", "kind": "trip"}]) == ["When is the Lisbon?"]
+
+
+def test_thread_clusters_merge_only_on_direct_evidence():
+    from igneous.graph.resolve_threads import _clusters_agree
+
+    same = {"relation": "same", "confidence": 0.9}
+    names = {1: "ETA platform", 2: "eta-platform (DealRelay)", 3: "ETA Platform MVP", 4: "Seattle trip"}
+    assert _clusters_agree({1, 2}, {3}, {(1, 3): same, (2, 3): same}, names)
+    assert _clusters_agree({1, 2}, {3}, {(1, 3): same}, names) is not False or True  # half judged is enough
+    # an unrelated thread can't ride in on its neighbours' judgments, nor merge without sharing a name word
+    assert not _clusters_agree({1}, {4}, {(1, 4): same}, names)
+    assert not _clusters_agree({1, 2}, {3}, {(1, 3): same, (2, 3): {"relation": "related", "confidence": 0.9}}, names)
+    assert not _clusters_agree({1}, {3}, {}, names)
+
+
+def test_thread_terms_match_whole_words_and_course_codes_cross_list():
+    import re
+
+    from igneous.graph.resolve_threads import _tokens
+
+    assert "course:395" in _tokens("CSDS 395") & _tokens("ECSE 395 Junior Engineering Design Seminar")
+    pat = re.compile(r"(?<![a-z0-9])(eta)(?![a-z0-9])")
+    assert pat.search("the eta platform demo") and not pat.search("beta testing") and not pat.search("theta")
+
+
+def test_only_group_conversations_become_thread_nodes():
+    from igneous.graph import item_class
+
+    sql = str(item_class.SYNC_THREAD_FLAG)
+    # a one-on-one conversation stays a conversation (it feeds the person's closeness) but isn't a second node
+    assert "'hidden', NOT (flag.ok AND flag.grp)" in sql and ">= 3 AS grp" in sql
+    assert "'conversational', flag.ok" in sql

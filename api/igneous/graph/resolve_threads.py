@@ -26,12 +26,13 @@ EXTRACTOR = "thread-resolution"
 VERSION = "1"
 MIN_SHARED = 0.15        # Jaccard of records or people for a pair to be judged
 NEAR_DAYS = 45           # spans within this many days of each other count as overlapping
-MAX_PAIRS = 300
+MAX_PAIRS = 1500  # judgments are cached by thread identity, so a wide net costs once
 
 
 def _threads(s: Session) -> list[dict]:
     rows = s.execute(text("""
-        SELECT p.id, p.key, p.name, p.props->>'kind' AS kind, (p.props->>'start')::timestamptz AS a,
+        SELECT p.id, p.key, p.name, p.props->>'kind' AS kind, COALESCE((p.props->>'pinned')::bool, false) AS pinned,
+               (p.props->>'start')::timestamptz AS a,
                (p.props->>'end')::timestamptz AS b,
                array_remove(array_agg(DISTINCT n.source_item_id), NULL) AS items,
                array_remove(array_agg(DISTINCT ip.src), NULL) AS people
@@ -46,7 +47,11 @@ def _threads(s: Session) -> list[dict]:
 
 
 def _tokens(name: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z0-9]+", (name or "").lower()) if len(w) >= 3}
+    """Name words; a course code's number counts on its own (CSDS 395 and ECSE 395 are one cross-listed course)."""
+    low = (name or "").lower()
+    words = {w for w in re.findall(r"[a-z0-9]+", low) if len(w) >= 3}
+    words |= {f"course:{n}" for n in re.findall(r"\b[a-z]{2,5}\s?(\d{3})\b", low)}
+    return words
 
 
 def candidate_pairs(ts: list[dict]) -> list[tuple[dict, dict]]:
@@ -87,27 +92,32 @@ def judge(s: Session, a: dict, b: dict) -> dict:
     if not settings.llm_enabled:
         return fallback
     prompt = f"A: {_card(s, a)}\n\nB: {_card(s, b)}"
-    key = "thread-pair:v2:" + hashlib.sha256(prompt.encode()).hexdigest()
+    # Keyed by the two threads' identities, not their exact current records: a judgment is reused while the
+    # threads stay the same things, so it doesn't re-roll every time a few records shift.
+    ident = "|".join(sorted([a["key"], b["key"]]))
+    key = "thread-pair:v3:" + hashlib.sha256(ident.encode()).hexdigest()
     cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
     if cached is not None:
         return cached
     try:
-        out, _ = structured(
-            "Two threads were found in someone's records (projects, trips, classes, jobs). Decide how they relate. "
+        system = ("Two threads were found in someone's records (projects, trips, classes, jobs). Decide how they relate. "
             "'same' ONLY if they are one and the same thing found twice: the same named project or product, the "
             "same trip, the same course. You must be able to name what they both are; sharing people, a time "
             "period, an organization or a topic is NOT enough (two trips in one summer are different trips; two "
             "projects of one lab are different projects). 'related': different things that belong together (one "
             "led to the other, one is part of the other, same client or lab); give the relation in a few words. "
             "'distinct': not meaningfully related. When unsure between same and related, choose related. "
-            "Give a confidence 0-1 and a short reason that names the thing if 'same'.",
-            prompt,
-            {"type": "object", "additionalProperties": False,
+            "Give a confidence 0-1 and a short reason that names the thing if 'same'.")
+        schema = {"type": "object", "additionalProperties": False,
              "required": ["relation", "label", "confidence", "reason", "shared_identity"],
              "properties": {"relation": {"enum": ["same", "related", "distinct"]}, "label": {"type": "string"},
                             "shared_identity": {"type": "string"},
-                            "confidence": {"type": "number"}, "reason": {"type": "string"}}},
-            max_tokens=500)
+                            "confidence": {"type": "number"}, "reason": {"type": "string"}}}
+        out, _ = structured(system, prompt, schema,
+            max_tokens=500, model=settings.llm_cheap_model)
+        if out.get("relation") == "same":
+            # A merge is hard to undo: confirm a cheap-model 'same' with the stronger model before trusting it.
+            out, _ = structured(system, prompt, schema, max_tokens=500)
     except LLMDisabled:
         return fallback
     except Exception:  # one failed judgment must not stop the run; unjudged pairs stay separate
@@ -115,6 +125,24 @@ def judge(s: Session, a: dict, b: dict) -> dict:
     s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb)) "
                    "ON CONFLICT (cache_key) DO NOTHING"), {"k": key, "r": json.dumps(out)})
     return out
+
+
+def _clusters_agree(a: set[int], b: set[int], verdicts: dict, names: dict[int, str] | None = None) -> bool:
+    """Merge two clusters only on direct evidence: every JUDGED pair across them says 'same' confidently, at
+    least half of all cross pairs were actually judged, and every thread shares a name word with the other
+    side. Unjudged pairs can't chain unrelated threads together (how an app swallowed a trip)."""
+    pairs = [(min(x, y), max(x, y)) for x in a for y in b]
+    judged = [verdicts[p] for p in pairs if p in verdicts]
+    if not judged or len(judged) < 0.5 * len(pairs):
+        return False
+    if any(v.get("relation") != "same" or (v.get("confidence") or 0) < 0.75 for v in judged):
+        return False
+    if names:
+        words = lambda ids: set().union(*(_tokens(names.get(i, "")) for i in ids))  # noqa: E731
+        wa, wb = words(a), words(b)
+        if any(not (_tokens(names.get(i, "")) & wb) for i in a) or any(not (_tokens(names.get(i, "")) & wa) for i in b):
+            return False
+    return True
 
 
 def run(s: Session, log=print) -> dict:
@@ -151,7 +179,7 @@ def run(s: Session, log=print) -> dict:
         rx, ry = find(x), find(y)
         if rx == ry:
             continue
-        if all(is_same(p, q) for p in members_of[rx] for q in members_of[ry]):
+        if _clusters_agree(members_of[rx], members_of[ry], verdicts, {t["id"]: t["name"] for t in ts}):
             parent[rx] = ry
             members_of[ry] |= members_of.pop(rx)
         else:
@@ -166,7 +194,8 @@ def run(s: Session, log=print) -> dict:
     for members in clusters.values():
         if len(members) < 2:
             continue
-        keep = max(members, key=lambda t: (len(t["items"]), len(t["people"])))
+        # A pinned thread (gold set / your correction) always survives, so its name and stated links stay.
+        keep = max(members, key=lambda t: (bool(t.get("pinned")), len(t["items"]), len(t["people"])))
         for t in members:
             if t["id"] == keep["id"]:
                 continue
@@ -183,6 +212,13 @@ def run(s: Session, log=print) -> dict:
                     COALESCE(props->'aliases', '[]'::jsonb) || to_jsonb(CAST(:alias AS text)))
                 WHERE id = :keep"""), {"keep": keep["id"], "alias": t["name"]})
             s.execute(text("DELETE FROM nodes WHERE id = :gone"), {"gone": t["id"]})
+            # Remember the merge: the gone thread's words now define the survivor, and the gone thread is not
+            # rebuilt next run (so the same merge isn't re-judged and re-rolled every time).
+            s.execute(text("""
+                UPDATE thread_registry k SET terms = ARRAY(SELECT DISTINCT unnest(k.terms || g.terms)), updated_at = now()
+                FROM thread_registry g WHERE k.key = :keep AND g.key = :gone"""), {"keep": keep["key"], "gone": t["key"]})
+            s.execute(text("UPDATE thread_registry SET status = 'merged', merged_into = :keep, updated_at = now() "
+                           "WHERE key = :gone AND NOT pinned"), {"keep": keep["key"], "gone": t["key"]})
     # Link related threads (after merging, so links land on survivors).
     for x, y, v in related:
         ia, ib = folded_into.get(x, x), folded_into.get(y, y)

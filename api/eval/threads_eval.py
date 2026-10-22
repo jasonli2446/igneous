@@ -8,6 +8,7 @@ A gold thread is "found" by the derived Project whose records best cover must_in
 any of its terms). Reported per thread and in total, so a change that fixes one case and breaks another shows.
 """
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -39,13 +40,19 @@ def score(gold: dict) -> dict:
     for g in gold["threads"]:
         terms = [t.lower() for t in g["terms"]]
         inc, exc = set(g.get("must_include") or []), set(g.get("must_exclude") or [])
-        matches = [p for p in projects.values()
-                   if any(t.strip() in (p["name"] or "").lower() for t in terms)
-                   or (inc and len(p["items"] & inc) >= max(1, len(inc) // 2))]
-        best = max(matches, key=lambda p: (len(p["items"] & inc), len(p["items"])), default=None)
+        # A gold thread is found by name first (the thing exists under the name the person uses); records only
+        # break ties. Matching by overlapping records first let one big thread "match" several gold threads.
+        gname = g["name"].lower()
+        by_name = [p for p in projects.values() if (p["name"] or "").lower() == gname]
+        word = re.compile(r"\b(" + "|".join(re.escape(t.strip()) for t in terms if len(t.strip()) >= 3) + r")\b")
+        named = [p for p in projects.values() if word.search((p["name"] or "").lower())] if terms else []
+        matches = by_name or named
+        best = max(matches, key=lambda p: (p in by_name, len(p["items"] & inc), len(p["items"])), default=None)
+        dups = [p for p in named if p is not best and not p["umbrella"]]
         found_ids[g["name"]] = best["id"] if best else None
         report.append({
-            "name": g["name"], "found": best["name"] if best else None, "duplicates": max(0, len(matches) - 1),
+            "name": g["name"], "found": best["name"] if best else None, "duplicates": len(dups),
+            "dup_names": [p["name"] for p in dups][:4], "records": len(best["items"]) if best else 0,
             "include_recall": round(len(best["items"] & inc) / len(inc), 2) if best and inc else None,
             "exclude_leaks": len(best["items"] & exc) if best else 0,
             "kind": best["kind"] if best else None})
@@ -68,6 +75,6 @@ if __name__ == "__main__":
     out = score(json.loads(path.read_text()))
     for r in out["threads"]:
         flag = "OK " if r["found"] and not r["duplicates"] and not r["exclude_leaks"] else "-- "
-        print(f"{flag}{r['name']:18s} found={r['found']!s:34.34s} dup={r['duplicates']} "
-              f"incl={r['include_recall']} leaks={r['exclude_leaks']} parent={r.get('parent_ok', '-')}")
+        print(f"{flag}{r['name']:18s} found={r['found']!s:22.22s} records={r['records']:5d} dup={r['duplicates']} "
+              f"parent={r.get('parent_ok', '-')!s:5s} {('dups: ' + '; '.join(r['dup_names'])) if r['dup_names'] else ''}")
     print(json.dumps(out["summary"]))
