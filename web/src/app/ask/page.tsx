@@ -1,14 +1,8 @@
 "use client";
 
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { InlineError, Skeleton } from "@/components/ui";
 import { api, AskResult, Hit } from "@/lib/api";
-
-const EXAMPLES = [
-  "Why was Ken Lay asked to donate his stock sale proceeds?",
-  "What did people say about the California power crisis and price caps?",
-  "What was Jeff Skilling's favorite pizza topping?",
-];
 
 // Render "[c123]" markers in the answer as links to their evidence card.
 function withCitations(answer: string, ids: Set<number>, onPick: (id: number) => void) {
@@ -31,6 +25,11 @@ export default function AskPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [focus, setFocus] = useState<number | null>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+
+  useEffect(() => {
+    api.askSuggestions().then(setSuggestions).catch(() => setSuggestions([]));
+  }, []);
 
   const run = async (question: string) => {
     if (!question.trim()) return;
@@ -69,10 +68,10 @@ export default function AskPage() {
           <input type="checkbox" className="accent-[var(--accent)]" checked={useGraph} onChange={(e) => setUseGraph(e.target.checked)} />
           Use the graph to find related context (turn off for plain retrieval)
         </label>
-        {!res && !busy && (
+        {!res && !busy && suggestions.length > 0 && (
           <ul className="mt-2 space-y-1">
             <li className="text-muted">Try one of these</li>
-            {EXAMPLES.map((ex) => (
+            {suggestions.map((ex) => (
               <li key={ex}><button onClick={() => run(ex)} className="text-left text-soft hover:text-ink hover:underline">{ex}</button></li>
             ))}
           </ul>

@@ -319,6 +319,7 @@ export const api = {
     if (!r.ok) throw new Error(`${r.status} ${(await r.json().catch(() => ({}))).detail ?? "/ask"}`);
     return (await r.json()) as AskResult;
   },
+  askSuggestions: () => get<string[]>("/ask/suggestions", {}),
   evidence: (id: number) => get<{ evidence: Evidence[] }>(`/graph/node/${id}/evidence`, { limit: 30 }),
   graphVersion: (signal?: AbortSignal) => get<{ version: string }>("/graph/version", {}, signal),
   view: (seed?: number, signal?: AbortSignal) => get<Subgraph & { seed: number }>("/graph/view", { seed }, signal),
