@@ -1,8 +1,8 @@
-"""Entity resolution for threads and projects: one ETA, not eighteen.
+"""Entity resolution for threads and projects: one Atlas, not eighteen.
 
-Threads are found from bursts of different words, so one real project can surface many times ("ETA platform",
-"eta-platform (DealRelay)", "xLab ETA / Promise Partners project"), and two different but related things
-(the ETA interviews and the ETA platform they led to) look alike. Same structure as people:
+Threads are found from bursts of different words, so one real project can surface many times ("Atlas platform",
+"atlas-platform (client app)", "Lab Atlas / partner firm project"), and two different but related things
+(the Atlas interviews and the Atlas platform they led to) look alike. Same structure as people:
 
   1. Candidate pairs, cheaply and inclusively: threads that share records or people, or name each other, within
      overlapping or adjacent time spans.
@@ -47,7 +47,7 @@ def _threads(s: Session) -> list[dict]:
 
 
 def _tokens(name: str) -> set[str]:
-    """Name words; a course code is one identifier ("csds 395" and "csds395" match; "ecse 395" is another course).
+    """Name words; a course code is one identifier ("CS 401" and "cs401" match; "EE 401" is another course).
     A bare number is never a name word: it's what different courses, rooms and years share."""
     low = (name or "").lower()
     codes = re.findall(r"\b([a-z]{2,5})\s?(\d{3})\b", low)
@@ -56,7 +56,7 @@ def _tokens(name: str) -> set[str]:
     return words | {f"course:{c}{d}" for c, d in codes}
 
 
-MENTIONS_MIN = 2  # records of one thread naming another, for the pair to be judged ("CSDS 395" in Igneous's proposal)
+MENTIONS_MIN = 2  # records of one thread naming another, for the pair to be judged ("CS 401" in Igneous's proposal)
 
 
 def _mentions(s: Session, ts: list[dict]) -> set[tuple[int, int]]:

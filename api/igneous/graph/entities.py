@@ -1,4 +1,4 @@
-"""Derived entities: the things your records are about ("Draw Steel", "Igneous", "Dealer Tire").
+"""Derived entities: the things your records are about ("Gloomhaven Night", "Igneous", "Acme Client").
 
 Nothing is configured. A name becomes a candidate when the data itself treats it as a thing you return to:
   - a recurring calendar series (3+ occurrences), or a title you put on 3+ events
@@ -11,7 +11,7 @@ LLM check when the model is enabled (otherwise a stop-list).
 Each surviving name becomes one `Project` node. Every item that mentions it (by phrase match on its chunks,
 across all sources) gets a PART_OF edge to it with the matched span as evidence; the anchors themselves link
 structurally (confidence 1.0). People involved in 2+ of its items get INVOLVED_IN with a count. A group chat
-that mentions it on 2+ days is linked as a whole: that's how "Draw Steel" on the calendar finds the group
+that mentions it on 2+ days is linked as a whole: that's how "Gloomhaven Night" on the calendar finds the group
 chat, and the chat finds who else plays.
 
 Corrections made in the Inspector live in graph/overrides.py and are replayed last on every run.
@@ -52,7 +52,7 @@ CLEAN = re.compile(r"\s*[\(\[].*?[\)\]]\s*|\s+[-\u2013\u2014:|]\s+.*$")
 
 
 def _norm(name: str) -> str:
-    """'Draw Steel (session 4)' -> 'draw steel'; 'Igneous - weekly sync' -> 'igneous'."""
+    """'Gloomhaven Night (session 4)' -> 'gloomhaven night'; 'Igneous - weekly sync' -> 'igneous'."""
     n = CLEAN.sub("", name or "").strip().lower()
     n = re.sub(r"\b(weekly|biweekly|daily|monthly|session|meeting|sync|standup|call)\b|#?\b\d+\b", " ", n)
     return re.sub(r"\s+", " ", n).strip(" -:")

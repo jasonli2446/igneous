@@ -227,7 +227,7 @@ def build_chat(b: Builder, item) -> None:
     meta = item.raw_meta
     mid = b.node("Message", f"imessage:{item.external_id}", item.title or "(chat)", {"source": "imessage"},
                  sid=item.id)
-    # Group chats are marked so the graph can treat them as groups ("who else is in the Draw Steel chat").
+    # Group chats are marked so the graph can treat them as groups ("who else is in the Gloomhaven Night chat").
     tid = b.node("Thread", f"imessage-chat:{meta.get('chat')}", (item.title or "").rsplit(" — ", 1)[0] or "chat",
                  {"source": "imessage", "group": bool(meta.get("group")) or len(meta.get("participants", [])) > 1})
     b.edge(mid, tid, "IN_THREAD", item.occurred_at, item.id)
@@ -509,7 +509,7 @@ WHERE p.type = 'Person' AND p.key = best.key AND p.name IS DISTINCT FROM best.na
 
 
 def name_from_headers(s: Session) -> int:
-    """Name each address by what most mail calls it ("Drew Tobias" in 50 headers beats "Joseph Tobias" in 26),
+    """Name each address by what most mail calls it ("Jordan Lee" in 50 headers beats "J Lee" in 26),
     whatever order items arrived in. A contact card or a user rename always wins."""
     return s.execute(NAME_FROM_HEADERS).rowcount
 

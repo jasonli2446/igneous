@@ -1185,7 +1185,7 @@ def test_service_addresses_are_not_people():
     assert is_service_address("notifications@github.com")
     assert is_service_address("no-reply@accounts.google.com")
     assert not is_service_address("12345+jli@users.noreply.github.com")  # a real person's commit address
-    assert not is_service_address("jyl123@case.edu") and not is_service_address("+16145551234")
+    assert not is_service_address("jyl123@university.edu") and not is_service_address("+16145551234")
 
 
 def test_redact_secrets():
@@ -1289,13 +1289,13 @@ def test_api_responses_name_numbers_but_keep_keys(monkeypatch):
 def test_entity_names_normalize_and_drop_generic():
     from igneous.graph.entities import _norm, _usable
 
-    assert _norm("Draw Steel (session 4)") == "draw steel"
+    assert _norm("Gloomhaven Night (session 4)") == "gloomhaven night"
     assert _norm("Igneous - weekly sync") == "igneous"
-    assert _norm("Draw Steel #12") == "draw steel"
+    assert _norm("Gloomhaven Night #12") == "gloomhaven night"
     assert not _usable(_norm("Lunch"))
     assert not _usable(_norm("1:1"))
     assert not _usable("10/21")
-    assert _usable("dealer tire")
+    assert _usable("acme robotics")
 
 
 def test_entity_screening_caches_verdicts_in_database(monkeypatch):
@@ -1639,10 +1639,10 @@ def test_spine_repo_evidence_uses_shared_repository_anchor():
 def test_organization_candidates_exclude_personal_domains_and_normalize_contact_companies():
     from igneous.graph.organizations import company_key, domain_of
 
-    assert domain_of("pat@1848.vc") == "1848.vc"
+    assert domain_of("pat@studio.vc") == "studio.vc"
     assert domain_of("pat@gmail.com") is None
     assert domain_of("not-an-email") is None
-    assert company_key("  1848 Ventures, LLC ") == ("company:1848-ventures-llc", "1848 Ventures, LLC")
+    assert company_key("  Studio Ventures, LLC ") == ("company:studio-ventures-llc", "Studio Ventures, LLC")
     assert company_key(" ") is None
 
 
@@ -1728,10 +1728,10 @@ def test_product_relay_senders_are_services_not_people():
 
     assert is_service_address("comments-noreply@docs.google.com")
     assert is_service_address("drive-shares-dm-noreply@google.com")
-    assert is_relay_name("Jason Li (Google Docs)") and is_relay_name("Kaitlyn Ng (via Google Chat)")
-    assert not is_relay_name("Jason Li") and not is_service_address("jane.doe@gmail.com")
-    assert unresolvable(P(1, "comments-noreply@docs.google.com", "Jason Li (Google Docs)", "jason", "li", set()))
-    assert not _human_name("Jason Li (Google Docs)", set())
+    assert is_relay_name("Sam Lee (Google Docs)") and is_relay_name("Alex Ng (via Google Chat)")
+    assert not is_relay_name("Sam Lee") and not is_service_address("jane.doe@gmail.com")
+    assert unresolvable(P(1, "comments-noreply@docs.google.com", "Sam Lee (Google Docs)", "sam", "lee", set()))
+    assert not _human_name("Sam Lee (Google Docs)", set())
 
 
 def test_group_expand_reveals_every_participant_not_top_k():
@@ -1746,8 +1746,8 @@ def test_life_thread_bursts_and_sections_from_kinds():
     from igneous.graph.threads import _bursts, _terms
     from igneous.graph.traversal import hub_id, section_for_kind
 
-    assert "Seattle" in _terms("Flight to Seattle on Friday") and "Friday" not in _terms("see you Friday")
-    assert "CSDS 395" in _terms("CSDS 395 final report")
+    assert "Portland" in _terms("Flight to Portland on Friday") and "Friday" not in _terms("see you Friday")
+    assert "CS 401" in _terms("CS 401 final report")
 
     class R:
         def __init__(self, day, src):
@@ -1773,11 +1773,11 @@ def test_verifier_snippets_claims_and_merge_safety():
 
     from igneous.graph import verify
 
-    item = {"body": "lots of unrelated words " * 30 + " see you at Draw Steel on Friday " + "more text " * 30,
+    item = {"body": "lots of unrelated words " * 30 + " see you at Gloomhaven Night on Friday " + "more text " * 30,
             "title": "plans", "source": "gmail", "occurred_at": datetime(2026, 8, 1), "recipients": 2}
-    assert "Draw Steel" in verify._snippet(item, ["Draw Steel"])  # the part that mentions the claim, not line 1
+    assert "Gloomhaven Night" in verify._snippet(item, ["Gloomhaven Night"])  # the part that mentions the claim, not line 1
     desc, digest = verify._describe({"src_type": "Person", "src_name": "A", "dst_type": "Project",
-                                     "dst_name": "Draw Steel", "dst_kind": "tabletop game"}, [item])
+                                     "dst_name": "Gloomhaven Night", "dst_kind": "tabletop game"}, [item])
     assert "2 recipients" in desc and len(digest) == 64
     # every claim the verifier judges is phrased; merges are only undone by a confident drop
     assert ("SAME_AS", "er") in verify.CLAIMS and ("PART_OF", "hierarchy") in verify.CLAIMS
@@ -1791,9 +1791,9 @@ def test_ask_suggestions_templates_skip_missing_slots():
     assert build([], []) == []
     assert build(["Ana"], []) == ["What have Ana and I talked about lately?"]
     full = build(["Ana", "Bo"], [{"name": "Lisbon", "kind": "trip"}, {"name": "Atlas", "kind": "project"},
-                                 {"name": "CSDS 395", "kind": "class"}, {"name": "Extra", "kind": "thread"}])
+                                 {"name": "CS 401", "kind": "class"}, {"name": "Extra", "kind": "thread"}])
     assert full == ["Who's working on Atlas with me?", "When is the Lisbon?",
-                    "What have Ana and I talked about lately?", "What did we decide about CSDS 395?",
+                    "What have Ana and I talked about lately?", "What did we decide about CS 401?",
                     "What have Bo and I talked about lately?"]
     assert build([], [{"name": "Atlas", "kind": "project"}]) == [
         "Who's working on Atlas with me?", "What did we decide about Atlas?"]
@@ -1804,7 +1804,7 @@ def test_thread_clusters_merge_only_on_direct_evidence():
     from igneous.graph.resolve_threads import _clusters_agree
 
     same = {"relation": "same", "confidence": 0.9}
-    names = {1: "ETA platform", 2: "eta-platform (DealRelay)", 3: "ETA Platform MVP", 4: "Seattle trip"}
+    names = {1: "Atlas platform", 2: "atlas-platform (client app)", 3: "Atlas Platform MVP", 4: "Portland trip"}
     assert _clusters_agree({1, 2}, {3}, {(1, 3): same, (2, 3): same}, names)
     assert _clusters_agree({1, 2}, {3}, {(1, 3): same}, names) is not False or True  # half judged is enough
     # an unrelated thread can't ride in on its neighbours' judgments, nor merge without sharing a name word
@@ -1819,11 +1819,11 @@ def test_thread_terms_match_whole_words_and_course_codes_are_whole():
     from igneous.graph.resolve_threads import _tokens
 
     # Same number, different department: different courses, nothing shared.
-    assert not _tokens("CSDS 395") & _tokens("ECSE 395 Junior Engineering Design Seminar")
-    assert _tokens("CSDS 395") & _tokens("csds395 final presentation")
-    assert "course:ecse395" in _tokens("ECSE 395") & _tokens("ECSE 395 Junior Engineering Design Seminar")
-    pat = re.compile(r"(?<![a-z0-9])(eta)(?![a-z0-9])")
-    assert pat.search("the eta platform demo") and not pat.search("beta testing") and not pat.search("theta")
+    assert not _tokens("CS 401") & _tokens("EE 401 Senior Design Seminar")
+    assert _tokens("CS 401") & _tokens("cs401 final presentation")
+    assert "course:ee401" in _tokens("EE 401") & _tokens("EE 401 Senior Design Seminar")
+    pat = re.compile(r"(?<![a-z0-9])(atlas)(?![a-z0-9])")
+    assert pat.search("the atlas platform demo") and not pat.search("fatlas testing") and not pat.search("atlases")
 
 
 def test_only_group_conversations_become_thread_nodes():
@@ -1899,10 +1899,10 @@ def test_threads_naming_each_other_are_judged_even_far_apart():
 
     from igneous.graph.resolve_threads import candidate_pairs
 
-    a = {"id": 1, "name": "CSDS 395", "items": {1}, "people": set(), "a": datetime(2025, 1, 1), "b": datetime(2025, 5, 1)}
+    a = {"id": 1, "name": "CS 401", "items": {1}, "people": set(), "a": datetime(2025, 1, 1), "b": datetime(2025, 5, 1)}
     b = {"id": 2, "name": "Igneous", "items": {9}, "people": set(), "a": datetime(2026, 4, 1), "b": datetime(2026, 10, 1)}
     assert candidate_pairs([a, b]) == []                     # nothing shared and far apart: not judged
-    assert len(candidate_pairs([a, b], {(2, 1)})) == 1       # Igneous's records name CSDS 395: judged
+    assert len(candidate_pairs([a, b], {(2, 1)})) == 1       # Igneous's records name CS 401: judged
 
 
 def test_people_are_judged_against_the_threads_core():
@@ -1939,7 +1939,7 @@ def test_bot_accounts_are_services():
     from igneous.graph.self_identity import is_service_address
 
     assert is_service_address("github:vercel[bot]") and is_service_address("github:dependabot[bot]")
-    assert not is_service_address("github:aadhavsb")
+    assert not is_service_address("github:samlee")
     assert not is_service_address("1+someone@users.noreply.github.com")
 
 

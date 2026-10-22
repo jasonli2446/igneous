@@ -50,8 +50,8 @@ they work on any graph that has trips, projects and an owner. Swap in your own n
 |---|---|
 | Open **Sources** | Setup lives in the UI: each source says what it reads and how to connect it. Gmail, Calendar, iMessage, Drive, GitHub, local files, plus exports: ChatGPT, Claude, Gemini (Takeout), LinkedIn. Rebuild runs the whole pipeline. |
 | Open **Graph** | It opens on you. The first ring is only what matters most: your schools and workplaces, your sustained projects, and your closest people. Closeness is recency-weighted, so it reflects your life now. One-off emails, newsletters and bots are never nodes. |
-| Click your **university** | It opens to the labs and the classes under it. Click a **lab** (e.g. `<xLab>`): its projects. Nobody configured this; it comes from the resume plus which threads involve the school's domain and dates. |
-| Click a **trip** (e.g. `<Seattle trip>`) | Who went comes from the trip's own group chat and events, not from everyone who mentioned it. Someone who asked "how was Seattle?" isn't on it. |
+| Click your **university** | It opens to the labs and the classes under it. Click a **lab** (e.g. `<the Lab>`): its projects. Nobody configured this; it comes from the resume plus which threads involve the school's domain and dates. |
+| Click a **trip** (e.g. `<weekend trip>`) | Who went comes from the trip's own group chat and events, not from everyone who mentioned it. Someone who asked "how was Portland?" isn't on it. |
 | Click a **person** | Their world: the people they're close to, the group chats they're in, projects and events. A single text never shows on its own; it shows as the chat or person it's with. Someone they only know through one project sits under that project. |
 | Click a **line** between two nodes | Why they're connected: the kind of link, who made it (a rule, the AI checker, or you), its reason, and the exact records. Open any record. |
 | **This is wrong** on a link | It disappears in place with Undo. That's a permanent verdict: never rebuilt, and used as an example for the checker. |
@@ -137,7 +137,7 @@ Adding "two records is enough" to prompt 4 keeps it short; without it the agent 
   cards fold into one person; your resume and LinkedIn are the backbone.
 - **Structure found, not configured:** trips, classes, jobs and projects from activity bursts, course codes,
   repos and recurring events; a persistent registry keeps them stable across rebuilds; classes and projects
-  sit under the school or lab they belong to; course codes are whole identifiers (CSDS 395 is not ECSE 395).
+  sit under the school or lab they belong to; course codes are whole identifiers (CS 401 is not EE 401).
 - **People done right:** who took part comes from group chats and attendance; people judged relative to a
   thread's core (a passing mention next to people who talk about it constantly is dropped); someone you only
   know through one project sits under it; automated senders and bots are never people.

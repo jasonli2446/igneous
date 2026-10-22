@@ -1,7 +1,7 @@
 """Corrections to derived entities: rename, hide, merge, unlink. Stored, never baked into the graph.
 
 `graph/entities.py` rebuilds its Projects and edges from scratch on every run, so a correction can't live on
-the rows it corrects. It lives here, keyed by natural keys (`Type:key`, e.g. `Project:project:draw steel`),
+the rows it corrects. It lives here, keyed by natural keys (`Type:key`, e.g. `Project:project:gloomhaven night`),
 and `apply` replays every override as the last step of each rebuild. `apply` is a pure function of the
 `overrides` table: delete a row and apply again, and the correction is gone (that is how undo works).
 
