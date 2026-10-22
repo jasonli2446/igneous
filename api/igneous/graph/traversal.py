@@ -267,8 +267,121 @@ def explain(s: Session, a: int, b: int, limit: int = 8) -> dict:
         c["thread"] = pretty_thread(c["thread"], named)
         c["excerpt"] = name_handles(c["excerpt"], named)
         out.append(c)
+    links = connection(s, ids["a"], ids["b"], named)
     return {"a": {"id": a, "name": names.get(a)}, "b": {"id": b, "name": names.get(b)},
-            "messages": total, "conversations": out, "events": [dict(e) for e in events]}
+            "messages": total, "conversations": out, "events": [dict(e) for e in events], **links}
+
+
+EDGE_EVIDENCE_LIMIT = 5
+PATH_MAX_HOPS = 3
+
+
+def edge_view(row: dict, evidence: list[dict]) -> dict:
+    """One edge as the Why view shows it. The verifier's verdict/reason/confidence ride in props when present."""
+    p = row.get("props") or {}
+    return {"id": row["id"], "type": row["type"], "extractor": row["extractor"],
+            "src": row["src"], "dst": row["dst"], "src_name": row.get("src_name"), "dst_name": row.get("dst_name"),
+            "verdict": p.get("verdict"), "reason": p.get("reason"),
+            "confidence": p.get("confidence", row.get("confidence")), "evidence": evidence}
+
+
+def visible_edge(row: dict) -> bool:
+    """A verifier 'drop' hides the edge from traversal and from the Why view."""
+    return (row.get("props") or {}).get("verdict") != "drop"
+
+
+def shortest_path(adj: dict[int, list[tuple[int, int]]], start: set[int], goal: set[int],
+                  max_hops: int = PATH_MAX_HOPS) -> list[tuple[int, int, int]] | None:
+    """BFS over {node: [(neighbour, edge_id)]}: the hops [(from, to, edge_id)] of a shortest path of at most
+    `max_hops`, or None. Pure so it can be tested without a database."""
+    prev: dict[int, tuple[int, int] | None] = {n: None for n in start}
+    frontier = list(start)
+    for _ in range(max_hops):
+        nxt = []
+        for n in frontier:
+            for m, eid in adj.get(n, ()):
+                if m in prev:
+                    continue
+                prev[m] = (n, eid)
+                if m in goal:
+                    hops, cur = [], m
+                    while prev[cur] is not None:
+                        f, e = prev[cur]
+                        hops.append((f, cur, e))
+                        cur = f
+                    return hops[::-1]
+                nxt.append(m)
+        frontier = nxt
+    return None
+
+
+def _evidence(s: Session, edge_ids: list[int], named: dict[str, str]) -> dict[int, list[dict]]:
+    """edge id -> its evidence items (edge_evidence rows plus the edge's own source item), newest first."""
+    from igneous.items import item_card
+    rows = s.execute(text("""
+        SELECT x.edge_id, x.kind, si.id, si.source, si.external_id, si.title, si.occurred_at, si.raw_meta,
+               left(si.body_text, 600) AS body_text
+        FROM (SELECT edge_id, source_item_id, kind FROM edge_evidence WHERE edge_id = ANY(:e)
+              UNION SELECT id, source_item_id, 'source' FROM edges WHERE id = ANY(:e) AND source_item_id IS NOT NULL) x
+        JOIN source_items si ON si.id = x.source_item_id
+        ORDER BY si.occurred_at DESC NULLS LAST
+    """), {"e": edge_ids}).mappings().all()
+    out: dict[int, list[dict]] = {}
+    for r in rows:
+        bucket = out.setdefault(r["edge_id"], [])
+        if len(bucket) >= EDGE_EVIDENCE_LIMIT or any(c["id"] == r["id"] for c in bucket):
+            continue
+        card = item_card(dict(r))
+        card["snippet"] = name_handles(card["snippet"], named)
+        card["kind"] = r["kind"]
+        bucket.append(card)
+    return out
+
+
+def connection(s: Session, ids_a: list[int], ids_b: list[int], named: dict[str, str]) -> dict:
+    """Works for any pair: `direct` = edges between the two (all aliases), each with its reason and evidence
+    items; when there are none, `path` = the shortest visible route (at most 3 hops) with each hop's evidence."""
+    edge_cols = """e.id, e.src, e.dst, e.type, e.extractor, e.props, e.confidence,
+                   (SELECT name FROM nodes WHERE id = e.src) AS src_name,
+                   (SELECT name FROM nodes WHERE id = e.dst) AS dst_name"""
+    rows = [dict(r) for r in s.execute(text(f"""
+        SELECT {edge_cols} FROM edges e
+        WHERE (e.src = ANY(:a) AND e.dst = ANY(:b)) OR (e.src = ANY(:b) AND e.dst = ANY(:a))
+        ORDER BY e.confidence DESC NULLS LAST, e.id LIMIT 40
+    """), {"a": ids_a, "b": ids_b}).mappings()]
+    rows = [r for r in rows if visible_edge(r)]
+    if rows:
+        ev = _evidence(s, [r["id"] for r in rows], named)
+        return {"direct": [edge_view(r, ev.get(r["id"], [])) for r in rows], "path": None}
+
+    adj: dict[int, list[tuple[int, int]]] = {}
+    seen, frontier, edges = set(ids_a), list(ids_a), {}
+    for _ in range(PATH_MAX_HOPS):
+        if not frontier:
+            break
+        layer = s.execute(text(f"""
+            SELECT {edge_cols} FROM edges e
+            WHERE (e.src = ANY(:f) OR e.dst = ANY(:f))
+              AND e.type NOT IN ('HAS_CHUNK', 'SAME_AS')
+              AND (SELECT count(*) FROM edges x WHERE x.src = e.dst OR x.dst = e.dst) <= :fan
+              AND (SELECT count(*) FROM edges x WHERE x.src = e.src OR x.dst = e.src) <= :fan
+            LIMIT 4000
+        """), {"f": frontier, "fan": MAX_FANOUT}).mappings().all()
+        nxt = []
+        for r in map(dict, layer):
+            if not visible_edge(r) or r["id"] in edges:
+                continue
+            edges[r["id"]] = r
+            adj.setdefault(r["src"], []).append((r["dst"], r["id"]))
+            adj.setdefault(r["dst"], []).append((r["src"], r["id"]))
+            nxt += [n for n in (r["src"], r["dst"]) if n not in seen]
+        seen.update(nxt)
+        frontier = list(dict.fromkeys(nxt))
+    hops = shortest_path(adj, set(ids_a), set(ids_b))
+    if not hops:
+        return {"direct": [], "path": None}
+    ev = _evidence(s, [e for _f, _t, e in hops], named)
+    return {"direct": [], "path": [{**edge_view(edges[e], ev.get(e, [])), "from": f, "to": t} for f, t, e in hops]}
 
 
 PHONE = re.compile(r"\+?\d{10,15}")
