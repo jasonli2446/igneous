@@ -554,6 +554,7 @@ def section_for_kind(kind: str | None) -> str:
             return section
     word = k.strip().split()[-1].capitalize()
     return word if word.endswith("s") else word + "s"
+MIN_SHOWN = 3   # every node you open shows at least this many connections, if it has them
 GROUP_MAX = 25  # members revealed at once when expanding a group or event (the rest via "show more")
 HUB_ID_BASE = -1000  # category hubs are virtual nodes with stable negative ids
 
@@ -939,6 +940,38 @@ def children(s: Session, node: int, ntype: str) -> list[int]:
             + earned_cut([(i, float(w)) for i, w in docs], hi=4))
 
 
+def fallback_neighbors(s: Session, node: int, head: int, exclude: set[int], k: int) -> list[int]:
+    """The node's strongest connections when its own rules found too few: direct links first (a verifier keep or
+    a stated link before an unchecked one, then by confidence), then what its records link to (an org's people, a
+    file's conversation). People are folded to one identity; hidden, service, and code-file nodes are skipped."""
+    if k <= 0:
+        return []
+    rows = s.execute(text(f"""
+        WITH direct AS (
+            SELECT CASE WHEN e.src = :n THEN e.dst ELSE e.src END AS o,
+                   (CASE WHEN e.props->>'verdict' = 'keep' OR e.extractor IN ('user', 'profile', 'contacts', 'spine')
+                         THEN 2 ELSE 1 END) + COALESCE(e.confidence, 0.5) AS w
+            FROM edges e WHERE (e.src = :n OR e.dst = :n) AND COALESCE(e.props->>'verdict', '') <> 'drop'),
+        via AS (  -- one step through the node's records: the message's thread, the org's members' threads
+            SELECT CASE WHEN e2.src = d.o THEN e2.dst ELSE e2.src END AS o, 0.5 AS w
+            FROM direct d JOIN nodes dn ON dn.id = d.o AND dn.type IN ('Message', 'Event', 'File')
+            JOIN edges e2 ON (e2.src = d.o OR e2.dst = d.o) AND e2.type IN ('IN_THREAD', 'SENT', 'RECEIVED', 'ATTENDED', 'PART_OF')),
+        allc AS (SELECT o, w FROM direct UNION ALL SELECT o, w FROM via)
+        SELECT COALESCE(c.canonical_id, a.o) AS o, max(a.w) + 0.1 * ln(1 + count(*)) AS w
+        FROM allc a LEFT JOIN canonical c ON c.node_id = a.o JOIN nodes x ON x.id = COALESCE(c.canonical_id, a.o)
+        WHERE x.id NOT IN {HIDDEN} AND COALESCE(x.props->>'kind', '') <> 'service'
+          AND NOT (x.type = 'File' AND x.name ~* '\.(ts|tsx|js|jsx|mjs|py|go|rs|java|c|h|cpp|json|ya?ml|toml|lock|css|scss|sh|sql|env)$')
+        GROUP BY 1 ORDER BY 2 DESC LIMIT 60
+    """), {"n": node}).all()
+    out: list[int] = []
+    for o, _w in rows:
+        if o not in exclude and o not in (node, head) and o not in out:
+            out.append(o)
+            if len(out) == k:
+                break
+    return out
+
+
 def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, offset: int = 0) -> dict:
     """Reveal `node`'s top connections that aren't on screen yet. A category hub reveals its next members; a
     person reveals their strongest people, group chats, and events; a group or event reveals who's in it."""
@@ -1005,6 +1038,9 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
                                   "weight": 1})
             for p in [p for p in members if p not in seen][offset:offset + GROUP_MAX]:
                 new.append(p)
+        # However strict the rules above are for this kind of node, opening it never shows (nearly) nothing.
+        if len(new) < MIN_SHOWN and offset == 0:
+            new.extend(fallback_neighbors(s, node, head, seen | set(new), MIN_SHOWN - len(new)))
         for p in new:
             edges.append({"id": -(800000 + p * 13 + node % 997), "src": node, "dst": p, "type": "RELATED", "weight": 1})
     g = subgraph(s, new)
