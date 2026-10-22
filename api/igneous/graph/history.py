@@ -136,39 +136,67 @@ def refresh_commitment_status(s: Session) -> int:
     return changed
 
 
-def derive_introductions(s: Session) -> int:
-    """Create conservative B->C introductions from a sender's first three-person email.
+MAX_INTRO_PARTICIPANTS = 4   # sender + recipients; larger threads are groups or mass mail, not introductions
+INTRO_WINDOW_DAYS = 180
 
-    A later shared message is required, and any earlier B/C shared message rejects
-    the candidate.  This deterministic derivation is intentionally separate from
-    model claims and remains fully source-cited.
+# Parameters: :ex, :version, :max_participants, :window_days.  Participants are canonical identities.
+INTRODUCTIONS_SQL = """
+WITH raw AS (
+  SELECT dst AS msg, src AS node, true AS is_sender, valid_from AS at, source_item_id AS sid
+  FROM edges WHERE type = 'SENT' AND valid_from IS NOT NULL
+  UNION ALL
+  SELECT src, dst, false, valid_from, source_item_id
+  FROM edges WHERE type = 'RECEIVED' AND valid_from IS NOT NULL
+), parts AS MATERIALIZED (
+  SELECT r.msg, COALESCE(c.canonical_id, r.node) AS person, bool_or(r.is_sender) AS is_sender,
+         min(r.at) AS at, min(r.sid) FILTER (WHERE r.is_sender) AS sid
+  FROM raw r LEFT JOIN canonical c ON c.node_id = r.node GROUP BY r.msg, COALESCE(c.canonical_id, r.node)
+), sizes AS MATERIALIZED (
+  SELECT msg, count(*) AS n, count(*) FILTER (WHERE is_sender) AS senders, min(at) AS at
+  FROM parts GROUP BY msg
+), eligible AS MATERIALIZED (
+  SELECT id FROM nodes WHERE COALESCE(props->>'kind', '') <> 'service'
+), cand AS MATERIALIZED (
+  SELECT a.person AS a, b.person AS b, c.person AS c, a.msg, z.at, a.sid
+  FROM sizes z JOIN parts a ON a.msg = z.msg AND a.is_sender
+  JOIN parts b ON b.msg = z.msg AND NOT b.is_sender
+  JOIN parts c ON c.msg = z.msg AND NOT c.is_sender AND c.person > b.person
+  WHERE z.senders = 1 AND z.n BETWEEN 3 AND :max_participants
+    AND b.person IN (SELECT id FROM eligible) AND c.person IN (SELECT id FROM eligible)
+), pm AS MATERIALIZED (
+  SELECT p.msg, p.person AS b, q.person AS c, z.at, z.n
+  FROM parts p JOIN parts q ON q.msg = p.msg AND q.person > p.person
+  JOIN sizes z ON z.msg = p.msg
+  WHERE p.person IN (SELECT b FROM cand) AND q.person IN (SELECT c FROM cand)
+), firsts AS (
+  SELECT DISTINCT ON (x.b, x.c) x.* FROM cand x
+  WHERE NOT EXISTS (SELECT 1 FROM pm WHERE pm.b = x.b AND pm.c = x.c AND pm.at < x.at)
+    AND EXISTS (SELECT 1 FROM pm WHERE pm.b = x.b AND pm.c = x.c AND pm.n <= :max_participants
+                AND pm.at > x.at AND pm.at <= x.at + make_interval(days => :window_days)
+                AND NOT EXISTS (SELECT 1 FROM parts r WHERE r.msg = pm.msg AND r.person = x.a))
+  ORDER BY x.b, x.c, x.at, x.msg
+)
+INSERT INTO edges (src, dst, type, props, valid_from, valid_to, extractor, extractor_version, confidence, source_item_id)
+SELECT b, c, 'INTRODUCED', jsonb_build_object('introducer', a, 'derived', true),
+       at, at, :ex, :version, .8, sid FROM firsts
+ON CONFLICT (src, dst, type, extractor) DO NOTHING
+"""
+
+
+def derive_introductions(s: Session) -> int:
+    """Create conservative B->C introductions from a sender's small email or thread.
+
+    Only a message with at most ``MAX_INTRO_PARTICIPANTS`` canonical participants and one
+    sender can introduce (so at most three pairs per message).  B and C must never have shared
+    a message before, and must later share a small message *without* the introducer within
+    ``INTRO_WINDOW_DAYS``.  Each pair gets one edge, from its earliest qualifying message.
+    Services are never B or C.  The user stays eligible as B or C.  Deterministic, source-cited,
+    and separate from model claims.  Rebuilds its own edges, so it is idempotent.
     """
     s.execute(text("DELETE FROM edges WHERE extractor = :ex AND type = 'INTRODUCED'"), {"ex": EXTRACTOR})
-    return s.execute(text("""
-        WITH participants AS (
-          SELECT sent.dst AS message, sent.src AS person, 'sender' AS role, sent.valid_from AS at,
-                 sent.source_item_id AS sid FROM edges sent WHERE sent.type = 'SENT'
-          UNION
-          SELECT received.src, received.dst, 'recipient', received.valid_from, received.source_item_id
-          FROM edges received WHERE received.type = 'RECEIVED'
-        ), candidates AS (
-          SELECT a.message, a.person AS introducer, b.person AS left_person, c.person AS right_person, a.at, a.sid,
-                 row_number() OVER (PARTITION BY b.person, c.person ORDER BY a.at, a.message) AS ordinal
-          FROM participants a JOIN participants b ON b.message = a.message AND b.person <> a.person
-          JOIN participants c ON c.message = a.message AND c.person > b.person AND c.person <> a.person
-          WHERE a.role = 'sender'
-        ), firsts AS (
-          SELECT * FROM candidates x WHERE ordinal = 1
-            AND NOT EXISTS (SELECT 1 FROM participants p JOIN participants q ON p.message = q.message
-                            WHERE p.person = x.left_person AND q.person = x.right_person AND p.at < x.at)
-            AND EXISTS (SELECT 1 FROM participants p JOIN participants q ON p.message = q.message
-                        WHERE p.person = x.left_person AND q.person = x.right_person AND p.at > x.at)
-        )
-        INSERT INTO edges (src, dst, type, props, valid_from, valid_to, extractor, extractor_version, confidence, source_item_id)
-        SELECT left_person, right_person, 'INTRODUCED', jsonb_build_object('introducer', introducer, 'derived', true),
-               at, at, :ex, :version, .8, sid FROM firsts
-        ON CONFLICT (src, dst, type, extractor) DO NOTHING
-    """), {"ex": EXTRACTOR, "version": VERSION}).rowcount or 0
+    return s.execute(text(INTRODUCTIONS_SQL), {
+        "ex": EXTRACTOR, "version": VERSION, "max_participants": MAX_INTRO_PARTICIPANTS,
+        "window_days": INTRO_WINDOW_DAYS}).rowcount or 0
 
 
 def commitments(s: Session, status: str = "open", limit: int = 50) -> list[dict]:
