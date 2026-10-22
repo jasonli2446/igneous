@@ -115,11 +115,21 @@ Pick 3–4. Each needs no setup beyond registration; each was run in a fresh ses
 6. **Refuses to make things up**:
    > Using igneous: what did `<person>` say about `<something that never happened>`?
 
-   Expect: `ask` returns "can't answer" with no invented citations.
+   Expect: `find` and `search` come back empty, and it says there's no record of it, with no invented
+   citations.
 
-**Timing (measured, fresh sessions):** 50–100 s per prompt, 4–18 tool calls. Prompts 1 and 3 are the
-fastest. Prompt 4 can run long if the agent keeps reading records; say "two records is enough" in the prompt
-to keep it short.
+**Measured (fresh `claude -p` sessions, real data, Oct 22):**
+
+| Prompt | Time | Tool calls | Result |
+|---|---|---|---|
+| 1 Overview | 27 s | 1 (`me`) | work/school history, current projects, closest people |
+| 2 Who went | 23 s | 8 | all three travellers, cited via the trip's group chat and records |
+| 3 Structure | 30 s | 11 | all four lab projects, and the people on the named project |
+| 4 Explain a link | 12 s | 3 | the link, its check, two cited records |
+| 5 Brief me | 22 s | 7 | what the class is, its people, latest activity with dates |
+| 6 Refuses | 20 s | 4 | "no record of that", no invented citations |
+
+Adding "two records is enough" to prompt 4 keeps it short; without it the agent may keep reading.
 
 ## 4. Capabilities to mention
 
