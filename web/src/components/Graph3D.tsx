@@ -360,9 +360,12 @@ function firstName(name: string) {
 function describe(n: N) {
   if (n.seed) return "You";
   if (n.kind === "category") return `${n.total} ${n.name.toLowerCase()} · click to show more`;
-  if (n.type === "Thread") return n.members ? `Conversation with ${n.members} of your contacts` : "Conversation";
-  if (n.type === "Event") return n.members ? `Event with ${n.members} of your contacts` : "Event";
-  return n.type;
+  // The section (what the color means) leads, with a dot in that color.
+  const section = n.category ?? TYPE_CATEGORY[n.type];
+  const swatch = section ? `<i style="display:inline-block;width:7px;height:7px;border-radius:9px;margin-right:5px;background:${categoryColor(section)}"></i>${escapeHtml(section)}` : "";
+  const detail = n.type === "Thread" ? (n.members ? `conversation with ${n.members} of your contacts` : "conversation")
+    : n.type === "Event" ? (n.members ? `event with ${n.members} of your contacts` : "event") : "";
+  return [swatch, detail].filter(Boolean).join(" · ") || n.type;
 }
 
 function linkReason(l: L) {

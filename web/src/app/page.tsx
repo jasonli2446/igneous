@@ -209,8 +209,6 @@ export default function Explorer() {
   }, []);
 
   const onLegend = useCallback((_c: Community[]) => {}, []); // communities color nodes; the legend lists categories
-  // Categories aren't nodes: they color the dots, and the legend lists them (click to show more of one).
-  const hubs = data.categories ?? [];
   const current = trail[trail.length - 1];
   const back = () => {
     if (trail.length < 2) return;
@@ -351,21 +349,9 @@ export default function Explorer() {
         </div>
       )}
 
-      {/* Bottom-left: compact legend and a one-line hint. */}
+      {/* Bottom-left: a one-line hint. Sections show in each dot's tooltip (color + name), not as pills. */}
       {data.nodes.length > 0 && (
         <div className="absolute bottom-3 left-3 z-10 max-w-[calc(100%-1.5rem)] space-y-1.5 text-xs">
-          {hubs.length > 0 && (
-            <div className="flex flex-wrap gap-1">
-              {hubs.map((h) => (
-                <button key={h.id} onClick={() => toggle(h.id)} title={expanded.has(h.id) ? `Show fewer ${h.name.toLowerCase()}` : `Show more ${h.name.toLowerCase()}`}
-                  className="flex items-center gap-1.5 rounded-full border border-line bg-panel/95 px-2.5 py-1 hover:bg-hover">
-                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: categoryColor(h.name) }} />
-                  <span className="text-soft">{h.name}</span>
-                  <span className="tabular-nums text-muted">{h.total}</span>
-                </button>
-              ))}
-            </div>
-          )}
           <p className="px-1 text-muted max-sm:hidden">Click a dot to open it · drag to rotate · scroll to zoom · bigger dots are closer to you</p>
         </div>
       )}

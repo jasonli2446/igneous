@@ -1766,3 +1766,20 @@ def test_life_thread_bursts_and_sections_from_kinds():
     assert section_for_kind("book club") == "Hobbies" and section_for_kind("research lab") == "Projects"
     assert section_for_kind("fundraiser") == "Fundraisers"  # a new kind becomes its own section
     assert hub_id("Clubs") == hub_id("Clubs") and hub_id("Clubs") != hub_id("Trips")
+
+
+def test_verifier_snippets_claims_and_merge_safety():
+    from datetime import datetime
+
+    from igneous.graph import verify
+
+    item = {"body": "lots of unrelated words " * 30 + " see you at Draw Steel on Friday " + "more text " * 30,
+            "title": "plans", "source": "gmail", "occurred_at": datetime(2026, 8, 1), "recipients": 2}
+    assert "Draw Steel" in verify._snippet(item, ["Draw Steel"])  # the part that mentions the claim, not line 1
+    desc, digest = verify._describe({"src_type": "Person", "src_name": "A", "dst_type": "Project",
+                                     "dst_name": "Draw Steel", "dst_kind": "tabletop game"}, [item])
+    assert "2 recipients" in desc and len(digest) == 64
+    # every claim the verifier judges is phrased; merges are only undone by a confident drop
+    assert ("SAME_AS", "er") in verify.CLAIMS and ("PART_OF", "hierarchy") in verify.CLAIMS
+    import inspect
+    assert "v.confidence >= 0.8" in inspect.getsource(verify.apply_verdicts)

@@ -31,7 +31,7 @@ LEGAL_ENDPOINTS: dict[str, set[tuple[str, str]]] = {
     "RELATED_TO": set(),  # Any node pair is legal.
     "SAME_AS": {("Person", "Person")},
     # Derived entities (graph/entities.py): an item or anchor belongs to a Project; people are involved in it.
-    "PART_OF": {(t, "Project") for t in ("Message", "Event", "Thread", "File", "Folder")},
+    "PART_OF": {(t, "Project") for t in ("Message", "Event", "Thread", "File", "Folder", "Project")},
     "INVOLVED_IN": {("Person", "Project")},
     # Google Takeout Maps (connectors/takeout.py): you visited / saved / reviewed a place.
     "VISITED": {("Person", "Place")},
