@@ -302,7 +302,7 @@ def fallback(facts: dict) -> str:
 
 def _model_summary(system: str, user: str) -> str:
     from igneous.llm import structured
-    out, _ = structured(system, user, SCHEMA, max_tokens=500)
+    out, _ = structured(system, user, SCHEMA, max_tokens=500, model=settings.llm_cheap_model)
     return " ".join(str(out["summary"]).split())
 
 
