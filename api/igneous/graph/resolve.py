@@ -162,15 +162,35 @@ MAX_SAME_NAME = 3  # identities sharing one exact full name that are still assum
 threshold_exact = 0.6  # score given to a rare exact-name pair (above THRESHOLD, below corroborated merges)
 
 
+def _same_bearer(a: P, b: P) -> bool:
+    """Cheap evidence two identities with one name belong to the same human: a shared correspondent, or the same
+    organizational mail domain (two addresses at your school). A phone isn't evidence on its own (two different
+    people named Drew can each have one), so it joins a bearer only through those."""
+    if a.peers & b.peers:
+        return True
+    return bool(a.is_email and b.is_email and a.domain == b.domain and a.domain not in (
+        "gmail.com", "icloud.com", "yahoo.com", "hotmail.com", "outlook.com", "me.com", "aol.com"))
+
+
 def candidates(s: Session) -> list[tuple[P, P, float, dict]]:
     out = []
     people = load(s)
     # Two different addresses with the same full name and nothing else in common might be two people; then a
     # phone or mention with that name can't be safely assigned to either.
+    # How common a name is = how many DISTINCT people carry it, not how many addresses. One person with a phone
+    # and four school addresses is one bearer; identities already tied together (a contact card, the same mail
+    # domain plus a shared correspondent) count once. Ten unrelated "John Smith"s still count as ten.
     by_name: dict[tuple[str, str], int] = defaultdict(int)
+    groups: dict[tuple[str, str], list[P]] = defaultdict(list)
     for p in people:
         if p.first and p.last and not unresolvable(p):
-            by_name[(p.first, p.last)] += 1
+            groups[(p.first, p.last)].append(p)
+    for name, ps in groups.items():
+        clusters: list[list[P]] = []
+        for p in ps:
+            home = next((c for c in clusters if any(_same_bearer(p, q) for q in c)), None)
+            (home.append(p) if home is not None else clusters.append([p]))
+        by_name[name] = len(clusters) if len(ps) > 1 else 1
     for group in blocks(people).values():
         for i, a in enumerate(group):
             for b in group[i + 1:]:

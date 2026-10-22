@@ -1851,3 +1851,13 @@ def test_links_you_stated_are_never_judged_by_the_model():
 
     from igneous.graph import threads
     assert "'user', :v, 1.0" in inspect.getsource(threads.pinned_parents)
+
+
+def test_person_merge_is_a_trusted_user_link():
+    import inspect
+
+    from igneous.graph import entity_api, resolve
+
+    src = inspect.getsource(entity_api.merge_people)
+    assert "'SAME_AS'" in src and "'user'" in src        # stored as your identity link
+    assert "user" in resolve.TRUSTED                      # which resolution always honors on every rebuild

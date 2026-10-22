@@ -82,6 +82,9 @@ def _items(s: Session) -> list:
         FROM source_items si
         LEFT JOIN nodes n ON n.source_item_id = si.id AND n.type IN ('Message', 'File', 'Event')
         WHERE si.source = ANY(:src) AND si.occurred_at IS NOT NULL
+          -- Notifications and marketing never make or join a thread (they stay searchable and as evidence):
+          -- a promo that mentions "Little Italy" isn't part of anything.
+          AND COALESCE(si.item_class, 'conversation') NOT IN ('notification', 'marketing')
         ORDER BY si.id, n.id
     """), {"src": list(SOURCES)}).all()
 
@@ -307,6 +310,8 @@ def ensure_registry(s: Session) -> None:
 def _migrate_registry(s: Session) -> None:
     """Older registries: allow status 'merged' and the merged_into column."""
     s.execute(text("ALTER TABLE thread_registry ADD COLUMN IF NOT EXISTS merged_into text"))
+    s.execute(text("ALTER TABLE thread_registry ADD COLUMN IF NOT EXISTS anchor text"))       # series|repo|chat|course
+    s.execute(text("ALTER TABLE thread_registry ADD COLUMN IF NOT EXISTS anchor_name text"))  # the seed's own name
     s.execute(text("ALTER TABLE thread_registry DROP CONSTRAINT IF EXISTS thread_registry_status_check"))
     s.execute(text("ALTER TABLE thread_registry ADD CONSTRAINT thread_registry_status_check "
                    "CHECK (status IN ('active', 'rejected', 'merged'))"))
@@ -341,6 +346,26 @@ def name_seeds(s: Session) -> list[dict]:
     return seeds
 
 
+_PAD = timedelta(days=30)  # around an anchor's own dates: planning before, photos and follow-ups after
+
+
+def _anchor_span(s: Session, seed: dict):
+    """When the seed's own anchor was active: (first, last), or None for anchors without dates of their own."""
+    name = seed["name"]
+    if seed["how"] == "series":
+        q = "SELECT min(occurred_at), max(occurred_at) FROM source_items WHERE source = 'gcal' AND title = :n"
+    elif seed["how"] == "repo":
+        q = ("SELECT min(occurred_at), max(occurred_at) FROM source_items WHERE source IN ('github', 'ai_chats', 'fs') "
+             "AND lower(raw_meta->>'repo') = lower(:n)")
+    elif seed["how"] == "chat":
+        q = ("SELECT min(si.occurred_at), max(si.occurred_at) FROM nodes t JOIN edges it ON it.dst = t.id AND it.type = 'IN_THREAD' "
+             "JOIN nodes m ON m.id = it.src JOIN source_items si ON si.id = m.source_item_id WHERE t.type = 'Thread' AND t.name = :n")
+    else:
+        return None  # course codes and the like: their mentions define them
+    row = s.execute(text(q), {"n": name}).first()
+    return (row[0], row[1]) if row and row[0] else None
+
+
 def _seed_candidate(s: Session, seed: dict, items_by_id: dict) -> dict | None:
     """Records naming a seed (in title or text), across all time: a long-running candidate."""
     term = seed["term"]
@@ -349,11 +374,18 @@ def _seed_candidate(s: Session, seed: dict, items_by_id: dict) -> dict | None:
     ids = s.execute(text(f"SELECT si.id FROM source_items si WHERE si.source = ANY(:src) AND ({q}) LIMIT 3000"),
                     {"src": list(SOURCES), **{f"v{i}": f"%{v}%" for i, v in enumerate(variants)}}).scalars().all()
     items = {i: items_by_id[i] for i in ids if i in items_by_id}
+    # The thread lives when its anchor does: a calendar series' occurrences, a repo's activity, a chat's days.
+    # A one-time hangout is its evening, not every later text naming the neighborhood.
+    anchor = _anchor_span(s, seed)
+    if anchor:
+        lo, hi = anchor
+        items = {k: v for k, v in items.items() if lo - _PAD <= v.occurred_at <= hi + _PAD}
     if len(items) < MIN_ITEMS or len({r.source for r in items.values()}) < 2:
         return None
     ts = sorted(r.occurred_at for r in items.values())
     return {"term": term, "terms": [term], "start": ts[0], "end": ts[-1], "items": items,
-            "sources": Counter(r.source for r in items.values()), "seed": seed["how"]}
+            "sources": Counter(r.source for r in items.values()), "seed": seed["how"], "seed_name": seed["name"],
+            "anchor": anchor}
 
 
 def _registered_all(rows, items: list) -> dict[str, dict]:
@@ -367,7 +399,7 @@ def _registered_all(rows, items: list) -> dict[str, dict]:
         if not terms:
             continue
         lo = hi = None
-        if row.span_start and row.span_end and row.origin == "burst":
+        if row.span_start and row.span_end and row.origin in ("burst", "name"):
             lo, hi = row.span_start - _td(days=30), row.span_end + _td(days=30)
         specs.append((row.key, terms, lo, hi))
     # Whole-word matching: a short defining term ("eta") must not match inside other words ("beta", "theta").
@@ -400,13 +432,55 @@ def _write_thread(s: Session, key: str, name: str, kind: str | None, terms: list
     for it in members:
         if it.node_id:
             _edge(s, it.node_id, tid, "PART_OF", {"why": f"mentions {terms[0]}"}, it.id, 0.6)
+    # Who took part comes from the strongest evidence: the thread's own group chat (the chat that most of its
+    # conversation happened in) and the attendees of its events. Someone who only talked about it with you ("how
+    # was Europe?") is related to it, not part of it.
+    participants = _participants(s, tid, [r.id for r in members])
+    # No group chat or events to say who took part (a trip planned over email and one-on-one texts): then the
+    # people in its small conversations are the best evidence we have; the verifier checks each one.
+    fallback = not participants
     for p, n, ev in _people(s, [r.id for r in members]):
-        eid = _edge(s, p, tid, "INVOLVED_IN", {"why": f"in {n} of its records", "items": n}, None, 0.6)
+        is_part = p in participants or fallback
+        eid = _edge(s, p, tid, "INVOLVED_IN" if is_part else "RELATED_TO",
+                    {"why": participants.get(p) or f"talked about it in {n} of its records", "items": n,
+                     "role": "participant" if is_part else "mentioned"}, None, 0.8 if is_part else 0.5)
         for sid in ev or []:
             if sid:
                 s.execute(text("INSERT INTO edge_evidence (edge_id, source_item_id, kind, detail) "
                                "VALUES (:e, :sid, 'member', '{}')"), {"e": eid, "sid": sid})
+    for p, why in participants.items():  # participants the mention rule didn't find (e.g. a quiet chat member)
+        if not s.execute(text("SELECT 1 FROM edges WHERE src = :p AND dst = :t AND type = 'INVOLVED_IN'"),
+                         {"p": p, "t": tid}).first():
+            _edge(s, p, tid, "INVOLVED_IN", {"why": why, "role": "participant"}, None, 0.8)
     return tid
+
+
+def _participants(s: Session, tid: int, item_ids: list[int]) -> dict[int, str]:
+    """{person: why} for the people who took part: members of the thread's main group chat (the group
+    conversation with the most of the thread's days, if it holds a real share of them), and attendees of the
+    thread's events. Canonical identities; you and services excluded."""
+    chat = s.execute(text("""
+        SELECT it.dst, count(*) AS days FROM nodes m JOIN edges it ON it.src = m.id AND it.type = 'IN_THREAD'
+        JOIN nodes c ON c.id = it.dst AND COALESCE((c.props->>'group')::bool, false)
+        WHERE m.source_item_id = ANY(:ids) AND m.type = 'Message'
+        GROUP BY it.dst ORDER BY count(*) DESC LIMIT 1"""), {"ids": item_ids}).first()
+    out: dict[int, str] = {}
+    if chat and chat.days >= max(3, 0.1 * len(item_ids)):
+        for p in s.execute(text("""
+            SELECT DISTINCT COALESCE(c.canonical_id, x.dst) FROM edges it JOIN edges x ON x.src = it.src AND x.type = 'RECEIVED'
+            LEFT JOIN canonical c ON c.node_id = x.dst JOIN nodes pn ON pn.id = COALESCE(c.canonical_id, x.dst)
+            WHERE it.dst = :chat AND it.type = 'IN_THREAD' AND pn.type = 'Person'
+              AND NOT COALESCE((pn.props->>'self')::bool, false) AND COALESCE(pn.props->>'kind', '') <> 'service'
+        """), {"chat": chat[0]}).scalars():
+            out[p] = f"in the group chat where it was planned ({chat.days} days)"
+    for p in s.execute(text("""
+        SELECT DISTINCT COALESCE(c.canonical_id, e.src) FROM nodes ev JOIN edges e ON e.dst = ev.id AND e.type = 'ATTENDED'
+        LEFT JOIN canonical c ON c.node_id = e.src JOIN nodes pn ON pn.id = COALESCE(c.canonical_id, e.src)
+        WHERE ev.type = 'Event' AND ev.source_item_id = ANY(:ids)
+          AND NOT COALESCE((pn.props->>'self')::bool, false) AND COALESCE(pn.props->>'kind', '') <> 'service'
+    """), {"ids": item_ids}).scalars():
+        out.setdefault(p, "attended its events")
+    return out
 
 
 def run(s: Session, log=print) -> int:
@@ -426,6 +500,14 @@ def run(s: Session, log=print) -> int:
     built = 0
 
     # 1. Known threads.
+    # A name thread's window follows its anchor (a series' occurrences, a repo's activity) as the data grows.
+    for row in s.execute(text("""SELECT key, anchor, anchor_name FROM thread_registry
+                                 WHERE status = 'active' AND origin = 'name' AND anchor IS NOT NULL""")).all():
+        span = _anchor_span(s, {"how": row.anchor, "name": row.anchor_name})
+        if span:
+            s.execute(text("UPDATE thread_registry SET span_start = :a, span_end = :b WHERE key = :k"),
+                      {"a": span[0], "b": span[1], "k": row.key})
+    s.commit()
     registry = s.execute(text("SELECT * FROM thread_registry WHERE status = 'active' ORDER BY pinned DESC, key")).all()
     members_by_key = _registered_all(registry, items)
     for row in registry:
@@ -455,11 +537,13 @@ def run(s: Session, log=print) -> int:
         verdict = _judge(s, c)
         terms = [t for t in (verdict.get("defining_terms") or c["terms"]) if len(t) >= 3] or c["terms"]
         s.execute(text("""
-            INSERT INTO thread_registry (key, name, kind, terms, span_start, span_end, status, origin, confidence)
-            VALUES (:k, :n, :kind, :t, :a, :b, :st, :o, :c) ON CONFLICT (key) DO NOTHING
+            INSERT INTO thread_registry (key, name, kind, terms, span_start, span_end, status, origin, confidence,
+                                         anchor, anchor_name)
+            VALUES (:k, :n, :kind, :t, :a, :b, :st, :o, :c, :anc, :an) ON CONFLICT (key) DO NOTHING
         """), {"k": key, "n": (verdict.get("name") or c["terms"][0])[:80], "kind": verdict.get("kind"), "t": terms,
                "a": c["start"], "b": c["end"], "st": "active" if verdict.get("keep") else "rejected",
-               "o": "name" if c.get("seed") else "burst", "c": verdict.get("confidence")})
+               "o": "name" if c.get("seed") else "burst", "c": verdict.get("confidence"),
+               "anc": c.get("seed"), "an": c.get("seed_name")})
         known.add(key)
         if not verdict.get("keep"):
             continue

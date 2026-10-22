@@ -189,3 +189,28 @@ def edge_is_wrong(body: WrongEdgeBody, s: Session = Depends(get_session)):
     verify.apply_verdicts(s)
     s.commit()
     return {"removed": body.edge, "also_removed": len(siblings)}
+
+
+class SamePersonBody(BaseModel):
+    other: int
+
+
+@router.post("/graph/person/{node_id}/merge")
+def merge_people(node_id: int, body: SamePersonBody, s: Session = Depends(get_session)):
+    """"These are the same person": a trusted identity link (extractor 'user') that entity resolution always
+    honors, so the two become one person now and on every rebuild (e.g. a nickname contact and a school address)."""
+    from igneous.graph import resolve
+    a, b = sorted((node_id, body.other))
+    types = dict(s.execute(text("SELECT id, type FROM nodes WHERE id = ANY(:i)"), {"i": [a, b]}).all())
+    if types.get(a) != "Person" or types.get(b) != "Person":
+        raise HTTPException(400, "Both must be people")
+    if a == b:
+        raise HTTPException(400, "That's the same person already")
+    s.execute(text("""
+        INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence)
+        VALUES (:a, :b, 'SAME_AS', '{"why": "you said they are the same person"}', 'user', '1', 1.0)
+        ON CONFLICT (src, dst, type, extractor) DO NOTHING"""), {"a": a, "b": b})
+    resolve.refresh_canonical(s)
+    s.commit()
+    head = s.execute(text("SELECT COALESCE((SELECT canonical_id FROM canonical WHERE node_id = :n), :n)"), {"n": a}).scalar()
+    return {"merged": [a, b], "person": head}

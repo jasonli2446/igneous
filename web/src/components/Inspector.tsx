@@ -102,6 +102,8 @@ export default function Inspector({ id, onExpandAction, onCloseAction, onSelectA
           : expanded ? "Hide their connections" : "Show their connections on the graph"}
       </button>
 
+      {node.type === "Person" && <SamePerson id={node.id} onDone={(person) => { onChangedAction?.(person); }} />}
+
       <Section title="Sources">
         <Sources id={node.id} highlight={[node.name]} />
       </Section>
@@ -124,6 +126,56 @@ export default function Inspector({ id, onExpandAction, onCloseAction, onSelectA
           )}
           </>}
         </Section>
+      )}
+    </div>
+  );
+}
+
+/** "Same person as…": fold another identity (a nickname contact, an old address) into this person, for good. */
+function SamePerson({ id, onDone }: { id: number; onDone: (person: number) => void }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const [hits, setHits] = useState<{ id: number; name: string; degree: number }[]>([]);
+  const [msg, setMsg] = useState<string | null>(null);
+  useEffect(() => {
+    if (q.trim().length < 2) return setHits([]);
+    const t = setTimeout(() => {
+      api.findNodes(q, "Person").then((r) => setHits(r.nodes.filter((n) => n.type === "Person" && n.id !== id))).catch(() => {});
+    }, 200);
+    return () => clearTimeout(t);
+  }, [q, id]);
+  if (!open) {
+    return (
+      <div>
+        <button onClick={() => setOpen(true)} className="rounded-md border border-line px-2.5 py-1 text-xs hover:bg-hover">
+          Same person as…
+        </button>
+        {msg && <p className="mt-1 text-xs text-muted">{msg}</p>}
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-md border border-line p-2">
+      <div className="flex items-center gap-2">
+        <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Find the other name or address"
+          aria-label="Search people to merge" onKeyDown={(e) => e.key === "Escape" && setOpen(false)}
+          className="min-w-0 flex-1 rounded border border-line bg-bg px-2 py-1 text-xs outline-none focus:border-accent" />
+        <button onClick={() => setOpen(false)} className="text-xs text-muted hover:text-ink">Cancel</button>
+      </div>
+      {q.trim().length >= 2 && (
+        <ul className="mt-2 space-y-0.5">
+          {hits.map((n) => (
+            <li key={n.id}>
+              <button className="flex w-full justify-between rounded px-1.5 py-1 text-left text-xs hover:bg-hover"
+                onClick={() => api.mergePeople(id, n.id).then((r) => {
+                  setOpen(false); setQ(""); setMsg(`Merged "${n.name}" into this person.`); onDone(r.person);
+                }).catch((e) => setMsg(String(e)))}>
+                <span className="truncate">{n.name}</span><span className="text-muted tabular-nums">{n.degree}</span>
+              </button>
+            </li>
+          ))}
+          {hits.length === 0 && <li className="px-1.5 py-1 text-xs text-muted">No one else matches.</li>}
+        </ul>
       )}
     </div>
   );
