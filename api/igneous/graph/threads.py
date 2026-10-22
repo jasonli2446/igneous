@@ -310,6 +310,8 @@ def ensure_registry(s: Session) -> None:
 def _migrate_registry(s: Session) -> None:
     """Older registries: allow status 'merged' and the merged_into column."""
     s.execute(text("ALTER TABLE thread_registry ADD COLUMN IF NOT EXISTS merged_into text"))
+    s.execute(text("ALTER TABLE thread_registry ADD COLUMN IF NOT EXISTS anchor text"))       # series|repo|chat|course
+    s.execute(text("ALTER TABLE thread_registry ADD COLUMN IF NOT EXISTS anchor_name text"))  # the seed's own name
     s.execute(text("ALTER TABLE thread_registry DROP CONSTRAINT IF EXISTS thread_registry_status_check"))
     s.execute(text("ALTER TABLE thread_registry ADD CONSTRAINT thread_registry_status_check "
                    "CHECK (status IN ('active', 'rejected', 'merged'))"))
@@ -382,7 +384,7 @@ def _seed_candidate(s: Session, seed: dict, items_by_id: dict) -> dict | None:
         return None
     ts = sorted(r.occurred_at for r in items.values())
     return {"term": term, "terms": [term], "start": ts[0], "end": ts[-1], "items": items,
-            "sources": Counter(r.source for r in items.values()), "seed": seed["how"],
+            "sources": Counter(r.source for r in items.values()), "seed": seed["how"], "seed_name": seed["name"],
             "anchor": anchor}
 
 
@@ -434,8 +436,11 @@ def _write_thread(s: Session, key: str, name: str, kind: str | None, terms: list
     # conversation happened in) and the attendees of its events. Someone who only talked about it with you ("how
     # was Europe?") is related to it, not part of it.
     participants = _participants(s, tid, [r.id for r in members])
+    # No group chat or events to say who took part (a trip planned over email and one-on-one texts): then the
+    # people in its small conversations are the best evidence we have; the verifier checks each one.
+    fallback = not participants
     for p, n, ev in _people(s, [r.id for r in members]):
-        is_part = p in participants
+        is_part = p in participants or fallback
         eid = _edge(s, p, tid, "INVOLVED_IN" if is_part else "RELATED_TO",
                     {"why": participants.get(p) or f"talked about it in {n} of its records", "items": n,
                      "role": "participant" if is_part else "mentioned"}, None, 0.8 if is_part else 0.5)
@@ -495,6 +500,14 @@ def run(s: Session, log=print) -> int:
     built = 0
 
     # 1. Known threads.
+    # A name thread's window follows its anchor (a series' occurrences, a repo's activity) as the data grows.
+    for row in s.execute(text("""SELECT key, anchor, anchor_name FROM thread_registry
+                                 WHERE status = 'active' AND origin = 'name' AND anchor IS NOT NULL""")).all():
+        span = _anchor_span(s, {"how": row.anchor, "name": row.anchor_name})
+        if span:
+            s.execute(text("UPDATE thread_registry SET span_start = :a, span_end = :b WHERE key = :k"),
+                      {"a": span[0], "b": span[1], "k": row.key})
+    s.commit()
     registry = s.execute(text("SELECT * FROM thread_registry WHERE status = 'active' ORDER BY pinned DESC, key")).all()
     members_by_key = _registered_all(registry, items)
     for row in registry:
@@ -524,11 +537,13 @@ def run(s: Session, log=print) -> int:
         verdict = _judge(s, c)
         terms = [t for t in (verdict.get("defining_terms") or c["terms"]) if len(t) >= 3] or c["terms"]
         s.execute(text("""
-            INSERT INTO thread_registry (key, name, kind, terms, span_start, span_end, status, origin, confidence)
-            VALUES (:k, :n, :kind, :t, :a, :b, :st, :o, :c) ON CONFLICT (key) DO NOTHING
+            INSERT INTO thread_registry (key, name, kind, terms, span_start, span_end, status, origin, confidence,
+                                         anchor, anchor_name)
+            VALUES (:k, :n, :kind, :t, :a, :b, :st, :o, :c, :anc, :an) ON CONFLICT (key) DO NOTHING
         """), {"k": key, "n": (verdict.get("name") or c["terms"][0])[:80], "kind": verdict.get("kind"), "t": terms,
                "a": c["start"], "b": c["end"], "st": "active" if verdict.get("keep") else "rejected",
-               "o": "name" if c.get("seed") else "burst", "c": verdict.get("confidence")})
+               "o": "name" if c.get("seed") else "burst", "c": verdict.get("confidence"),
+               "anc": c.get("seed"), "an": c.get("seed_name")})
         known.add(key)
         if not verdict.get("keep"):
             continue

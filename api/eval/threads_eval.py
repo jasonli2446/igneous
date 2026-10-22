@@ -56,6 +56,17 @@ def score(gold: dict) -> dict:
             "include_recall": round(len(best["items"] & inc) / len(inc), 2) if best and inc else None,
             "exclude_leaks": len(best["items"] & exc) if best else 0,
             "kind": best["kind"] if best else None})
+    # Who took part: names the person gave (match by first name, so "Tara" finds her contact under any name).
+    with SessionLocal() as s:
+        for g, r in zip(gold["threads"], report, strict=True):
+            if not (g.get("participants") or g.get("not_participants")) or not found_ids.get(g["name"]):
+                continue
+            went = [n.lower() for n in s.execute(text(
+                "SELECT n.name FROM edges e JOIN nodes n ON n.id = e.src WHERE e.dst = :t AND e.type = 'INVOLVED_IN'"),
+                {"t": found_ids[g["name"]]}).scalars()]
+            first = lambda n: n.lower().split()[0]  # noqa: E731
+            r["participants_missing"] = [p for p in g.get("participants", []) if not any(first(p) in w for w in went)]
+            r["wrongly_went"] = [p for p in g.get("not_participants", []) if any(first(p) in w for w in went)]
     for g, r in zip(gold["threads"], report, strict=True):
         if g.get("parent"):
             child, parent = found_ids.get(g["name"]), found_ids.get(g["parent"])
@@ -66,7 +77,8 @@ def score(gold: dict) -> dict:
         "duplicated": sum(1 for r in report if r["duplicates"]),
         "leaks": sum(r["exclude_leaks"] for r in report),
         "hierarchy_ok": sum(1 for r in report if r.get("parent_ok")),
-        "hierarchy_of": sum(1 for g in gold["threads"] if g.get("parent"))}
+        "hierarchy_of": sum(1 for g in gold["threads"] if g.get("parent")),
+        "participant_errors": sum(len(r.get("participants_missing", [])) + len(r.get("wrongly_went", [])) for r in report)}
     return {"summary": summary, "threads": report}
 
 
@@ -76,5 +88,7 @@ if __name__ == "__main__":
     for r in out["threads"]:
         flag = "OK " if r["found"] and not r["duplicates"] and not r["exclude_leaks"] else "-- "
         print(f"{flag}{r['name']:18s} found={r['found']!s:22.22s} records={r['records']:5d} dup={r['duplicates']} "
-              f"parent={r.get('parent_ok', '-')!s:5s} {('dups: ' + '; '.join(r['dup_names'])) if r['dup_names'] else ''}")
+              f"parent={r.get('parent_ok', '-')!s:5s} {('dups: ' + '; '.join(r['dup_names'])) if r['dup_names'] else ''}"
+              + (f" MISSING={r['participants_missing']}" if r.get("participants_missing") else "")
+              + (f" WRONGLY_WENT={r['wrongly_went']}" if r.get("wrongly_went") else ""))
     print(json.dumps(out["summary"]))
