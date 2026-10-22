@@ -36,6 +36,7 @@ CLAIMS = {
                        "talks with and its topics; two addresses of one person rarely share messages)",
     ("INTRODUCED", "relationship-history"): "this person introduced the two people to each other",
     ("PART_OF", "hierarchy"): "this project / thread is part of (or run under) this larger program or organization",
+    ("RELATED_TO", "thread-resolution"): "these two threads are related as stated (e.g. interviews for, same client as)",
 }
 MAX_EVIDENCE = 6
 SNIPPET = 280
