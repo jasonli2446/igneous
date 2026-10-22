@@ -1840,3 +1840,14 @@ def test_one_way_bulk_senders_are_services_but_colleagues_are_not():
     assert "named_by' IS DISTINCT FROM 'contacts'" in sql      # not a saved contact
     assert "NOT IN (SELECT d FROM my_domains)" in sql          # not at a domain you write to (school, employer)
     assert "bulk >= 0.8 * sent.n" in sql                       # what they send is mostly notifications/marketing
+
+
+def test_links_you_stated_are_never_judged_by_the_model():
+    from igneous.graph import verify
+
+    # the verifier only judges model-derived links; your own (extractor 'user') are never in its claims
+    assert all(extractor != "user" for _type, extractor in verify.CLAIMS)
+    import inspect
+
+    from igneous.graph import threads
+    assert "'user', :v, 1.0" in inspect.getsource(threads.pinned_parents)

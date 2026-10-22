@@ -420,7 +420,7 @@ def run(s: Session, log=print) -> int:
     _migrate_registry(s)
     items = _items(s)
     items_by_id = {r.id: r for r in items}
-    s.execute(text("DELETE FROM edges WHERE extractor IN (:x, 'hierarchy', 'thread-resolution')"), {"x": EXTRACTOR})
+    s.execute(text("DELETE FROM edges WHERE extractor IN (:x, 'hierarchy', 'thread-resolution', 'user')"), {"x": EXTRACTOR})
     keep_keys: list[str] = []
     claimed: set[int] = set()
     built = 0
@@ -605,7 +605,7 @@ def pinned_parents(s: Session) -> int:
     for c, p in rows:
         s.execute(text("""
             INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence)
-            VALUES (:c, :p, 'PART_OF', '{"why": "you said so"}', 'hierarchy', :v, 1.0)
+            VALUES (:c, :p, 'PART_OF', '{"why": "you said so"}', 'user', :v, 1.0)
             ON CONFLICT (src, dst, type, extractor) DO NOTHING"""), {"c": c, "p": p, "v": VERSION})
     return len(rows)
 
