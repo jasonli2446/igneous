@@ -518,4 +518,6 @@ def run(s: Session) -> int:
         derive_introductions(s)     # deterministic, source-cited three-person introductions
     backfill_temporal(s)
     s.commit()
+    from igneous.graph import item_class
+    item_class.apply(s)  # classify new items and mirror the class onto Message/Thread nodes
     return len(rows)
