@@ -130,6 +130,9 @@ def relationships(s: Session, head: int, limit: int) -> list[tuple[int, float, d
         FROM theirs t JOIN size sz ON sz.m = t.m JOIN nodes msg ON msg.id = t.m
         JOIN source_items si ON si.id = msg.source_item_id
         LEFT JOIN events ev ON ev.p = t.p
+        JOIN nodes tp ON tp.id = t.p
+        -- Services (GitHub mailing you under your own name, a bank) are never relationships, however much mail.
+        WHERE COALESCE(tp.props->>'kind', '') <> 'service' AND NOT COALESCE((tp.props->>'self')::bool, false)
         GROUP BY t.p
     """), {"head": head, "hl": HALF_LIFE_DAYS}).mappings().all()
     scored = []
@@ -146,6 +149,35 @@ def relationships(s: Session, head: int, limit: int) -> list[tuple[int, float, d
         scored.append((r["p"], round(strength, 3), dict(r)))
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored[:limit]
+
+
+CONTAINED = 0.8  # share of two people's common records inside one project or group chat that makes it "that's how they know each other"
+
+
+def contexts_of(s: Session, a: int, others: list[int]) -> dict[int, int]:
+    """{other: context} for each person whose whole shared history with `a` sits in one project or group chat
+    (Praveen and Aadhav only ever overlap on the CSDS 393 project): that context explains the tie, so the other
+    person belongs under it, not beside `a`. Pairs with history of their own (outside any single context) stay."""
+    if not others:
+        return {}
+    canon = "COALESCE((SELECT canonical_id FROM canonical WHERE node_id = {x}), {x})"
+    rows = s.execute(text(f"""
+        WITH pm AS (SELECT {canon.format(x='src')} AS p, dst AS m FROM edges WHERE type IN ('SENT', 'ATTENDED')
+                    UNION SELECT {canon.format(x='dst')}, src FROM edges WHERE type = 'RECEIVED'),
+        shared AS (SELECT b.p AS o, a.m FROM pm a JOIN pm b ON a.m = b.m
+                   WHERE a.p = :a AND b.p = ANY(:o) AND b.p <> :a),
+        tot AS (SELECT o, count(DISTINCT m) AS n FROM shared GROUP BY o),
+        ctx AS (  -- each shared record's contexts: its group chat, and the projects it is part of
+            SELECT sh.o, it.dst AS c, sh.m FROM shared sh JOIN edges it ON it.src = sh.m AND it.type = 'IN_THREAD'
+            JOIN nodes g ON g.id = it.dst AND COALESCE((g.props->>'group')::bool, false)
+            UNION SELECT sh.o, pe.dst, sh.m FROM shared sh JOIN edges pe ON pe.src = sh.m AND pe.type = 'PART_OF'
+            JOIN nodes pj ON pj.id = pe.dst AND pj.type = 'Project' AND NOT COALESCE((pj.props->>'hidden')::bool, false)
+              AND NOT COALESCE((pj.props->>'umbrella')::bool, false)),
+        best AS (SELECT DISTINCT ON (ctx.o) ctx.o, ctx.c, count(DISTINCT ctx.m) AS n FROM ctx
+                 GROUP BY ctx.o, ctx.c ORDER BY ctx.o, count(DISTINCT ctx.m) DESC, ctx.c)
+        SELECT best.o, best.c FROM best JOIN tot USING (o) WHERE best.n >= :share * tot.n
+    """), {"a": a, "o": others, "share": CONTAINED}).all()
+    return {o: c for o, c in rows}
 
 
 def people(s: Session, seed: int, limit: int = 60) -> dict:
@@ -816,6 +848,13 @@ def _ties(s: Session, ids: list[int], per_node: int = 2) -> list[dict]:
             WHERE part.p IN (SELECT id FROM vis) AND part.hub IN (SELECT id FROM vis))
         SELECT x, y, w, t FROM pp UNION ALL SELECT x, y, w, t FROM ph
     """), {"ids": ids}).all()
+    # Two people who only overlap inside one project or group chat know each other through it: the line goes
+    # through that context (if it's on screen, they're both linked to it), not straight between them.
+    contained: set[tuple[int, int]] = set()
+    for x in {x for x, _y, _w, t in rows if t == "CORRESPONDS"}:
+        for y in contexts_of(s, x, [y for xx, y, _w, t in rows if xx == x and t == "CORRESPONDS"]):
+            contained.add((x, y))
+    rows = [r for r in rows if not (r[3] == "CORRESPONDS" and (r[0], r[1]) in contained)]
     edges = [{"id": -(500000 + i), "src": x, "dst": y, "type": t, "weight": int(w)} for i, (x, y, w, t) in enumerate(rows)]
     by: dict[int, list[dict]] = {}
     for e in edges:
@@ -1019,6 +1058,10 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
             # chats, projects/threads and events they're in, and the files and email threads you share.
             pid = _canon_head(s, node)
             people = [p for p, _st, _ in relationships(s, pid, 40) if p not in seen and p != head]
+            # Someone this person only knows through one project or group chat goes under it, not beside them:
+            # the context takes their place (once), and they appear when it's opened.
+            ctx = contexts_of(s, pid, people)
+            people = list(dict.fromkeys(ctx.get(p, p) for p in people))
             things = person_world(s, pid, head)
             picked: list[int] = []
             quota = {"Person": max(3, k // 2), "Thread": 3, "Project": 3, "Event": 2, "File": 2}

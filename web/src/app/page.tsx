@@ -198,9 +198,10 @@ export default function Explorer() {
 
   // Links each expand added (so collapsing removes exactly those, including links between nodes already shown).
   const edgesAddedBy = useRef<Map<number, Set<string>>>(new Map());
-  const toggle = useCallback(async (id: number) => {
+  const toggle = useCallback(async (id: number, mode: "open" | "toggle" = "toggle") => {
     const { introducedBy: ib, expanded: ex, seedId: seed } = stateRef.current;
     if (seed === undefined) return;
+    if (ex.has(id) && mode === "open") return; // already showing its connections: coming back keeps them
     if (ex.has(id)) {
       const drop = new Set<number>();
       const collect = (p: number) => ib.forEach((parent, child) => { if (parent === p && !drop.has(child)) { drop.add(child); collect(child); } });

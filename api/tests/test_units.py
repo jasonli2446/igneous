@@ -1923,3 +1923,13 @@ def test_a_persons_messages_and_one_on_one_chats_fold_into_them():
     world = inspect.getsource(traversal.person_world)
     assert "'Message'" not in world and "it.src IN (SELECT m FROM mine)" not in world
     assert "x.type = 'Message'" in inspect.getsource(traversal.fallback_neighbors)
+
+
+def test_a_shared_context_explains_a_tie_and_services_are_never_relationships():
+    import inspect
+
+    from igneous.graph import traversal
+
+    assert traversal.CONTAINED >= 0.75
+    assert "contexts_of" in inspect.getsource(traversal.expand) and "contexts_of" in inspect.getsource(traversal._ties)
+    assert "'service'" in inspect.getsource(traversal.relationships)
