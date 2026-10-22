@@ -100,22 +100,24 @@ def judge(s: Session, a: dict, b: dict) -> dict:
     if cached is not None:
         return cached
     try:
-        out, _ = structured(
-            "Two threads were found in someone's records (projects, trips, classes, jobs). Decide how they relate. "
+        system = ("Two threads were found in someone's records (projects, trips, classes, jobs). Decide how they relate. "
             "'same' ONLY if they are one and the same thing found twice: the same named project or product, the "
             "same trip, the same course. You must be able to name what they both are; sharing people, a time "
             "period, an organization or a topic is NOT enough (two trips in one summer are different trips; two "
             "projects of one lab are different projects). 'related': different things that belong together (one "
             "led to the other, one is part of the other, same client or lab); give the relation in a few words. "
             "'distinct': not meaningfully related. When unsure between same and related, choose related. "
-            "Give a confidence 0-1 and a short reason that names the thing if 'same'.",
-            prompt,
-            {"type": "object", "additionalProperties": False,
+            "Give a confidence 0-1 and a short reason that names the thing if 'same'.")
+        schema = {"type": "object", "additionalProperties": False,
              "required": ["relation", "label", "confidence", "reason", "shared_identity"],
              "properties": {"relation": {"enum": ["same", "related", "distinct"]}, "label": {"type": "string"},
                             "shared_identity": {"type": "string"},
-                            "confidence": {"type": "number"}, "reason": {"type": "string"}}},
-            max_tokens=500)
+                            "confidence": {"type": "number"}, "reason": {"type": "string"}}}
+        out, _ = structured(system, prompt, schema,
+            max_tokens=500, model=settings.llm_cheap_model)
+        if out.get("relation") == "same":
+            # A merge is hard to undo: confirm a cheap-model 'same' with the stronger model before trusting it.
+            out, _ = structured(system, prompt, schema, max_tokens=500)
     except LLMDisabled:
         return fallback
     except Exception:  # one failed judgment must not stop the run; unjudged pairs stay separate

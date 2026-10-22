@@ -581,7 +581,7 @@ def _is_umbrella(s: Session, term: str, thread_names: list[str], months: int) ->
                 prompt,
                 {"type": "object", "additionalProperties": False, "required": ["umbrella", "confidence"],
                  "properties": {"umbrella": {"type": "boolean"}, "confidence": {"type": "number"}}},
-                max_tokens=120)
+                max_tokens=120, model=settings.llm_cheap_model)
         except LLMDisabled:
             return False
         s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb)) "

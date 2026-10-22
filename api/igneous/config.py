@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # safe: importing/syncing a source never sends it to a model unless named here.
     llm_sources: str = ""
     llm_model: str = "us.anthropic.claude-sonnet-5-5"
+    # High-volume yes/no judgments (verifying edges, pair same/related, umbrellas, summaries) use the cheap model;
+    # nuanced ones (naming threads, picking their records, confirming a merge) use llm_model.
+    llm_cheap_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     hosted_retries: int = 2
     hosted_retry_seconds: float = 1.0
     hosted_batch_size: int = 4
