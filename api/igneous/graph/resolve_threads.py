@@ -31,7 +31,8 @@ MAX_PAIRS = 300
 
 def _threads(s: Session) -> list[dict]:
     rows = s.execute(text("""
-        SELECT p.id, p.key, p.name, p.props->>'kind' AS kind, (p.props->>'start')::timestamptz AS a,
+        SELECT p.id, p.key, p.name, p.props->>'kind' AS kind, COALESCE((p.props->>'pinned')::bool, false) AS pinned,
+               (p.props->>'start')::timestamptz AS a,
                (p.props->>'end')::timestamptz AS b,
                array_remove(array_agg(DISTINCT n.source_item_id), NULL) AS items,
                array_remove(array_agg(DISTINCT ip.src), NULL) AS people
@@ -87,7 +88,10 @@ def judge(s: Session, a: dict, b: dict) -> dict:
     if not settings.llm_enabled:
         return fallback
     prompt = f"A: {_card(s, a)}\n\nB: {_card(s, b)}"
-    key = "thread-pair:v2:" + hashlib.sha256(prompt.encode()).hexdigest()
+    # Keyed by the two threads' identities, not their exact current records: a judgment is reused while the
+    # threads stay the same things, so it doesn't re-roll every time a few records shift.
+    ident = "|".join(sorted([a["key"], b["key"]]))
+    key = "thread-pair:v3:" + hashlib.sha256(ident.encode()).hexdigest()
     cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
     if cached is not None:
         return cached
@@ -115,6 +119,20 @@ def judge(s: Session, a: dict, b: dict) -> dict:
     s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb)) "
                    "ON CONFLICT (cache_key) DO NOTHING"), {"k": key, "r": json.dumps(out)})
     return out
+
+
+def _clusters_agree(a: set[int], b: set[int], verdicts: dict) -> bool:
+    """Average-link with a veto: merge when most JUDGED cross pairs say 'same' with confidence and none says
+    'distinct' or 'related' confidently. An unjudged pair or one lukewarm 'same' doesn't block a merge (five
+    fragments of one project); one confident 'different things' does (two trips in one summer)."""
+    judged = [verdicts[(min(x, y), max(x, y))] for x in a for y in b if (min(x, y), max(x, y)) in verdicts]
+    if not judged:
+        return False
+    for v in judged:
+        if v.get("relation") in ("distinct", "related") and (v.get("confidence") or 0) >= 0.75:
+            return False
+    same = [v for v in judged if v.get("relation") == "same"]
+    return len(same) >= 0.6 * len(judged) and sum(v.get("confidence") or 0 for v in same) / max(1, len(same)) >= 0.75
 
 
 def run(s: Session, log=print) -> dict:
@@ -151,7 +169,7 @@ def run(s: Session, log=print) -> dict:
         rx, ry = find(x), find(y)
         if rx == ry:
             continue
-        if all(is_same(p, q) for p in members_of[rx] for q in members_of[ry]):
+        if _clusters_agree(members_of[rx], members_of[ry], verdicts):
             parent[rx] = ry
             members_of[ry] |= members_of.pop(rx)
         else:
@@ -166,7 +184,8 @@ def run(s: Session, log=print) -> dict:
     for members in clusters.values():
         if len(members) < 2:
             continue
-        keep = max(members, key=lambda t: (len(t["items"]), len(t["people"])))
+        # A pinned thread (gold set / your correction) always survives, so its name and stated links stay.
+        keep = max(members, key=lambda t: (bool(t.get("pinned")), len(t["items"]), len(t["people"])))
         for t in members:
             if t["id"] == keep["id"]:
                 continue
@@ -183,6 +202,13 @@ def run(s: Session, log=print) -> dict:
                     COALESCE(props->'aliases', '[]'::jsonb) || to_jsonb(CAST(:alias AS text)))
                 WHERE id = :keep"""), {"keep": keep["id"], "alias": t["name"]})
             s.execute(text("DELETE FROM nodes WHERE id = :gone"), {"gone": t["id"]})
+            # Remember the merge: the gone thread's words now define the survivor, and the gone thread is not
+            # rebuilt next run (so the same merge isn't re-judged and re-rolled every time).
+            s.execute(text("""
+                UPDATE thread_registry k SET terms = ARRAY(SELECT DISTINCT unnest(k.terms || g.terms)), updated_at = now()
+                FROM thread_registry g WHERE k.key = :keep AND g.key = :gone"""), {"keep": keep["key"], "gone": t["key"]})
+            s.execute(text("UPDATE thread_registry SET status = 'merged', merged_into = :keep, updated_at = now() "
+                           "WHERE key = :gone AND NOT pinned"), {"keep": keep["key"], "gone": t["key"]})
     # Link related threads (after merging, so links land on survivors).
     for x, y, v in related:
         ia, ib = folded_into.get(x, x), folded_into.get(y, y)

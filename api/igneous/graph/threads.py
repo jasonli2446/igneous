@@ -78,7 +78,7 @@ def _terms(text_: str) -> set[str]:
 def _items(s: Session) -> list:
     return s.execute(text("""
         SELECT DISTINCT ON (si.id) si.id, si.source, si.occurred_at, coalesce(si.title, '') AS title,
-               left(coalesce(si.body_text, ''), 1500) AS body, n.id AS node_id
+               left(coalesce(si.body_text, ''), 4000) AS body, n.id AS node_id
         FROM source_items si
         LEFT JOIN nodes n ON n.source_item_id = si.id AND n.type IN ('Message', 'File', 'Event')
         WHERE si.source = ANY(:src) AND si.occurred_at IS NOT NULL
@@ -283,62 +283,209 @@ def _edge(s: Session, src: int, dst: int, type_: str, props: dict, sid: int | No
     return eid
 
 
+def ensure_registry(s: Session) -> None:
+    """Threads that have been found are kept as identities, so later runs attach new records to them instead of
+    re-deriving (and re-rolling) everything from scratch."""
+    s.execute(text("""
+        CREATE TABLE IF NOT EXISTS thread_registry (
+            key        text PRIMARY KEY,
+            name       text NOT NULL,
+            kind       text,
+            terms      text[] NOT NULL,          -- the words that define it (match = membership)
+            span_start timestamptz,
+            span_end   timestamptz,
+            status     text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'rejected', 'merged')),
+            merged_into text,                         -- for status 'merged': the surviving thread's key
+            pinned     boolean NOT NULL DEFAULT false,   -- gold set or a user correction: never dropped
+            origin     text NOT NULL DEFAULT 'burst',    -- burst | name | gold | user
+            confidence real,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now()
+        )"""))
+
+
+def _migrate_registry(s: Session) -> None:
+    """Older registries: allow status 'merged' and the merged_into column."""
+    s.execute(text("ALTER TABLE thread_registry ADD COLUMN IF NOT EXISTS merged_into text"))
+    s.execute(text("ALTER TABLE thread_registry DROP CONSTRAINT IF EXISTS thread_registry_status_check"))
+    s.execute(text("ALTER TABLE thread_registry ADD CONSTRAINT thread_registry_status_check "
+                   "CHECK (status IN ('active', 'rejected', 'merged'))"))
+
+
+def name_seeds(s: Session) -> list[dict]:
+    """Long-running things named outright: repositories, course codes, recurring calendar series, named group
+    chats. A burst finds a trip; a name finds a semester-long course or a year-long project."""
+    seeds: list[dict] = []
+    rows = s.execute(text(r"""
+        SELECT 'repo' AS how, lower(raw_meta->>'repo') AS name FROM source_items
+        WHERE source IN ('github', 'ai_chats', 'fs') AND coalesce(raw_meta->>'repo', '') <> ''
+        GROUP BY 2 HAVING count(*) >= 5
+        UNION ALL
+        SELECT 'course', upper(regexp_replace(substring(title from '([A-Za-z]{2,5} ?[0-9]{3})'), '\s', ' ', 'g'))
+        FROM source_items WHERE source IN ('gcal', 'gmail') AND title ~ '[A-Za-z]{2,5} ?[0-9]{3}'
+        GROUP BY 2 HAVING count(*) >= 5
+        UNION ALL
+        SELECT 'series', min(title) FROM source_items WHERE source = 'gcal' AND coalesce(title, '') <> ''
+        GROUP BY raw_meta->>'event_key' HAVING count(*) >= 4
+        UNION ALL
+        SELECT 'chat', name FROM nodes WHERE type = 'Thread' AND COALESCE((props->>'group')::bool, false)
+          AND name !~ '[0-9]{4}' AND name !~ ',' AND length(name) >= 3
+    """)).all()
+    seen = set()
+    for how, name in rows:
+        n = (name or "").strip()
+        if len(n) < 3 or n.lower() in seen:
+            continue
+        seen.add(n.lower())
+        seeds.append({"how": how, "name": n, "term": n.replace("-", " ") if how == "repo" else n})
+    return seeds
+
+
+def _seed_candidate(s: Session, seed: dict, items_by_id: dict) -> dict | None:
+    """Records naming a seed (in title or text), across all time: a long-running candidate."""
+    term = seed["term"]
+    variants = {term, term.replace(" ", "-"), term.replace(" ", "")}
+    q = " OR ".join(f"(si.title ILIKE :v{i} OR left(si.body_text, 4000) ILIKE :v{i})" for i in range(len(variants)))
+    ids = s.execute(text(f"SELECT si.id FROM source_items si WHERE si.source = ANY(:src) AND ({q}) LIMIT 3000"),
+                    {"src": list(SOURCES), **{f"v{i}": f"%{v}%" for i, v in enumerate(variants)}}).scalars().all()
+    items = {i: items_by_id[i] for i in ids if i in items_by_id}
+    if len(items) < MIN_ITEMS or len({r.source for r in items.values()}) < 2:
+        return None
+    ts = sorted(r.occurred_at for r in items.values())
+    return {"term": term, "terms": [term], "start": ts[0], "end": ts[-1], "items": items,
+            "sources": Counter(r.source for r in items.values()), "seed": seed["how"]}
+
+
+def _registered_all(rows, items: list) -> dict[str, dict]:
+    """Every known thread's records now, in one pass over the items: those naming one of its defining terms,
+    inside its span (+/- 30 days) for burst threads. Deterministic, which is what keeps a found thread found."""
+    from datetime import timedelta as _td
+
+    specs = []
+    for row in rows:
+        terms = [t.lower() for t in (row.terms or []) if len(t) >= 3]
+        if not terms:
+            continue
+        lo = hi = None
+        if row.span_start and row.span_end and row.origin == "burst":
+            lo, hi = row.span_start - _td(days=30), row.span_end + _td(days=30)
+        specs.append((row.key, terms, lo, hi))
+    out: dict[str, dict] = {k: {} for k, *_ in specs}
+    for it in items:
+        hay = (it.title + " " + it.body).lower()
+        for key, terms, lo, hi in specs:
+            if lo is not None and not (lo <= it.occurred_at <= hi):
+                continue
+            if any(t in hay for t in terms):
+                out[key][it.id] = it
+    return out
+
+
+def _write_thread(s: Session, key: str, name: str, kind: str | None, terms: list[str], members: list,
+                  extra: dict) -> int:
+    span = sorted(r.occurred_at for r in members)
+    props = {"derived": "threads", "kind": kind or "thread", "terms": terms[:6],
+             "start": span[0].isoformat(), "end": span[-1].isoformat(),
+             "sources": dict(Counter(r.source for r in members)), "records": len(members), **extra}
+    tid = s.execute(text("""
+        INSERT INTO nodes (type, key, name, props) VALUES ('Project', :k, :n, CAST(:p AS jsonb))
+        ON CONFLICT (type, key) DO UPDATE SET
+            name = CASE WHEN COALESCE((nodes.props->>'renamed')::bool, false) THEN nodes.name ELSE EXCLUDED.name END,
+            props = nodes.props || EXCLUDED.props
+        RETURNING id
+    """), {"k": key, "n": name[:80], "p": json.dumps(props)}).scalar_one()
+    for it in members:
+        if it.node_id:
+            _edge(s, it.node_id, tid, "PART_OF", {"why": f"mentions {terms[0]}"}, it.id, 0.6)
+    for p, n, ev in _people(s, [r.id for r in members]):
+        eid = _edge(s, p, tid, "INVOLVED_IN", {"why": f"in {n} of its records", "items": n}, None, 0.6)
+        for sid in ev or []:
+            if sid:
+                s.execute(text("INSERT INTO edge_evidence (edge_id, source_item_id, kind, detail) "
+                               "VALUES (:e, :sid, 'member', '{}')"), {"e": eid, "sid": sid})
+    return tid
+
+
 def run(s: Session, log=print) -> int:
+    """1. Known threads (registry): members recomputed from their defining terms, no model call.
+    2. New candidates (name seeds for long-running things, bursts for the rest), skipping records known threads
+       already cover: judged once; kept ones join the registry, rejected ones are remembered.
+    3. Resolve duplicates / link related threads; umbrellas over them. Pinned threads are never dropped."""
     from igneous.graph import overrides
 
-    cands = candidates(s)
+    ensure_registry(s)
+    _migrate_registry(s)
+    items = _items(s)
+    items_by_id = {r.id: r for r in items}
     s.execute(text("DELETE FROM edges WHERE extractor IN (:x, 'hierarchy', 'thread-resolution')"), {"x": EXTRACTOR})
-    keep_keys = []
+    keep_keys: list[str] = []
+    claimed: set[int] = set()
     built = 0
+
+    # 1. Known threads.
+    registry = s.execute(text("SELECT * FROM thread_registry WHERE status = 'active' ORDER BY pinned DESC, key")).all()
+    members_by_key = _registered_all(registry, items)
+    for row in registry:
+        members = list(members_by_key.get(row.key, {}).values())
+        if len(members) < 3 and not row.pinned:
+            continue
+        if not members:
+            continue
+        _write_thread(s, row.key, row.name, row.kind, list(row.terms), members, {"origin": row.origin,
+                      "pinned": row.pinned, "confidence": row.confidence})
+        keep_keys.append(row.key)
+        claimed |= {r.id for r in members}
+        built += 1
+    known = {r[0] for r in s.execute(text("SELECT key FROM thread_registry"))}
+
+    # 2. New candidates: name seeds first (long-running), then bursts; only what known threads don't cover.
+    cands = [c for c in (_seed_candidate(s, sd, items_by_id) for sd in name_seeds(s)) if c]
+    cands += candidates(s)
     for c in cands:
+        fresh = {k: v for k, v in c["items"].items() if k not in claimed}
+        if len(fresh) < MIN_ITEMS:
+            continue  # already covered by a thread we know
+        c = {**c, "items": fresh, "sources": Counter(r.source for r in fresh.values())}
+        key = "thread:" + hashlib.sha256((c["terms"][0].lower() + ("" if c.get("seed") else c["start"].strftime("%Y-%m"))).encode()).hexdigest()[:16]
+        if key in known:
+            continue  # judged before (kept -> handled above; rejected -> stays rejected)
         verdict = _judge(s, c)
+        terms = [t for t in (verdict.get("defining_terms") or c["terms"]) if len(t) >= 3] or c["terms"]
+        s.execute(text("""
+            INSERT INTO thread_registry (key, name, kind, terms, span_start, span_end, status, origin, confidence)
+            VALUES (:k, :n, :kind, :t, :a, :b, :st, :o, :c) ON CONFLICT (key) DO NOTHING
+        """), {"k": key, "n": (verdict.get("name") or c["terms"][0])[:80], "kind": verdict.get("kind"), "t": terms,
+               "a": c["start"], "b": c["end"], "st": "active" if verdict.get("keep") else "rejected",
+               "o": "name" if c.get("seed") else "burst", "c": verdict.get("confidence")})
+        known.add(key)
         if not verdict.get("keep"):
             continue
         members = _belongs(c, verdict)
         if len(members) < 3:
-            continue  # once unrelated records are removed, too little is left to be a thread
-        key = "thread:" + hashlib.sha256((c["terms"][0].lower() + c["start"].strftime("%Y-%m")).encode()).hexdigest()[:16]
+            s.execute(text("UPDATE thread_registry SET status = 'rejected' WHERE key = :k"), {"k": key})
+            continue
+        _write_thread(s, key, verdict["name"], verdict.get("kind"), terms, members,
+                      {"origin": "name" if c.get("seed") else "burst", "judged": verdict.get("judged", False),
+                       "confidence": verdict.get("confidence"),
+                       "suggested": (verdict.get("confidence") or 0) < MIN_CONFIDENCE})
         keep_keys.append(key)
-        props = {"derived": "threads", "kind": verdict.get("kind") or "thread",
-                 "terms": (verdict.get("defining_terms") or c["terms"])[:6],
-                 "start": c["start"].isoformat(), "end": c["end"].isoformat(),
-                 "sources": dict(Counter(r.source for r in members)), "records": len(members),
-                 "judged": verdict.get("judged", False), "confidence": verdict.get("confidence"),
-                 "suggested": (verdict.get("confidence") or 0) < MIN_CONFIDENCE}
-        tid = s.execute(text("""
-            INSERT INTO nodes (type, key, name, props) VALUES ('Project', :k, :n, CAST(:p AS jsonb))
-            ON CONFLICT (type, key) DO UPDATE SET
-                name = CASE WHEN COALESCE((nodes.props->>'renamed')::bool, false) THEN nodes.name ELSE EXCLUDED.name END,
-                props = nodes.props || EXCLUDED.props
-            RETURNING id
-        """), {"k": key, "n": verdict["name"][:80], "p": json.dumps(props)}).scalar_one()
-        defining = (verdict.get("defining_terms") or c["terms"][:1])[0]
-        for it in members:
-            if it.node_id:
-                why = "picked by the judge" if it.id in set(verdict.get("members") or []) else f"mentions {defining}"
-                _edge(s, it.node_id, tid, "PART_OF", {"why": why}, it.id, 0.6)
-        for p, n, ev in _people(s, [r.id for r in members]):
-            # Record the very items that make them a member, so the verifier and the "why" view read those.
-            eid = _edge(s, p, tid, "INVOLVED_IN", {"why": f"in {n} of its records", "items": n}, None, 0.6)
-            for sid in ev or []:
-                if sid:
-                    s.execute(text("INSERT INTO edge_evidence (edge_id, source_item_id, kind, detail) "
-                                   "VALUES (:e, :sid, 'member', '{}')"), {"e": eid, "sid": sid})
+        claimed |= {r.id for r in members}
         built += 1
-        log(f"  thread {props['kind']:10s} sources={len(c['sources'])} items={len(c['items'])}") if log else None
-    # Before deleting stale threads and finding umbrellas: fold duplicates (one ETA, not eighteen) and link
-    # related threads, so umbrellas see one thread per real thing.
+        s.commit()
+
+    # 3. Clean up, resolve duplicates / related, umbrellas. Pinned threads are never dropped.
     s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'
-                      AND NOT COALESCE((props->>'umbrella')::bool, false) AND NOT (key = ANY(:keep))"""),
-              {"keep": keep_keys})
+                      AND NOT COALESCE((props->>'umbrella')::bool, false) AND NOT (key = ANY(:keep))
+                      AND NOT COALESCE((props->>'pinned')::bool, false)"""), {"keep": keep_keys})
     s.commit()
     from igneous.graph import resolve_threads
     resolve_threads.run(s, log=None)
     keep_keys[:] = s.execute(text("SELECT key FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'")).scalars().all()
     built += umbrellas(s, keep_keys)
-    # Threads that no longer qualify go away (corrections in overrides survive: they key on node keys).
+    pinned_parents(s)  # stated structure (xLab over its projects) always holds
     s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'
-                      AND NOT (key = ANY(:keep))"""), {"keep": keep_keys})
+                      AND NOT (key = ANY(:keep)) AND NOT COALESCE((props->>'pinned')::bool, false)"""),
+              {"keep": keep_keys})
     overrides.apply(s)
     s.commit()
     return built
@@ -436,3 +583,50 @@ def _is_umbrella(s: Session, term: str, thread_names: list[str], months: int) ->
         s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb)) "
                        "ON CONFLICT (cache_key) DO NOTHING"), {"k": key, "r": json.dumps(cached)})
     return bool(cached.get("umbrella")) and (cached.get("confidence") or 0) >= 0.7
+
+
+def ensure_hierarchy(s: Session) -> None:
+    s.execute(text("""CREATE TABLE IF NOT EXISTS thread_parents (
+        child_key text NOT NULL, parent_key text NOT NULL, origin text NOT NULL DEFAULT 'gold',
+        PRIMARY KEY (child_key, parent_key))"""))
+
+
+def pinned_parents(s: Session) -> int:
+    """Write PART_OF edges for parent links someone stated (gold set / corrections), by registry key."""
+    ensure_hierarchy(s)
+    rows = s.execute(text("""
+        SELECT c.id, p.id FROM thread_parents tp
+        JOIN nodes c ON c.type = 'Project' AND c.key = tp.child_key
+        JOIN nodes p ON p.type = 'Project' AND p.key = tp.parent_key""")).all()
+    for c, p in rows:
+        s.execute(text("""
+            INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence)
+            VALUES (:c, :p, 'PART_OF', '{"why": "you said so"}', 'hierarchy', :v, 1.0)
+            ON CONFLICT (src, dst, type, extractor) DO NOTHING"""), {"c": c, "p": p, "v": VERSION})
+    return len(rows)
+
+
+def pin_gold(s: Session, gold: dict) -> int:
+    """Seed the registry from a gold set: each gold thread is a pinned identity defined by its terms."""
+    ensure_registry(s)
+    n = 0
+    for g in gold.get("threads", []):
+        terms = [t.strip() for t in g.get("terms", []) if len(t.strip()) >= 3]
+        if not terms:
+            continue
+        key = "gold:" + hashlib.sha256(g["name"].lower().encode()).hexdigest()[:16]
+        s.execute(text("""
+            INSERT INTO thread_registry (key, name, kind, terms, status, pinned, origin, confidence)
+            VALUES (:k, :n, :kind, :t, 'active', true, 'gold', 1.0)
+            ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, kind = EXCLUDED.kind, terms = EXCLUDED.terms,
+                status = 'active', pinned = true, updated_at = now()
+        """), {"k": key, "n": g["name"], "kind": g.get("kind"), "t": terms})
+        n += 1
+    ensure_hierarchy(s)
+    gkey = lambda name: "gold:" + hashlib.sha256(name.lower().encode()).hexdigest()[:16]  # noqa: E731
+    for g in gold.get("threads", []):
+        if g.get("parent"):
+            s.execute(text("INSERT INTO thread_parents (child_key, parent_key) VALUES (:c, :p) ON CONFLICT DO NOTHING"),
+                      {"c": gkey(g["name"]), "p": gkey(g["parent"])})
+    s.commit()
+    return n

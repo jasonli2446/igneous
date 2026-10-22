@@ -1783,3 +1783,15 @@ def test_verifier_snippets_claims_and_merge_safety():
     assert ("SAME_AS", "er") in verify.CLAIMS and ("PART_OF", "hierarchy") in verify.CLAIMS
     import inspect
     assert "v.confidence >= 0.8" in inspect.getsource(verify.apply_verdicts)
+
+
+def test_thread_clusters_merge_on_mostly_same_but_one_confident_distinct_vetoes():
+    from igneous.graph.resolve_threads import _clusters_agree
+
+    same = {"relation": "same", "confidence": 0.9}
+    lukewarm = {"relation": "same", "confidence": 0.72}
+    distinct = {"relation": "distinct", "confidence": 0.9}
+    v = {(1, 3): same, (2, 3): lukewarm}           # (1,2) cluster vs 3; one pair unjudged elsewhere is fine
+    assert _clusters_agree({1, 2}, {3}, v)
+    assert not _clusters_agree({1, 2}, {3}, {**v, (1, 3): distinct})  # a confident "different things" vetoes
+    assert not _clusters_agree({1}, {4}, v)                            # never judged: no merge
