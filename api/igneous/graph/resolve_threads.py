@@ -47,11 +47,13 @@ def _threads(s: Session) -> list[dict]:
 
 
 def _tokens(name: str) -> set[str]:
-    """Name words; a course code's number counts on its own (CSDS 395 and ECSE 395 are one cross-listed course)."""
+    """Name words; a course code is one identifier ("csds 395" and "csds395" match; "ecse 395" is another course).
+    A bare number is never a name word: it's what different courses, rooms and years share."""
     low = (name or "").lower()
-    words = {w for w in re.findall(r"[a-z0-9]+", low) if len(w) >= 3}
-    words |= {f"course:{n}" for n in re.findall(r"\b[a-z]{2,5}\s?(\d{3})\b", low)}
-    return words
+    codes = re.findall(r"\b([a-z]{2,5})\s?(\d{3})\b", low)
+    words = {w for w in re.findall(r"[a-z0-9]+", low) if len(w) >= 3 and not w.isdigit()}
+    words -= {d for _c, d in codes} | {c for c, _d in codes}
+    return words | {f"course:{c}{d}" for c, d in codes}
 
 
 def candidate_pairs(ts: list[dict]) -> list[tuple[dict, dict]]:

@@ -395,7 +395,8 @@ def _registered_all(rows, items: list) -> dict[str, dict]:
 
     specs = []
     for row in rows:
-        terms = [t.lower() for t in (row.terms or []) if len(t) >= 3]
+        # A bare number ("395") is shared by different courses, rooms and years: never a defining term alone.
+        terms = [t.lower() for t in (row.terms or []) if len(t) >= 3 and not t.strip().isdigit()]
         if not terms:
             continue
         lo = hi = None
@@ -403,7 +404,11 @@ def _registered_all(rows, items: list) -> dict[str, dict]:
             lo, hi = row.span_start - _td(days=30), row.span_end + _td(days=30)
         specs.append((row.key, terms, lo, hi))
     # Whole-word matching: a short defining term ("eta") must not match inside other words ("beta", "theta").
-    patterns = {key: re.compile(r"(?<![a-z0-9])(" + "|".join(re.escape(t) for t in terms) + r")(?![a-z0-9])")
+    # A course code matches with or without its space ("csds 395" / "csds395"), and only with its department.
+    def pat(t: str) -> str:
+        m = re.fullmatch(r"([a-z]{2,5})\s?(\d{3})", t)
+        return rf"{m.group(1)}\s?{m.group(2)}" if m else re.escape(t)
+    patterns = {key: re.compile(r"(?<![a-z0-9])(" + "|".join(pat(t) for t in terms) + r")(?![a-z0-9])")
                 for key, terms, _lo, _hi in specs}
     out: dict[str, dict] = {k: {} for k, *_ in specs}
     for it in items:

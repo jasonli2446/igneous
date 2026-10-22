@@ -32,13 +32,15 @@ SCHEMA = {
         "person_name": {"type": "string"},
         "experience": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
-            "required": ["org", "title", "start", "end", "domain_hint"],
+            "required": ["org", "title", "start", "end", "domain_hint", "parent", "project"],
             "properties": {"org": {"type": "string"}, "title": {"type": "string"}, "start": {"type": "string"},
-                           "end": {"type": "string"}, "domain_hint": {"type": "string"}}}},
+                           "end": {"type": "string"}, "domain_hint": {"type": "string"},
+                           "parent": {"type": "string"}, "project": {"type": "string"}}}},
         "education": {"type": "array", "items": {
-            "type": "object", "additionalProperties": False, "required": ["school", "degree", "start", "end"],
+            "type": "object", "additionalProperties": False,
+            "required": ["school", "degree", "start", "end", "domain_hint"],
             "properties": {"school": {"type": "string"}, "degree": {"type": "string"}, "start": {"type": "string"},
-                           "end": {"type": "string"}}}},
+                           "end": {"type": "string"}, "domain_hint": {"type": "string"}}}},
         "projects": {"type": "array", "items": {
             "type": "object", "additionalProperties": False, "required": ["name", "description", "org"],
             "properties": {"name": {"type": "string"}, "description": {"type": "string"},
@@ -64,7 +66,7 @@ def extract(s: Session, doc) -> dict | None:
 
     if not settings.llm_enabled:
         return None
-    key = "profile-extract:v2:" + hashlib.sha256(doc.body_text.encode()).hexdigest()
+    key = "profile-extract:v3:" + hashlib.sha256(doc.body_text.encode()).hexdigest()
     cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
     if cached is not None:
         return cached
@@ -72,8 +74,13 @@ def extract(s: Session, doc) -> dict | None:
         out, _ = structured(
             "Read a document and, if it describes its owner (a resume, CV or profile), extract their history as "
             "they state it. Use the organization and project names exactly as written ('KKR', '1848 Ventures', "
-            "'xLab'). Dates as YYYY-MM (or YYYY, or 'present'). domain_hint: the organization's email/web domain if "
-            "you can tell (kkr.com), else ''. A project's org: the employer or lab it was done for, else ''. If the "
+            "'xLab'). An entry's org is the organization alone: when a heading combines an institution, an "
+            "organization and a project or client ('CWRU xLab - Dealer Tire'), org is the organization ('xLab'), "
+            "parent is the larger institution it belongs to ('Case Western Reserve University', spelled out), and "
+            "project is the project or client ('Dealer Tire'); otherwise parent and project are ''. Dates as YYYY-MM "
+            "(or YYYY, or 'present'). domain_hint: the organization's or school's own email/web domain if you can "
+            "tell (kkr.com, case.edu), else ''; a lab or program inside a university has no domain of its own (''). "
+            "A project's org: the employer or lab it was done for, else ''. If the "
             "document isn't about its owner, is_about_owner=false and leave the lists empty. person_name: the full "
             "name of the person the document is about, exactly as written at the top.",
             doc.body_text[:12000], SCHEMA, max_tokens=3000)
@@ -145,18 +152,36 @@ def run(s: Session, log=print) -> dict:
             if k and k not in schools:
                 schools[k] = {**ed, "doc": doc.id}
 
-    def org_node(name: str, domain: str) -> int:
-        # Reuse the domain's existing Organization node (so people already MEMBER_OF it count), named as you name it.
-        if domain:
-            nid = s.execute(text("SELECT id FROM nodes WHERE type = 'Organization' AND key = :d"), {"d": domain.lower()}).scalar()
+    # A domain names one organization. Schools claim theirs first; a later entry with the same domain (a lab at
+    # the university) is part of the one that claimed it, never a rename of it.
+    claimed: dict[str, int] = {}
+    by_name: dict[str, int] = {}
+
+    def org_node(name: str, domain: str) -> tuple[int, int | None]:
+        """(org id, the org it's part of when its domain was already claimed)."""
+        d = (domain or "").lower().strip()
+        if d in claimed:
+            nid = s.execute(text("""
+                INSERT INTO nodes (type, key, name, props) VALUES ('Organization', :k, :n, '{"named_by": "profile"}')
+                ON CONFLICT (type, key) DO UPDATE SET name = EXCLUDED.name RETURNING id
+            """), {"k": "org:" + _slug(name), "n": name}).scalar_one()
+            by_name.setdefault(_slug(name), nid)
+            return nid, claimed[d]
+        nid = None
+        if d:  # reuse the domain's node (people already MEMBER_OF it count), named as you name it
+            nid = s.execute(text("SELECT id FROM nodes WHERE type = 'Organization' AND key = :d"), {"d": d}).scalar()
             if nid:
                 s.execute(text("UPDATE nodes SET name = :n, props = props || '{\"named_by\": \"profile\"}' WHERE id = :i"),
                           {"n": name, "i": nid})
-                return nid
-        return s.execute(text("""
-            INSERT INTO nodes (type, key, name, props) VALUES ('Organization', :k, :n, '{"named_by": "profile"}')
-            ON CONFLICT (type, key) DO UPDATE SET name = EXCLUDED.name RETURNING id
-        """), {"k": domain.lower() if domain else "org:" + _slug(name), "n": name}).scalar_one()
+        if nid is None:
+            nid = by_name.get(_slug(name)) or s.execute(text("""
+                INSERT INTO nodes (type, key, name, props) VALUES ('Organization', :k, :n, '{"named_by": "profile"}')
+                ON CONFLICT (type, key) DO UPDATE SET name = EXCLUDED.name RETURNING id
+            """), {"k": d or "org:" + _slug(name), "n": name}).scalar_one()
+        if d:
+            claimed[d] = nid
+        by_name.setdefault(_slug(name), nid)
+        return nid, None
 
     def edge(src: int, dst: int, type_: str, props: dict, frm=None, to=None, sid=None):
         s.execute(text("""
@@ -169,15 +194,25 @@ def run(s: Session, log=print) -> dict:
                "sid": sid})
 
     org_ids: dict[str, int] = {}
+    named_projects: dict[int, set[str]] = {}  # org -> project names your resume puts under it
+    for k, ed in schools.items():
+        oid, _ = org_node(ed["school"], ed.get("domain_hint") or "")
+        org_ids[k] = oid
+        edge(self_id, oid, "WORKED_AT", {"why": f"your resume: {ed['degree']}", "title": ed["degree"], "school": True},
+             _date(ed["start"]), _date(ed["end"]), ed["doc"])
     for k, e in orgs.items():
-        oid = org_node(e["org"], e.get("domain_hint") or "")
+        oid, part_of = org_node(e["org"], e.get("domain_hint") or "")
         org_ids[k] = oid
         edge(self_id, oid, "WORKED_AT", {"why": f"your resume: {e['title']}", "title": e["title"]},
              _date(e["start"]), _date(e["end"]), e["doc"])
-    for _k, ed in schools.items():
-        oid = org_node(ed["school"], "")
-        edge(self_id, oid, "WORKED_AT", {"why": f"your resume: {ed['degree']}", "title": ed["degree"], "school": True},
-             _date(ed["start"]), _date(ed["end"]), ed["doc"])
+        parent = part_of
+        if e.get("parent"):
+            parent = by_name.get(_slug(e["parent"])) or org_node(e["parent"], "")[0]
+        if parent and parent != oid:
+            edge(oid, parent, "PART_OF", {"why": f"your resume: {e['org']} is part of "
+                                                  f"{e.get('parent') or 'it'}"}, sid=e["doc"])
+        if e.get("project"):
+            named_projects.setdefault(oid, set()).add(e["project"])
     # Projects become pinned threads named as you name them (the registry keeps them across runs).
     for k, p in projects.items():
         key = "profile:" + hashlib.sha256(k.encode()).hexdigest()[:16]
@@ -190,10 +225,18 @@ def run(s: Session, log=print) -> dict:
             ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, terms = EXCLUDED.terms, status = 'active',
                 pinned = true, updated_at = now()
         """), {"k": key, "n": p["name"][:80], "t": list(dict.fromkeys(terms))})
-        if p.get("org") and _slug(p["org"]) in org_ids:
-            threads.ensure_hierarchy(s)
-            s.execute(text("""INSERT INTO thread_parents (child_key, parent_key, origin) VALUES (:c, :p, 'profile')
-                              ON CONFLICT DO NOTHING"""), {"c": key, "p": f"org:{org_ids[_slug(p['org'])]}"})
+        oid = org_ids.get(_slug(p.get("org") or "")) or by_name.get(_slug(p.get("org") or ""))
+        if oid:
+            named_projects.setdefault(oid, set()).add(p["name"])
+    # Which projects sit under which org: read by the backbone stage once threads exist (graph/backbone.py).
+    s.execute(text("UPDATE nodes SET props = props - 'resume_projects' WHERE type = 'Organization' AND props ? 'resume_projects'"))
+    for oid, names in named_projects.items():
+        s.execute(text("UPDATE nodes SET props = props || jsonb_build_object('resume_projects', CAST(:n AS jsonb)) WHERE id = :i"),
+                  {"n": json.dumps(sorted(names)), "i": oid})
+    s.execute(text("DELETE FROM thread_parents WHERE origin = 'profile'"))
+    # Organizations an older reading of your resume made that nothing points at any more.
+    s.execute(text("""DELETE FROM nodes n WHERE n.type = 'Organization' AND n.props->>'named_by' = 'profile'
+                      AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id OR e.dst = n.id)"""))
     s.commit()
     stats = {"documents": used, "orgs": len(orgs), "schools": len(schools), "projects": len(projects)}
     if log:

@@ -39,6 +39,7 @@ CLAIMS = {
                        "talks with and its topics; two addresses of one person rarely share messages)",
     ("INTRODUCED", "relationship-history"): "this person introduced the two people to each other",
     ("PART_OF", "hierarchy"): "this project / thread is part of (or run under) this larger program or organization",
+    ("PART_OF", "backbone"): "this thread (a class, project or job) was done at or for this organization or school",
     ("RELATED_TO", "thread-resolution"): "these two threads are related as stated (e.g. interviews for, same client as)",
 }
 MAX_EVIDENCE = 6
@@ -263,8 +264,14 @@ def run(s: Session, log=print, budget: int = BUDGET) -> dict:
         prior = known.get(k)
         if prior and prior[1] == "user":
             continue  # the user decided; never re-judged
-        desc, digest = (_describe_identity(s, edge) if edge["type"] == "SAME_AS"
-                        else _describe(edge, _evidence(s, edge)))
+        evidence = [] if edge["type"] == "SAME_AS" else _evidence(s, edge)
+        if evidence and not edge["items"]:
+            # A link proposed without records: what the judge reads becomes its evidence, so the why-view shows
+            # what the verdict was made on instead of "no evidence".
+            for e in evidence:
+                s.execute(text("INSERT INTO edge_evidence (edge_id, source_item_id, kind, detail) "
+                               "VALUES (:e, :s, 'verified-on', '{}')"), {"e": edge["id"], "s": e["id"]})
+        desc, digest = (_describe_identity(s, edge) if edge["type"] == "SAME_AS" else _describe(edge, evidence))
         if prior and prior[0] == digest:
             stats["cached"] += 1
             continue
