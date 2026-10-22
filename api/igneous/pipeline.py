@@ -28,7 +28,7 @@ def run_all(s: Session) -> dict:
 
 def stages(extract: int = 0) -> dict:
     """Every pipeline stage by name, in run order (shared by `igneous pipeline` and the UI's Rebuild button)."""
-    from igneous.graph import entities, organizations, resolve, self_identity, spine, threads, topics
+    from igneous.graph import entities, organizations, resolve, self_identity, spine, threads, topics, verify
     from igneous.graph import extract as ex
     from igneous.rag import chunking, embed
 
@@ -42,4 +42,6 @@ def stages(extract: int = 0) -> dict:
             "self": lambda s: self_identity.run(s)["self_links"],
             "resolve": lambda s: resolve.run(s)["same_as"],
             # Resolve first so aliases (including phone-only contacts) receive one relationship.
-            "organizations": organizations.run}
+            "organizations": organizations.run,
+            # Last: check every derived relationship against its evidence (keeps, drops, or flags it).
+            "verify": lambda s: verify.run(s, log=None)}

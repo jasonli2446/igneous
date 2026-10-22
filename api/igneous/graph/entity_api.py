@@ -126,10 +126,18 @@ def unlink(node_id: int, body: UnlinkBody, s: Session = Depends(get_session)):
     _project(s, node_id)
     edges = [dict(r) for r in s.execute(text("""
         SELECT src, dst, type, props, extractor_version, confidence, source_item_id, span_start, span_end
-        FROM edges WHERE src = :m AND dst = :p AND extractor = :x AND type IN ('PART_OF', 'INVOLVED_IN')
+        FROM edges WHERE src = :m AND dst = :p AND type IN ('PART_OF', 'INVOLVED_IN')
+          AND extractor IN (:x, 'threads', 'hierarchy')
     """), {"m": body.node, "p": node_id, "x": overrides.EXTRACTOR}).mappings()]
     if not edges:
         raise HTTPException(404, "That isn't linked to this entity")
+    # Also a labeled verdict: the verifier keeps it dropped on every rebuild and learns from it (few-shot).
+    from igneous.graph import verify
+    for e in s.execute(text("""
+        SELECT e.type, e.extractor FROM edges e WHERE e.src = :m AND e.dst = :p AND e.type IN ('PART_OF', 'INVOLVED_IN')
+    """), {"m": body.node, "p": node_id}).all():
+        verify.record_correction(s, _key(s, body.node), _key(s, node_id), e.type, e.extractor, "drop",
+                                 "removed by you")
     return {**_commit(s, "unlink", [_key(s, node_id), _key(s, body.node)], data={"edges": edges}), "id": node_id}
 
 

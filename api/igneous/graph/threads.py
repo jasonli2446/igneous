@@ -37,6 +37,9 @@ MIN_ITEMS = 6
 MAX_DF = 0.02            # a term in more than 2% of all items is background (a hometown, a school), not a thread
 MAX_CANDIDATES = 80      # judged per run (model budget)
 MIN_CONFIDENCE = 0.55    # below this, a judged thread is a suggestion, not a node
+UMBRELLA_MONTHS = 6      # an umbrella (org, program, lab) is present across at least this many months...
+UMBRELLA_SHARE = 0.2     # ...and makes up at least this share of the items of...
+UMBRELLA_THREADS = 2     # ...at least this many threads
 
 # Sources that describe the user's life (not contact cards or raw metadata).
 SOURCES = ("gmail", "email", "imessage", "gcal", "drive", "fs", "notes", "ai_chats", "github",
@@ -151,7 +154,7 @@ def _merge(cands: list[dict]) -> list[dict]:
     return merged[:MAX_CANDIDATES]
 
 
-def _people(s: Session, item_ids: list[int]) -> list[tuple[int, int]]:
+def _people(s: Session, item_ids: list[int]) -> list[tuple[int, int, list[int]]]:
     """(canonical person, qualifying items) for people who are really in the thread, excluding services and you.
 
     Being one of many recipients of a mention (a club mailing that names the game) isn't membership. An item
@@ -168,10 +171,12 @@ def _people(s: Session, item_ids: list[int]) -> list[tuple[int, int]]:
             UNION SELECT e.dst, e.src, false FROM edges e JOIN msg ON msg.id = e.src WHERE e.type = 'RECEIVED'),
         ok AS (SELECT ppl.p, ppl.m FROM ppl JOIN size ON size.id = ppl.m JOIN msg ON msg.id = ppl.m
                WHERE ppl.wrote OR size.n <= 4 OR msg.type = 'Event')
-        SELECT COALESCE(c.canonical_id, ok.p) AS p, count(DISTINCT ok.m) AS n
+        SELECT COALESCE(c.canonical_id, ok.p) AS p, count(DISTINCT ok.m) AS n,
+               (array_agg(DISTINCT (SELECT source_item_id FROM nodes WHERE id = ok.m)))[1:8] AS items
         FROM ok LEFT JOIN canonical c ON c.node_id = ok.p JOIN nodes pn ON pn.id = ok.p
+        JOIN nodes head ON head.id = COALESCE(c.canonical_id, ok.p)
         WHERE pn.type = 'Person' AND COALESCE(pn.props->>'kind', '') <> 'service'
-          AND NOT COALESCE((pn.props->>'self')::bool, false)
+          AND NOT COALESCE((head.props->>'self')::bool, false)  -- you, under any of your addresses
         GROUP BY 1 HAVING count(DISTINCT ok.m) >= 2 ORDER BY 2 DESC LIMIT 30
     """), {"ids": item_ids}).all()
 
@@ -219,7 +224,7 @@ def _judge(s: Session, c: dict) -> dict:
     return {**out, "judged": True}
 
 
-def _edge(s: Session, src: int, dst: int, type_: str, props: dict, sid: int | None, conf: float) -> None:
+def _edge(s: Session, src: int, dst: int, type_: str, props: dict, sid: int | None, conf: float) -> int:
     eid = s.execute(text("""
         INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence, source_item_id)
         VALUES (:src, :dst, :t, CAST(:p AS jsonb), :x, :v, :c, :sid)
@@ -230,13 +235,14 @@ def _edge(s: Session, src: int, dst: int, type_: str, props: dict, sid: int | No
         s.execute(text("INSERT INTO edge_evidence (edge_id, source_item_id, kind, detail) "
                        "VALUES (:e, :sid, :k, CAST(:d AS jsonb))"),
                   {"e": eid, "sid": sid, "k": props.get("why", "thread"), "d": json.dumps(props)})
+    return eid
 
 
 def run(s: Session, log=print) -> int:
     from igneous.graph import overrides
 
     cands = candidates(s)
-    s.execute(text("DELETE FROM edges WHERE extractor = :x"), {"x": EXTRACTOR})
+    s.execute(text("DELETE FROM edges WHERE extractor IN (:x, 'hierarchy')"), {"x": EXTRACTOR})
     keep_keys = []
     built = 0
     for c in cands:
@@ -259,14 +265,81 @@ def run(s: Session, log=print) -> int:
         for it in c["items"].values():
             if it.node_id:
                 _edge(s, it.node_id, tid, "PART_OF", {"why": "mentions " + c["terms"][0]}, it.id, 0.6)
-        for p, n in _people(s, list(c["items"].keys())):
-            _edge(s, p, tid, "INVOLVED_IN", {"why": f"wrote or was in a small conversation about it ({n} items)",
-                                             "items": n}, None, 0.6)
+        for p, n, ev in _people(s, list(c["items"].keys())):
+            # Record the very items that make them a member, so the verifier and the "why" view read those.
+            eid = _edge(s, p, tid, "INVOLVED_IN", {"why": f"in {n} of its records", "items": n}, None, 0.6)
+            for sid in ev or []:
+                if sid:
+                    s.execute(text("INSERT INTO edge_evidence (edge_id, source_item_id, kind, detail) "
+                                   "VALUES (:e, :sid, 'member', '{}')"), {"e": eid, "sid": sid})
         built += 1
         log(f"  thread {props['kind']:10s} sources={len(c['sources'])} items={len(c['items'])}") if log else None
+    built += umbrellas(s, keep_keys)
     # Threads that no longer qualify go away (corrections in overrides survive: they key on node keys).
     s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'
                       AND NOT (key = ANY(:keep))"""), {"keep": keep_keys})
     overrides.apply(s)
     s.commit()
+    return built
+
+
+def umbrellas(s: Session, keep_keys: list[str]) -> int:
+    """Long-running things several threads sit under: an org, lab, program or club ("xLab" over Dealer Tire,
+    ETA and the avatar kiosk). The opposite of a thread: persistent (many months, no single burst) and
+    concentrated in a group of threads. Proposes thread PART_OF umbrella edges; the verifier checks each."""
+    threads_ = s.execute(text("""
+        SELECT t.id, t.key FROM nodes t WHERE t.type = 'Project' AND t.props->>'derived' = 'threads'
+          AND t.key = ANY(:keep)"""), {"keep": keep_keys}).all()
+    if len(threads_) < UMBRELLA_THREADS:
+        return 0
+    # Terms per thread, weighted by share of the thread's items that carry them.
+    share: dict[str, dict[int, float]] = defaultdict(dict)
+    for tid, _key in threads_:
+        rows = s.execute(text("""
+            SELECT coalesce(si.title, '') || ' ' || left(coalesce(si.body_text, ''), 1500)
+            FROM edges e JOIN nodes n ON n.id = e.src JOIN source_items si ON si.id = n.source_item_id
+            WHERE e.dst = :t AND e.type = 'PART_OF' AND e.extractor = :x LIMIT 400
+        """), {"t": tid, "x": EXTRACTOR}).scalars().all()
+        if not rows:
+            continue
+        counts = Counter(t for r in rows for t in _terms(r))
+        for term, n in counts.items():
+            if n / len(rows) >= UMBRELLA_SHARE:
+                share[term][tid] = n / len(rows)
+    built = 0
+    for term, by_thread in share.items():
+        if len(by_thread) < UMBRELLA_THREADS:
+            continue
+        months = s.execute(text("""
+            SELECT count(DISTINCT date_trunc('month', occurred_at)) FROM source_items
+            WHERE occurred_at IS NOT NULL AND (title ILIKE :q OR body_text ILIKE :q)
+        """), {"q": f"%{term}%"}).scalar()
+        if (months or 0) < UMBRELLA_MONTHS:
+            continue
+        key = "umbrella:" + term.lower()
+        keep_keys.append(key)
+        uid = s.execute(text("""
+            INSERT INTO nodes (type, key, name, props) VALUES ('Project', :k, :n, CAST(:p AS jsonb))
+            ON CONFLICT (type, key) DO UPDATE SET
+                name = CASE WHEN COALESCE((nodes.props->>'renamed')::bool, false) THEN nodes.name ELSE EXCLUDED.name END,
+                props = nodes.props || EXCLUDED.props
+            RETURNING id
+        """), {"k": key, "n": term, "p": json.dumps({"derived": "threads", "kind": "organization",
+                                                     "umbrella": True, "months": months})}).scalar_one()
+        for tid, frac in by_thread.items():
+            # Evidence: the thread's items that name the umbrella (the verifier reads exactly those).
+            eid = s.execute(text("""
+                INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence)
+                VALUES (:a, :b, 'PART_OF', CAST(:p AS jsonb), 'hierarchy', :v, :c)
+                ON CONFLICT (src, dst, type, extractor) DO UPDATE SET props = EXCLUDED.props RETURNING id
+            """), {"a": tid, "b": uid, "v": VERSION, "c": round(frac, 3),
+                   "p": json.dumps({"why": f"{round(frac * 100)}% of its records mention {term}"})}).scalar_one()
+            for sid in s.execute(text("""
+                SELECT si.id FROM edges e JOIN nodes n ON n.id = e.src JOIN source_items si ON si.id = n.source_item_id
+                WHERE e.dst = :t AND e.type = 'PART_OF' AND e.extractor = :x
+                  AND (si.title ILIKE :q OR si.body_text ILIKE :q) ORDER BY si.occurred_at DESC LIMIT 6
+            """), {"t": tid, "x": EXTRACTOR, "q": f"%{term}%"}).scalars():
+                s.execute(text("INSERT INTO edge_evidence (edge_id, source_item_id, kind, detail) "
+                               "VALUES (:e, :sid, 'umbrella', '{}')"), {"e": eid, "sid": sid})
+        built += 1
     return built

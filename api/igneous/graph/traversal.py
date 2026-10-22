@@ -719,10 +719,13 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
                          WHERE m.type = 'Message' GROUP BY it.dst)
                 SELECT x, type, w FROM (
                     SELECT x, type, w, at FROM m WHERE type <> 'Message'
-                    UNION ALL SELECT x, type, w, at FROM conv) q
+                    UNION ALL SELECT x, type, w, at FROM conv
+                    -- what it's part of (a thread's lab or org), always shown first
+                    UNION ALL SELECT e.dst, 'Parent', 1000, NULL FROM edges e JOIN nodes p ON p.id = e.dst
+                              WHERE e.src = :n AND e.type = 'PART_OF' AND p.type = 'Project') q
                 ORDER BY w DESC, at DESC NULLS LAST LIMIT 120
             """), {"n": node}).all()
-            quota = {"Person": 8, "Thread": 6, "File": 6, "Event": 4, "Folder": 2}
+            quota = {"Parent": 2, "Project": 8, "Person": 8, "Thread": 6, "File": 6, "Event": 4, "Folder": 2}
             used: dict[str, int] = {}
             for p, t, _w in rows:
                 if p not in seen and p != head and used.get(t, 0) < quota.get(t, 2):
