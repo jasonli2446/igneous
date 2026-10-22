@@ -1949,3 +1949,16 @@ def test_a_projects_people_get_one_cut_not_two():
     # One traveller texted about the trip far more than the others: all three still show.
     assert _core_people([(1, 28.0), (2, 8.0), (3, 7.0)]) == [1, 2, 3]
     assert _core_people([(1, 30.0), (2, 25.0), (3, 22.0), (4, 1.0)]) == [1, 2, 3]  # a passing mention goes
+
+
+def test_mcp_server_starts_light_and_exposes_graph_tools():
+    import subprocess
+    import sys
+
+    # The model/search stacks must not load at import: a slow start races the client's first tool call.
+    code = "import sys, igneous.mcp_server as m; print('igneous.rag.search' in sys.modules, 'anthropic' in sys.modules)"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.split()
+    assert out == ["False", "False"]
+    from igneous import mcp_server as m
+    for tool in ("me", "find", "open_node", "why_connected", "sources", "read_item", "search", "ask"):
+        assert callable(getattr(m, tool))

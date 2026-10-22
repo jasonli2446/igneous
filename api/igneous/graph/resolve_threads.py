@@ -258,6 +258,9 @@ def run(s: Session, log=print) -> dict:
             first, second = sorted((x, y), key=lambda i: key_of[i])
             child, parent = (first, second) if v["relation"] == "a_part_of_b" else (second, first)
             child, parent = folded_into.get(child, child), folded_into.get(parent, parent)
+            if child == parent or not s.execute(text("SELECT count(*) = 2 FROM nodes WHERE id IN (:a, :b)"),
+                                                {"a": child, "b": parent}).scalar():
+                continue  # one side was merged away (or into the other) earlier in this run
             s.execute(text("""
                 INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence)
                 VALUES (:a, :b, 'PART_OF', CAST(:p AS jsonb), 'hierarchy', :v, :c)

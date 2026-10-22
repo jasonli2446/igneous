@@ -1033,10 +1033,13 @@ def fallback_neighbors(s: Session, node: int, head: int, exclude: set[int], k: i
     person = s.execute(text("SELECT type = 'Person' FROM nodes WHERE id = :n"), {"n": node}).scalar()
     rows = s.execute(text(f"""
         WITH direct AS (
+            -- Never the node's own parent (what it's part of): opening xLab must not list Case Western in it.
             SELECT CASE WHEN e.src = :n THEN e.dst ELSE e.src END AS o,
                    (CASE WHEN e.props->>'verdict' = 'keep' OR e.extractor IN ('user', 'profile', 'contacts', 'spine')
                          THEN 2 ELSE 1 END) + COALESCE(e.confidence, 0.5) AS w
-            FROM edges e WHERE (e.src = :n OR e.dst = :n) AND COALESCE(e.props->>'verdict', '') <> 'drop'),
+            FROM edges e WHERE (e.src = :n OR e.dst = :n) AND COALESCE(e.props->>'verdict', '') <> 'drop'
+              AND NOT (e.src = :n AND e.type = 'PART_OF')
+              AND NOT (e.src = (SELECT (props->>'thread')::bigint FROM nodes WHERE id = :n) AND e.type = 'PART_OF')),
         via AS (  -- one step through the node's records: the message's thread, the org's members' threads
             SELECT CASE WHEN e2.src = d.o THEN e2.dst ELSE e2.src END AS o, 0.5 AS w
             FROM direct d JOIN nodes dn ON dn.id = d.o AND dn.type IN ('Message', 'Event', 'File')
