@@ -232,7 +232,7 @@ def run(s: Session, threshold: float = THRESHOLD) -> dict:
 # SAME_AS from these sources is ground truth (a contact card, the signed-in account, a user correction, a
 # commit's verified email): never second-guess it with name heuristics. Without this, "Me" (first name "me")
 # could never join the user's named cluster.
-TRUSTED = ("self", "contacts", "user", "github")
+TRUSTED = ("self", "contacts", "user", "github", "linkedin")
 
 
 def _human_name(name: str, handles: set[str]) -> bool:

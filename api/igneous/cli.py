@@ -160,6 +160,23 @@ def import_takeout(paths: list[Path] = typer.Argument(None, help="Takeout .zip f
     print(result, f"in {time.time() - t:.1f}s")
 
 
+@import_app.command("linkedin")
+def import_linkedin(paths: list[Path] = typer.Argument(..., help="LinkedIn export .zip (or Connections-only zip), "
+                                                                 "or an extracted folder")):
+    """LinkedIn data export: your profile (positions, education, projects, skills) and connections. Re-running is a no-op."""
+    from igneous.connectors import linkedin
+
+    try:
+        resolved = linkedin.resolve_paths([str(p) for p in paths])
+        linkedin.preflight(resolved)
+    except linkedin.LinkedInError as e:
+        raise typer.BadParameter(str(e)) from e
+    t = time.time()
+    with SessionLocal() as s:
+        result = linkedin.run_import(s, resolved)
+    print(result, f"in {time.time() - t:.1f}s")
+
+
 @app.command()
 def connect(provider: str = typer.Argument(..., help="google"),
             browser: bool = typer.Option(True, help="open the browser; --no-browser just prints the URL")):

@@ -7,7 +7,7 @@ import { api, ItemDetail, SourceCard } from "@/lib/api";
 
 const SOURCE_LABEL: Record<string, string> = {
   gmail: "Gmail", email: "Email", gcal: "Calendar", gcontacts: "Contacts", maccontacts: "Contacts", drive: "Drive",
-  github: "GitHub", fs: "Files", notes: "Notes", imessage: "Messages", ai_chats: "AI chat", takeout: "Takeout",
+  github: "GitHub", fs: "Files", notes: "Notes", imessage: "Messages", ai_chats: "AI chat", takeout: "Takeout", linkedin: "LinkedIn",
 };
 export const sourceLabel = (s: string) =>
   SOURCE_LABEL[s] ?? (s.startsWith("takeout_") ? `Takeout ${s.slice(8)}` : s);
