@@ -366,6 +366,7 @@ export default function Explorer() {
           <Inspector id={detailId} onExpandAction={toggle} onCloseAction={closePanel}
             expanded={detailId !== null && expanded.has(detailId)}
             onSelectAction={openFromPanel}
+            onWhyAction={(a, b) => setWhy({ a, b })}
             onChangedAction={async (keep) => { await load(trail[trail.length - 1] ?? null, false); if (keep !== null) setSelected(keep); }} />
         )}
       </aside>
