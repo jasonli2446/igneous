@@ -187,6 +187,8 @@ def edge_is_wrong(body: WrongEdgeBody, s: Session = Depends(get_session)):
     for key, type_, extractor in siblings:
         verify.record_correction(s, key, e.b, type_, extractor, "drop", "you said this conversation isn't part of it")
     verify.apply_verdicts(s)
+    from igneous.graph import dirty
+    dirty.touch(s)  # the graph changed: cached views must not serve the old link
     s.commit()
     return {"removed": body.edge, "also_removed": len(siblings)}
 
@@ -211,6 +213,8 @@ def merge_people(node_id: int, body: SamePersonBody, s: Session = Depends(get_se
         VALUES (:a, :b, 'SAME_AS', '{"why": "you said they are the same person"}', 'user', '1', 1.0)
         ON CONFLICT (src, dst, type, extractor) DO NOTHING"""), {"a": a, "b": b})
     resolve.refresh_canonical(s)
+    from igneous.graph import dirty
+    dirty.touch(s)
     s.commit()
     head = s.execute(text("SELECT COALESCE((SELECT canonical_id FROM canonical WHERE node_id = :n), :n)"), {"n": a}).scalar()
     return {"merged": [a, b], "person": head}

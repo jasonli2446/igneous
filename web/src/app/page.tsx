@@ -361,7 +361,8 @@ export default function Explorer() {
         className={`absolute inset-y-0 right-0 z-20 w-full max-w-96 overflow-y-auto border-l border-line bg-panel transition-transform duration-200 ${panelOpen ? "translate-x-0" : "translate-x-full"}`}>
         {why ? (
           <WhyConnected a={why.a} b={why.b} onCloseAction={closePanel}
-            onOpenAction={(id) => { setWhy(null); openFromPanel(id); }} />
+            onOpenAction={(id) => { setWhy(null); openFromPanel(id); }}
+            onChangedAction={() => { void load(trail[trail.length - 1] ?? null, false); }} />
         ) : (
           <Inspector id={detailId} onExpandAction={toggle} onCloseAction={closePanel}
             expanded={detailId !== null && expanded.has(detailId)}
