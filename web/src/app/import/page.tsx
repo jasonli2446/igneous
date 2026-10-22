@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AiImportResult, api, Job, TakeoutResult } from "@/lib/api";
+import { AiImportResult, api, Job, LinkedInResult, TakeoutResult } from "@/lib/api";
 
 type Provider = {
   id: "chatgpt" | "claude_ai";
@@ -321,6 +321,146 @@ function TakeoutCard() {
   );
 }
 
+const LINKEDIN_STEPS = [
+  "On linkedin.com click Me, then Settings & Privacy, then Data privacy, then Get a copy of your data.",
+  "Fast option: choose Want something in particular? and tick Connections only. It usually takes minutes.",
+  "Full option: choose Download larger data archive for your positions, education, projects and skills. LinkedIn says it can take up to 24 hours.",
+  "Click Request archive and confirm your password. LinkedIn emails you a download link.",
+  "Download the .zip and upload it below, or give its path or an extracted folder.",
+];
+
+function LinkedInCard() {
+  const [job, setJob] = useState<Job | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [upload, setUpload] = useState<number | null>(null);
+  const [path, setPath] = useState("");
+  const input = useRef<HTMLInputElement>(null);
+  const running = starting || job?.status === "running";
+
+  useEffect(() => {
+    if (job?.status !== "running") return;
+    const t = setInterval(() => {
+      api.job(job.id).then(setJob).catch(() => {});
+    }, 1500);
+    return () => clearInterval(t);
+  }, [job]);
+
+  async function start(args: { file?: File; path?: string }) {
+    if (running) return;
+    setError(null);
+    setStarting(true);
+    setUpload(args.file ? 0 : null);
+    try {
+      setJob(await api.importLinkedin(args, args.file ? setUpload : undefined));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setStarting(false);
+      setUpload(null);
+      if (input.current) input.current.value = "";
+    }
+  }
+
+  const result = job?.status === "succeeded" ? (job.result as unknown as LinkedInResult | null) : null;
+  const secondary =
+    "rounded-md border border-line bg-panel px-3 py-1.5 text-sm font-medium text-soft transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50";
+
+  return (
+    <section className="rounded-lg border border-line bg-panel" aria-labelledby="linkedin-title">
+      <div className="grid gap-6 p-5 sm:p-6 md:grid-cols-2">
+        <div>
+          <h2 id="linkedin-title" className="text-lg font-semibold tracking-tight text-ink">
+            LinkedIn
+          </h2>
+          <p className="mt-1 text-sm leading-6 text-muted">
+            Your profile (positions, education, projects, skills) and your connections with their company and position.
+          </p>
+          <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm leading-6 text-soft marker:text-muted">
+            {LINKEDIN_STEPS.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ol>
+          <p className="mt-4 text-sm leading-6 text-muted">
+            <span className="font-medium text-soft">How long it takes:</span> Connections only is usually ready in
+            minutes; the larger archive can take up to 24 hours.
+          </p>
+          <p className="mt-2 text-sm leading-6 text-muted">
+            Only profile and connection files are read; messages and login history are ignored. This data stays on this
+            computer and is never sent to a model unless you opt in.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-4">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void start({ path });
+            }}
+            className="flex flex-col gap-2 sm:flex-row"
+          >
+            <label htmlFor="linkedin-path" className="sr-only">Path to a LinkedIn export zip or folder</label>
+            <input
+              id="linkedin-path"
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              placeholder="~/Downloads/Basic_LinkedInDataExport.zip or a folder"
+              className="min-w-0 flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none placeholder:text-muted focus-visible:border-accent"
+            />
+            <button type="submit" disabled={running || !path.trim()} className={secondary}>Import path</button>
+          </form>
+          <label
+            htmlFor="linkedin-file"
+            className={`flex min-h-24 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-line px-4 py-5 text-center text-sm transition-colors hover:bg-hover ${running ? "pointer-events-none opacity-60" : ""}`}
+          >
+            <span className="font-medium text-ink">Or choose the zip file</span>
+            <span className="text-xs text-muted">The .zip from LinkedIn&apos;s email, no need to unzip it.</span>
+            <input
+              ref={input}
+              id="linkedin-file"
+              type="file"
+              accept=".zip,.csv,application/zip,text/csv"
+              className="sr-only"
+              disabled={running}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void start({ file });
+              }}
+            />
+          </label>
+
+          <div aria-live="polite" className="min-h-6 text-sm">
+            {upload !== null && <p className="text-xs text-muted">Uploading {Math.round(upload * 100)}%</p>}
+            {job?.status === "running" && (
+              <div role="status">
+                <div className="h-1.5 overflow-hidden rounded-full bg-hover">
+                  <div className="progress-slide h-full w-1/3 bg-accent" />
+                </div>
+                <p className="mt-1.5 text-xs text-muted">Saving your profile and connections. You can leave this page open.</p>
+              </div>
+            )}
+            {error && <p role="alert" className="text-danger">{error}</p>}
+            {job?.status === "failed" && <p role="alert" className="text-danger">{job.error ?? "The import failed."}</p>}
+            {result && (
+              <div>
+                <p className="text-accent">Imported. Open Sources and press Rebuild to add it to the graph.</p>
+                <div className="mt-3 grid grid-cols-2 gap-4">
+                  <Stat label="Connections" value={result.connections} />
+                  <Stat label="Positions" value={result.positions} />
+                  <Stat label="Schools" value={result.education} />
+                  <Stat label="New" value={result.inserted} />
+                  <Stat label="Updated" value={result.updated} />
+                  <Stat label="Secrets removed" value={result.redactions} />
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export default function ImportPage() {
   return (
     <main className="mx-auto w-full max-w-5xl px-4 py-10 sm:px-6 sm:py-14">
@@ -336,6 +476,7 @@ export default function ImportPage() {
 
       <div className="mt-8 space-y-6">
         <TakeoutCard />
+        <LinkedInCard />
         {PROVIDERS.map((p) => (
           <ProviderCard key={p.id} provider={p} />
         ))}

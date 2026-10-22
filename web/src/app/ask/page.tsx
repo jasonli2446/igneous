@@ -121,7 +121,7 @@ export default function AskPage() {
 const SOURCE_LABELS: Record<string, string> = {
   gmail: "Email", email: "Email", imessage: "Messages", gcal: "Calendar", drive: "Drive", fs: "Files",
   ai_chats: "AI chat", apple_notes: "Notes", github: "GitHub", takeout_activity: "Google activity",
-  takeout_chrome: "Browsing", takeout_meet: "Meet", takeout_chat: "Google Chat", takeout_tasks: "Tasks",
+  takeout_chrome: "Browsing", takeout_meet: "Meet", takeout_chat: "Google Chat", takeout_tasks: "Tasks", linkedin: "LinkedIn",
 };
 
 function sourceLabel(source: string) {

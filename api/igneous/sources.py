@@ -94,6 +94,18 @@ SOURCES: list[dict] = [
                "arrive as several zips.",
                "Download every zip. On Import choose Scan Downloads for takeout-*.zip, give a path, or upload them."],
      "cli": "igneous import takeout ~/Downloads/takeout-*.zip"},
+    {"id": "linkedin", "kind": "import", "name": "LinkedIn", "group": "Exports",
+     "reads": "Your LinkedIn profile (positions, education, projects, skills) and your connections with their company, "
+              "position and connection date. Positions and education become your employers and schools; connections "
+              "become named people linked to their companies. Login data is never read, and the data stays local "
+              "unless you opt in (IGNEOUS_LLM_SOURCES).",
+     "steps": ["On linkedin.com click Me, then Settings & Privacy, then Data privacy, then Get a copy of your data.",
+               "For the fast option choose Want something in particular? and tick Connections only (usually minutes). "
+               "For positions, education, projects and skills choose Download larger data archive "
+               "(it can take up to 24 hours).",
+               "Click Request archive and confirm your password. LinkedIn emails you a download link.",
+               "Download the .zip. On Import upload it, or give its path or an extracted folder."],
+     "cli": "igneous import linkedin ~/Downloads/Basic_LinkedInDataExport.zip"},
     {"id": "claude_ai", "kind": "import", "name": "Claude.ai export", "group": "Exports",
      "reads": "Your claude.ai conversation history from Anthropic's data export.",
      "steps": ["Request the export in claude.ai settings (Privacy, Export data).",
@@ -189,6 +201,8 @@ def describe(s: Session) -> list[dict]:
         row["cli"] = src.get("cli")
         if sid == "takeout":
             count = sum(n for src_, n in counts.items() if src_.startswith("takeout_")) + export_counts.get("gemini", 0)
+        elif sid == "linkedin":
+            count = counts.get("linkedin", 0)
         elif kind == "import":
             count = export_counts.get(sid, 0)
         elif sid == "ai_chats":

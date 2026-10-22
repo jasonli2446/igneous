@@ -343,6 +343,43 @@ def build_github(b: Builder, item) -> None:
             b.edge(pid, mid, "SENT", item.occurred_at, item.id)
 
 
+def build_linkedin(b: Builder, item) -> None:
+    """A LinkedIn connection names one human. The Person is keyed by the connection's email when the export has
+    one (so it merges with mail identities by key), else by `linkedin:<profile slug>`; either way it is named
+    by LinkedIn (props.named_by='linkedin') and is MEMBER_OF its company. Extractor 'linkedin' keeps that edge
+    out of the organizations stage's cleanup of legacy 'spine' memberships. With an email, the profile identity
+    `linkedin:<slug>` is joined to the address by a trusted SAME_AS. The profile item (kind 'profile') is
+    consumed by graph/profile.py, not here."""
+    from igneous.connectors.linkedin import profile_slug
+    from igneous.graph.organizations import domain_of
+
+    meta = item.raw_meta
+    if meta.get("kind") != "connection" or not meta.get("name"):
+        return
+    name, email = meta["name"], (meta.get("email") or "").lower() or None
+    slug = profile_slug(meta.get("url") or "")
+    props = {"named_by": "linkedin", "linkedin_url": meta.get("url"), "position": meta.get("position") or None}
+    props = {k: v for k, v in props.items() if v}
+    key = email or (f"linkedin:{slug}" if slug else f"linkedin:{item.external_id.split('/', 1)[-1]}")
+    pid = b.node("Person", key, name, {**props, **({"email": email} if email else {})}, sid=item.id)
+    if email and slug:
+        lid = b.node("Person", f"linkedin:{slug}", name, props, sid=item.id)
+        a, c = sorted((lid, pid))
+        b.s.execute(text("""
+            INSERT INTO edges (src, dst, type, extractor, confidence, source_item_id)
+            VALUES (:a, :b, 'SAME_AS', 'linkedin', 1.0, :sid) ON CONFLICT (src, dst, type, extractor) DO NOTHING
+        """), {"a": a, "b": c, "sid": item.id})
+    company = (meta.get("company") or "").strip()
+    org_slug = re.sub(r"[^a-z0-9]+", "-", company.lower()).strip("-")
+    if len(org_slug) >= 2:
+        okey = domain_of(email) or f"org:{org_slug}"
+        oid = b.node("Organization", okey, company, {"kind": "employer", "source": "linkedin"})
+        b.s.execute(text("""
+            INSERT INTO edges (src, dst, type, extractor, confidence, source_item_id)
+            VALUES (:p, :o, 'MEMBER_OF', 'linkedin', 1.0, :sid) ON CONFLICT (src, dst, type, extractor) DO NOTHING
+        """), {"p": pid, "o": oid, "sid": item.id})
+
+
 def build_file(b: Builder, item) -> None:
     path = item.raw_meta.get("path", item.external_id)
     folders = item.raw_meta.get("folders")
@@ -500,6 +537,8 @@ def run(s: Session) -> int:
             build_event(b, item)
         elif item.source in ("gcontacts", "maccontacts"):
             build_contact(b, item)
+        elif item.source == "linkedin":
+            build_linkedin(b, item)
         elif item.source in ("fs", "drive", "notes"):
             build_file(b, item)
         dirty.mark(s, b.touched, f"source item {item.id} changed")

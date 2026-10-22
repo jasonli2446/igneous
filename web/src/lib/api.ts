@@ -236,6 +236,31 @@ function importTakeout(input: { files?: File[]; path?: string; scanDownloads?: b
   });
 }
 
+export type LinkedInResult = {
+  inserted: number; updated: number; unchanged: number; connections: number; positions: number; education: number;
+  profile: number; redactions: number;
+};
+
+// A LinkedIn export is small: upload the zip, or give a path (this API runs on your computer).
+function importLinkedin(input: { file?: File; path?: string }, onProgress?: (fraction: number) => void) {
+  return new Promise<Job>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", new URL("/import/linkedin", API).toString());
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
+    xhr.onerror = () => reject(new Error("Could not reach the API."));
+    xhr.onload = () => {
+      let body: { detail?: unknown } = {};
+      try { body = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(body as unknown as Job);
+      reject(new Error(typeof body.detail === "string" ? body.detail : `Import failed (${xhr.status}).`));
+    };
+    const form = new FormData();
+    if (input.file) form.append("file", input.file);
+    if (input.path?.trim()) form.append("path", input.path.trim());
+    xhr.send(form);
+  });
+}
+
 export type Job = {
   id: string;
   kind: "sync" | "pipeline" | "connect" | "import";
@@ -289,6 +314,7 @@ async function send<T>(method: string, path: string, body?: unknown, params: Rec
 export const api = {
   importAiExport,
   importTakeout,
+  importLinkedin,
   job: (id: string, signal?: AbortSignal) => get<Job>(`/jobs/${id}`, {}, signal),
   sources: (signal?: AbortSignal) => get<{ sources: SourceInfo[] }>("/sources", {}, signal),
   jobs: (signal?: AbortSignal) => get<{ jobs: Job[] }>("/jobs", {}, signal),

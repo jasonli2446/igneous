@@ -179,6 +179,55 @@ def list_sources(s: Session = Depends(get_session)):
     return {"sources": sources.describe(s)}
 
 
+@app.post("/import/linkedin")
+async def import_linkedin(request: Request):
+    """Import a LinkedIn data export (the zip, or Connections only) as a background job; poll /jobs/{id}.
+    Send a multipart `file` (the zip as downloaded) or JSON/form `{"path": "<zip or folder>"}`. This API runs on
+    your computer, so reading a local path is fine."""
+    import shutil
+    import tempfile
+    import zipfile
+    from pathlib import Path
+
+    from igneous.connectors import linkedin
+
+    tmp: str | None = None
+    try:
+        if request.headers.get("content-type", "").startswith("application/json"):
+            body = await request.json()
+            paths = body.get("path") or body.get("paths")
+        else:
+            form = await request.form()
+            paths = [str(p) for p in form.getlist("path") if p]
+            uploads = [f for f in form.getlist("file") if hasattr(f, "file")]
+            if uploads:
+                tmp = tempfile.mkdtemp(prefix="igneous-linkedin-")
+                for i, up in enumerate(uploads):
+                    with open(Path(tmp) / f"{i}-{Path(up.filename or 'linkedin.zip').name}", "wb") as out:
+                        shutil.copyfileobj(up.file, out)
+                paths = [*paths, *(str(p) for p in sorted(Path(tmp).iterdir()))]
+        resolved = linkedin.resolve_paths(paths)
+        linkedin.preflight(resolved)
+    except (linkedin.LinkedInError, ValueError, zipfile.BadZipFile) as e:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+        raise HTTPException(422, str(e)) from e
+
+    def runner(sess, progress):
+        try:
+            return linkedin.run_import(sess, resolved, progress)
+        finally:
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+    try:
+        return _start_job("import", "linkedin", runner)
+    except HTTPException:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+        raise
+
+
 def _start_job(kind: str, source: str, runner, account: str | None = None):
     try:
         return sources.job_view(jobs.start(kind, source, runner, account))
