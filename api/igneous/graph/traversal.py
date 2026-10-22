@@ -11,6 +11,11 @@ from sqlalchemy.orm import Session
 # Hub nodes (a big Organization, a mass-mail Thread) would swallow the node budget; skip expanding them.
 MAX_FANOUT = 200
 
+# Messages the spine marked hidden (graph/item_class.py): notifications, marketing, calendar replies, and
+# messages of lone unanswered threads. They stay as evidence and search results but are never members,
+# closeness or connections. Backed by the partial index nodes_hidden_idx.
+HIDDEN = "(SELECT id FROM nodes WHERE props->>'hidden' = 'true')"
+
 
 @dataclass(frozen=True)
 class GraphFilters:
@@ -83,9 +88,9 @@ def relationships(s: Session, head: int, limit: int) -> list[tuple[int, float, d
     rows = s.execute(text(f"""
         WITH me AS (SELECT :head AS id UNION SELECT node_id FROM canonical WHERE canonical_id = :head),
         pm AS (  -- (person, message, did they send it)
-            SELECT {canon.format(x='src')} AS p, dst AS m, true AS sent FROM edges WHERE type = 'SENT'
+            SELECT {canon.format(x='src')} AS p, dst AS m, true AS sent FROM edges WHERE type = 'SENT' AND dst NOT IN {HIDDEN}
             UNION ALL
-            SELECT {canon.format(x='dst')}, src, false FROM edges WHERE type = 'RECEIVED'),
+            SELECT {canon.format(x='dst')}, src, false FROM edges WHERE type = 'RECEIVED' AND src NOT IN {HIDDEN}),
         mine AS (SELECT m, bool_or(sent) AS i_sent FROM pm WHERE p IN (SELECT id FROM me) GROUP BY m),
         -- How many people each conversation involves: a message in a 12-person group chat says much less about
         -- you and any one member than a one-to-one text, so its weight is split across the others in it.
@@ -152,8 +157,8 @@ def people(s: Session, seed: int, limit: int = 60) -> dict:
     ids = [head] + [p for p, _, _ in rel]
     ties = s.execute(text(f"""
         WITH parts AS (
-            SELECT {canon.format(x='src')} AS p, dst AS m FROM edges WHERE type = 'SENT'
-            UNION SELECT {canon.format(x='dst')}, src FROM edges WHERE type = 'RECEIVED'),
+            SELECT {canon.format(x='src')} AS p, dst AS m FROM edges WHERE type = 'SENT' AND dst NOT IN {HIDDEN}
+            UNION SELECT {canon.format(x='dst')}, src FROM edges WHERE type = 'RECEIVED' AND src NOT IN {HIDDEN}),
         mine AS (SELECT * FROM parts WHERE p = ANY(:ids))
         SELECT a.p AS src, b.p AS dst, count(*) AS w
         FROM mine a JOIN mine b ON a.m = b.m AND a.p < b.p GROUP BY 1, 2
@@ -185,8 +190,8 @@ def network(s: Session, seed: int, people_limit: int = 50, hub_limit: int = 30) 
     hubs = s.execute(text(f"""
         WITH part AS (  -- (person, hub) for every conversation thread or event they were part of
             SELECT DISTINCT {canon.format(x='pm.p')} AS person, t.dst AS hub
-            FROM (SELECT src AS p, dst AS m FROM edges WHERE type = 'SENT'
-                  UNION SELECT dst, src FROM edges WHERE type = 'RECEIVED') pm
+            FROM (SELECT src AS p, dst AS m FROM edges WHERE type = 'SENT' AND dst NOT IN {HIDDEN}
+                  UNION SELECT dst, src FROM edges WHERE type = 'RECEIVED' AND src NOT IN {HIDDEN}) pm
             JOIN edges t ON t.src = pm.m AND t.type = 'IN_THREAD'
             UNION
             SELECT DISTINCT {canon.format(x='src')}, dst FROM edges WHERE type = 'ATTENDED'),
@@ -198,8 +203,8 @@ def network(s: Session, seed: int, people_limit: int = 50, hub_limit: int = 30) 
     # How active each member is in each hub (messages), so a link's thickness means something.
     activity = {(r.hub, r.person): r.n for r in s.execute(text(f"""
         SELECT t.dst AS hub, {canon.format(x='pm.p')} AS person, count(DISTINCT pm.m) AS n
-        FROM (SELECT src AS p, dst AS m FROM edges WHERE type = 'SENT'
-              UNION SELECT dst, src FROM edges WHERE type = 'RECEIVED') pm
+        FROM (SELECT src AS p, dst AS m FROM edges WHERE type = 'SENT' AND dst NOT IN {HIDDEN}
+              UNION SELECT dst, src FROM edges WHERE type = 'RECEIVED' AND src NOT IN {HIDDEN}) pm
         JOIN edges t ON t.src = pm.m AND t.type = 'IN_THREAD'
         WHERE t.dst = ANY(:hubs) GROUP BY 1, 2
     """), {"hubs": [h.hub for h in hubs]})}
@@ -237,9 +242,9 @@ def explain(s: Session, a: int, b: int, limit: int = 8) -> dict:
         ids[side] = [head, *s.execute(text("SELECT node_id FROM canonical WHERE canonical_id = :h"),
                                       {"h": head}).scalars()]
     names = dict(s.execute(text("SELECT id, name FROM nodes WHERE id = ANY(:i)"), {"i": [a, b]}).all())
-    convo = s.execute(text("""
-        WITH pm AS (SELECT src AS p, dst AS m FROM edges WHERE type = 'SENT'
-                    UNION SELECT dst, src FROM edges WHERE type = 'RECEIVED'),
+    convo = s.execute(text(f"""
+        WITH pm AS (SELECT src AS p, dst AS m FROM edges WHERE type = 'SENT' AND dst NOT IN {HIDDEN}
+                    UNION SELECT dst, src FROM edges WHERE type = 'RECEIVED' AND src NOT IN {HIDDEN}),
         shared AS (SELECT DISTINCT x.m FROM pm x JOIN pm y ON x.m = y.m
                    WHERE x.p = ANY(:a) AND y.p = ANY(:b))
         SELECT t.id AS thread_id, t.name AS thread, count(*) AS messages,
@@ -573,9 +578,9 @@ def scored_members(s: Session, head: int, per: int = 8) -> dict[str, list[dict]]
         out["People"] = people
 
     # Groups: group conversations the seed is in, by messages the seed shared there and distinct members.
-    groups = s.execute(text("""
-        WITH mine AS (SELECT dst AS m FROM edges WHERE src = ANY(:me) AND type = 'SENT'
-                      UNION SELECT src FROM edges WHERE dst = ANY(:me) AND type = 'RECEIVED'),
+    groups = s.execute(text(f"""
+        WITH mine AS (SELECT dst AS m FROM edges WHERE src = ANY(:me) AND type = 'SENT' AND dst NOT IN {HIDDEN}
+                      UNION SELECT src FROM edges WHERE dst = ANY(:me) AND type = 'RECEIVED' AND src NOT IN {HIDDEN}),
         g AS (SELECT it.dst AS t, count(DISTINCT mine.m) AS msgs,
                      sum(power(0.5, GREATEST(0, EXTRACT(EPOCH FROM now() - si.occurred_at) / 86400) / :hl)) AS recent
               FROM (SELECT DISTINCT m FROM mine) mine
@@ -584,7 +589,7 @@ def scored_members(s: Session, head: int, per: int = 8) -> dict[str, list[dict]]
               GROUP BY it.dst)
         SELECT g.t, g.msgs, COALESCE(g.recent, 0),
                (SELECT count(DISTINCT x.src) FROM edges it2 JOIN edges x ON x.dst = it2.src AND x.type = 'SENT'
-                WHERE it2.dst = g.t AND it2.type = 'IN_THREAD') AS people
+                WHERE it2.dst = g.t AND it2.type = 'IN_THREAD' AND it2.src NOT IN {HIDDEN}) AS people
         FROM g WHERE g.msgs >= 2
     """), {"me": me, "hl": HALF_LIFE_DAYS}).all()
     # A group you're active in now outranks a big chat that went quiet; lifetime volume only adds a little.
@@ -744,8 +749,8 @@ def _ties(s: Session, ids: list[int], per_node: int = 2) -> list[dict]:
         return []
     canon = "COALESCE((SELECT canonical_id FROM canonical WHERE node_id = {x}), {x})"
     rows = s.execute(text(f"""
-        WITH pm AS (SELECT {canon.format(x='src')} AS p, dst AS m FROM edges WHERE type = 'SENT'
-                    UNION SELECT {canon.format(x='dst')}, src FROM edges WHERE type = 'RECEIVED'),
+        WITH pm AS (SELECT {canon.format(x='src')} AS p, dst AS m FROM edges WHERE type = 'SENT' AND dst NOT IN {HIDDEN}
+                    UNION SELECT {canon.format(x='dst')}, src FROM edges WHERE type = 'RECEIVED' AND src NOT IN {HIDDEN}),
         part AS (  -- person -> thread or event they're in
             SELECT pm.p, it.dst AS hub FROM pm JOIN edges it ON it.src = pm.m AND it.type = 'IN_THREAD'
             UNION SELECT {canon.format(x='src')}, dst FROM edges WHERE type = 'ATTENDED'),
@@ -774,11 +779,11 @@ def person_world(s: Session, pid: int, you: int) -> list[tuple[int, str, float]]
     involve both them and you."""
     ids = [pid, *s.execute(text("SELECT node_id FROM canonical WHERE canonical_id = :h"), {"h": pid}).scalars()]
     me = [you, *s.execute(text("SELECT node_id FROM canonical WHERE canonical_id = :h"), {"h": you}).scalars()]
-    return [(r[0], r[1], float(r[2])) for r in s.execute(text("""
-        WITH theirs AS (SELECT dst AS m FROM edges WHERE src = ANY(:ids) AND type = 'SENT'
-                        UNION SELECT src FROM edges WHERE dst = ANY(:ids) AND type = 'RECEIVED'),
-        mine AS (SELECT dst AS m FROM edges WHERE src = ANY(:me) AND type = 'SENT'
-                 UNION SELECT src FROM edges WHERE dst = ANY(:me) AND type = 'RECEIVED'),
+    return [(r[0], r[1], float(r[2])) for r in s.execute(text(f"""
+        WITH theirs AS (SELECT dst AS m FROM edges WHERE src = ANY(:ids) AND type = 'SENT' AND dst NOT IN {HIDDEN}
+                        UNION SELECT src FROM edges WHERE dst = ANY(:ids) AND type = 'RECEIVED' AND src NOT IN {HIDDEN}),
+        mine AS (SELECT dst AS m FROM edges WHERE src = ANY(:me) AND type = 'SENT' AND dst NOT IN {HIDDEN}
+                 UNION SELECT src FROM edges WHERE dst = ANY(:me) AND type = 'RECEIVED' AND src NOT IN {HIDDEN}),
         recent AS (SELECT m, power(0.5, GREATEST(0, EXTRACT(EPOCH FROM now() - si.occurred_at) / 86400) / :hl) AS w
                    FROM theirs JOIN nodes n ON n.id = theirs.m LEFT JOIN source_items si ON si.id = n.source_item_id)
         -- group chats / threads they're in
@@ -842,11 +847,11 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
             # group chat rather than each message), the events, and the documents, most recent first.
             hidden = s.execute(text("SELECT COALESCE((props->>'hidden')::bool, false) FROM nodes WHERE id = :n"),
                                {"n": node}).scalar()
-            rows = [] if hidden else s.execute(text("""
+            rows = [] if hidden else s.execute(text(f"""
                 WITH m AS (SELECT e.src AS x, n.type, COALESCE((e.props->>'items')::float, (e.props->>'days')::float, 1) AS w,
                                   si.occurred_at AS at
                            FROM edges e JOIN nodes n ON n.id = e.src LEFT JOIN source_items si ON si.id = n.source_item_id
-                           WHERE e.dst = :n AND e.type IN ('PART_OF', 'INVOLVED_IN')),
+                           WHERE e.dst = :n AND e.type IN ('PART_OF', 'INVOLVED_IN') AND e.src NOT IN {HIDDEN}),
                 -- messages collapse into their conversation: one email thread / chat per conversation
                 conv AS (SELECT it.dst AS x, 'Thread' AS type, count(*)::float AS w, max(m.at) AS at
                          FROM m JOIN edges it ON it.src = m.x AND it.type = 'IN_THREAD'
@@ -869,10 +874,10 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
             # Every member who speaks (or attends), not a top-k: a 6-person chat where all six talk shows all
             # six. "Takes part" = 2+ messages or 2%+ of the group's messages, so a huge list's silent
             # recipients stay out; anyone beyond GROUP_MAX waits for "show more" (offset).
-            rows = s.execute(text("""
+            rows = s.execute(text(f"""
                 WITH q AS (
                     SELECT x.src AS p, 'sent' AS how FROM edges it JOIN edges x ON x.dst = it.src AND x.type = 'SENT'
-                    WHERE it.dst = :n AND it.type = 'IN_THREAD'
+                    WHERE it.dst = :n AND it.type = 'IN_THREAD' AND it.src NOT IN {HIDDEN}
                     UNION ALL SELECT src, 'attended' FROM edges WHERE dst = :n AND type IN ('ATTENDED', 'MEMBER_OF')
                     UNION ALL SELECT src, 'involved' FROM edges WHERE dst = :n AND type = 'INVOLVED_IN'),
                 c AS (SELECT COALESCE((SELECT canonical_id FROM canonical WHERE node_id = q.p), q.p) AS p, count(*) AS n
