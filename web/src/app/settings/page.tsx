@@ -21,6 +21,11 @@ const STAGE_LABEL: Record<string, string> = {
   entities: "Finding people and organizations in text",
   self: "Working out which person is you",
   resolve: "Merging duplicate people",
+  profile: "Reading your resume and LinkedIn",
+  threads: "Finding trips, classes, jobs and projects",
+  backbone: "Placing them under your schools and workplaces",
+  organizations: "Finding where people work",
+  verify: "Checking each connection against its sources",
 };
 
 const nf = new Intl.NumberFormat();
