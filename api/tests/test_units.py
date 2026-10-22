@@ -1811,3 +1811,13 @@ def test_thread_clusters_merge_only_on_direct_evidence():
     assert not _clusters_agree({1}, {4}, {(1, 4): same}, names)
     assert not _clusters_agree({1, 2}, {3}, {(1, 3): same, (2, 3): {"relation": "related", "confidence": 0.9}}, names)
     assert not _clusters_agree({1}, {3}, {}, names)
+
+
+def test_thread_terms_match_whole_words_and_course_codes_cross_list():
+    import re
+
+    from igneous.graph.resolve_threads import _tokens
+
+    assert "course:395" in _tokens("CSDS 395") & _tokens("ECSE 395 Junior Engineering Design Seminar")
+    pat = re.compile(r"(?<![a-z0-9])(eta)(?![a-z0-9])")
+    assert pat.search("the eta platform demo") and not pat.search("beta testing") and not pat.search("theta")

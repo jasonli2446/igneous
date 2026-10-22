@@ -26,7 +26,7 @@ EXTRACTOR = "thread-resolution"
 VERSION = "1"
 MIN_SHARED = 0.15        # Jaccard of records or people for a pair to be judged
 NEAR_DAYS = 45           # spans within this many days of each other count as overlapping
-MAX_PAIRS = 300
+MAX_PAIRS = 1500  # judgments are cached by thread identity, so a wide net costs once
 
 
 def _threads(s: Session) -> list[dict]:
@@ -47,7 +47,11 @@ def _threads(s: Session) -> list[dict]:
 
 
 def _tokens(name: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z0-9]+", (name or "").lower()) if len(w) >= 3}
+    """Name words; a course code's number counts on its own (CSDS 395 and ECSE 395 are one cross-listed course)."""
+    low = (name or "").lower()
+    words = {w for w in re.findall(r"[a-z0-9]+", low) if len(w) >= 3}
+    words |= {f"course:{n}" for n in re.findall(r"\b[a-z]{2,5}\s?(\d{3})\b", low)}
+    return words
 
 
 def candidate_pairs(ts: list[dict]) -> list[tuple[dict, dict]]:

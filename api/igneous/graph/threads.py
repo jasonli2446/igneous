@@ -370,13 +370,16 @@ def _registered_all(rows, items: list) -> dict[str, dict]:
         if row.span_start and row.span_end and row.origin == "burst":
             lo, hi = row.span_start - _td(days=30), row.span_end + _td(days=30)
         specs.append((row.key, terms, lo, hi))
+    # Whole-word matching: a short defining term ("eta") must not match inside other words ("beta", "theta").
+    patterns = {key: re.compile(r"(?<![a-z0-9])(" + "|".join(re.escape(t) for t in terms) + r")(?![a-z0-9])")
+                for key, terms, _lo, _hi in specs}
     out: dict[str, dict] = {k: {} for k, *_ in specs}
     for it in items:
         hay = (it.title + " " + it.body).lower()
-        for key, terms, lo, hi in specs:
+        for key, _terms, lo, hi in specs:
             if lo is not None and not (lo <= it.occurred_at <= hi):
                 continue
-            if any(t in hay for t in terms):
+            if patterns[key].search(hay):
                 out[key][it.id] = it
     return out
 
