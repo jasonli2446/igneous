@@ -2,8 +2,33 @@
 
 import { useEffect, useState } from "react";
 import TimelineExplorer from "@/components/TimelineExplorer";
+import { SourceRows } from "@/components/SourceList";
 import { InlineError, Skeleton } from "@/components/ui";
-import { api, Explanation } from "@/lib/api";
+import { api, Explanation, WhyEdge } from "@/lib/api";
+
+const REL: Record<string, string> = {
+  CORRESPONDS: "corresponds with", PART_OF: "is part of", INVOLVED_IN: "is involved in", RELATED_TO: "is related to",
+  ATTENDED: "attended", MENTIONS: "mentions", ABOUT: "is about", INTRODUCED: "introduced", MEMBER_OF: "is a member of",
+  SENT: "sent", RECEIVED: "received", IN_THREAD: "is in", REPLIES_TO: "replied to", AUTHORED: "authored", SAME_AS: "is the same as",
+};
+
+/** One link: who and how, the verifier's reason when it has judged it, and the items it came from. */
+function EdgeCard({ e, terms }: { e: WhyEdge; terms: string[] }) {
+  return (
+    <li className="rounded-md border border-line p-2.5">
+      <div className="flex items-start gap-2">
+        <span className="min-w-0 flex-1 text-sm font-medium break-words">
+          {e.src_name} <span className="font-normal text-muted">{REL[e.type] ?? e.type.toLowerCase()}</span> {e.dst_name}
+        </span>
+        {e.verdict === "unsure" && <span className="shrink-0 rounded bg-hover px-1.5 py-px text-[10px] text-muted">Suggestion</span>}
+      </div>
+      {e.reason
+        ? <p className="mt-1 text-xs leading-relaxed text-soft">{e.reason}</p>
+        : <p className="mt-1 text-xs text-muted">No verified reason yet; found by {e.extractor === "spine" ? "message headers" : e.extractor}.</p>}
+      {e.evidence.length > 0 && <div className="mt-2"><SourceRows items={e.evidence} highlight={terms} /></div>}
+    </li>
+  );
+}
 
 function range(a: string | null, b: string | null) {
   if (!a) return "";
@@ -51,8 +76,24 @@ export default function WhyConnected({ a, b, onCloseAction, onOpenAction }: {
               across {r.conversations.length} conversation{r.conversations.length === 1 ? "" : "s"}</>}
             {r.messages > 0 && r.events.length > 0 && ", and "}
             {r.events.length > 0 && <>{r.events.length} shared event{r.events.length === 1 ? "" : "s"}</>}
-            {r.messages === 0 && r.events.length === 0 && "They're linked through a group they're both in, but share no direct messages."}
+            {r.messages === 0 && r.events.length === 0 && (r.direct.length > 0 || r.path ? "They share no direct messages." : "No connection found within three steps.")}
           </p>
+
+          {r.direct.length > 0 && (
+            <section aria-label="Why linked">
+              <h3 className="mb-2 text-xs font-medium text-muted">Why they&apos;re linked</h3>
+              <ul className="space-y-2">{r.direct.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} />)}</ul>
+            </section>
+          )}
+
+          {r.direct.length === 0 && r.path && (
+            <section aria-label="Path">
+              <h3 className="mb-2 text-xs font-medium text-muted">
+                No direct link. The shortest route is {r.path.length} step{r.path.length === 1 ? "" : "s"}
+              </h3>
+              <ul className="space-y-2">{r.path.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} />)}</ul>
+            </section>
+          )}
 
           {r.conversations.length > 0 && (
             <section>

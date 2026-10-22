@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import EntityInspector from "@/components/EntityInspector";
 import NodeSummary from "@/components/NodeSummary";
+import Sources from "@/components/SourceList";
 import { InlineError, Skeleton } from "@/components/ui";
 import { typeLabel } from "@/lib/graph-style";
 import { api, NodeDetail, TYPE_COLORS } from "@/lib/api";
@@ -12,7 +13,7 @@ type Props = {
   /** Whether this node's connections are currently shown on the graph (so the button says Show or Hide). */
   expanded?: boolean;
   // Projects are editable: selecting one of their members, and re-fetching the graph after a correction.
-  onSelectAction?: (id: number) => void; onChangedAction?: (keep: number | null) => void;
+  onSelectAction?: (id: number) => void; onWhyAction?: (a: number, b: number) => void; onChangedAction?: (keep: number | null) => void;
 };
 
 const when = (iso: string) =>
@@ -43,7 +44,7 @@ function InspectorSkeleton() {
   );
 }
 
-export default function Inspector({ id, onExpandAction, onCloseAction, onSelectAction, onChangedAction, expanded }: Props) {
+export default function Inspector({ id, onExpandAction, onCloseAction, onSelectAction, onWhyAction, onChangedAction, expanded }: Props) {
   const [busy, setBusy] = useState(false);
   const [node, setNode] = useState<NodeDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -90,7 +91,7 @@ export default function Inspector({ id, onExpandAction, onCloseAction, onSelectA
           <div className="mt-0.5 text-xs break-all text-muted">{node.key}</div>)}
       </header>
 
-      <NodeSummary id={node.id} onSelectAction={(x) => onSelectAction?.(x)} />
+      <NodeSummary id={node.id} onSelectAction={(x) => onSelectAction?.(x)} onWhyAction={onWhyAction} />
 
       <button disabled={busy} aria-pressed={expanded}
         onClick={async () => { setBusy(true); try { await onExpandAction(node.id); } finally { setBusy(false); } }}
@@ -100,6 +101,10 @@ export default function Inspector({ id, onExpandAction, onCloseAction, onSelectA
         {busy ? (expanded ? "Hiding…" : "Finding connections…")
           : expanded ? "Hide their connections" : "Show their connections on the graph"}
       </button>
+
+      <Section title="Sources">
+        <Sources id={node.id} highlight={[node.name]} />
+      </Section>
 
       {src && (
         <Section title="Original">

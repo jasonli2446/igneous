@@ -363,10 +363,11 @@ def connection(s: Session, ids_a: list[int], ids_b: list[int], named: dict[str, 
             SELECT {edge_cols} FROM edges e
             WHERE (e.src = ANY(:f) OR e.dst = ANY(:f))
               AND e.type NOT IN ('HAS_CHUNK', 'SAME_AS')
-              AND (SELECT count(*) FROM edges x WHERE x.src = e.dst OR x.dst = e.dst) <= :fan
-              AND (SELECT count(*) FROM edges x WHERE x.src = e.src OR x.dst = e.src) <= :fan
+              AND (CASE WHEN e.src = ANY(:f) THEN e.dst ELSE e.src END = ANY(:goal)
+                   OR (SELECT count(*) FROM edges x WHERE x.src = CASE WHEN e.src = ANY(:f) THEN e.dst ELSE e.src END
+                                                      OR x.dst = CASE WHEN e.src = ANY(:f) THEN e.dst ELSE e.src END) <= :fan)
             LIMIT 4000
-        """), {"f": frontier, "fan": MAX_FANOUT}).mappings().all()
+        """), {"f": frontier, "goal": ids_b, "fan": MAX_FANOUT}).mappings().all()
         nxt = []
         for r in map(dict, layer):
             if not visible_edge(r) or r["id"] in edges:
