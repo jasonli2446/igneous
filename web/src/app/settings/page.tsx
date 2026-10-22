@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
+import ImportForm from "@/components/ImportForms";
 import { InlineError, Skeleton } from "@/components/ui";
 import { api, Job, SourceInfo } from "@/lib/api";
 
@@ -92,8 +93,6 @@ function SourceCard({ source, busy, onSync, onRefresh }: {
   let action: React.ReactNode = null;
   if (isGithub && source.accounts.length === 0) {
     action = <GithubToken onSaved={onRefresh} />;
-  } else if (source.kind === "import") {
-    action = <Link href="/import" className={source.items ? secondary : primary}>Open Import</Link>;
   } else if (needsGoogle) {
     action = <a href={api.googleConnectUrl()} className={primary}>Connect a Google account</a>;
   } else if (source.can_sync) {
@@ -126,8 +125,12 @@ function SourceCard({ source, busy, onSync, onRefresh }: {
               {nf.format(source.items)} items, last synced {when(source.last_sync)}
             </p>
           )}
-          {source.kind === "import" && source.items > 0 && (
-            <p className="mt-1 text-xs text-muted tabular-nums">{nf.format(source.items)} imported days</p>
+          {source.kind === "import" && (
+            <p className="mt-1 text-xs text-muted tabular-nums">
+              {source.items > 0
+                ? `${nf.format(source.items)} items imported${source.last_sync ? `, last import ${when(source.last_sync)}` : ""}`
+                : "Nothing imported yet"}
+            </p>
           )}
         </div>
         <div className="shrink-0">{action}</div>
@@ -173,6 +176,10 @@ function SourceCard({ source, busy, onSync, onRefresh }: {
           <Steps steps={source.steps} />
           <Cli command={source.cli} />
         </div>
+      )}
+
+      {source.kind === "import" && (
+        <div className="mt-4"><ImportForm sourceId={source.id} onDone={onRefresh} /></div>
       )}
     </li>
   );
@@ -280,8 +287,8 @@ export default function SourcesPage() {
       <header>
         <h1 className="text-xl font-semibold tracking-tight text-ink">Sources</h1>
         <p className="mt-1 max-w-2xl text-sm leading-6 text-muted">
-          Connect what you want Igneous to learn from. Everything stays on this computer. Work down the list, then
-          build the graph at the bottom.
+          Connect an account, upload an export, or point Igneous at something on this computer. Everything stays on
+          this computer. Work down the list, then build the graph at the bottom.
         </p>
       </header>
 
