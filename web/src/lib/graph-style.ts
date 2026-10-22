@@ -7,7 +7,18 @@ export type Community = { color: string; members: string[]; size: number };
 export const CATEGORY_COLOR: Record<string, string> = {
   People: "#6aa6ff", Groups: "#4fd1a5", Events: "#f5b14c", Organizations: "#b48cff",
   Projects: "#ff7aa8", Courses: "#4cc9e6", Code: "#ff8a65", Files: "#a3d65c", Topics: "#e879f9", Places: "#facc15",
+  Trips: "#38bdf8", Work: "#f97316", Hobbies: "#84cc16",
 };
+
+/** A section's color: a fixed one for known sections, otherwise a stable hue from its name (sections come from
+ *  the data, so a new one like "Clubs" still gets a consistent, distinct color). */
+export function categoryColor(name: string | null | undefined): string {
+  if (!name) return "#a8aca3";
+  if (CATEGORY_COLOR[name]) return CATEGORY_COLOR[name];
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return `hsl(${h % 360} 65% 60%)`;
+}
 
 // Nodes added by /graph/expand carry no `category`; fall back to the category their type belongs to (#96).
 export const TYPE_CATEGORY: Record<string, string> = {

@@ -4,7 +4,7 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CATEGORY_COLOR, TYPE_CATEGORY, type Community } from "@/lib/graph-style";
+import { categoryColor, TYPE_CATEGORY, type Community } from "@/lib/graph-style";
 import Inspector from "@/components/Inspector";
 import { useTheme } from "@/components/ThemeToggle";
 import { InlineError, TopProgress } from "@/components/ui";
@@ -319,7 +319,7 @@ export default function Explorer() {
                     {first && <div className="px-3 pt-1.5 pb-0.5 text-[11px] font-medium text-muted">{cat || m.type}</div>}
                     <button onClick={() => choose(i)} onMouseEnter={() => setActive(i)}
                       className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-left ${i === active ? "bg-hover" : ""}`}>
-                      <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: CATEGORY_COLOR[cat] ?? "#a8aca3" }} />
+                      <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: categoryColor(cat) }} />
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-sm">{m.name}</span>
                         <span className="block truncate text-xs text-muted">{m.context}</span>
@@ -359,7 +359,7 @@ export default function Explorer() {
               {hubs.map((h) => (
                 <button key={h.id} onClick={() => toggle(h.id)} title={expanded.has(h.id) ? `Show fewer ${h.name.toLowerCase()}` : `Show more ${h.name.toLowerCase()}`}
                   className="flex items-center gap-1.5 rounded-full border border-line bg-panel/95 px-2.5 py-1 hover:bg-hover">
-                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: CATEGORY_COLOR[h.name] ?? "#a8aca3" }} />
+                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: categoryColor(h.name) }} />
                   <span className="text-soft">{h.name}</span>
                   <span className="tabular-nums text-muted">{h.total}</span>
                 </button>

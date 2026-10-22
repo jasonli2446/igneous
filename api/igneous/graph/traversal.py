@@ -1,4 +1,5 @@
 """Bounded, provenance-filtered graph traversals used by the Explorer API."""
+import hashlib
 import math
 import re
 from dataclasses import dataclass
@@ -389,7 +390,29 @@ def subgraph(s: Session, node_ids: list[int], filters: GraphFilters = NO_FILTERS
 # How a node type is shown. Presentational only; a type with no members in the data never appears.
 CATEGORY = {"Person": "People", "Group": "Groups", "Event": "Events", "Organization": "Organizations",
             "Project": "Projects", "Course": "Courses", "Repo": "Code", "File": "Files", "Topic": "Topics",
-            "Place": "Places"}
+            "Place": "Places", "Trip": "Trips", "Work": "Work", "Hobby": "Hobbies"}
+
+# Free-text kinds from the threads judge, bucketed into a few readable sections; anything else becomes its own
+# section named after the kind ("Clubs", "Research"), so a new kind of thing in the data gets a new section.
+_KIND_SECTIONS = [
+    (("trip", "travel", "vacation", "visit", "conference trip"), "Trips"),
+    (("course", "class", "lecture", "seminar", "lab section", "coursework"), "Courses"),
+    (("job", "internship", "work", "employment", "ta ", "ta job", "teaching assistant", "role", "position"), "Work"),
+    (("hobby", "game", "sport", "club", "climbing", "music", "campaign"), "Hobbies"),
+    (("project", "client", "startup", "research", "hackathon", "repo", "app", "platform", "thesis"), "Projects"),
+    (("event", "party", "wedding", "concert", "festival"), "Events"),
+]
+
+
+def section_for_kind(kind: str | None) -> str:
+    k = f" {(kind or '').lower().strip()} "
+    if not k.strip() or k.strip() == "thread":
+        return "Projects"
+    for words, section in _KIND_SECTIONS:
+        if any(f" {w.strip()} " in k or k.strip().startswith(w.strip()) for w in words):
+            return section
+    word = k.strip().split()[-1].capitalize()
+    return word if word.endswith("s") else word + "s"
 GROUP_MAX = 25  # members revealed at once when expanding a group or event (the rest via "show more")
 HUB_ID_BASE = -1000  # category hubs are virtual nodes with stable negative ids
 
@@ -482,10 +505,14 @@ def scored_members(s: Session, head: int, per: int = 8) -> dict[str, list[dict]]
         JOIN nodes item ON item.id = via.i LEFT JOIN source_items si ON si.id = item.source_item_id
         GROUP BY via.p
     """), {"me": me, "hl": HALF_LIFE_DAYS}).all()
-    pl = [{"id": p, "strength": math.log1p(float(recent)) * 2 + math.log1p(n) * 0.25 + 0.5 * math.log1p(people)}
-          for p, n, people, recent in projects]
-    if pl:
-        out["Projects"] = pl
+    # Each project-like node lands in the section its kind names: a judged thread says what it is ("trip",
+    # "course", "TA job"), so sections come from the data (Trips, Courses, Work, ...) rather than a fixed list.
+    kinds = dict(s.execute(text("SELECT id, props->>'kind' FROM nodes WHERE id = ANY(:ids)"),
+                           {"ids": [p for p, *_ in projects]}).all()) if projects else {}
+    for p, n, people, recent in projects:
+        cat = section_for_kind(kinds.get(p))
+        out.setdefault(cat, []).append(
+            {"id": p, "strength": math.log1p(float(recent)) * 2 + math.log1p(n) * 0.25 + 0.5 * math.log1p(people)})
 
     # Places (Google Takeout Maps): where you actually go, by visit count and distinct days; saved places count too.
     if s.execute(text("SELECT EXISTS (SELECT 1 FROM nodes WHERE id = ANY(:me) AND props->>'self' = 'true')"),
@@ -520,8 +547,13 @@ def scored_members(s: Session, head: int, per: int = 8) -> dict[str, list[dict]]
     return out
 
 
+def hub_id(cat: str) -> int:
+    """A stable negative id for any section name (new sections like 'Clubs' appear from the data)."""
+    return HUB_ID_BASE - (int(hashlib.sha1(cat.encode()).hexdigest()[:6], 16) % 900_000)
+
+
 def _hub(cat: str, total: int, strength: float) -> dict:
-    return {"id": HUB_ID_BASE - list(CATEGORY.values()).index(cat), "type": "Category", "name": cat,
+    return {"id": hub_id(cat), "type": "Category", "name": cat,
             "key": f"category:{cat}", "degree": total, "kind": "category", "category": cat,
             "total": total, "strength": strength}
 
@@ -602,6 +634,39 @@ def _ties(s: Session, ids: list[int], per_node: int = 2) -> list[dict]:
     return [e for e in edges if id(e) in keep]
 
 
+def person_world(s: Session, pid: int, you: int) -> list[tuple[int, str, float]]:
+    """What a person is part of, strongest and most recent first: (node, type, weight). Group chats they speak
+    in, projects/threads they're involved in, events they attend, and the files and email threads that
+    involve both them and you."""
+    ids = [pid, *s.execute(text("SELECT node_id FROM canonical WHERE canonical_id = :h"), {"h": pid}).scalars()]
+    me = [you, *s.execute(text("SELECT node_id FROM canonical WHERE canonical_id = :h"), {"h": you}).scalars()]
+    return [(r[0], r[1], float(r[2])) for r in s.execute(text("""
+        WITH theirs AS (SELECT dst AS m FROM edges WHERE src = ANY(:ids) AND type = 'SENT'
+                        UNION SELECT src FROM edges WHERE dst = ANY(:ids) AND type = 'RECEIVED'),
+        mine AS (SELECT dst AS m FROM edges WHERE src = ANY(:me) AND type = 'SENT'
+                 UNION SELECT src FROM edges WHERE dst = ANY(:me) AND type = 'RECEIVED'),
+        recent AS (SELECT m, power(0.5, GREATEST(0, EXTRACT(EPOCH FROM now() - si.occurred_at) / 86400) / :hl) AS w
+                   FROM theirs JOIN nodes n ON n.id = theirs.m LEFT JOIN source_items si ON si.id = n.source_item_id)
+        -- group chats / threads they're in
+        SELECT it.dst, CASE WHEN t.type = 'Thread' AND COALESCE((t.props->>'group')::bool, false) THEN 'Thread'
+                            ELSE 'Message' END, sum(r.w)
+        FROM recent r JOIN edges it ON it.src = r.m AND it.type = 'IN_THREAD' JOIN nodes t ON t.id = it.dst
+        WHERE t.type = 'Thread' AND (COALESCE((t.props->>'group')::bool, false) OR it.src IN (SELECT m FROM mine))
+        GROUP BY it.dst, t.type, t.props
+        UNION ALL  -- projects and life threads
+        SELECT e.dst, 'Project', 1 + COALESCE((e.props->>'items')::float, 1)
+        FROM edges e JOIN nodes p ON p.id = e.dst AND p.type = 'Project'
+        WHERE e.src = ANY(:ids) AND e.type = 'INVOLVED_IN' AND NOT COALESCE((p.props->>'hidden')::bool, false)
+        UNION ALL  -- events
+        SELECT e.dst, 'Event', 1 FROM edges e JOIN nodes ev ON ev.id = e.dst AND ev.type = 'Event'
+        WHERE e.src = ANY(:ids) AND e.type = 'ATTENDED'
+        UNION ALL  -- files they authored or shared with you
+        SELECT e.dst, 'File', 1 FROM edges e JOIN nodes f ON f.id = e.dst AND f.type = 'File'
+        WHERE e.src = ANY(:ids) AND e.type IN ('AUTHORED', 'EDITED', 'SHARED_WITH')
+        ORDER BY 3 DESC LIMIT 60
+    """), {"ids": ids, "me": me, "hl": HALF_LIFE_DAYS})]
+
+
 def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, offset: int = 0) -> dict:
     """Reveal `node`'s top connections that aren't on screen yet. A category hub reveals its next members; a
     person reveals their strongest people, group chats, and events; a group or event reveals who's in it."""
@@ -610,9 +675,10 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
     new: list[int] = []
     edges: list[dict] = []
     ntype = None
-    if node <= HUB_ID_BASE + 10 and node < 0:  # a category hub
-        cat = list(CATEGORY.values())[HUB_ID_BASE - node]
-        members = scored_members(s, head).get(cat, [])
+    if HUB_ID_BASE - 900_000 < node <= HUB_ID_BASE:  # a section (category) from the legend
+        sections = scored_members(s, head)
+        cat = next((c for c in sections if hub_id(c) == node), None)
+        members = sections.get(cat, []) if cat else []
         for m in [m for m in members if m["id"] not in seen][offset:offset + k]:
             new.append(m["id"])
             # No hub node on screen: more members of a category attach to the seed, like the first ones.
@@ -620,22 +686,48 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
     else:
         ntype = s.execute(text("SELECT type FROM nodes WHERE id = :n"), {"n": node}).scalar()
         if ntype == "Person":
-            for p, _st, _ in relationships(s, _canon_head(s, node), 40):
-                if p not in seen and p != head and len(new) < k:
-                    new.append(p)
-        elif ntype == "Project":  # its people, then its group chats, events and items (none if hidden)
-            rows = [] if s.execute(text("SELECT COALESCE((props->>'hidden')::bool, false) FROM nodes WHERE id = :n"),
-                                   {"n": node}).scalar() else s.execute(text("""
-                SELECT src, CASE n.type WHEN 'Person' THEN 0 WHEN 'Thread' THEN 1 WHEN 'Event' THEN 2 ELSE 3 END,
-                       COALESCE((e.props->>'items')::int, (e.props->>'days')::int, 1)
-                FROM edges e JOIN nodes n ON n.id = e.src
-                WHERE e.dst = :n AND e.type IN ('PART_OF', 'INVOLVED_IN') ORDER BY 2, 3 DESC LIMIT 80
+            # A person opens onto their world, not just more people: who they're closest to, plus the group
+            # chats, projects/threads and events they're in, and the files and email threads you share.
+            pid = _canon_head(s, node)
+            people = [p for p, _st, _ in relationships(s, pid, 40) if p not in seen and p != head]
+            things = person_world(s, pid, head)
+            picked: list[int] = []
+            quota = {"Person": max(3, k // 2), "Thread": 3, "Project": 3, "Event": 2, "File": 2, "Message": 2}
+            used: dict[str, int] = {}
+            for p in people:
+                if used.get("Person", 0) < quota["Person"]:
+                    picked.append(p)
+                    used["Person"] = used.get("Person", 0) + 1
+            for x, t, _w in things:
+                if x not in seen and x not in picked and used.get(t, 0) < quota.get(t, 1):
+                    picked.append(x)
+                    used[t] = used.get(t, 0) + 1
+            new.extend(picked[:k * 2])
+        elif ntype == "Project":  # its people, conversations, events and files (none if hidden)
+            # A project or life thread shows its substance: who's in it, the conversations (an email thread or
+            # group chat rather than each message), the events, and the documents, most recent first.
+            hidden = s.execute(text("SELECT COALESCE((props->>'hidden')::bool, false) FROM nodes WHERE id = :n"),
+                               {"n": node}).scalar()
+            rows = [] if hidden else s.execute(text("""
+                WITH m AS (SELECT e.src AS x, n.type, COALESCE((e.props->>'items')::float, (e.props->>'days')::float, 1) AS w,
+                                  si.occurred_at AS at
+                           FROM edges e JOIN nodes n ON n.id = e.src LEFT JOIN source_items si ON si.id = n.source_item_id
+                           WHERE e.dst = :n AND e.type IN ('PART_OF', 'INVOLVED_IN')),
+                -- messages collapse into their conversation: one email thread / chat per conversation
+                conv AS (SELECT it.dst AS x, 'Thread' AS type, count(*)::float AS w, max(m.at) AS at
+                         FROM m JOIN edges it ON it.src = m.x AND it.type = 'IN_THREAD'
+                         WHERE m.type = 'Message' GROUP BY it.dst)
+                SELECT x, type, w FROM (
+                    SELECT x, type, w, at FROM m WHERE type <> 'Message'
+                    UNION ALL SELECT x, type, w, at FROM conv) q
+                ORDER BY w DESC, at DESC NULLS LAST LIMIT 120
             """), {"n": node}).all()
-            per_kind: dict[int, int] = {}
-            for p, kind, _w in rows:
-                if p not in seen and p != head and per_kind.get(kind, 0) < max(2, k // 2) and len(new) < k * 2:
+            quota = {"Person": 8, "Thread": 6, "File": 6, "Event": 4, "Folder": 2}
+            used: dict[str, int] = {}
+            for p, t, _w in rows:
+                if p not in seen and p != head and used.get(t, 0) < quota.get(t, 2):
                     new.append(p)
-                    per_kind[kind] = per_kind.get(kind, 0) + 1
+                    used[t] = used.get(t, 0) + 1
         else:  # a group, event, org: everyone who actually takes part, strongest first
             # Every member who speaks (or attends), not a top-k: a 6-person chat where all six talk shows all
             # six. "Takes part" = 2+ messages or 2%+ of the group's messages, so a huge list's silent

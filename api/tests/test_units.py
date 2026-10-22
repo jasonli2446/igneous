@@ -1738,3 +1738,31 @@ def test_group_expand_reveals_every_participant_not_top_k():
     from igneous.graph import traversal
 
     assert traversal.GROUP_MAX >= 20  # a group shows all who take part (up to a readable cap), not 6
+
+
+def test_life_thread_bursts_and_sections_from_kinds():
+    from datetime import datetime, timedelta
+
+    from igneous.graph.threads import _bursts, _terms
+    from igneous.graph.traversal import hub_id, section_for_kind
+
+    assert "Seattle" in _terms("Flight to Seattle on Friday") and "Friday" not in _terms("see you Friday")
+    assert "CSDS 395" in _terms("CSDS 395 final report")
+
+    class R:
+        def __init__(self, day, src):
+            self.occurred_at, self.source = datetime(2026, 1, 1) + timedelta(days=day), src
+
+    # a term mentioned once a month for two years, then a 3-week spike across sources
+    background = [R(d, "gmail") for d in range(0, 720, 30)]
+    spike = [R(700 + i, s) for i, s in enumerate(["gmail", "imessage", "gcal", "fs", "gmail", "imessage", "drive"])]
+    its = sorted(background + spike, key=lambda r: r.occurred_at)
+    windows = _bursts(its)
+    assert windows
+    assert its[windows[-1][0]].occurred_at >= datetime(2026, 1, 1) + timedelta(days=660)  # the spike, not the background
+
+    assert section_for_kind("trip") == "Trips" and section_for_kind("course") == "Courses"
+    assert section_for_kind("TA job") == "Work" and section_for_kind("client project") == "Projects"
+    assert section_for_kind("book club") == "Hobbies" and section_for_kind("research lab") == "Projects"
+    assert section_for_kind("fundraiser") == "Fundraisers"  # a new kind becomes its own section
+    assert hub_id("Clubs") == hub_id("Clubs") and hub_id("Clubs") != hub_id("Trips")
