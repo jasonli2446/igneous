@@ -1941,3 +1941,11 @@ def test_bot_accounts_are_services():
     assert is_service_address("github:vercel[bot]") and is_service_address("github:dependabot[bot]")
     assert not is_service_address("github:aadhavsb")
     assert not is_service_address("1+someone@users.noreply.github.com")
+
+
+def test_a_projects_people_get_one_cut_not_two():
+    from igneous.graph.traversal import _core_people
+
+    # One traveller texted about the trip far more than the others: all three still show.
+    assert _core_people([(1, 28.0), (2, 8.0), (3, 7.0)]) == [1, 2, 3]
+    assert _core_people([(1, 30.0), (2, 25.0), (3, 22.0), (4, 1.0)]) == [1, 2, 3]  # a passing mention goes

@@ -918,11 +918,14 @@ def earned_cut(scored: list[tuple[int, float]], lo: int = 1, hi: int = 12) -> li
     return [i for i, _ in scored[:cut]]
 
 
-def _core_people(people: list[tuple[int, float]], hi: int = 10) -> list[int]:
-    """A project's people, without the ones who only passed by: measured against its most active few."""
+def _core_people(people: list[tuple[int, float]], hi: int = 10, keep: set[int] = frozenset()) -> list[int]:
+    """A project's people, without the ones who only passed by: measured against its most active few. `keep`
+    (members of its own group chats) is direct evidence and always stays."""
     from igneous.graph.threads import relative_members
-    real = relative_members([(p, int(w)) for p, w in people])
-    return earned_cut([(p, w) for p, w in people if p in real], hi=hi)
+    real = relative_members([(p, int(w)) for p, w in people], keep)
+    # Who's in it was decided above; the strongest `hi` of them show (no second cut at the biggest gap, which
+    # dropped a trip's travellers because one of them texted about it four times as much).
+    return [p for p, _w in sorted(people, key=lambda x: -x[1]) if p in real][:hi]
 
 
 def children(s: Session, node: int, ntype: str) -> list[int]:
@@ -973,22 +976,42 @@ def children(s: Session, node: int, ntype: str) -> list[int]:
         WHERE pe.dst = :n AND pe.type = 'PART_OF' AND NOT COALESCE((f.props->>'hidden')::bool, false)
         GROUP BY f.id HAVING count(*) >= 3
     """), {"n": node}).all()
-    people = s.execute(text("""
-        SELECT e.src, COALESCE((e.props->>'items')::float, 1) FROM edges e JOIN nodes p ON p.id = e.src
-        WHERE e.dst = :n AND e.type = 'INVOLVED_IN' AND p.type = 'Person'
-          AND (e.props->>'verdict' = 'keep' OR e.extractor IN ('user', 'profile', 'contacts'))
-    """), {"n": node}).all()
+    # Its group chats, ranked by how much of its own people they hold (the trip's chat is the one its travellers
+    # are in), plus how many of its records happened there.
     convs = s.execute(text(f"""
-        SELECT it.dst, count(*) FROM edges pe JOIN nodes m ON m.id = pe.src AND m.type = 'Message'
-        JOIN edges it ON it.src = m.id AND it.type = 'IN_THREAD' JOIN nodes t ON t.id = it.dst
-        WHERE pe.dst = :n AND pe.type = 'PART_OF' AND t.id NOT IN {HIDDEN}
-          AND COALESCE((t.props->>'group')::bool, false)
-        GROUP BY it.dst
+        WITH tp AS (SELECT COALESCE(c.canonical_id, e.src) AS p FROM edges e LEFT JOIN canonical c ON c.node_id = e.src
+                    WHERE e.dst = :n AND e.type = 'INVOLVED_IN' AND COALESCE(e.props->>'verdict', '') <> 'drop'),
+        ch AS (SELECT it.dst AS g, count(DISTINCT m.id) AS msgs FROM edges pe JOIN nodes m ON m.id = pe.src AND m.type = 'Message'
+               JOIN edges it ON it.src = m.id AND it.type = 'IN_THREAD' JOIN nodes t ON t.id = it.dst
+               WHERE pe.dst = :n AND pe.type = 'PART_OF' AND t.id NOT IN {HIDDEN}
+                 AND COALESCE((t.props->>'group')::bool, false) GROUP BY it.dst),
+        mem AS (SELECT ch.g, count(DISTINCT COALESCE(c.canonical_id, x.dst)) FILTER (WHERE COALESCE(c.canonical_id, x.dst) IN (SELECT p FROM tp)) AS shared
+                FROM ch JOIN edges it ON it.dst = ch.g AND it.type = 'IN_THREAD'
+                JOIN edges x ON x.src = it.src AND x.type = 'RECEIVED' LEFT JOIN canonical c ON c.node_id = x.dst GROUP BY ch.g)
+        SELECT ch.g, ch.msgs + 20 * COALESCE(mem.shared, 0) FROM ch LEFT JOIN mem USING (g)
         UNION ALL  -- a chat attached to it as a whole (named after it, or the class group chat)
         SELECT g.id, 50 FROM edges pe JOIN nodes g ON g.id = pe.src AND g.type = 'Thread'
         WHERE pe.dst = :n AND pe.type = 'PART_OF' AND g.id NOT IN {HIDDEN}
           AND COALESCE(pe.props->>'verdict', '') <> 'drop'
     """), {"n": node}).all()
+    # Its people: checked (or stated) ones, plus anyone the verifier was unsure about who is in one of its own
+    # group chats; being in the trip's chat is the direct evidence the verifier didn't have.
+    chats = [g for g, _w in convs]
+    people = s.execute(text("""
+        SELECT e.src, COALESCE((e.props->>'items')::float, 1) FROM edges e JOIN nodes p ON p.id = e.src
+        WHERE e.dst = :n AND e.type = 'INVOLVED_IN' AND p.type = 'Person'
+          AND (e.props->>'verdict' = 'keep' OR e.extractor IN ('user', 'profile', 'contacts')
+               OR (e.props->>'verdict' = 'unsure' AND EXISTS (
+                   SELECT 1 FROM edges it JOIN edges x ON x.src = it.src AND x.type IN ('RECEIVED', 'SENT')
+                   LEFT JOIN canonical c ON c.node_id = CASE WHEN x.type = 'RECEIVED' THEN x.dst ELSE x.src END
+                   WHERE it.dst = ANY(:chats) AND it.type = 'IN_THREAD'
+                     AND COALESCE(c.canonical_id, CASE WHEN x.type = 'RECEIVED' THEN x.dst ELSE x.src END) = e.src)))
+    """), {"n": node, "chats": chats}).all()
+    in_chats = set(s.execute(text("""
+        SELECT DISTINCT COALESCE(c.canonical_id, CASE WHEN x.type = 'RECEIVED' THEN x.dst ELSE x.src END)
+        FROM edges it JOIN edges x ON x.src = it.src AND x.type IN ('RECEIVED', 'SENT')
+        LEFT JOIN canonical c ON c.node_id = CASE WHEN x.type = 'RECEIVED' THEN x.dst ELSE x.src END
+        WHERE it.dst = ANY(:chats) AND it.type = 'IN_THREAD'"""), {"chats": chats[:5]}).scalars())
     docs = s.execute(text(r"""
         SELECT f.id, 1 + length(coalesce(si.body_text, '')) / 4000.0 FROM edges pe JOIN nodes f ON f.id = pe.src
         JOIN source_items si ON si.id = f.source_item_id
@@ -996,7 +1019,8 @@ def children(s: Session, node: int, ntype: str) -> list[int]:
           AND f.name !~* '\.(ts|tsx|js|jsx|mjs|py|go|rs|java|c|h|cpp|json|ya?ml|toml|lock|css|scss|html?|sh|sql|txt|env|md)$'
     """), {"n": node}).all()
     return (earned_cut([(i, float(w)) for i, w in homes], hi=2)
-            + _core_people(people) + earned_cut([(i, float(w)) for i, w in convs], hi=5)
+            + _core_people(people, keep={p for p, _w in people} & in_chats)
+            + earned_cut([(i, float(w)) for i, w in convs], hi=5)
             + earned_cut([(i, float(w)) for i, w in docs], hi=4))
 
 
@@ -1026,9 +1050,29 @@ def fallback_neighbors(s: Session, node: int, head: int, exclude: set[int], k: i
           AND NOT (x.type = 'File' AND x.name ~* '\.(ts|tsx|js|jsx|mjs|py|go|rs|java|c|h|cpp|json|ya?ml|toml|lock|css|scss|sh|sql|env)$')
         GROUP BY 1 ORDER BY 2 DESC LIMIT 60
     """), {"n": node, "person": bool(person)}).all()
+    # A single message stands for its conversation: the group chat it's in, else the person it's with. Only a
+    # message with neither (a note to yourself) stands for itself, and only after everything else.
+    ids = [o for o, _w in rows]
+    rep = dict(s.execute(text("""
+        SELECT m.id, COALESCE(
+            (SELECT it.dst FROM edges it JOIN nodes g ON g.id = it.dst
+             WHERE it.src = m.id AND it.type = 'IN_THREAD' AND COALESCE((g.props->>'group')::bool, false)
+               AND NOT COALESCE((g.props->>'hidden')::bool, false) LIMIT 1),
+            (SELECT COALESCE(c.canonical_id, x.p) FROM (
+                 SELECT dst AS p FROM edges WHERE src = m.id AND type = 'RECEIVED'
+                 UNION SELECT src FROM edges WHERE dst = m.id AND type = 'SENT') x
+             LEFT JOIN canonical c ON c.node_id = x.p JOIN nodes pn ON pn.id = COALESCE(c.canonical_id, x.p)
+             WHERE NOT COALESCE((pn.props->>'self')::bool, false) AND COALESCE(pn.props->>'kind', '') <> 'service'
+             LIMIT 1))
+        FROM nodes m WHERE m.id = ANY(:i) AND m.type = 'Message'"""), {"i": ids}).all())
+    lone = [o for o in ids if o in rep and rep[o] is None]
+    # A folder is where a file sits, not what it's connected to: last, like a lone message.
+    folders = set(s.execute(text("SELECT id FROM nodes WHERE id = ANY(:i) AND type = 'Folder'"), {"i": ids}).scalars())
+    lone += [o for o in ids if o in folders]
+    ids = [o for o in ids if o not in folders]
     out: list[int] = []
-    for o, _w in rows:
-        if o not in exclude and o not in (node, head) and o not in out:
+    for o in [rep.get(o, o) for o in ids if o not in lone] + lone:
+        if o is not None and o not in exclude and o not in (node, head) and o not in out:
             out.append(o)
             if len(out) == k:
                 break
