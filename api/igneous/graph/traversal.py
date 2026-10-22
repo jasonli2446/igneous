@@ -878,6 +878,13 @@ def earned_cut(scored: list[tuple[int, float]], lo: int = 1, hi: int = 12) -> li
     return [i for i, _ in scored[:cut]]
 
 
+def _core_people(people: list[tuple[int, float]], hi: int = 10) -> list[int]:
+    """A project's people, without the ones who only passed by: measured against its most active few."""
+    from igneous.graph.threads import relative_members
+    real = relative_members([(p, int(w)) for p, w in people])
+    return earned_cut([(p, w) for p, w in people if p in real], hi=hi)
+
+
 def children(s: Session, node: int, ntype: str) -> list[int]:
     """A project's or org's children, the bigger picture first: the projects under it, then (for a project) its
     checked people, its main group conversations and its key documents. Code files and one-off notices are detail
@@ -918,6 +925,14 @@ def children(s: Session, node: int, ntype: str) -> list[int]:
         return list(stated) + earned_cut([(i, w * 2) for i, w in subs]) + earned_cut([(i, float(w)) for i, w in people], hi=8)
     if subs or stated:  # an umbrella: its projects are the picture; their detail is one click deeper
         return list(stated) + [i for i in earned_cut([(i, w) for i, w in subs]) if i not in stated]
+    # Where the work lives: the repository or folder that holds most of its records (the GitHub repo for a
+    # coding project), one link instead of its issues one by one.
+    homes = s.execute(text("""
+        SELECT f.id, count(*) FROM edges pe JOIN edges ct ON ct.dst = pe.src AND ct.type = 'CONTAINS'
+        JOIN nodes f ON f.id = ct.src AND f.type = 'Folder'
+        WHERE pe.dst = :n AND pe.type = 'PART_OF' AND NOT COALESCE((f.props->>'hidden')::bool, false)
+        GROUP BY f.id HAVING count(*) >= 3
+    """), {"n": node}).all()
     people = s.execute(text("""
         SELECT e.src, COALESCE((e.props->>'items')::float, 1) FROM edges e JOIN nodes p ON p.id = e.src
         WHERE e.dst = :n AND e.type = 'INVOLVED_IN' AND p.type = 'Person'
@@ -929,6 +944,10 @@ def children(s: Session, node: int, ntype: str) -> list[int]:
         WHERE pe.dst = :n AND pe.type = 'PART_OF' AND t.id NOT IN {HIDDEN}
           AND COALESCE((t.props->>'group')::bool, false)
         GROUP BY it.dst
+        UNION ALL  -- a chat attached to it as a whole (named after it, or the class group chat)
+        SELECT g.id, 50 FROM edges pe JOIN nodes g ON g.id = pe.src AND g.type = 'Thread'
+        WHERE pe.dst = :n AND pe.type = 'PART_OF' AND g.id NOT IN {HIDDEN}
+          AND COALESCE(pe.props->>'verdict', '') <> 'drop'
     """), {"n": node}).all()
     docs = s.execute(text(r"""
         SELECT f.id, 1 + length(coalesce(si.body_text, '')) / 4000.0 FROM edges pe JOIN nodes f ON f.id = pe.src
@@ -936,7 +955,8 @@ def children(s: Session, node: int, ntype: str) -> list[int]:
         WHERE pe.dst = :n AND pe.type = 'PART_OF' AND f.type = 'File'
           AND f.name !~* '\.(ts|tsx|js|jsx|mjs|py|go|rs|java|c|h|cpp|json|ya?ml|toml|lock|css|scss|html?|sh|sql|txt|env|md)$'
     """), {"n": node}).all()
-    return (earned_cut([(i, w) for i, w in people], hi=10) + earned_cut([(i, float(w)) for i, w in convs], hi=5)
+    return (earned_cut([(i, float(w)) for i, w in homes], hi=2)
+            + _core_people(people) + earned_cut([(i, float(w)) for i, w in convs], hi=5)
             + earned_cut([(i, float(w)) for i, w in docs], hi=4))
 
 

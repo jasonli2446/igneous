@@ -160,6 +160,22 @@ def _merge(cands: list[dict]) -> list[dict]:
     return merged[:MAX_CANDIDATES]
 
 
+CORE = 3            # the thread's most active people set the bar for everyone else
+RELATIVE_FLOOR = 0.15  # of the core's typical count: below it, a mention is noise, not membership
+
+
+def relative_members(counts: list[tuple[int, int]], keep: set[int] = frozenset()) -> set[int]:
+    """Who is really in it, judged against how active its core is. When a few people mention it 20 times each,
+    someone with one or two mentions is passing by; in a small thread where everyone has 2-3, they all count.
+    `keep` (group chat members, event attendees) is direct evidence and always stays."""
+    if not counts:
+        return set(keep)
+    top = sorted((n for _p, n in counts), reverse=True)[:CORE]
+    core = top[len(top) // 2]  # median of the core: one hyperactive person doesn't raise the bar for all
+    bar = max(2, round(core * RELATIVE_FLOOR))
+    return {p for p, n in counts if n >= bar} | set(keep)
+
+
 def _people(s: Session, item_ids: list[int]) -> list[tuple[int, int, list[int]]]:
     """(canonical person, qualifying items) for people who are really in the thread, excluding services and you.
 
@@ -445,7 +461,11 @@ def _write_thread(s: Session, key: str, name: str, kind: str | None, terms: list
     # No group chat or events to say who took part (a trip planned over email and one-on-one texts): then the
     # people in its small conversations are the best evidence we have; the verifier checks each one.
     fallback = not participants
-    for p, n, ev in _people(s, [r.id for r in members]):
+    people = _people(s, [r.id for r in members])
+    real = relative_members([(p, n) for p, n, _ev in people], set(participants))
+    for p, n, ev in people:
+        if p not in real:
+            continue  # a passing mention next to people who talk about it all the time
         is_part = p in participants or fallback
         eid = _edge(s, p, tid, "INVOLVED_IN" if is_part else "RELATED_TO",
                     {"why": participants.get(p) or f"talked about it in {n} of its records", "items": n,
@@ -500,7 +520,8 @@ def run(s: Session, log=print) -> int:
     _migrate_registry(s)
     items = _items(s)
     items_by_id = {r.id: r for r in items}
-    s.execute(text("DELETE FROM edges WHERE extractor IN (:x, 'hierarchy', 'thread-resolution', 'user')"), {"x": EXTRACTOR})
+    # Your stated links ('user') are never deleted: viewers mid-rebuild must not see xLab lose its projects.
+    s.execute(text("DELETE FROM edges WHERE extractor IN (:x, 'hierarchy', 'thread-resolution')"), {"x": EXTRACTOR})
     keep_keys: list[str] = []
     claimed: set[int] = set()
     built = 0
@@ -579,6 +600,7 @@ def run(s: Session, log=print) -> int:
     keep_keys[:] = [k for k in keep_keys if not k.startswith("umbrella:")]
     built += umbrellas(s, keep_keys)
     pinned_parents(s)  # stated structure (xLab over its projects) always holds
+    _short_named(s)    # chats named by an ambiguous token ("395") go to the thread they fit, if one clearly does
     attach_groups(s)   # named group chats / event series that belong to a thread (the Bellfield chats -> Bellfield house)
     s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'
                       AND NOT (key = ANY(:keep)) AND NOT COALESCE((props->>'pinned')::bool, false)"""),
@@ -739,6 +761,56 @@ def pin_gold(s: Session, gold: dict) -> int:
             s.execute(text("INSERT INTO thread_parents (child_key, parent_key) VALUES (:c, :p) ON CONFLICT DO NOTHING"),
                       {"c": gkey(g["name"]), "p": gkey(g["parent"])})
     s.commit()
+    return n
+
+
+def _short_named(s: Session) -> int:
+    """A chat named by a short or ambiguous token ("395": the class group chat) can't be matched by name alone, since
+    "395" is CSDS 395 and ECSE 395 alike. Among the threads whose terms contain that token, the chat goes to the one
+    it fits best (the share of its active days inside the thread's span, plus people they share), and only when
+    that one clearly fits better than the others. The verifier then checks the link."""
+    chats = s.execute(text("""
+        SELECT g.id, lower(regexp_replace(g.name, '[^A-Za-z0-9]+', '', 'g')) AS tok,
+               array_agg(DISTINCT si.occurred_at::date) AS days,
+               array_remove(array_agg(DISTINCT COALESCE(c.canonical_id, x.dst)), NULL) AS people
+        FROM nodes g JOIN edges it ON it.dst = g.id AND it.type = 'IN_THREAD'
+        JOIN nodes m ON m.id = it.src JOIN source_items si ON si.id = m.source_item_id
+        LEFT JOIN edges x ON x.src = m.id AND x.type = 'RECEIVED' LEFT JOIN canonical c ON c.node_id = x.dst
+        WHERE g.type = 'Thread' AND COALESCE((g.props->>'group')::bool, false)
+          AND NOT COALESCE((g.props->>'hidden')::bool, false)
+          AND length(regexp_replace(g.name, '[^A-Za-z0-9]+', '', 'g')) BETWEEN 2 AND 5
+        GROUP BY g.id""")).mappings().all()
+    if not chats:
+        return 0
+    threads_ = s.execute(text("""
+        SELECT p.id, r.terms, (p.props->>'start')::date AS a, (p.props->>'end')::date AS b,
+               array_remove(array_agg(DISTINCT COALESCE(c.canonical_id, e.src)), NULL) AS people
+        FROM nodes p JOIN thread_registry r ON r.key = p.key
+        LEFT JOIN edges e ON e.dst = p.id AND e.type IN ('INVOLVED_IN', 'RELATED_TO')
+        LEFT JOIN canonical c ON c.node_id = e.src
+        WHERE p.type = 'Project' AND r.status = 'active' AND p.props ? 'start' GROUP BY p.id, r.terms""")).mappings().all()
+    n = 0
+    for ch in chats:
+        fits = []
+        for t in threads_:
+            tokens = {w for term in t["terms"] or [] for w in re.findall(r"[a-z0-9]+", term.lower())}
+            if ch["tok"] not in tokens:
+                continue
+            inside = sum(1 for d in ch["days"] if t["a"] <= d <= t["b"]) / max(1, len(ch["days"]))
+            shared = len(set(ch["people"]) & set(t["people"] or []))
+            fits.append((inside + 0.25 * min(shared, 4), shared, inside, t["id"]))
+        fits.sort(reverse=True)
+        if not fits or fits[0][2] < 0.5 or (len(fits) > 1 and fits[0][0] - fits[1][0] < 0.25):
+            continue  # it didn't happen during any of them, or two fit about as well: no guess
+        score, shared, inside, tid = fits[0]
+        s.execute(text("""
+            INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence)
+            VALUES (:g, :t, 'PART_OF', CAST(:p AS jsonb), 'hierarchy', :v, :c)
+            ON CONFLICT (src, dst, type, extractor) DO NOTHING
+        """), {"g": ch["id"], "t": tid, "v": VERSION, "c": round(min(0.9, 0.4 + score / 3), 2),
+               "p": json.dumps({"why": f"named like it; {round(inside * 100)}% of its activity was during it"
+                                       + (f", {shared} of its people are in it" if shared else "")})})
+        n += 1
     return n
 
 

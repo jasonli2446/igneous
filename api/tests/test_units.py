@@ -1892,3 +1892,24 @@ def test_expand_tops_up_to_a_minimum():
     src = inspect.getsource(traversal.expand)
     assert "fallback_neighbors" in src and "len(new) < MIN_SHOWN" in src
     assert "drop" in inspect.getsource(traversal.fallback_neighbors)  # never tops up with a link the verifier dropped
+
+
+def test_threads_naming_each_other_are_judged_even_far_apart():
+    from datetime import datetime
+
+    from igneous.graph.resolve_threads import candidate_pairs
+
+    a = {"id": 1, "name": "CSDS 395", "items": {1}, "people": set(), "a": datetime(2025, 1, 1), "b": datetime(2025, 5, 1)}
+    b = {"id": 2, "name": "Igneous", "items": {9}, "people": set(), "a": datetime(2026, 4, 1), "b": datetime(2026, 10, 1)}
+    assert candidate_pairs([a, b]) == []                     # nothing shared and far apart: not judged
+    assert len(candidate_pairs([a, b], {(2, 1)})) == 1       # Igneous's records name CSDS 395: judged
+
+
+def test_people_are_judged_against_the_threads_core():
+    from igneous.graph.threads import relative_members
+
+    busy = [(1, 22), (2, 20), (3, 18), (4, 2), (5, 1), (6, 3)]
+    assert relative_members(busy) == {1, 2, 3, 6}            # bar = max(2, 0.15*20) = 3
+    assert relative_members(busy, keep={5}) == {1, 2, 3, 5, 6}  # in the group chat: always stays
+    small = [(1, 3), (2, 2), (3, 2)]
+    assert relative_members(small) == {1, 2, 3}             # small thread: everyone counts
