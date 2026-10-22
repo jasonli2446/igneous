@@ -1913,3 +1913,13 @@ def test_people_are_judged_against_the_threads_core():
     assert relative_members(busy, keep={5}) == {1, 2, 3, 5, 6}  # in the group chat: always stays
     small = [(1, 3), (2, 2), (3, 2)]
     assert relative_members(small) == {1, 2, 3}             # small thread: everyone counts
+
+
+def test_a_persons_messages_and_one_on_one_chats_fold_into_them():
+    import inspect
+
+    from igneous.graph import traversal
+
+    world = inspect.getsource(traversal.person_world)
+    assert "'Message'" not in world and "it.src IN (SELECT m FROM mine)" not in world
+    assert "x.type = 'Message'" in inspect.getsource(traversal.fallback_neighbors)

@@ -839,11 +839,12 @@ def person_world(s: Session, pid: int, you: int) -> list[tuple[int, str, float]]
         recent AS (SELECT m, power(0.5, GREATEST(0, EXTRACT(EPOCH FROM now() - si.occurred_at) / 86400) / :hl) AS w
                    FROM theirs JOIN nodes n ON n.id = theirs.m LEFT JOIN source_items si ON si.id = n.source_item_id)
         -- group chats / threads they're in
-        SELECT it.dst, CASE WHEN t.type = 'Thread' AND COALESCE((t.props->>'group')::bool, false) THEN 'Thread'
-                            ELSE 'Message' END, sum(r.w)
+        -- Only group chats: your one-on-one messages and email threads with them ARE the relationship (they're in
+        -- the person's sources and closeness), not separate things beside them.
+        SELECT it.dst, 'Thread', sum(r.w)
         FROM recent r JOIN edges it ON it.src = r.m AND it.type = 'IN_THREAD' JOIN nodes t ON t.id = it.dst
-        WHERE t.type = 'Thread' AND (COALESCE((t.props->>'group')::bool, false) OR it.src IN (SELECT m FROM mine))
-        GROUP BY it.dst, t.type, t.props
+        WHERE t.type = 'Thread' AND COALESCE((t.props->>'group')::bool, false)
+        GROUP BY it.dst
         UNION ALL  -- projects and life threads
         SELECT e.dst, 'Project', 1 + COALESCE((e.props->>'items')::float, 1)
         FROM edges e JOIN nodes p ON p.id = e.dst AND p.type = 'Project'
@@ -966,6 +967,7 @@ def fallback_neighbors(s: Session, node: int, head: int, exclude: set[int], k: i
     file's conversation). People are folded to one identity; hidden, service, and code-file nodes are skipped."""
     if k <= 0:
         return []
+    person = s.execute(text("SELECT type = 'Person' FROM nodes WHERE id = :n"), {"n": node}).scalar()
     rows = s.execute(text(f"""
         WITH direct AS (
             SELECT CASE WHEN e.src = :n THEN e.dst ELSE e.src END AS o,
@@ -980,9 +982,11 @@ def fallback_neighbors(s: Session, node: int, head: int, exclude: set[int], k: i
         SELECT COALESCE(c.canonical_id, a.o) AS o, max(a.w) + 0.1 * ln(1 + count(*)) AS w
         FROM allc a LEFT JOIN canonical c ON c.node_id = a.o JOIN nodes x ON x.id = COALESCE(c.canonical_id, a.o)
         WHERE x.id NOT IN {HIDDEN} AND COALESCE(x.props->>'kind', '') <> 'service'
+          -- A person's messages and one-on-one chats are the person; only bigger things or other people go beside.
+          AND NOT (:person AND (x.type = 'Message' OR (x.type = 'Thread' AND NOT COALESCE((x.props->>'group')::bool, false))))
           AND NOT (x.type = 'File' AND x.name ~* '\.(ts|tsx|js|jsx|mjs|py|go|rs|java|c|h|cpp|json|ya?ml|toml|lock|css|scss|sh|sql|env)$')
         GROUP BY 1 ORDER BY 2 DESC LIMIT 60
-    """), {"n": node}).all()
+    """), {"n": node, "person": bool(person)}).all()
     out: list[int] = []
     for o, _w in rows:
         if o not in exclude and o not in (node, head) and o not in out:
@@ -1017,7 +1021,7 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
             people = [p for p, _st, _ in relationships(s, pid, 40) if p not in seen and p != head]
             things = person_world(s, pid, head)
             picked: list[int] = []
-            quota = {"Person": max(3, k // 2), "Thread": 3, "Project": 3, "Event": 2, "File": 2, "Message": 2}
+            quota = {"Person": max(3, k // 2), "Thread": 3, "Project": 3, "Event": 2, "File": 2}
             used: dict[str, int] = {}
             for p in people:
                 if used.get("Person", 0) < quota["Person"]:
