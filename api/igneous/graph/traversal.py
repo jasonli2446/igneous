@@ -833,6 +833,74 @@ def person_world(s: Session, pid: int, you: int) -> list[tuple[int, str, float]]
     """), {"ids": ids, "me": me, "hl": HALF_LIFE_DAYS})]
 
 
+def earned_cut(scored: list[tuple[int, float]], lo: int = 1, hi: int = 12) -> list[int]:
+    """Keep the strong ones: sort by score and cut at the largest relative drop (a project with two real children
+    shows two, one with ten shows ten), between lo and hi."""
+    scored = sorted(scored, key=lambda x: -x[1])
+    if len(scored) <= lo:
+        return [i for i, _ in scored]
+    cut, best = len(scored[:hi]), 0.0
+    for i in range(lo, min(len(scored), hi)):
+        prev, cur = scored[i - 1][1], scored[i][1]
+        drop = (prev - cur) / prev if prev > 0 else 0
+        if drop > best and drop >= 0.4:
+            cut, best = i, drop
+    return [i for i, _ in scored[:cut]]
+
+
+def children(s: Session, node: int, ntype: str) -> list[int]:
+    """A project's or org's children, the bigger picture first: the projects under it, then (for a project) its
+    checked people, its main group conversations and its key documents. Code files and one-off notices are detail
+    that lives inside a project, not next to it."""
+    if s.execute(text("SELECT COALESCE((props->>'hidden')::bool, false) FROM nodes WHERE id = :n"), {"n": node}).scalar():
+        return []
+    # Projects/threads under it (umbrellas, employers), weighted by their own size.
+    # Children you stated (or your resume did) always show; others earn their place by size.
+    stated = s.execute(text("""
+        SELECT DISTINCT e.src FROM edges e JOIN nodes c ON c.id = e.src
+        WHERE e.dst = :n AND e.type = 'PART_OF' AND c.type = 'Project' AND e.extractor IN ('user', 'profile')
+    """), {"n": node}).scalars().all()
+    subs = s.execute(text("""
+        SELECT c.id, COALESCE((c.props->>'records')::float, 1) FROM edges e JOIN nodes c ON c.id = e.src
+        WHERE e.dst = :n AND e.type = 'PART_OF' AND c.type = 'Project' AND NOT COALESCE((c.props->>'hidden')::bool, false)
+          AND e.extractor NOT IN ('user', 'profile')
+        UNION
+        SELECT c.id, COALESCE((c.props->>'records')::float, 1) FROM edges e JOIN nodes c ON c.id = e.dst
+        WHERE e.src = :n AND e.type = 'RELATED_TO' AND c.type = 'Project' AND e.extractor = 'thread-resolution'
+    """), {"n": node}).all()
+    if ntype == "Organization":
+        # An employer or school: its projects first (yours, under it), then the people you knew there.
+        people = s.execute(text("""
+            SELECT COALESCE(c.canonical_id, e.src), count(*) FROM edges e LEFT JOIN canonical c ON c.node_id = e.src
+            JOIN nodes p ON p.id = COALESCE(c.canonical_id, e.src)
+            WHERE e.dst = :n AND e.type IN ('WORKED_AT', 'MEMBER_OF') AND p.type = 'Person'
+              AND NOT COALESCE((p.props->>'self')::bool, false) AND COALESCE(p.props->>'kind', '') <> 'service'
+            GROUP BY 1""" ), {"n": node}).all()
+        return list(stated) + earned_cut([(i, w * 2) for i, w in subs]) + earned_cut([(i, float(w)) for i, w in people], hi=8)
+    if subs or stated:  # an umbrella: its projects are the picture; their detail is one click deeper
+        return list(stated) + [i for i in earned_cut([(i, w) for i, w in subs]) if i not in stated]
+    people = s.execute(text("""
+        SELECT e.src, COALESCE((e.props->>'items')::float, 1) FROM edges e JOIN nodes p ON p.id = e.src
+        WHERE e.dst = :n AND e.type = 'INVOLVED_IN' AND p.type = 'Person'
+          AND (e.props->>'verdict' = 'keep' OR e.extractor IN ('user', 'profile', 'contacts'))
+    """), {"n": node}).all()
+    convs = s.execute(text(f"""
+        SELECT it.dst, count(*) FROM edges pe JOIN nodes m ON m.id = pe.src AND m.type = 'Message'
+        JOIN edges it ON it.src = m.id AND it.type = 'IN_THREAD' JOIN nodes t ON t.id = it.dst
+        WHERE pe.dst = :n AND pe.type = 'PART_OF' AND t.id NOT IN {HIDDEN}
+          AND COALESCE((t.props->>'group')::bool, false)
+        GROUP BY it.dst
+    """), {"n": node}).all()
+    docs = s.execute(text(r"""
+        SELECT f.id, 1 + length(coalesce(si.body_text, '')) / 4000.0 FROM edges pe JOIN nodes f ON f.id = pe.src
+        JOIN source_items si ON si.id = f.source_item_id
+        WHERE pe.dst = :n AND pe.type = 'PART_OF' AND f.type = 'File'
+          AND f.name !~* '\.(ts|tsx|js|jsx|mjs|py|go|rs|java|c|h|cpp|json|ya?ml|toml|lock|css|scss|html?|sh|sql|txt|env|md)$'
+    """), {"n": node}).all()
+    return (earned_cut([(i, w) for i, w in people], hi=10) + earned_cut([(i, float(w)) for i, w in convs], hi=5)
+            + earned_cut([(i, float(w)) for i, w in docs], hi=4))
+
+
 def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, offset: int = 0) -> dict:
     """Reveal `node`'s top connections that aren't on screen yet. A category hub reveals its next members; a
     person reveals their strongest people, group chats, and events; a group or event reveals who's in it."""
@@ -869,37 +937,10 @@ def expand(s: Session, seed: int, node: int, visible: list[int], k: int = 6, off
                     picked.append(x)
                     used[t] = used.get(t, 0) + 1
             new.extend(picked[:k * 2])
-        elif ntype == "Project":  # its people, conversations, events and files (none if hidden)
-            # A project or life thread shows its substance: who's in it, the conversations (an email thread or
-            # group chat rather than each message), the events, and the documents, most recent first.
-            hidden = s.execute(text("SELECT COALESCE((props->>'hidden')::bool, false) FROM nodes WHERE id = :n"),
-                               {"n": node}).scalar()
-            rows = [] if hidden else s.execute(text(f"""
-                WITH m AS (SELECT e.src AS x, n.type, COALESCE((e.props->>'items')::float, (e.props->>'days')::float, 1) AS w,
-                                  si.occurred_at AS at
-                           FROM edges e JOIN nodes n ON n.id = e.src LEFT JOIN source_items si ON si.id = n.source_item_id
-                           WHERE e.dst = :n AND e.type IN ('PART_OF', 'INVOLVED_IN') AND e.src NOT IN {HIDDEN}
-                             -- people shown in a thread are checked ones (or stated by you); records may be unchecked
-                             AND (e.type <> 'INVOLVED_IN' OR e.props->>'verdict' = 'keep'
-                                  OR e.extractor IN ('user', 'profile', 'contacts'))),
-                -- messages collapse into their conversation: one email thread / chat per conversation
-                conv AS (SELECT it.dst AS x, 'Thread' AS type, count(*)::float AS w, max(m.at) AS at
-                         FROM m JOIN edges it ON it.src = m.x AND it.type = 'IN_THREAD'
-                         WHERE m.type = 'Message' GROUP BY it.dst)
-                SELECT x, type, w FROM (
-                    SELECT x, type, w, at FROM m WHERE type <> 'Message'
-                    UNION ALL SELECT x, type, w, at FROM conv
-                    -- what it's part of (a thread's lab or org), always shown first
-                    UNION ALL SELECT e.dst, 'Parent', 1000, NULL FROM edges e JOIN nodes p ON p.id = e.dst
-                              WHERE e.src = :n AND e.type = 'PART_OF' AND p.type = 'Project') q
-                ORDER BY w DESC, at DESC NULLS LAST LIMIT 120
-            """), {"n": node}).all()
-            quota = {"Parent": 2, "Project": 8, "Person": 8, "Thread": 6, "File": 6, "Event": 4, "Folder": 2}
-            used: dict[str, int] = {}
-            for p, t, _w in rows:
-                if p not in seen and p != head and used.get(t, 0) < quota.get(t, 2):
-                    new.append(p)
-                    used[t] = used.get(t, 0) + 1
+        elif ntype in ("Project", "Organization"):
+            # What it's made of, one level down: an umbrella (a lab, an employer) shows its projects; a project shows
+            # its people, its main conversations and its key documents. How many is earned (see earned_cut).
+            new.extend(p for p in children(s, node, ntype) if p not in seen and p != head)
         else:  # a group, event, org: everyone who actually takes part, strongest first
             # Every member who speaks (or attends), not a top-k: a 6-person chat where all six talk shows all
             # six. "Takes part" = 2+ messages or 2%+ of the group's messages, so a huge list's silent

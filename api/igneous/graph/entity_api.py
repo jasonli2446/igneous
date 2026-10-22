@@ -3,6 +3,8 @@
 Reads: GET /graph/entity/{id}. Corrections: POST /graph/entity/{id}/rename|hide|merge|unlink, each stored in
 `overrides` (graph/overrides.py) and applied immediately; DELETE /overrides/{id} undoes one.
 """
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -179,18 +181,18 @@ def edge_is_wrong(body: WrongEdgeBody, s: Session = Depends(get_session)):
     # A correction applies at the level you made it: "this email isn't part of that project" means its whole
     # conversation isn't, so every other message in the same thread linked the same way goes too.
     siblings = s.execute(text("""
-        SELECT m2.type || ':' || m2.key, x.type, x.extractor
+        SELECT m2.type || ':' || m2.key, x.type, x.extractor, x.id
         FROM edges src_e JOIN edges it ON it.src = src_e.src AND it.type = 'IN_THREAD'
         JOIN edges it2 ON it2.dst = it.dst AND it2.type = 'IN_THREAD' JOIN nodes m2 ON m2.id = it2.src
         JOIN edges x ON x.src = m2.id AND x.dst = src_e.dst AND x.type = src_e.type
         WHERE src_e.id = :i AND x.extractor <> 'spine' AND m2.id <> src_e.src"""), {"i": body.edge}).all()
-    for key, type_, extractor in siblings:
+    for key, type_, extractor, _id in siblings:
         verify.record_correction(s, key, e.b, type_, extractor, "drop", "you said this conversation isn't part of it")
     verify.apply_verdicts(s)
     from igneous.graph import dirty
     dirty.touch(s)  # the graph changed: cached views must not serve the old link
     s.commit()
-    return {"removed": body.edge, "also_removed": len(siblings)}
+    return {"removed": body.edge, "also_removed": len(siblings), "edges": [body.edge, *(r.id for r in siblings)]}
 
 
 class SamePersonBody(BaseModel):
@@ -218,3 +220,81 @@ def merge_people(node_id: int, body: SamePersonBody, s: Session = Depends(get_se
     s.commit()
     head = s.execute(text("SELECT COALESCE((SELECT canonical_id FROM canonical WHERE node_id = :n), :n)"), {"n": a}).scalar()
     return {"merged": [a, b], "person": head}
+
+
+class RestoreBody(BaseModel):
+    edges: list[int]
+
+
+@router.post("/graph/edge/restore")
+def restore_edges(body: RestoreBody, s: Session = Depends(get_session)):
+    """Undo "This is wrong": bring the removed links back and forget the verdicts that removed them."""
+    from igneous.graph import dirty
+    rows = s.execute(text("""
+        SELECT d.id, a.type || ':' || a.key AS a, b.type || ':' || b.key AS b, d.type, d.extractor
+        FROM edges_dropped d JOIN nodes a ON a.id = d.src JOIN nodes b ON b.id = d.dst WHERE d.id = ANY(:i)
+    """), {"i": body.edges}).all()
+    for r in rows:
+        s.execute(text("DELETE FROM edge_verdicts WHERE src_key = :a AND dst_key = :b AND type = :t AND extractor = :x"),
+                  {"a": r.a, "b": r.b, "t": r.type, "x": r.extractor})
+    s.execute(text("""
+        INSERT INTO edges SELECT id, src, dst, type, props - 'verdict' - 'reason', valid_from, valid_to, extractor,
+               extractor_version, model, confidence, source_item_id, span_start, span_end
+        FROM edges_dropped WHERE id = ANY(:i) ON CONFLICT DO NOTHING"""), {"i": [r.id for r in rows]})
+    s.execute(text("DELETE FROM edges_dropped WHERE id = ANY(:i)"), {"i": [r.id for r in rows]})
+    dirty.touch(s)
+    s.commit()
+    return {"restored": [r.id for r in rows]}
+
+
+# How two kinds of thing can be connected, in plain words (the add-a-connection menu), and the edge each means.
+RELATIONS = {
+    ("Person", "Project"): [("went on it / took part", "INVOLVED_IN"), ("connected to it", "RELATED_TO")],
+    ("Project", "Project"): [("part of it", "PART_OF"), ("related to it", "RELATED_TO")],
+    ("Project", "Organization"): [("done at / for it", "PART_OF")],
+    ("Person", "Organization"): [("worked or studied there", "WORKED_AT"), ("is part of it", "MEMBER_OF")],
+    ("Thread", "Project"): [("this chat is about it", "PART_OF")],
+    ("Event", "Project"): [("part of it", "PART_OF")],
+    ("File", "Project"): [("part of it", "PART_OF")],
+    ("Message", "Project"): [("part of it", "PART_OF")],
+}
+
+
+@router.get("/graph/link/options")
+def link_options(a: int, b: int, s: Session = Depends(get_session)):
+    """The plain-language ways two things can be connected (either direction), for the add-connection menu."""
+    ta, tb = (s.execute(text("SELECT type FROM nodes WHERE id = :i"), {"i": i}).scalar() for i in (a, b))
+    out = [{"label": lbl, "type": t, "src": a, "dst": b} for lbl, t in RELATIONS.get((ta, tb), [])]
+    out += [{"label": lbl, "type": t, "src": b, "dst": a} for lbl, t in RELATIONS.get((tb, ta), [])]
+    if ta == tb == "Person":
+        out.append({"label": "same person", "type": "SAME_AS", "src": min(a, b), "dst": max(a, b)})
+    return {"options": out or [{"label": "related", "type": "RELATED_TO", "src": a, "dst": b}]}
+
+
+class LinkBody(BaseModel):
+    src: int
+    dst: int
+    type: str
+    note: str | None = None
+
+
+@router.post("/graph/link")
+def add_link(body: LinkBody, s: Session = Depends(get_session)):
+    """Add a connection you know about: stored as yours (extractor 'user'), never checked or dropped by the AI, kept
+    on every rebuild. A 'same person' link merges the two identities."""
+    from igneous.graph import dirty, resolve
+    allowed = {t for opts in RELATIONS.values() for _l, t in opts} | {"SAME_AS", "RELATED_TO"}
+    if body.type not in allowed:
+        raise HTTPException(400, "Unknown kind of connection")
+    eid = s.execute(text("""
+        INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence)
+        VALUES (:a, :b, :t, CAST(:p AS jsonb), 'user', '1', 1.0)
+        ON CONFLICT (src, dst, type, extractor) DO UPDATE SET props = EXCLUDED.props RETURNING id
+    """), {"a": body.src, "b": body.dst, "t": body.type,
+           "p": json.dumps({"why": body.note or "you added this", "reason": body.note or "You added this connection."})}
+    ).scalar_one()
+    if body.type == "SAME_AS":
+        resolve.refresh_canonical(s)
+    dirty.touch(s)
+    s.commit()
+    return {"id": eid, "src": body.src, "dst": body.dst, "type": body.type}

@@ -9,7 +9,7 @@ import Inspector from "@/components/Inspector";
 import { useTheme } from "@/components/ThemeToggle";
 import { InlineError, TopProgress } from "@/components/ui";
 import WhyConnected from "@/components/WhyConnected";
-import { api, GNode, Subgraph, Thing } from "@/lib/api";
+import { api, GEdge, GNode, Subgraph, Thing } from "@/lib/api";
 
 // WebGL libraries touch window at import time, so they can't render on the server.
 const Graph3D = dynamic(() => import("@/components/Graph3D"), { ssr: false });
@@ -162,13 +162,38 @@ export default function Explorer() {
   // Click a node: reveal its top connections; click it again to fold them back.
   // "This is wrong": take that link off the screen in place (no reload, no reflow). A node that was only on screen
   // because of it goes too; one with other links stays.
-  const dropLink = useCallback(({ src, dst }: { src: number; dst: number }) => {
+  // A short "Undo" after a correction; it says what changed so a click is never a surprise.
+  const [toast, setToast] = useState<{ text: string; undo: () => void } | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = useCallback((text: string, undo: () => void) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast({ text, undo });
+    toastTimer.current = setTimeout(() => setToast(null), 7000);
+  }, []);
+
+  const dropLink = useCallback(({ src, dst, edges, text }: { src: number; dst: number; edges?: number[]; text?: string }) => {
+    let removed: Subgraph | null = null;
     setData((prev) => {
+      removed = prev;
       const edges = prev.edges.filter((e) => !((e.src === src && e.dst === dst) || (e.src === dst && e.dst === src)));
       const linked = new Set(edges.flatMap((e) => [e.src, e.dst]));
       const seed = prev.nodes.find((n) => n.kind === "seed")?.id;
       return { ...prev, edges, nodes: prev.nodes.filter((n) => n.id === seed || linked.has(n.id)) };
     });
+    if (edges?.length && text) {
+      showToast(text, () => {
+        api.restoreEdges(edges).then(() => { if (removed) setData(removed); setToast(null); }).catch(() => {});
+      });
+    }
+  }, [showToast]);
+
+  // A connection you added shows up now: the other end joins the graph if it wasn't already there.
+  const addLink = useCallback((node: GNode, edge: GEdge) => {
+    setData((prev) => ({
+      ...prev,
+      nodes: prev.nodes.some((n) => n.id === node.id) ? prev.nodes : [...prev.nodes, node],
+      edges: [...prev.edges.filter((e) => e.id !== edge.id), edge],
+    }));
   }, []);
 
   // Links each expand added (so collapsing removes exactly those, including links between nodes already shown).
@@ -367,6 +392,13 @@ export default function Explorer() {
         </div>
       )}
 
+      {toast && (
+        <div role="status" className="absolute bottom-12 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 rounded-md border border-line bg-panel px-3 py-2 text-xs shadow-lg">
+          <span className="text-soft">{toast.text}</span>
+          <button onClick={toast.undo} className="font-medium text-accent hover:underline">Undo</button>
+        </div>
+      )}
+
       {/* Right: details, only while something is selected. */}
       <aside aria-hidden={!panelOpen} inert={!panelOpen}
         className={`absolute inset-y-0 right-0 z-20 w-full max-w-96 overflow-y-auto border-l border-line bg-panel transition-transform duration-200 ${panelOpen ? "translate-x-0" : "translate-x-full"}`}>
@@ -379,6 +411,7 @@ export default function Explorer() {
             expanded={detailId !== null && expanded.has(detailId)}
             onSelectAction={openFromPanel}
             onWhyAction={(a, b) => setWhy({ a, b })}
+            onLinkedAction={addLink}
             onChangedAction={async (keep) => { await load(trail[trail.length - 1] ?? null, false); if (keep !== null) setSelected(keep); }} />
         )}
       </aside>

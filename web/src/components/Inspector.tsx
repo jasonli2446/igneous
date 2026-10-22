@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import ConnectTo from "@/components/ConnectTo";
 import EntityInspector from "@/components/EntityInspector";
 import NodeSummary from "@/components/NodeSummary";
 import Sources from "@/components/SourceList";
 import { InlineError, Skeleton } from "@/components/ui";
 import { typeLabel } from "@/lib/graph-style";
-import { api, NodeDetail, TYPE_COLORS } from "@/lib/api";
+import { api, GEdge, GNode, NodeDetail, TYPE_COLORS } from "@/lib/api";
 
 type Props = {
   id: number | null; onExpandAction: (id: number) => void | Promise<void>; onCloseAction?: () => void;
@@ -14,6 +15,7 @@ type Props = {
   expanded?: boolean;
   // Projects are editable: selecting one of their members, and re-fetching the graph after a correction.
   onSelectAction?: (id: number) => void; onWhyAction?: (a: number, b: number) => void; onChangedAction?: (keep: number | null) => void;
+  onLinkedAction?: (node: GNode, edge: GEdge) => void;
 };
 
 const when = (iso: string) =>
@@ -44,7 +46,7 @@ function InspectorSkeleton() {
   );
 }
 
-export default function Inspector({ id, onExpandAction, onCloseAction, onSelectAction, onWhyAction, onChangedAction, expanded }: Props) {
+export default function Inspector({ id, onExpandAction, onCloseAction, onSelectAction, onWhyAction, onChangedAction, onLinkedAction, expanded }: Props) {
   const [busy, setBusy] = useState(false);
   const [node, setNode] = useState<NodeDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -67,7 +69,7 @@ export default function Inspector({ id, onExpandAction, onCloseAction, onSelectA
   if (!node) return <InspectorSkeleton />;
   if (node.type === "Project" && onSelectAction) {
     return <EntityInspector id={node.id} onSelectAction={onSelectAction} onCloseAction={onCloseAction}
-      onChangedAction={onChangedAction ?? (() => {})} />;
+      onChangedAction={onChangedAction ?? (() => {})} onLinkedAction={onLinkedAction} />;
   }
 
   const src = node.source_item;
@@ -101,6 +103,8 @@ export default function Inspector({ id, onExpandAction, onCloseAction, onSelectA
         {busy ? (expanded ? "Hiding…" : "Finding connections…")
           : expanded ? "Hide their connections" : "Show their connections on the graph"}
       </button>
+
+      <ConnectTo id={node.id} name={node.name} onLinkedAction={onLinkedAction} />
 
       {node.type === "Person" && <SamePerson id={node.id} onDone={(person) => { onChangedAction?.(person); }} />}
 
