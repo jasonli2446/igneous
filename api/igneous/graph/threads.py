@@ -285,7 +285,7 @@ def run(s: Session, log=print) -> int:
     from igneous.graph import overrides
 
     cands = candidates(s)
-    s.execute(text("DELETE FROM edges WHERE extractor IN (:x, 'hierarchy')"), {"x": EXTRACTOR})
+    s.execute(text("DELETE FROM edges WHERE extractor IN (:x, 'hierarchy', 'thread-resolution')"), {"x": EXTRACTOR})
     keep_keys = []
     built = 0
     for c in cands:
@@ -324,6 +324,15 @@ def run(s: Session, log=print) -> int:
                                    "VALUES (:e, :sid, 'member', '{}')"), {"e": eid, "sid": sid})
         built += 1
         log(f"  thread {props['kind']:10s} sources={len(c['sources'])} items={len(c['items'])}") if log else None
+    # Before deleting stale threads and finding umbrellas: fold duplicates (one ETA, not eighteen) and link
+    # related threads, so umbrellas see one thread per real thing.
+    s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'
+                      AND NOT COALESCE((props->>'umbrella')::bool, false) AND NOT (key = ANY(:keep))"""),
+              {"keep": keep_keys})
+    s.commit()
+    from igneous.graph import resolve_threads
+    resolve_threads.run(s, log=None)
+    keep_keys[:] = s.execute(text("SELECT key FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'")).scalars().all()
     built += umbrellas(s, keep_keys)
     # Threads that no longer qualify go away (corrections in overrides survive: they key on node keys).
     s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'
