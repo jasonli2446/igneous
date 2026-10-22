@@ -1830,3 +1830,13 @@ def test_only_group_conversations_become_thread_nodes():
     # a one-on-one conversation stays a conversation (it feeds the person's closeness) but isn't a second node
     assert "'hidden', NOT (flag.ok AND flag.grp)" in sql and ">= 3 AS grp" in sql
     assert "'conversational', flag.ok" in sql
+
+
+def test_one_way_bulk_senders_are_services_but_colleagues_are_not():
+    from igneous.graph import self_identity
+
+    sql = str(self_identity.ONE_WAY_SENDERS)
+    assert "NOT IN (SELECT p FROM i_wrote)" in sql            # you never wrote to them
+    assert "named_by' IS DISTINCT FROM 'contacts'" in sql      # not a saved contact
+    assert "NOT IN (SELECT d FROM my_domains)" in sql          # not at a domain you write to (school, employer)
+    assert "bulk >= 0.8 * sent.n" in sql                       # what they send is mostly notifications/marketing
