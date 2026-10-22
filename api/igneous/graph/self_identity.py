@@ -37,13 +37,18 @@ RELAY_NAME = re.compile(r"\((via |Google |from )[^)]*\)\s*$", re.I)
 RELAY_DOMAINS = ("docs.google.com", "drive.google.com", "calendar-server.bounces.google.com")
 
 
+BOT_LOGIN = re.compile(r"(\[bot\]|-bot|^bot-|^dependabot|^renovate|^github-actions)$|\[bot\]", re.I)
+
+
 def is_service_address(addr: str) -> bool:
+    if addr.lower().startswith("github:"):
+        return bool(BOT_LOGIN.search(addr.split(":", 1)[1]))  # vercel[bot], dependabot: automation, not people
     if "@" not in addr:
         # SMS short codes (banks, verification codes, delivery alerts) are 5-6 digits: automated, never a person.
         return bool(re.fullmatch(r"\d{3,6}", addr.strip()))
     local, domain = addr.lower().rsplit("@", 1)
     if domain.endswith("users.noreply.github.com"):
-        return False  # a real person's GitHub commit address
+        return bool(BOT_LOGIN.search(local))  # a real person's commit address, unless it's a bot's
     return domain.endswith(SERVICE_DOMAINS + RELAY_DOMAINS) or bool(SERVICE_LOCAL.search(local))
 
 

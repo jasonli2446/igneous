@@ -1933,3 +1933,11 @@ def test_a_shared_context_explains_a_tie_and_services_are_never_relationships():
     assert traversal.CONTAINED >= 0.75
     assert "contexts_of" in inspect.getsource(traversal.expand) and "contexts_of" in inspect.getsource(traversal._ties)
     assert "'service'" in inspect.getsource(traversal.relationships)
+
+
+def test_bot_accounts_are_services():
+    from igneous.graph.self_identity import is_service_address
+
+    assert is_service_address("github:vercel[bot]") and is_service_address("github:dependabot[bot]")
+    assert not is_service_address("github:aadhavsb")
+    assert not is_service_address("1+someone@users.noreply.github.com")
