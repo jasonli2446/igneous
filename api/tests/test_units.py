@@ -1870,3 +1870,11 @@ def test_profile_only_counts_documents_about_you():
     assert not _is_me("John Smith", {"jane doe"})           # a friend's resume in your Drive isn't yours
     assert not _is_me("Jane", {"jane doe"})                 # a first name alone isn't proof
     assert _date("2026-06") == "2026-06-01" and _date("present") is None
+
+
+def test_earned_cut_keeps_the_strong_ones():
+    from igneous.graph.traversal import earned_cut
+
+    assert earned_cut([(1, 100), (2, 90), (3, 10), (4, 9)]) == [1, 2]     # a clear drop after the strong two
+    assert len(earned_cut([(i, 50 - i) for i in range(10)])) == 10        # ten similar ones all show
+    assert earned_cut([(1, 5)]) == [1]
