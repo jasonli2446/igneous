@@ -52,14 +52,18 @@ function range(a: string | null, b: string | null) {
 }
 
 /** The evidence behind a link: what two people actually share. */
-export default function WhyConnected({ a, b, onCloseAction, onOpenAction }: {
+export default function WhyConnected({ a, b, onCloseAction, onOpenAction, onChangedAction }: {
   a: number; b: number; onCloseAction: () => void; onOpenAction: (id: number) => void;
+  /** The graph changed (a link was removed): the page reloads what's on screen. */
+  onChangedAction?: () => void;
 }) {
   const [r, setR] = useState<Explanation | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   // "This is wrong": your verdict removes the link now and keeps it gone on every rebuild.
-  const wrong = (edge: number) => { api.edgeIsWrong(edge).then(() => setAttempt((n) => n + 1)).catch((e) => setErr(String(e))); };
+  const wrong = (edge: number) => {
+    api.edgeIsWrong(edge).then(() => { setAttempt((n) => n + 1); onChangedAction?.(); }).catch((e) => setErr(String(e)));
+  };
 
   useEffect(() => {
     let live = true;
