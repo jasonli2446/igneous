@@ -133,6 +133,8 @@ def candidates(s: Session) -> list[dict]:
             win = its[lo:hi + 1]
             out.append({"term": term, "start": win[0].occurred_at, "end": win[-1].occurred_at,
                         "items": {r.id: r for r in win}, "sources": Counter(r.source for r in win)})
+    # Repeating terms are kept (a weekly game repeats); whether a candidate names a real thing is the judge's
+    # call, measured against the gold set in eval/threads_gold.json rather than tuned by hand.
     return _merge(out)
 
 
@@ -181,8 +183,26 @@ def _people(s: Session, item_ids: list[int]) -> list[tuple[int, int, list[int]]]
     """), {"ids": item_ids}).all()
 
 
+def _sample(items: list, n: int = 40) -> list:
+    """Spread across the window and the sources, so the judge sees the whole candidate, not its first days."""
+    items = sorted(items, key=lambda r: r.occurred_at)
+    if len(items) <= n:
+        return items
+    by_src: dict[str, list] = defaultdict(list)
+    for r in items:
+        by_src[r.source].append(r)
+    out: list = []
+    while len(out) < n and any(by_src.values()):
+        for src in list(by_src):
+            lst = by_src[src]
+            if lst:
+                out.append(lst.pop(len(lst) // 2 if len(out) % 2 else 0))
+    return sorted(out[:n], key=lambda r: r.occurred_at)
+
+
 def _judge(s: Session, c: dict) -> dict:
-    """Name and classify a candidate. Model only with opted-in sources; cached per candidate content."""
+    """Decide what the candidate is, which of its records belong, and which words define it. Model only with
+    opted-in sources; cached per candidate content. Fallback (no model): the seed term defines it."""
     from igneous.graph.extract import allowed_sources
     from igneous.llm import LLMDisabled, structured
 
@@ -190,38 +210,61 @@ def _judge(s: Session, c: dict) -> dict:
     month = c["start"].strftime("%b %Y") if c["start"].strftime("%b %Y") == c["end"].strftime("%b %Y") \
         else f"{c['start']:%b}-{c['end']:%b %Y}"
     fallback = {"keep": True, "kind": "thread", "name": f"{c['terms'][0]} · {month}", "confidence": 0.6,
-                "judged": False}
-    shown = [r for r in c["items"].values() if r.source in allowed][:40]
+                "judged": False, "defining_terms": [c["terms"][0]], "members": None}
+    shown = _sample([r for r in c["items"].values() if r.source in allowed])
     if not settings.llm_enabled or not shown:
         return fallback
-    lines = [f"- [{r.source}, {r.occurred_at:%Y-%m-%d}] {r.title[:120]} :: {re.sub(r'\\s+', ' ', r.body)[:240]}"
-             for r in shown]
+    lines = [f"{i}. [{r.source}, {r.occurred_at:%Y-%m-%d}] {r.title[:120]} :: {re.sub(r'\\s+', ' ', r.body)[:240]}"
+             for i, r in enumerate(shown)]
     others = {src: n for src, n in c["sources"].items() if src not in allowed}
-    prompt = (f"Terms: {', '.join(c['terms'][:6])}\nWindow: {c['start']:%Y-%m-%d} to {c['end']:%Y-%m-%d}\n"
-              f"Items (opted-in sources):\n" + "\n".join(lines) +
-              (f"\nAlso, items not shown (counts only): {json.dumps(others)}" if others else ""))
-    key = "threads-judge:v1:" + hashlib.sha256(prompt.encode()).hexdigest()
+    prompt = (f"Shared terms: {', '.join(c['terms'][:8])}\nWindow: {c['start']:%Y-%m-%d} to {c['end']:%Y-%m-%d}"
+              f" ({len(c['items'])} records; a sample is listed)\nRecords:\n" + "\n".join(lines) +
+              (f"\nAlso, records not shown (counts only): {json.dumps(others)}" if others else ""))
+    key = "threads-judge:v2:" + hashlib.sha256(prompt.encode()).hexdigest()
     cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
-    if cached is not None:
-        return {**cached, "judged": True}
-    try:
-        out, _ = structured(
-            "You find the threads of someone's life in their records: a trip, a class, a job or internship, a "
-            "hobby, a project, a club, an event they planned. Given records that share some terms within a time "
-            "window, decide whether they are one such thread. If yes, name it the way the person would refer to "
-            "it in conversation (short: 'Seattle trip', 'CSDS 395', 'KKR internship', 'Draw Steel'), and say "
-            "what kind of thing it is in one or two words. If the records are unrelated or just share a common "
-            "word (a newsletter topic, a place mentioned in passing), keep=false. Use only what the records show.",
-            prompt,
-            {"type": "object", "additionalProperties": False, "required": ["keep", "kind", "name", "confidence"],
-             "properties": {"keep": {"type": "boolean"}, "kind": {"type": "string"}, "name": {"type": "string"},
-                            "confidence": {"type": "number"}}},
-            max_tokens=400)
-    except LLMDisabled:
-        return fallback
-    s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb)) "
-                   "ON CONFLICT (cache_key) DO NOTHING"), {"k": key, "r": json.dumps(out)})
-    return {**out, "judged": True}
+    if cached is None:
+        try:
+            cached, _ = structured(
+                "You find the threads of someone's life in their records: a trip, a class, a job or internship, a "
+                "hobby, a project, a club, an event they planned. These records were grouped because they share "
+                "some words within a time window, but sharing a word doesn't make them one thing. Decide: is "
+                "there a real thread here? If yes: name it the way the person would say it ('Seattle trip', "
+                "'CSDS 395', 'Draw Steel'), say what kind of thing it is, list the words that actually identify "
+                "it (its name, nicknames, codes, not generic words like 'other', 'meeting', 'notes'), and list "
+                "the numbers of ONLY the records that are about it. Leave out records that merely share a word "
+                "(an unrelated meeting, a newsletter). If there is no single thread, keep=false.",
+                prompt,
+                {"type": "object", "additionalProperties": False,
+                 "required": ["keep", "kind", "name", "confidence", "defining_terms", "members"],
+                 "properties": {"keep": {"type": "boolean"}, "kind": {"type": "string"}, "name": {"type": "string"},
+                                "confidence": {"type": "number"},
+                                "defining_terms": {"type": "array", "items": {"type": "string"}},
+                                "members": {"type": "array", "items": {"type": "integer"}}}},
+                max_tokens=900)
+        except LLMDisabled:
+            return fallback
+        s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb)) "
+                       "ON CONFLICT (cache_key) DO NOTHING"), {"k": key, "r": json.dumps(cached)})
+    judged_ids = [shown[i].id for i in cached.get("members", []) if 0 <= i < len(shown)]
+    return {**cached, "judged": True, "members": judged_ids, "shown": [r.id for r in shown]}
+
+
+def _belongs(c: dict, verdict: dict) -> list:
+    """The candidate's records that belong: those the judge picked from its sample, plus unseen records that
+    name one of its defining terms. A shown record the judge left out is out."""
+    if verdict.get("members") is None:  # no judge: the seed term defines it
+        terms = [t.lower() for t in verdict.get("defining_terms") or c["terms"][:1]]
+        return [r for r in c["items"].values() if any(t in (r.title + " " + r.body).lower() for t in terms)]
+    shown, picked = set(verdict.get("shown", [])), set(verdict["members"])
+    terms = [t.lower() for t in verdict.get("defining_terms") or [] if len(t) >= 3]
+    out = []
+    for r in c["items"].values():
+        if r.id in shown:
+            if r.id in picked:
+                out.append(r)
+        elif terms and any(t in (r.title + " " + r.body).lower() for t in terms):
+            out.append(r)
+    return out
 
 
 def _edge(s: Session, src: int, dst: int, type_: str, props: dict, sid: int | None, conf: float) -> int:
@@ -249,10 +292,15 @@ def run(s: Session, log=print) -> int:
         verdict = _judge(s, c)
         if not verdict.get("keep"):
             continue
+        members = _belongs(c, verdict)
+        if len(members) < 3:
+            continue  # once unrelated records are removed, too little is left to be a thread
         key = "thread:" + hashlib.sha256((c["terms"][0].lower() + c["start"].strftime("%Y-%m")).encode()).hexdigest()[:16]
         keep_keys.append(key)
-        props = {"derived": "threads", "kind": verdict.get("kind") or "thread", "terms": c["terms"][:6],
-                 "start": c["start"].isoformat(), "end": c["end"].isoformat(), "sources": dict(c["sources"]),
+        props = {"derived": "threads", "kind": verdict.get("kind") or "thread",
+                 "terms": (verdict.get("defining_terms") or c["terms"])[:6],
+                 "start": c["start"].isoformat(), "end": c["end"].isoformat(),
+                 "sources": dict(Counter(r.source for r in members)), "records": len(members),
                  "judged": verdict.get("judged", False), "confidence": verdict.get("confidence"),
                  "suggested": (verdict.get("confidence") or 0) < MIN_CONFIDENCE}
         tid = s.execute(text("""
@@ -262,10 +310,12 @@ def run(s: Session, log=print) -> int:
                 props = nodes.props || EXCLUDED.props
             RETURNING id
         """), {"k": key, "n": verdict["name"][:80], "p": json.dumps(props)}).scalar_one()
-        for it in c["items"].values():
+        defining = (verdict.get("defining_terms") or c["terms"][:1])[0]
+        for it in members:
             if it.node_id:
-                _edge(s, it.node_id, tid, "PART_OF", {"why": "mentions " + c["terms"][0]}, it.id, 0.6)
-        for p, n, ev in _people(s, list(c["items"].keys())):
+                why = "picked by the judge" if it.id in set(verdict.get("members") or []) else f"mentions {defining}"
+                _edge(s, it.node_id, tid, "PART_OF", {"why": why}, it.id, 0.6)
+        for p, n, ev in _people(s, [r.id for r in members]):
             # Record the very items that make them a member, so the verifier and the "why" view read those.
             eid = _edge(s, p, tid, "INVOLVED_IN", {"why": f"in {n} of its records", "items": n}, None, 0.6)
             for sid in ev or []:
@@ -316,6 +366,9 @@ def umbrellas(s: Session, keep_keys: list[str]) -> int:
         """), {"q": f"%{term}%"}).scalar()
         if (months or 0) < UMBRELLA_MONTHS:
             continue
+        names = dict(s.execute(text("SELECT id, name FROM nodes WHERE id = ANY(:i)"), {"i": list(by_thread)}).all())
+        if not _is_umbrella(s, term, [names[t] for t in by_thread if t in names], months):
+            continue
         key = "umbrella:" + term.lower()
         keep_keys.append(key)
         uid = s.execute(text("""
@@ -343,3 +396,32 @@ def umbrellas(s: Session, keep_keys: list[str]) -> int:
                                "VALUES (:e, :sid, 'umbrella', '{}')"), {"e": eid, "sid": sid})
         built += 1
     return built
+
+
+def _is_umbrella(s: Session, term: str, thread_names: list[str], months: int) -> bool:
+    """Is `term` the name of an organization, lab, program, club or team these threads belong to? Boilerplate
+    shared across threads ("Zoom", "Best", "Eastern Time") isn't. Cached; without the model, not accepted."""
+    from igneous.llm import LLMDisabled, structured
+
+    if not settings.llm_enabled:
+        return False
+    prompt = f"Term: {term}\nPresent across {months} months.\nThreads whose records often mention it:\n" + \
+        "\n".join(f"- {n}" for n in sorted(thread_names)[:20])
+    key = "threads-umbrella:v1:" + hashlib.sha256(prompt.encode()).hexdigest()
+    cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
+    if cached is None:
+        try:
+            cached, _ = structured(
+                "Decide whether a term is the name of an organization, lab, program, club, team or company that "
+                "the listed projects/threads belong to (e.g. a university lab running several client projects). "
+                "Generic words, tools used everywhere (Zoom, Canvas), places, times, people's names and email "
+                "boilerplate are NOT. Answer only from the term and the thread names.",
+                prompt,
+                {"type": "object", "additionalProperties": False, "required": ["umbrella", "confidence"],
+                 "properties": {"umbrella": {"type": "boolean"}, "confidence": {"type": "number"}}},
+                max_tokens=120)
+        except LLMDisabled:
+            return False
+        s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb)) "
+                       "ON CONFLICT (cache_key) DO NOTHING"), {"k": key, "r": json.dumps(cached)})
+    return bool(cached.get("umbrella")) and (cached.get("confidence") or 0) >= 0.7
