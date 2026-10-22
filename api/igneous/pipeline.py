@@ -28,7 +28,17 @@ def run_all(s: Session) -> dict:
 
 def stages(extract: int = 0) -> dict:
     """Every pipeline stage by name, in run order (shared by `igneous pipeline` and the UI's Rebuild button)."""
-    from igneous.graph import entities, organizations, resolve, self_identity, spine, threads, topics, verify
+    from igneous.graph import (
+        entities,
+        organizations,
+        profile,
+        resolve,
+        self_identity,
+        spine,
+        threads,
+        topics,
+        verify,
+    )
     from igneous.graph import extract as ex
     from igneous.rag import chunking, embed
 
@@ -37,6 +47,8 @@ def stages(extract: int = 0) -> dict:
             "topics": topics.run,
             "entities": lambda s: entities.run(s, log=None),
             # Life threads (trips, classes, jobs, hobbies): after entities, so named projects exist first.
+            # Your resume first: where you worked/studied and your projects anchor everything else.
+            "profile": lambda s: profile.run(s, log=None),
             "threads": lambda s: threads.run(s, log=None),
             # self before resolve: the "you" links must exist when identities are merged
             "self": lambda s: self_identity.run(s)["self_links"],

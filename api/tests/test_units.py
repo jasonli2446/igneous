@@ -1861,3 +1861,12 @@ def test_person_merge_is_a_trusted_user_link():
     src = inspect.getsource(entity_api.merge_people)
     assert "'SAME_AS'" in src and "'user'" in src        # stored as your identity link
     assert "user" in resolve.TRUSTED                      # which resolution always honors on every rebuild
+
+
+def test_profile_only_counts_documents_about_you():
+    from igneous.graph.profile import _date, _is_me
+
+    assert _is_me("Jane Q. Doe", {"jane doe", "jdoe"})
+    assert not _is_me("John Smith", {"jane doe"})           # a friend's resume in your Drive isn't yours
+    assert not _is_me("Jane", {"jane doe"})                 # a first name alone isn't proof
+    assert _date("2026-06") == "2026-06-01" and _date("present") is None
