@@ -1,10 +1,20 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import TimelineExplorer from "@/components/TimelineExplorer";
 import { SourceRows } from "@/components/SourceList";
 import { InlineError, Skeleton } from "@/components/ui";
 import { api, Explanation, WhyEdge } from "@/lib/api";
+
+// Where a link came from, in plain words (instead of internal stage names).
+const ORIGIN: Record<string, string> = {
+  spine: "Straight from your data (who sent and received it, or the conversation it's in).",
+  contacts: "From your contacts.",
+  threads: "Suggested automatically from shared words and timing; not checked yet.",
+  hierarchy: "Suggested automatically from the names; not checked yet.",
+  "thread-resolution": "Suggested automatically; not checked yet.",
+  er: "Matched automatically by name and contacts; not checked yet.",
+  organizations: "Suggested from email domains and work history; not checked yet.",
+};
 
 const REL: Record<string, string> = {
   CORRESPONDS: "corresponds with", PART_OF: "is part of", INVOLVED_IN: "is involved in", RELATED_TO: "is related to",
@@ -13,7 +23,7 @@ const REL: Record<string, string> = {
 };
 
 /** One link: who and how, the verifier's reason when it has judged it, and the items it came from. */
-function EdgeCard({ e, terms }: { e: WhyEdge; terms: string[] }) {
+function EdgeCard({ e, terms, onWrong }: { e: WhyEdge; terms: string[]; onWrong?: (id: number) => void }) {
   return (
     <li className="rounded-md border border-line p-2.5">
       <div className="flex items-start gap-2">
@@ -24,8 +34,13 @@ function EdgeCard({ e, terms }: { e: WhyEdge; terms: string[] }) {
       </div>
       {e.reason
         ? <p className="mt-1 text-xs leading-relaxed text-soft">{e.reason}</p>
-        : <p className="mt-1 text-xs text-muted">No verified reason yet; found by {e.extractor === "spine" ? "message headers" : e.extractor}.</p>}
+        : <p className="mt-1 text-xs text-muted">{ORIGIN[e.extractor] ?? "Inferred automatically; not checked yet."}</p>}
       {e.evidence.length > 0 && <div className="mt-2"><SourceRows items={e.evidence} highlight={terms} /></div>}
+      {e.extractor !== "spine" && onWrong && (
+        <button onClick={() => onWrong(e.id)} className="mt-2 text-xs text-muted hover:text-danger hover:underline">
+          This is wrong
+        </button>
+      )}
     </li>
   );
 }
@@ -43,6 +58,8 @@ export default function WhyConnected({ a, b, onCloseAction, onOpenAction }: {
   const [r, setR] = useState<Explanation | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+  // "This is wrong": your verdict removes the link now and keeps it gone on every rebuild.
+  const wrong = (edge: number) => { api.edgeIsWrong(edge).then(() => setAttempt((n) => n + 1)).catch((e) => setErr(String(e))); };
 
   useEffect(() => {
     let live = true;
@@ -76,22 +93,22 @@ export default function WhyConnected({ a, b, onCloseAction, onOpenAction }: {
               across {r.conversations.length} conversation{r.conversations.length === 1 ? "" : "s"}</>}
             {r.messages > 0 && r.events.length > 0 && ", and "}
             {r.events.length > 0 && <>{r.events.length} shared event{r.events.length === 1 ? "" : "s"}</>}
-            {r.messages === 0 && r.events.length === 0 && (r.direct.length > 0 || r.path ? "They share no direct messages." : "No connection found within three steps.")}
+            {r.messages === 0 && r.events.length === 0 && !r.direct.length && !r.path && "No connection found within three steps."}
           </p>
 
           {r.direct.length > 0 && (
             <section aria-label="Why linked">
               <h3 className="mb-2 text-xs font-medium text-muted">Why they&apos;re linked</h3>
-              <ul className="space-y-2">{r.direct.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} />)}</ul>
+              <ul className="space-y-2">{r.direct.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} onWrong={wrong} />)}</ul>
             </section>
           )}
 
           {r.direct.length === 0 && r.path && (
             <section aria-label="Path">
               <h3 className="mb-2 text-xs font-medium text-muted">
-                No direct link. The shortest route is {r.path.length} step{r.path.length === 1 ? "" : "s"}
+                {r.path.length <= 2 ? "How they're linked" : `Linked through ${r.path.length - 1} other thing${r.path.length === 2 ? "" : "s"}`}
               </h3>
-              <ul className="space-y-2">{r.path.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} />)}</ul>
+              <ul className="space-y-2">{r.path.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} onWrong={wrong} />)}</ul>
             </section>
           )}
 
@@ -141,7 +158,6 @@ export default function WhyConnected({ a, b, onCloseAction, onOpenAction }: {
               </ul>
             </section>
           )}
-          <TimelineExplorer a={a} b={b} title="Relationship timeline" />
         </>
       )}
     </div>

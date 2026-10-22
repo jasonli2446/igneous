@@ -326,6 +326,7 @@ export const api = {
   expandNode: (seed: number, node: number, visible: number[], offset = 0, signal?: AbortSignal) =>
     get<Subgraph>("/graph/expand", { seed, node, visible, offset }, signal),
   explain: (a: number, b: number) => get<Explanation>("/graph/explain", { a, b }),
+  edgeIsWrong: (edge: number) => send<{ removed: number }>("POST", "/graph/edge/wrong", { edge }),
   timeline: (a: number, b?: number, limit = 50, signal?: AbortSignal) =>
     get<Timeline>("/timeline", { a, b, limit }, signal),
   entity: (id: number) => get<EntityDetail>(`/graph/entity/${id}`, {}),

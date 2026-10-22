@@ -266,7 +266,10 @@ def run(s: Session, log=print, budget: int = BUDGET) -> dict:
             stats["cached"] += 1
             continue
         todo.setdefault((edge["type"], edge["extractor"]), []).append((edge, desc, digest))
-    for claim, items in todo.items():
+    # What people see first is judged first: who's in a thread, what sits under an org, which identities merge;
+    # then the many item links. A run that hits its budget never leaves the people lists unchecked.
+    order = {"INVOLVED_IN": 0, "SAME_AS": 1, "RELATED_TO": 2, "WORKED_AT": 3, "PART_OF": 4, "INTRODUCED": 5}
+    for claim, items in sorted(todo.items(), key=lambda kv: (order.get(kv[0][0], 9), kv[0][1] != "hierarchy")):
         for i in range(0, len(items), BATCH):
             if stats["calls"] >= budget:
                 break

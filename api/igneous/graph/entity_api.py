@@ -156,3 +156,36 @@ def undo(override_id: int, s: Session = Depends(get_session)):
         overrides.apply(s)
         s.commit()
     return {"undone": override_id, "op": row["op"]}
+
+
+class WrongEdgeBody(BaseModel):
+    edge: int
+
+
+@router.post("/graph/edge/wrong")
+def edge_is_wrong(body: WrongEdgeBody, s: Session = Depends(get_session)):
+    """'This is wrong' on any derived link: recorded as your verdict (it stays gone on every rebuild and teaches
+    the verifier), and the link leaves the graph now. Links read straight from your data (who sent an email) can't
+    be wrong this way; only inferred ones can."""
+    from igneous.graph import verify
+    e = s.execute(text("""
+        SELECT e.type, e.extractor, a.type || ':' || a.key AS a, b.type || ':' || b.key AS b
+        FROM edges e JOIN nodes a ON a.id = e.src JOIN nodes b ON b.id = e.dst WHERE e.id = :i"""), {"i": body.edge}).first()
+    if e is None:
+        raise HTTPException(404, "No such link")
+    if e.extractor == "spine":
+        raise HTTPException(400, "This link comes straight from your data, not from inference")
+    verify.record_correction(s, e.a, e.b, e.type, e.extractor, "drop", "you said this is wrong")
+    # A correction applies at the level you made it: "this email isn't part of that project" means its whole
+    # conversation isn't, so every other message in the same thread linked the same way goes too.
+    siblings = s.execute(text("""
+        SELECT m2.type || ':' || m2.key, x.type, x.extractor
+        FROM edges src_e JOIN edges it ON it.src = src_e.src AND it.type = 'IN_THREAD'
+        JOIN edges it2 ON it2.dst = it.dst AND it2.type = 'IN_THREAD' JOIN nodes m2 ON m2.id = it2.src
+        JOIN edges x ON x.src = m2.id AND x.dst = src_e.dst AND x.type = src_e.type
+        WHERE src_e.id = :i AND x.extractor <> 'spine' AND m2.id <> src_e.src"""), {"i": body.edge}).all()
+    for key, type_, extractor in siblings:
+        verify.record_correction(s, key, e.b, type_, extractor, "drop", "you said this conversation isn't part of it")
+    verify.apply_verdicts(s)
+    s.commit()
+    return {"removed": body.edge, "also_removed": len(siblings)}

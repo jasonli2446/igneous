@@ -94,6 +94,40 @@ def _signals(s: Session) -> list[tuple[str, str]]:
     return out
 
 
+# A person is a human you correspond with, not an organization that emails you. A sender is a service when the
+# contact is one-way (you never wrote to them, they aren't in your contacts, you share no group chat) and what
+# they send is mostly notifications or marketing (item_class): airlines, banks, newsletters, "Adam from Bolt".
+ONE_WAY_SENDERS = text("""
+WITH me AS (SELECT :me AS id UNION SELECT node_id FROM canonical WHERE canonical_id = :me),
+i_wrote AS (SELECT DISTINCT COALESCE(c.canonical_id, r.dst) AS p
+            FROM edges s JOIN edges r ON r.src = s.dst AND r.type = 'RECEIVED'
+            LEFT JOIN canonical c ON c.node_id = r.dst
+            WHERE s.type = 'SENT' AND s.src IN (SELECT id FROM me)),
+-- Domains you write to people at (your school, your employers): someone there who emails you is a colleague
+-- even if you never wrote to them personally, not a service.
+my_domains AS (SELECT DISTINCT split_part(n.key, '@', 2) AS d FROM i_wrote JOIN nodes n ON n.id = i_wrote.p
+               WHERE n.key LIKE '%@%' AND split_part(n.key, '@', 2) NOT IN
+                   ('gmail.com', 'icloud.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'me.com', 'aol.com')),
+sent AS (SELECT e.src AS p, count(*) AS n,
+                count(*) FILTER (WHERE si.item_class IN ('notification', 'marketing')) AS bulk
+         FROM edges e JOIN nodes m ON m.id = e.dst JOIN source_items si ON si.id = m.source_item_id
+         WHERE e.type = 'SENT' GROUP BY e.src)
+UPDATE nodes p SET props = p.props || '{"kind": "service", "service_reason": "one-way bulk sender"}'
+FROM sent
+WHERE p.id = sent.p AND p.type = 'Person' AND p.key LIKE '%@%'
+  AND COALESCE(p.props->>'kind', '') <> 'service' AND NOT COALESCE((p.props->>'self')::bool, false)
+  AND p.props->>'named_by' IS DISTINCT FROM 'contacts'
+  AND COALESCE((SELECT canonical_id FROM canonical WHERE node_id = p.id), p.id) NOT IN (SELECT p FROM i_wrote)
+  AND sent.n > 0
+  AND split_part(p.key, '@', 2) NOT IN (SELECT d FROM my_domains)
+  -- mostly bulk mail, or a company-style sender you never answered whose mail never came to more than you plus
+  -- a list (no exchange with any human in it: every message they sent was received by nobody who replied)
+  AND (sent.bulk >= 0.8 * sent.n OR (
+        p.name !~ '^[A-Z][a-z]+ [A-Z][a-z]+$'          -- not a "First Last" human name
+        AND sent.bulk >= 0.5 * sent.n))
+""")
+
+
 def run(s: Session) -> dict:
     s.execute(text("DELETE FROM edges WHERE type = 'SAME_AS' AND extractor = :ex"), {"ex": EXTRACTOR})
     # Mark automated senders before linking anything, so a feed named "Jason Li Calendar" can't become the user.
@@ -124,5 +158,6 @@ def run(s: Session) -> dict:
                                     COALESCE(edges.props->'signals', '[]'::jsonb) || (EXCLUDED.props->'signals'))
         """), {"a": a, "b": b, "ex": EXTRACTOR, "p": json.dumps({"signals": [signal]})})
         linked.setdefault(key, []).append(signal)
+    services += s.execute(ONE_WAY_SENDERS, {"me": me}).rowcount
     s.commit()
     return {"self_links": len(linked), "signals": sum(len(v) for v in linked.values()), "services": services}
