@@ -288,6 +288,8 @@ def edge_view(row: dict, evidence: list[dict]) -> dict:
     return {"id": row["id"], "type": row["type"], "extractor": row["extractor"],
             "src": row["src"], "dst": row["dst"], "src_name": row.get("src_name"), "dst_name": row.get("dst_name"),
             "verdict": p.get("verdict"), "reason": p.get("reason"),
+            # What the rule that made it saw ("62% of its conversations involve case.edu"), for unjudged links.
+            "why": p["why"] if isinstance(p.get("why"), str) else "; ".join(p.get("why") or []) or None,
             "confidence": p.get("confidence", row.get("confidence")), "evidence": evidence}
 
 

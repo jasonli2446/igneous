@@ -173,8 +173,12 @@ def run(s: Session, log=print) -> dict:
             if nid:
                 s.execute(text("UPDATE nodes SET name = :n, props = props || '{\"named_by\": \"profile\"}' WHERE id = :i"),
                           {"n": name, "i": nid})
-        if nid is None:
+        if nid is None:  # no domain given: the org already in your graph under this name, if one is
             nid = by_name.get(_slug(name)) or s.execute(text("""
+                SELECT id FROM nodes WHERE type = 'Organization' AND lower(name) = lower(:n)
+                ORDER BY (SELECT count(*) FROM edges e WHERE e.dst = nodes.id) DESC LIMIT 1"""), {"n": name}).scalar()
+        if nid is None:
+            nid = s.execute(text("""
                 INSERT INTO nodes (type, key, name, props) VALUES ('Organization', :k, :n, '{"named_by": "profile"}')
                 ON CONFLICT (type, key) DO UPDATE SET name = EXCLUDED.name RETURNING id
             """), {"k": d or "org:" + _slug(name), "n": name}).scalar_one()

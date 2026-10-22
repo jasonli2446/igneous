@@ -45,6 +45,7 @@ UMBRELLA_THREADS = 2     # ...at least this many threads
 SOURCES = ("gmail", "email", "imessage", "gcal", "drive", "fs", "notes", "ai_chats", "github",
            "takeout_activity", "takeout_chrome", "takeout_tasks", "takeout_meet", "takeout_chat")
 
+COURSE_CODE = re.compile(r"[A-Za-z]{2,5}\s?\d{3}[A-Za-z]?")
 # Capitalized phrases (1-3 words), or course-style codes ("CSDS 395").
 TERM = re.compile(r"\b(?:[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,}){0,2}|[A-Z]{2,5}\s?\d{3})\b")
 STOP = {
@@ -608,8 +609,14 @@ def umbrellas(s: Session, keep_keys: list[str]) -> int:
             if n / len(rows) >= UMBRELLA_SHARE:
                 share[term][tid] = n / len(rows)
     built = 0
+    thread_names = {re.sub(r"\s+", " ", n.lower()).strip() for n in s.execute(text(
+        "SELECT name FROM nodes WHERE type = 'Project' AND key = ANY(:keep)"), {"keep": keep_keys}).scalars()}
     for term, by_thread in share.items():
         if len(by_thread) < UMBRELLA_THREADS:
+            continue
+        # A course is never over other courses (two classes share a prereq's name in their mail), and a term that
+        # already names a thread is that thread, not a second thing above its neighbours.
+        if COURSE_CODE.fullmatch(term.strip()) or re.sub(r"\s+", " ", term.lower()).strip() in thread_names:
             continue
         months = s.execute(text("""
             SELECT count(DISTINCT date_trunc('month', occurred_at)) FROM source_items
