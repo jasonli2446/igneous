@@ -22,8 +22,9 @@ extraction produces, so it can consume this item without a model call:
    "experience": [{"org", "title", "start", "end", "domain_hint"}],
    "education":  [{"school", "degree", "start", "end"}],
    "projects":   [{"name", "description", "org"}]}
-Dates are "YYYY-MM" (None when unknown or still ongoing). A year-only date becomes January for a start and
-December for an end. domain_hint and a project's org are None: LinkedIn exports carry neither.
+Every field is a string, as in that stage's JSON schema: "" when unknown. Dates are "YYYY-MM" ("" when unknown
+or still ongoing). A year-only date becomes January for a start and December for an end. domain_hint and a
+project's org are "": LinkedIn exports carry neither. (The structured raw_meta lists beside "profile" keep None.)
 
 Everything stored passes through redact(). The export is read-only input; no credentials are involved or stored.
 LinkedIn data stays out of every model call unless named in IGNEOUS_LLM_SOURCES.
@@ -251,12 +252,13 @@ def profile_item(x: Export, counts: dict[str, int]) -> SourceItem | None:
         "positions": positions, "education": education, "projects": projects, "skills": skills,
         "certifications": certs, "honors": honors, "languages": languages,
         "profile": {
-            "is_about_owner": True, "person_name": name,
-            "experience": [{"org": p["org"], "title": p["title"], "start": p["start"], "end": p["end"], "domain_hint": None}
+            "is_about_owner": True, "person_name": name or "",
+            "experience": [{"org": p["org"], "title": p["title"], "start": p["start"] or "", "end": p["end"] or "",
+                            "domain_hint": ""}
                            for p in positions],
-            "education": [{"school": e["school"], "degree": e["degree"], "start": e["start"], "end": e["end"]}
+            "education": [{"school": e["school"], "degree": e["degree"], "start": e["start"] or "", "end": e["end"] or ""}
                           for e in education],
-            "projects": [{"name": p["name"], "description": p["description"], "org": None} for p in projects],
+            "projects": [{"name": p["name"], "description": p["description"], "org": ""} for p in projects],
         },
     }
     return SourceItem(source="linkedin", external_id="profile", title=f"LinkedIn profile: {name}" if name else "LinkedIn profile",

@@ -48,11 +48,11 @@ def test_parse_profile_and_connections(zpath):
     assert prof["profile"] == {
         "is_about_owner": True, "person_name": "Pat Example",
         "experience": [
-            {"org": "Acme Corp", "title": "Engineer", "start": "2025-06", "end": None, "domain_hint": None},
-            {"org": "Old Co", "title": "Intern", "start": "2023-09", "end": "2023-12", "domain_hint": None}],
+            {"org": "Acme Corp", "title": "Engineer", "start": "2025-06", "end": "", "domain_hint": ""},
+            {"org": "Old Co", "title": "Intern", "start": "2023-09", "end": "2023-12", "domain_hint": ""}],
         "education": [{"school": "Example University", "degree": "BS Computer Science", "start": "2023-01",
                        "end": "2026-12"}],
-        "projects": [{"name": "Widget Tracker", "description": "Tracks widgets", "org": None}]}
+        "projects": [{"name": "Widget Tracker", "description": "Tracks widgets", "org": ""}]}
     assert prof["skills"] == ["Python", "Go"]
     assert "Birth Date" not in str(prof) and "Nowhere" not in str(prof)
     assert TOKEN not in by_id["profile"].body_text and TOKEN not in str(prof)
