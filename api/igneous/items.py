@@ -129,7 +129,7 @@ def node_sources(node_id: int, limit: int = Query(10, ge=1, le=50), offset: int 
     if not n:
         raise HTTPException(404)
     ids = _my_ids(s, _canon_head(s, node_id))
-    params = {"ids": ids, "lim": limit + 1, "off": offset}
+    params = {"ids": ids, "lim": limit + 1, "off": offset, "mine": True}
     if n["type"] == "Person":
         sql = f"""
             WITH me AS (SELECT id FROM nodes WHERE props->>'self' = 'true'
@@ -138,7 +138,7 @@ def node_sources(node_id: int, limit: int = Query(10, ge=1, le=50), offset: int 
             pm AS (SELECT src AS p, dst AS m FROM edges WHERE type = 'SENT'
                    UNION SELECT dst, src FROM edges WHERE type = 'RECEIVED'),
             shared AS (SELECT DISTINCT x.m FROM pm x WHERE x.p = ANY(:ids)
-                       AND (NOT EXISTS (SELECT 1 FROM me)
+                       AND (NOT :mine OR NOT EXISTS (SELECT 1 FROM me)
                             OR EXISTS (SELECT 1 FROM pm y WHERE y.m = x.m AND y.p IN (SELECT id FROM me)))),
             sid AS (SELECT msg.source_item_id AS id FROM shared JOIN nodes msg ON msg.id = shared.m
                     UNION SELECT ev.source_item_id FROM edges a JOIN nodes ev ON ev.id = a.dst
@@ -157,4 +157,6 @@ def node_sources(node_id: int, limit: int = Query(10, ge=1, le=50), offset: int 
             SELECT {CARD_COLS} FROM sid JOIN source_items si ON si.id = sid.id
             ORDER BY si.occurred_at DESC NULLS LAST, si.id LIMIT :lim OFFSET :off"""
     rows = s.execute(text(sql), params).mappings().all()
+    if not rows and offset == 0 and n["type"] == "Person":  # nothing shared with you: show their own items
+        rows = s.execute(text(sql), {**params, "mine": False}).mappings().all()
     return {"items": [item_card(dict(r)) for r in rows[:limit]], "more": len(rows) > limit}

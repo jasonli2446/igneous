@@ -267,9 +267,10 @@ def explain(s: Session, a: int, b: int, limit: int = 8) -> dict:
         c["thread"] = pretty_thread(c["thread"], named)
         c["excerpt"] = name_handles(c["excerpt"], named)
         out.append(c)
-    links = connection(s, ids["a"], ids["b"], named)
+    links = connection(s, ids["a"], ids["b"], named, allow_path=total == 0 and not events)
     return {"a": {"id": a, "name": names.get(a)}, "b": {"id": b, "name": names.get(b)},
-            "messages": total, "conversations": out, "events": [dict(e) for e in events], **links}
+            "messages": total, "conversations": out, "events": [dict(e) for e in events],
+            "shared": shared_items(s, ids["a"], ids["b"], named) if total else [], **links}
 
 
 EDGE_EVIDENCE_LIMIT = 5
@@ -338,7 +339,24 @@ def _evidence(s: Session, edge_ids: list[int], named: dict[str, str]) -> dict[in
     return out
 
 
-def connection(s: Session, ids_a: list[int], ids_b: list[int], named: dict[str, str]) -> dict:
+def shared_items(s: Session, ids_a: list[int], ids_b: list[int], named: dict[str, str], limit: int = 5) -> list[dict]:
+    """The latest messages both sides took part in, as openable item cards."""
+    from igneous.items import CARD_COLS, item_card
+    rows = s.execute(text(f"""
+        WITH pm AS (SELECT src AS p, dst AS m FROM edges WHERE type = 'SENT'
+                    UNION SELECT dst, src FROM edges WHERE type = 'RECEIVED')
+        SELECT {CARD_COLS} FROM (SELECT DISTINCT x.m FROM pm x JOIN pm y ON x.m = y.m
+                                 WHERE x.p = ANY(:a) AND y.p = ANY(:b)) sh
+        JOIN nodes msg ON msg.id = sh.m JOIN source_items si ON si.id = msg.source_item_id
+        ORDER BY si.occurred_at DESC NULLS LAST LIMIT :lim
+    """), {"a": ids_a, "b": ids_b, "lim": limit}).mappings().all()
+    cards = [item_card(dict(r)) for r in rows]
+    for c in cards:
+        c["snippet"] = name_handles(c["snippet"], named)
+    return cards
+
+
+def connection(s: Session, ids_a: list[int], ids_b: list[int], named: dict[str, str], allow_path: bool = True) -> dict:
     """Works for any pair: `direct` = edges between the two (all aliases), each with its reason and evidence
     items; when there are none, `path` = the shortest visible route (at most 3 hops) with each hop's evidence."""
     edge_cols = """e.id, e.src, e.dst, e.type, e.extractor, e.props, e.confidence,
@@ -353,6 +371,8 @@ def connection(s: Session, ids_a: list[int], ids_b: list[int], named: dict[str, 
     if rows:
         ev = _evidence(s, [r["id"] for r in rows], named)
         return {"direct": [edge_view(r, ev.get(r["id"], [])) for r in rows], "path": None}
+    if not allow_path:
+        return {"direct": [], "path": None}
 
     adj: dict[int, list[tuple[int, int]]] = {}
     seen, frontier, edges = set(ids_a), list(ids_a), {}

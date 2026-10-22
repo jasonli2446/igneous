@@ -95,6 +95,13 @@ export default function WhyConnected({ a, b, onCloseAction, onOpenAction }: {
             </section>
           )}
 
+          {r.shared.length > 0 && (
+            <section aria-label="Latest messages together">
+              <h3 className="mb-2 text-xs font-medium text-muted">Latest messages together</h3>
+              <SourceRows items={r.shared} highlight={[r.a.name, r.b.name]} />
+            </section>
+          )}
+
           {r.conversations.length > 0 && (
             <section>
               <h3 className="mb-2 text-xs font-medium text-muted">Conversations</h3>

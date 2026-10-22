@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { InlineError, Skeleton } from "@/components/ui";
 import { api, ItemDetail, SourceCard } from "@/lib/api";
 
@@ -137,8 +138,9 @@ export function Reader({ id, highlight, onCloseAction }: { id: number; highlight
     ? v.map((x) => (typeof x === "object" && x ? ((x as { name?: string; email?: string }).name || (x as { email?: string }).email) : String(x))).filter(Boolean).join(", ")
     : "";
 
-  return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget) onCloseAction(); }}>
+  // Portaled: the details panel is transformed, which would otherwise trap a fixed overlay inside it.
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget) onCloseAction(); }}>
       <div role="dialog" aria-modal="true" aria-label={item?.title ?? "Source item"}
         className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-lg border border-line bg-panel text-sm shadow-xl">
         <header className="flex items-start gap-3 border-b border-line p-4">
@@ -168,6 +170,7 @@ export function Reader({ id, highlight, onCloseAction }: { id: number; highlight
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

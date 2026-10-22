@@ -98,6 +98,7 @@ export type Explanation = {
   conversations: { thread_id: number; thread: string; messages: number; people: number; first: string | null;
     last: string | null; source: string; excerpt: string | null }[];
   events: { id: number; name: string; at: string | null }[];
+  shared: SourceCard[];
   direct: WhyEdge[];
   path: WhyEdge[] | null;
 };
