@@ -1881,3 +1881,14 @@ def test_earned_cut_keeps_the_strong_ones():
     assert earned_cut([(1, 100), (2, 90), (3, 10), (4, 9)]) == [1, 2]     # a clear drop after the strong two
     assert len(earned_cut([(i, 50 - i) for i in range(10)])) == 10        # ten similar ones all show
     assert earned_cut([(1, 5)]) == [1]
+
+
+def test_expand_tops_up_to_a_minimum():
+    import inspect
+
+    from igneous.graph import traversal
+
+    assert traversal.MIN_SHOWN == 3
+    src = inspect.getsource(traversal.expand)
+    assert "fallback_neighbors" in src and "len(new) < MIN_SHOWN" in src
+    assert "drop" in inspect.getsource(traversal.fallback_neighbors)  # never tops up with a link the verifier dropped
