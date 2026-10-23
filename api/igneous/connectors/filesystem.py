@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem
-from igneous.connectors.redact import redact
+from igneous.connectors.redact import redact_moving
 from igneous.parsers import parse_document
 
 CHECKPOINT_EVERY = 100
@@ -113,9 +113,14 @@ class FilesystemConnector:
                     continue
                 parsed = parse_document(data, path.name)
                 if parsed.status == "ok":
-                    body, redactions = redact(parsed.text)
+                    # Redaction changes lengths: page and section offsets move with it (#186).
+                    marks = [b[k] for b in parsed.boundaries for k in ("start", "end")]
+                    body, redactions, marks = redact_moving(parsed.text, marks)
+                    boundaries = [{**b, "start": marks[2 * i], "end": marks[2 * i + 1]}
+                                  for i, b in enumerate(parsed.boundaries)]
                     mime, parser = parsed.mime, parsed.parser
-                    meta.update({"parser": parser, "boundaries": parsed.boundaries, "redactions": redactions})
+                    meta.update({"parser": parser, "boundaries": boundaries, "redactions": redactions,
+                                 "boundaries_redacted": True})
                 else:
                     meta.update({"parser": None, "parse_status": parsed.status})
                 yield SourceItem(

@@ -32,14 +32,39 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
 
 def redact(text: str | None) -> tuple[str | None, dict[str, int]]:
     """Returns (redacted text, {kind: count})."""
+    out, counts, _ = redact_moving(text, [])
+    return out, counts
+
+
+def redact_moving(text: str | None, positions: list[int]) -> tuple[str | None, dict[str, int], list[int]]:
+    """redact(), and where each of `positions` (offsets into `text`, such as a parser's page boundaries) lands in
+    the redacted text. A position inside a replaced secret moves into its replacement."""
     if not text:
-        return text, {}
+        return text, {}, list(positions)
     counts: dict[str, int] = {}
+    positions = list(positions)
     for kind, pat in PATTERNS:
-        def sub(m, kind=kind):
+        pieces, edits, last = [], [], 0  # edits: (start, end, replacement length) in this pass's input
+        for m in pat.finditer(text):
             counts[kind] = counts.get(kind, 0) + 1
-            if kind == "assigned_secret":  # keep the variable name; it's useful context and not secret
-                return f"{m.group(1)}{m.group(2)}[REDACTED:{kind}]"
-            return f"[REDACTED:{kind}]"
-        text = pat.sub(sub, text)
-    return text, counts
+            # assigned_secret keeps the variable name; it's useful context and not secret
+            new = f"{m.group(1)}{m.group(2)}[REDACTED:{kind}]" if kind == "assigned_secret" else f"[REDACTED:{kind}]"
+            pieces += [text[last:m.start()], new]
+            edits.append((m.start(), m.end(), len(new)))
+            last = m.end()
+        if edits:
+            text = "".join(pieces) + text[last:]
+            positions = [_moved(p, edits) for p in positions]
+    return text, counts, positions
+
+
+def _moved(pos: int, edits: list[tuple[int, int, int]]) -> int:
+    shift = 0
+    for start, end, size in edits:
+        if end <= pos:
+            shift += size - (end - start)
+        elif start < pos:
+            return start + shift + min(pos - start, size)
+        else:
+            break
+    return pos + shift
