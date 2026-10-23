@@ -190,8 +190,7 @@ def test_a_cached_resume_still_counts_with_the_model_off(graph, monkeypatch):
     from igneous.graph import profile
 
     with SessionLocal() as s:
-        doc = s.execute(text("SELECT id, source, title, occurred_at, body_text FROM source_items "
-                             "WHERE external_id = 'drive/resume'")).one()
+        doc = next(d for d in profile.documents(s) if d.title == "Resume 2026")
         key = "profile-extract:v3:" + hashlib.sha256(doc.body_text.encode()).hexdigest()
         s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb))"),
                   {"k": key, "r": json.dumps({"is_about_owner": True, "person_name": "Me Myself"})})
