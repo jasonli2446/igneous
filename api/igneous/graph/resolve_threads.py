@@ -121,7 +121,7 @@ def judge(s: Session, a: dict, b: dict) -> dict:
     # Keyed by the two threads' identities, not their exact current records: a judgment is reused while the
     # threads stay the same things, so it doesn't re-roll every time a few records shift.
     ident = "|".join(sorted([a["key"], b["key"]]))
-    key = "thread-pair:v4:" + hashlib.sha256(ident.encode()).hexdigest()
+    key = "thread-pair:v5:" + hashlib.sha256(ident.encode()).hexdigest()
     cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
     if cached is not None:
         return cached
@@ -131,14 +131,16 @@ def judge(s: Session, a: dict, b: dict) -> dict:
             "same trip, the same course. You must be able to name what they both are; sharing people, a time "
             "period, an organization or a topic is NOT enough (two trips in one summer are different trips; two "
             "projects of one lab are different projects). 'related': different things that belong together (one "
-            "led to the other, same client or lab); give the relation in a few words. 'a_part_of_b' / "
-            "'b_part_of_a': one was done within or for the other (a project built for a class, a sub-project of a "
-            "larger project, an interview round of a job search); the records must show it, not just a shared topic. "
+            "led to the other, same client or lab); give the relation in a few words. 'part_of': one was done "
+            "within or for the other (a project built for a class, a sub-project of a larger project, an interview "
+            "round of a job search); the records must show it, not just a shared topic. For 'part_of', `container` "
+            "names the larger one by its exact name (the class, the larger project, the job search). "
             "'distinct': not meaningfully related. When unsure between same and related, choose related. "
             "Give a confidence 0-1 and a short reason that names the thing if 'same'.")
         schema = {"type": "object", "additionalProperties": False,
-             "required": ["relation", "label", "confidence", "reason", "shared_identity"],
-             "properties": {"relation": {"enum": ["same", "a_part_of_b", "b_part_of_a", "related", "distinct"]}, "label": {"type": "string"},
+             "required": ["relation", "label", "confidence", "reason", "shared_identity", "container"],
+             "properties": {"relation": {"enum": ["same", "part_of", "related", "distinct"]}, "label": {"type": "string"},
+                            "container": {"type": "string"},
                             "shared_identity": {"type": "string"},
                             "confidence": {"type": "number"}, "reason": {"type": "string"}}}
         out, _ = structured(system, prompt, schema,
@@ -153,6 +155,10 @@ def judge(s: Session, a: dict, b: dict) -> dict:
     s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb)) "
                    "ON CONFLICT (cache_key) DO NOTHING"), {"k": key, "r": json.dumps(out)})
     return out
+
+
+def _norm_name(n: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", n.lower()).strip()
 
 
 def _clusters_agree(a: set[int], b: set[int], verdicts: dict, names: dict[int, str] | None = None) -> bool:
@@ -201,7 +207,7 @@ def run(s: Session, log=print) -> dict:
     # same thing. One eager judgment can't chain unrelated threads together (how a trip got swallowed before).
     for (x, y), v in sorted(verdicts.items(), key=lambda kv: -(kv[1].get("confidence") or 0)):
         if not is_same(x, y):
-            if v.get("relation") in ("related", "a_part_of_b", "b_part_of_a") and (v.get("confidence") or 0) >= 0.6:
+            if v.get("relation") in ("related", "part_of") and (v.get("confidence") or 0) >= 0.6:
                 related.append((x, y, v))
             continue
         rx, ry = find(x), find(y)
@@ -248,15 +254,20 @@ def run(s: Session, log=print) -> dict:
             s.execute(text("UPDATE thread_registry SET status = 'merged', merged_into = :keep, updated_at = now() "
                            "WHERE key = :gone AND NOT pinned"), {"keep": keep["key"], "gone": t["key"]})
     # Link related threads (after merging, so links land on survivors).
-    key_of = {t["id"]: t["key"] for t in ts}
+    name_of = {t["id"]: t["name"] or "" for t in ts}
     for x, y, v in related:
         ia, ib = folded_into.get(x, x), folded_into.get(y, y)
         if ia == ib:
             continue  # they ended up merged after all
-        if v.get("relation") in ("a_part_of_b", "b_part_of_a"):
-            # A was judged with the smaller key; map the direction back onto these two ids.
-            first, second = sorted((x, y), key=lambda i: key_of[i])
-            child, parent = (first, second) if v["relation"] == "a_part_of_b" else (second, first)
+        if v.get("relation") == "part_of":
+            # The judge names the container (not an A/B label, which models flip): match it to one of the two.
+            names = {i: _norm_name(name_of[i]) for i in (x, y)}
+            box = _norm_name(v.get("container") or "")
+            hit = [i for i in (x, y) if box and (names[i] == box or names[i] in box or box in names[i])]
+            if len(hit) != 1:
+                continue  # can't tell which is the container: no link rather than a backwards one
+            parent = hit[0]
+            child = y if parent == x else x
             child, parent = folded_into.get(child, child), folded_into.get(parent, parent)
             if child == parent or not s.execute(text("SELECT count(*) = 2 FROM nodes WHERE id IN (:a, :b)"),
                                                 {"a": child, "b": parent}).scalar():
