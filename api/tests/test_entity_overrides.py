@@ -45,3 +45,28 @@ def test_entity_routes_are_registered():
         assert "post" in paths[f"/graph/entity/{{node_id}}/{op}"]
     assert "get" in paths["/graph/entity/{node_id}"]
     assert "delete" in paths["/overrides/{override_id}"]
+
+
+def test_adding_a_connection_accepts_only_pairs_the_menu_offers():
+    """POST /graph/link used to check only the edge type's name, so it could write illegal edges (#181)."""
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    from igneous.db import get_session
+    from igneous.main import app
+
+    kinds = {1: "Person", 2: "Person", 3: "Project"}
+
+    class Session:
+        def execute(self, statement, params=None):
+            return SimpleNamespace(scalar=lambda: kinds.get((params or {}).get("i")))
+
+    app.dependency_overrides[get_session] = lambda: Session()
+    try:
+        client = TestClient(app)
+        assert client.post("/graph/link", json={"src": 1, "dst": 2, "type": "PART_OF"}).status_code == 400
+        assert client.post("/graph/link", json={"src": 3, "dst": 1, "type": "SAME_AS"}).status_code == 400
+        assert client.post("/graph/link", json={"src": 1, "dst": 9, "type": "RELATED_TO"}).status_code == 404
+    finally:
+        app.dependency_overrides.clear()

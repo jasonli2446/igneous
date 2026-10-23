@@ -18,12 +18,13 @@ from sqlalchemy.orm import Session
 LEGAL_ENDPOINTS: dict[str, set[tuple[str, str]]] = {
     "SENT": {("Person", "Message")},
     "RECEIVED": {("Message", "Person")},
-    "MEMBER_OF": {("Person", "Organization")},  # legacy deterministic domain membership
+    "MEMBER_OF": {("Person", "Organization")},  # a LinkedIn connection's company; also stated by you
     "WORKED_AT": {("Person", "Organization")},
     "IN_THREAD": {("Message", "Thread")},
     "REPLIES_TO": {("Message", "Message")},
     "ATTACHED": {("Message", "File")},
-    "CONTAINS": {("Folder", "Folder"), ("Folder", "File"), ("Folder", "Thread")},  # repo -> AI session
+    # A folder's files; a repo's AI sessions (Thread) and GitHub activity (Message).
+    "CONTAINS": {("Folder", "Folder"), ("Folder", "File"), ("Folder", "Thread"), ("Folder", "Message")},
     "ATTENDED": {("Person", "Event")},
     "AUTHORED": {("Person", "File")},
     "MENTIONS": {("Message", "Person"), ("Message", "Organization")},
@@ -32,11 +33,24 @@ LEGAL_ENDPOINTS: dict[str, set[tuple[str, str]]] = {
     "SAME_AS": {("Person", "Person")},
     # Derived entities (graph/entities.py): an item or anchor belongs to a Project; people are involved in it.
     "PART_OF": {(t, "Project") for t in ("Message", "Event", "Thread", "File", "Folder", "Project")}
-               | {("Organization", "Organization")},  # a lab inside its university (your resume)
+               | {("Organization", "Organization"),  # a lab inside its university (your resume)
+                  ("Project", "Organization")},     # done at / for it (a connection you add)
     "INVOLVED_IN": {("Person", "Project")},
     # Google Takeout Maps (connectors/takeout.py): you visited / saved / reviewed a place.
     "VISITED": {("Person", "Place")},
     "SAVED": {("Person", "Place")},
+    # Relationship history (graph/history.py): claims a message makes, and who introduced whom.
+    "HAS_COMMITMENT": {("Message", "Commitment")},
+    "HAS_DECISION": {("Message", "Decision")},
+    "INTRODUCED": {("Person", "Person")},
+}
+
+# Per message source (graph/spine.py): (fewest SENT, most SENT or None, fewest RECEIVED). Unlisted sources (GitHub
+# activity, whose authors vary and nobody receives it) aren't checked.
+CARDINALITY: dict[str, tuple[int, int | None, int]] = {
+    "email": (1, 1, 1), "gmail": (1, 1, 1),                 # one sender, at least one recipient
+    "imessage": (1, None, 1), "takeout_chat": (1, None, 1),  # a conversation-day: whoever spoke, everyone in it
+    "ai_chats": (1, 1, 0),                                  # you, talking to an assistant
 }
 
 
@@ -82,28 +96,27 @@ def endpoint_violations(rows: Iterable[Mapping[str, Any]]) -> list[Violation]:
 
 
 def message_cardinality_violations(rows: Iterable[Mapping[str, Any]]) -> list[Violation]:
-    """Validate email's one sender and every ingested Message's recipient cardinality."""
+    """Validate each ingested Message's SENT and RECEIVED counts against its source's shape (CARDINALITY)."""
     violations = []
     for row in rows:
+        if row["source"] not in CARDINALITY:
+            continue
+        low, high, received_min = CARDINALITY[row["source"]]
         sent, received = row["sent_count"], row["received_count"]
-        is_chat = row["source"] in ("imessage", "takeout_chat")
-        if (is_chat and sent < 1) or (not is_chat and sent != 1):
-            expected = "at least 1" if is_chat else "exactly 1"
-            details = {"sent_count": sent, "expected": 1}
-            if is_chat:
-                details["minimum"] = details.pop("expected")
+        if sent < low or (high is not None and sent > high):
+            exact = high == low
             violations.append(Violation(
                 code="message_sent_cardinality",
-                message=f"Message has {sent} SENT edges; expected {expected}",
+                message=f"Message has {sent} SENT edges; expected {'exactly' if exact else 'at least'} {low}",
                 node_id=row["id"],
-                details=details,
+                details={"sent_count": sent, "expected" if exact else "minimum": low},
             ))
-        if received < 1:
+        if received < received_min:
             violations.append(Violation(
                 code="message_received_cardinality",
-                message=f"Message has {received} RECEIVED edges; expected at least 1",
+                message=f"Message has {received} RECEIVED edges; expected at least {received_min}",
                 node_id=row["id"],
-                details={"received_count": received, "minimum": 1},
+                details={"received_count": received, "minimum": received_min},
             ))
     return violations
 

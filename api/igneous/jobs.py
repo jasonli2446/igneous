@@ -1,7 +1,7 @@
 """Background jobs for the browser UI (syncs, pipeline runs, Google sign-in).
 
-State lives in a small Postgres `jobs` table, created idempotently like google_auth's oauth_tokens, so a page
-reload (or an API restart) still shows what happened. A partial unique index allows one running job per source.
+State lives in a small Postgres `jobs` table (migration 0007), so a page reload (or an API restart) still
+shows what happened. A partial unique index allows one running job per source.
 Jobs run in a daemon thread with their own Session; progress counts are written at most once a second.
 """
 import json
@@ -25,27 +25,8 @@ class JobBusy(RuntimeError):
     pass
 
 
-def ensure_table(s: Session) -> None:
-    s.execute(text("""
-        CREATE TABLE IF NOT EXISTS jobs (
-            id          text PRIMARY KEY,
-            kind        text NOT NULL,            -- sync | pipeline | connect
-            source      text NOT NULL,            -- connector id, 'pipeline', or 'google_connect'
-            account     text,
-            status      text NOT NULL DEFAULT 'running',   -- running | succeeded | failed
-            started_at  timestamptz NOT NULL DEFAULT now(),
-            finished_at timestamptz,
-            progress    jsonb NOT NULL DEFAULT '{}',
-            result      jsonb,
-            error       text)
-    """))
-    s.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_running ON jobs (source) WHERE status = 'running'"))
-    s.commit()
-
-
 def fail_interrupted(s: Session) -> int:
     """A job still 'running' at API startup lost its thread (restart / --reload): mark it failed."""
-    ensure_table(s)
     n = s.execute(text("""
         UPDATE jobs SET status = 'failed', finished_at = now(),
                error = 'Interrupted because the API restarted. Start it again; it resumes where it stopped.'
@@ -60,18 +41,15 @@ def _row(r) -> dict:
 
 
 def get(s: Session, job_id: str) -> dict | None:
-    ensure_table(s)
     r = s.execute(text("SELECT * FROM jobs WHERE id = :i"), {"i": job_id}).first()
     return _row(r) if r else None
 
 
 def recent(s: Session, limit: int = 30) -> list[dict]:
-    ensure_table(s)
     return [_row(r) for r in s.execute(text("SELECT * FROM jobs ORDER BY started_at DESC LIMIT :n"), {"n": limit})]
 
 
 def latest_by_source(s: Session) -> dict[str, dict]:
-    ensure_table(s)
     rows = s.execute(text("SELECT DISTINCT ON (source) * FROM jobs ORDER BY source, started_at DESC"))
     return {r.source: _row(r) for r in rows}
 
@@ -81,7 +59,6 @@ def start(kind: str, source: str, runner: Runner, account: str | None = None,
     """Create the job row (JobBusy if `source` already has a running job) and run `runner` in a thread."""
     job_id = uuid.uuid4().hex[:12]
     with session_factory() as s:
-        ensure_table(s)
         try:
             s.execute(text("INSERT INTO jobs (id, kind, source, account) VALUES (:i, :k, :s, :a)"),
                       {"i": job_id, "k": kind, "s": source, "a": account})

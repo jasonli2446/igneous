@@ -66,6 +66,8 @@ Export formats are sources too: add the entry to `SOURCES` and an inline form in
 - Gmail quota on this Testing-mode Google project is about 730 units/min. The connector paces itself.
 - Changing a connector's `external_id` format duplicates existing rows on resync. Ship a migration with it
   (see PR #83 for the gcal case).
+- Tables and columns come only from Alembic migrations (`api/migrations/versions/`), never `CREATE`/`ALTER` in app
+  code (#181). The API refuses to start on a schema behind head.
 
 ## Checks before any PR
 

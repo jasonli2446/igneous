@@ -283,9 +283,13 @@ def add_link(body: LinkBody, s: Session = Depends(get_session)):
     """Add a connection you know about: stored as yours (extractor 'user'), never checked or dropped by the AI, kept
     on every rebuild. A 'same person' link merges the two identities."""
     from igneous.graph import dirty, resolve
-    allowed = {t for opts in RELATIONS.values() for _l, t in opts} | {"SAME_AS", "RELATED_TO"}
-    if body.type not in allowed:
-        raise HTTPException(400, "Unknown kind of connection")
+    ta, tb = (s.execute(text("SELECT type FROM nodes WHERE id = :i"), {"i": i}).scalar() for i in (body.src, body.dst))
+    if ta is None or tb is None:
+        raise HTTPException(404, "No such node")
+    # Only what the menu offers for these two kinds of thing (#181): any other pair would be an illegal edge.
+    if not (body.type == "RELATED_TO" or (body.type == "SAME_AS" and ta == tb == "Person")
+            or body.type in {t for _l, t in RELATIONS.get((ta, tb), [])}):
+        raise HTTPException(400, f"A {ta} can't be connected to a {tb} that way")
     eid = s.execute(text("""
         INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence)
         VALUES (:a, :b, :t, CAST(:p AS jsonb), 'user', '1', 1.0)

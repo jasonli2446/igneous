@@ -27,6 +27,9 @@ uv run alembic upgrade head              # create the schema (or `make migrate` 
 
 The default connection is `postgresql+psycopg://igneous:igneous@localhost:5432/igneous` (`api/igneous/config.py`).
 
+Every table comes from a migration. After pulling, run `uv run alembic upgrade head` again (once per database); the
+API refuses to start on an older schema and prints that command.
+
 Tests (`make test`) never use that database or your personal one: `api/tests/conftest.py` points them at
 `igneous_test` on the same server, recreated and migrated on every run.
 
@@ -171,7 +174,7 @@ skip calls or `EXTRACT=500` to process more. Everything is incremental: re-runni
 | `api/eval/` | gold questions, ER labels, harnesses, results (see `api/eval/README.md`) |
 | `api/igneous/pipeline.py` | per-stage watermarks; every stage is incremental and safe to re-run |
 | `api/igneous/main.py` | FastAPI: `/search`, `/ask`, `/graph/search`, `/graph/subgraph`, `/graph/people`, `/graph/node/{id}`, `/graph/node/{id}/evidence`, `/stats` |
-| `api/migrations/` | schema (plain SQL in `0001_core_schema.py`) |
+| `api/migrations/` | the whole schema, as plain SQL migrations (`0001_core_schema.py` onward); app code never creates tables |
 | `web/` | Next.js: explorer (sigma.js) with inspector + evidence, Ask, Search |
 
 ## Your own Messages (iMessage / SMS)

@@ -19,7 +19,7 @@ services:
       IGNEOUS_DATABASE_URL: postgresql+psycopg://igneous:igneous@db:5432/igneous
       IGNEOUS_DATA_DIR: /data
     ports: ["8000:8000"]
-    volumes: [./api/igneous:/app/igneous, ./data:/data, models:/root/.cache]
+    volumes: [./api/igneous:/app/igneous, ./api/migrations:/app/migrations, ./data:/data, models:/root/.cache]
     depends_on: { db: { condition: service_healthy } }
 
   web:

@@ -122,7 +122,6 @@ def test_one_running_job_per_source(db):
 
 def test_interrupted_jobs_are_marked_failed_on_startup(db):
     with SessionLocal() as s:
-        jobs.ensure_table(s)
         s.execute(text("INSERT INTO jobs (id, kind, source) VALUES ('jobtest-stale', 'sync', 'jobtest-stale')"))
         s.commit()
         assert jobs.fail_interrupted(s) >= 1

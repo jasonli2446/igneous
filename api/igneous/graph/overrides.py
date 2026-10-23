@@ -20,18 +20,6 @@ OPS = ("rename", "hide", "merge", "unlink")
 EXTRACTOR = "entities"  # edges owned by graph/entities.py
 
 
-def ensure_table(s: Session) -> None:
-    s.execute(text("""
-        CREATE TABLE IF NOT EXISTS overrides (
-            id         bigserial PRIMARY KEY,
-            op         text NOT NULL CHECK (op IN ('rename', 'hide', 'merge', 'unlink')),
-            node_keys  text[] NOT NULL,      -- natural keys 'Type:key', so they survive node-id churn on rebuild
-            value      text,                 -- rename: the new name
-            data       jsonb,                -- unlink: snapshot of the dropped edges, for undo
-            created_at timestamptz NOT NULL DEFAULT now())
-    """))
-
-
 @dataclass
 class Plan:
     renames: dict[str, str] = field(default_factory=dict)         # project key -> name
@@ -82,13 +70,11 @@ def _ids(s: Session, keys: set[str]) -> dict[str, int]:
 
 
 def load(s: Session) -> list[dict]:
-    ensure_table(s)
     return [dict(r) for r in s.execute(text(
         "SELECT id, op, node_keys, value, data, created_at FROM overrides ORDER BY id")).mappings()]
 
 
 def add(s: Session, op: str, node_keys: list[str], value: str | None = None, data: dict | None = None) -> int:
-    ensure_table(s)
     return s.execute(text("""
         INSERT INTO overrides (op, node_keys, value, data) VALUES (:op, :k, :v, CAST(:d AS jsonb)) RETURNING id
     """), {"op": op, "k": node_keys, "v": value, "d": json.dumps(data) if data is not None else None}).scalar_one()
@@ -97,7 +83,6 @@ def add(s: Session, op: str, node_keys: list[str], value: str | None = None, dat
 def remove(s: Session, override_id: int) -> dict | None:
     """Delete one override and return it (None if it doesn't exist). The caller then re-applies, or, for a
     merge, rebuilds, since the folded project's rows are gone."""
-    ensure_table(s)
     row = s.execute(text("DELETE FROM overrides WHERE id = :i RETURNING id, op, node_keys, value, data"),
                     {"i": override_id}).mappings().first()
     return dict(row) if row else None

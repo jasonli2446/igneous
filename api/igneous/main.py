@@ -15,7 +15,7 @@ from igneous.config import settings
 from igneous.connectors import secrets
 from igneous.connectors.ai_exports import ExportConnector, ExportError, export_items, parse_export
 from igneous.connectors.base import run_sync
-from igneous.db import SessionLocal, get_session
+from igneous.db import SessionLocal, get_session, schema_problem
 from igneous.graph.entity_api import router as entity_router
 from igneous.graph.history import commitments, decisions, relationship_history
 from igneous.graph.traversal import GraphFilters, expand, explain, neighborhood, network, people, view
@@ -58,8 +58,10 @@ app.include_router(items_router)
 
 
 @app.on_event("startup")
-def _fail_interrupted_jobs():
+def _startup():
     with SessionLocal() as s:
+        if problem := schema_problem(s):
+            raise RuntimeError(problem)
         jobs.fail_interrupted(s)
 
 

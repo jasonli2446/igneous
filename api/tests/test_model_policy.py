@@ -71,13 +71,8 @@ def _item(s, source, external_id, title, body, when) -> int:
 @pytest.fixture
 def graph(test_db):
     """Two threads (Atlas, Atlas platform) with mail from Sam (gmail) and texts from Pat (imessage), over 8 months."""
-    from igneous.graph import threads
-
     with SessionLocal() as s:
         _wipe(s)
-        threads.ensure_registry(s)
-        threads._migrate_registry(s)
-        threads.ensure_hierarchy(s)
         g: dict = {"items": {}}
         g["me"] = _node(s, "Person", "email:me@shared.test", "Me Myself", {"self": True})
         g["sam"] = _node(s, "Person", "email:sam@shared.test", "Sam Shared")
@@ -126,9 +121,6 @@ def graph(test_db):
         _item(s, "fs", "home/resume.pdf", "resume.pdf", "PRIVATEMARKER " + resume, T0)
         _item(s, "drive", "drive/resume", "Resume 2026", resume, T0)
         s.commit()
-        from igneous.graph import verify
-
-        verify.ensure_table(s)
         # Corrections the user made: one about Pat (who appears only in texts), one about Sam.
         for who, reason in (("phone:+15550001111", "Pat Private was never on it"), ("email:sam@shared.test", "yes")):
             s.execute(text("""INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, reason, source)

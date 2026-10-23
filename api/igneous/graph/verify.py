@@ -51,23 +51,6 @@ BATCH = 12          # edges judged per model call (same claim type)
 BUDGET = 400        # model calls per run; the rest wait for the next run
 
 
-def ensure_table(s: Session) -> None:
-    s.execute(text("""
-        CREATE TABLE IF NOT EXISTS edge_verdicts (
-            src_key    text NOT NULL,
-            dst_key    text NOT NULL,
-            type       text NOT NULL,
-            extractor  text NOT NULL,
-            evidence   text NOT NULL,          -- hash of the evidence the verdict was made on
-            verdict    text NOT NULL CHECK (verdict IN ('keep', 'drop', 'unsure')),
-            confidence real,
-            reason     text,
-            source     text NOT NULL DEFAULT 'model',   -- 'model' or 'user' (a correction; never overwritten)
-            updated_at timestamptz NOT NULL DEFAULT now(),
-            PRIMARY KEY (src_key, dst_key, type, extractor)
-        )"""))
-
-
 def _edges(s: Session, pending_only: bool = True) -> list[dict]:
     """Derived edges with their natural keys and evidence (source, date, title, snippet per item)."""
     claims = [f"{t}|{x}" for t, x in CLAIMS]
@@ -250,8 +233,6 @@ def apply_verdicts(s: Session) -> int:
 
     A dropped edge moves to `edges_dropped` (kept for the why-view and audit) rather than being flagged, so every
     query in the system ignores it without having to know about verdicts."""
-    ensure_table(s)
-    s.execute(text("CREATE TABLE IF NOT EXISTS edges_dropped (LIKE edges INCLUDING DEFAULTS)"))
     moved = s.execute(text("""
         WITH d AS (
             DELETE FROM edges e USING nodes a, nodes b, edge_verdicts v
@@ -294,7 +275,6 @@ def run(s: Session, log=print, budget: int = BUDGET) -> dict:
     """Judge every derived edge that has no verdict for its current evidence; then apply all verdicts."""
     from igneous.llm import allowed_sources, visible_nodes
 
-    ensure_table(s)
     stats = {"judged": 0, "keep": 0, "drop": 0, "unsure": 0, "cached": 0, "calls": 0, "not_shared": 0}
     sources = allowed_sources()
     if not settings.llm_enabled or not sources:
@@ -363,7 +343,6 @@ def run(s: Session, log=print, budget: int = BUDGET) -> dict:
 def record_correction(s: Session, src_key: str, dst_key: str, type_: str, extractor: str, verdict: str,
                       reason: str | None = None) -> None:
     """A user's correction is a verdict that wins forever and teaches the judge (few-shot)."""
-    ensure_table(s)
     s.execute(text("""
         INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, confidence, reason, source)
         VALUES (:a, :b, :t, :x, 'user', :v, 1.0, :r, 'user')

@@ -316,37 +316,6 @@ def _edge(s: Session, src: int, dst: int, type_: str, props: dict, sid: int | No
     return eid
 
 
-def ensure_registry(s: Session) -> None:
-    """Threads that have been found are kept as identities, so later runs attach new records to them instead of
-    re-deriving (and re-rolling) everything from scratch."""
-    s.execute(text("""
-        CREATE TABLE IF NOT EXISTS thread_registry (
-            key        text PRIMARY KEY,
-            name       text NOT NULL,
-            kind       text,
-            terms      text[] NOT NULL,          -- the words that define it (match = membership)
-            span_start timestamptz,
-            span_end   timestamptz,
-            status     text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'rejected', 'merged')),
-            merged_into text,                         -- for status 'merged': the surviving thread's key
-            pinned     boolean NOT NULL DEFAULT false,   -- gold set or a user correction: never dropped
-            origin     text NOT NULL DEFAULT 'burst',    -- burst | name | gold | user
-            confidence real,
-            created_at timestamptz NOT NULL DEFAULT now(),
-            updated_at timestamptz NOT NULL DEFAULT now()
-        )"""))
-
-
-def _migrate_registry(s: Session) -> None:
-    """Older registries: allow status 'merged' and the merged_into column."""
-    s.execute(text("ALTER TABLE thread_registry ADD COLUMN IF NOT EXISTS merged_into text"))
-    s.execute(text("ALTER TABLE thread_registry ADD COLUMN IF NOT EXISTS anchor text"))       # series|repo|chat|course
-    s.execute(text("ALTER TABLE thread_registry ADD COLUMN IF NOT EXISTS anchor_name text"))  # the seed's own name
-    s.execute(text("ALTER TABLE thread_registry DROP CONSTRAINT IF EXISTS thread_registry_status_check"))
-    s.execute(text("ALTER TABLE thread_registry ADD CONSTRAINT thread_registry_status_check "
-                   "CHECK (status IN ('active', 'rejected', 'merged'))"))
-
-
 def name_seeds(s: Session) -> list[dict]:
     """Long-running things named outright: repositories, course codes, recurring calendar series, named group
     chats. A burst finds a trip; a name finds a semester-long course or a year-long project."""
@@ -534,8 +503,6 @@ def run(s: Session, log=print) -> int:
     3. Resolve duplicates / link related threads; umbrellas over them. Pinned threads are never dropped."""
     from igneous.graph import overrides
 
-    ensure_registry(s)
-    _migrate_registry(s)
     items = _items(s)
     items_by_id = {r.id: r for r in items}
     # Your stated links ('user') are never deleted: viewers mid-rebuild must not see the Lab lose its projects.
@@ -747,15 +714,8 @@ def _is_umbrella(s: Session, term: str, thread_names: list[str], months: int, sh
     return bool(cached.get("umbrella")) and (cached.get("confidence") or 0) >= 0.7
 
 
-def ensure_hierarchy(s: Session) -> None:
-    s.execute(text("""CREATE TABLE IF NOT EXISTS thread_parents (
-        child_key text NOT NULL, parent_key text NOT NULL, origin text NOT NULL DEFAULT 'gold',
-        PRIMARY KEY (child_key, parent_key))"""))
-
-
 def pinned_parents(s: Session) -> int:
     """Write PART_OF edges for parent links someone stated (gold set / corrections), by registry key."""
-    ensure_hierarchy(s)
     rows = s.execute(text("""
         SELECT c.id, p.id FROM thread_parents tp
         JOIN nodes c ON c.type = 'Project' AND c.key = tp.child_key
@@ -770,7 +730,6 @@ def pinned_parents(s: Session) -> int:
 
 def pin_gold(s: Session, gold: dict) -> int:
     """Seed the registry from a gold set: each gold thread is a pinned identity defined by its terms."""
-    ensure_registry(s)
     n = 0
     for g in gold.get("threads", []):
         terms = [t.strip() for t in g.get("terms", []) if len(t.strip()) >= 3]
@@ -784,7 +743,6 @@ def pin_gold(s: Session, gold: dict) -> int:
                 status = 'active', pinned = true, updated_at = now()
         """), {"k": key, "n": g["name"], "kind": g.get("kind"), "t": terms})
         n += 1
-    ensure_hierarchy(s)
     gkey = lambda name: "gold:" + hashlib.sha256(name.lower().encode()).hexdigest()[:16]  # noqa: E731
     for g in gold.get("threads", []):
         if g.get("parent"):
