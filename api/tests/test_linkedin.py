@@ -1,4 +1,4 @@
-"""LinkedIn export importer (#157). Synthetic CSVs only; DB tests use the dev database and clean up after themselves."""
+"""LinkedIn export importer (#157). Synthetic CSVs only; DB tests run in the throwaway test database."""
 import zipfile
 from pathlib import Path
 
@@ -88,12 +88,7 @@ def clean():
 
 
 @pytest.fixture
-def db():
-    try:
-        with SessionLocal() as s:
-            s.execute(text("SELECT count(*) FROM source_items"))
-    except Exception:
-        pytest.skip("Postgres not available")
+def db(test_db):
     clean()
     yield
     clean()

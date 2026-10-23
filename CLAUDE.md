@@ -68,4 +68,6 @@ Export formats are sources too: add the entry to `SOURCES` and an inline form in
 ## Checks before any PR
 
 `cd api && uv run ruff check . && uv run pytest -q` and `cd web && npx next typegen && npx tsc --noEmit && npm run build`.
+pytest runs against its own `igneous_test` database (`api/tests/conftest.py`); DB-backed tests request the
+`test_db` fixture.
 For UI changes, verify in the browser with `playwright-cli`.
