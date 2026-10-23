@@ -1,4 +1,4 @@
-"""Google Takeout importer (#109). Synthetic data only; DB tests use the dev database and clean up after themselves."""
+"""Google Takeout importer (#109). Synthetic data only; DB tests run in the throwaway test database."""
 import io
 import json
 import zipfile
@@ -235,12 +235,7 @@ def clean():
 
 
 @pytest.fixture
-def db():
-    try:
-        with SessionLocal() as s:
-            s.execute(text("SELECT count(*) FROM source_items"))
-    except Exception:
-        pytest.skip("Postgres not available")
+def db(test_db):
     clean()
     yield
     clean()

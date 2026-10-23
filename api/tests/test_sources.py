@@ -1,4 +1,4 @@
-"""Sources registry shape and the background job runner. No network; jobs use a fake connector and the dev DB."""
+"""Sources registry shape and the background job runner. No network; jobs use a fake connector and the test database."""
 import time
 
 import pytest
@@ -70,12 +70,7 @@ class FakeConnector:
 
 
 @pytest.fixture
-def db():
-    try:
-        with SessionLocal() as s:
-            s.execute(text("SELECT 1"))
-    except Exception:
-        pytest.skip("Postgres not available")
+def db(test_db):
     yield
     with SessionLocal() as s:
         s.execute(text("DELETE FROM source_items WHERE source = 'fake'"))

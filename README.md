@@ -27,6 +27,9 @@ uv run alembic upgrade head              # create the schema (or `make migrate` 
 
 The default connection is `postgresql+psycopg://igneous:igneous@localhost:5432/igneous` (`api/igneous/config.py`).
 
+Tests (`make test`) never use that database or your personal one: `api/tests/conftest.py` points them at
+`igneous_test` on the same server, recreated and migrated on every run.
+
 ### 3. Configuration (`api/.env`)
 
 Every API setting is an environment variable with the prefix `IGNEOUS_`; you can put them in `api/.env`
