@@ -11,6 +11,10 @@ you use. So the biggest parts of your life come from there first, and everything
      domain it matches. Projects -> pinned threads named as you name them. Education -> your school.
      All are pinned (origin 'profile'): never dropped by the verifier, and the gold-set equivalent of what you'd say.
   4. Older versions keep roles that later versions drop (history), newer versions win on titles and dates.
+
+A LinkedIn export (connectors/linkedin.py) is read too, without a model: its profile item carries the same structure
+in `raw_meta.profile`. It has no date of its own, so a dated resume wins on titles and dates and LinkedIn fills in
+what the resumes leave out.
 """
 import hashlib
 import json
@@ -50,12 +54,16 @@ SCHEMA = {
 
 
 def documents(s: Session) -> list:
-    """Candidate self-describing documents: resume/CV-titled files, newest first."""
+    """Candidate self-describing documents: resume/CV-titled files, newest first, then the LinkedIn profile
+    (`given`: its structure, already extracted)."""
     return s.execute(text(r"""
-        SELECT id, source, title, occurred_at, body_text FROM source_items
+        SELECT id, source, title, occurred_at, body_text, NULL::jsonb AS given FROM source_items
         WHERE source IN ('fs', 'drive', 'notes') AND coalesce(body_text, '') <> ''
           AND (title ~* '(resume|résumé|\mcv\M|curriculum vitae|linkedin)')
           AND length(body_text) BETWEEN 400 AND 30000
+        UNION ALL
+        SELECT id, source, title, occurred_at, body_text, raw_meta->'profile' FROM source_items
+        WHERE source = 'linkedin' AND external_id = 'profile' AND raw_meta ? 'profile'
         ORDER BY occurred_at DESC NULLS LAST
     """)).all()
 
@@ -66,6 +74,8 @@ def extract(s: Session, doc) -> dict | None:
     (#179)."""
     from igneous.llm import LLMDisabled, allowed_sources, structured
 
+    if doc.given:  # the LinkedIn export states it outright: no model call
+        return doc.given
     key = "profile-extract:v3:" + hashlib.sha256(doc.body_text.encode()).hexdigest()
     cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
     if cached is not None:
@@ -133,14 +143,16 @@ def run(s: Session, log=print) -> dict:
         out = extract(s, doc)
         if not out or not out.get("is_about_owner"):
             continue
-        # A resume in your Drive may be a friend's you reviewed: only one that names YOU counts.
-        if not _is_me(out.get("person_name", ""), my_names):
+        # A resume in your Drive may be a friend's you reviewed: only one that names YOU counts. A LinkedIn export
+        # is always of the account that exported it.
+        if doc.source != "linkedin" and not _is_me(out.get("person_name", ""), my_names):
             continue
         used += 1
+        via = "your LinkedIn" if doc.source == "linkedin" else "your resume"
         for e in out.get("experience", []):
             k = _slug(e["org"])
             if k and k not in orgs:  # newest version wins
-                orgs[k] = {**e, "doc": doc.id}
+                orgs[k] = {**e, "doc": doc.id, "via": via}
         for p in out.get("projects", []):
             k = _slug(p["name"])
             if k and k not in projects:
@@ -148,7 +160,7 @@ def run(s: Session, log=print) -> dict:
         for ed in out.get("education", []):
             k = _slug(ed["school"])
             if k and k not in schools:
-                schools[k] = {**ed, "doc": doc.id}
+                schools[k] = {**ed, "doc": doc.id, "via": via}
 
     # A domain names one organization. Schools claim theirs first; a later entry with the same domain (a lab at
     # the university) is part of the one that claimed it, never a rename of it.
@@ -200,18 +212,18 @@ def run(s: Session, log=print) -> dict:
     for k, ed in schools.items():
         oid, _ = org_node(ed["school"], ed.get("domain_hint") or "")
         org_ids[k] = oid
-        edge(self_id, oid, "WORKED_AT", {"why": f"your resume: {ed['degree']}", "title": ed["degree"], "school": True},
+        edge(self_id, oid, "WORKED_AT", {"why": f"{ed['via']}: {ed['degree']}", "title": ed["degree"], "school": True},
              _date(ed["start"]), _date(ed["end"]), ed["doc"])
     for k, e in orgs.items():
         oid, part_of = org_node(e["org"], e.get("domain_hint") or "")
         org_ids[k] = oid
-        edge(self_id, oid, "WORKED_AT", {"why": f"your resume: {e['title']}", "title": e["title"]},
+        edge(self_id, oid, "WORKED_AT", {"why": f"{e['via']}: {e['title']}", "title": e["title"]},
              _date(e["start"]), _date(e["end"]), e["doc"])
         parent = part_of
         if e.get("parent"):
             parent = by_name.get(_slug(e["parent"])) or org_node(e["parent"], "")[0]
         if parent and parent != oid:
-            edge(oid, parent, "PART_OF", {"why": f"your resume: {e['org']} is part of "
+            edge(oid, parent, "PART_OF", {"why": f"{e['via']}: {e['org']} is part of "
                                                   f"{e.get('parent') or 'it'}"}, sid=e["doc"])
         if e.get("project"):
             named_projects.setdefault(oid, set()).add(e["project"])

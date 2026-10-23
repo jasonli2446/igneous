@@ -140,3 +140,35 @@ def test_content_change_updates(db, tmp_path, zpath):
         changed = dict(FILES, **{"Skills.csv": "Name\nPython\nRust\n"})
         stats = linkedin.run_import(s, [write_zip(tmp_path / "b.zip", changed)])
         assert stats["updated"] == 1 and stats["unchanged"] == 2
+
+
+def test_the_profile_stage_reads_linkedin_without_a_model(db, zpath, monkeypatch):
+    """The export states positions, schools and projects outright: the backbone needs no model call (#157)."""
+    from igneous import llm
+    from igneous.graph import profile
+
+    def no_model(*_args, **_kwargs):
+        raise AssertionError("no model call for a LinkedIn profile")
+
+    monkeypatch.setattr(llm, "chat", no_model)
+    with SessionLocal() as s:
+        linkedin.run_import(s, [zpath])
+        s.execute(text("INSERT INTO nodes (type, key, name, props) VALUES "
+                       "('Person', 'linkedin:me', 'Pat Example', '{\"self\": true}')"))
+        s.commit()
+        try:
+            stats = profile.run(s, log=None)
+            assert stats["documents"] == 1 and stats["orgs"] == 2 and stats["schools"] == 1
+            worked = dict(s.execute(text("""
+                SELECT o.name, e.props->>'why' FROM edges e JOIN nodes o ON o.id = e.dst
+                WHERE e.type = 'WORKED_AT' AND e.extractor = 'profile' ORDER BY 1""")).all())
+            assert worked == {"Acme Corp": "your LinkedIn: Engineer", "Old Co": "your LinkedIn: Intern",
+                              "Example University": "your LinkedIn: BS Computer Science"}
+            assert s.execute(text("SELECT name FROM thread_registry WHERE origin = 'profile'")).scalars().all() \
+                == ["Widget Tracker"]
+        finally:
+            s.execute(text("DELETE FROM edges WHERE extractor = 'profile'"))
+            s.execute(text("DELETE FROM thread_registry WHERE origin = 'profile'"))
+            s.execute(text("DELETE FROM nodes WHERE key = 'linkedin:me' OR (type = 'Organization' "
+                           "AND props->>'named_by' = 'profile')"))
+            s.commit()
