@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import ImportForm from "@/components/ImportForms";
 import { InlineError, Skeleton } from "@/components/ui";
-import { api, Job, SourceInfo } from "@/lib/api";
+import { api, Job, ModelStatus, SourceInfo } from "@/lib/api";
 
 const STATUS: Record<SourceInfo["status"], { label: string; dot: string; text: string }> = {
   not_set_up: { label: "Not set up", dot: "bg-muted", text: "text-muted" },
@@ -137,6 +137,9 @@ function SourceCard({ source, busy, onSync, onRefresh }: {
                 : "Nothing imported yet"}
             </p>
           )}
+          <p className={`mt-1 max-w-xl text-xs leading-5 ${source.model.allowed === "no" ? "text-muted" : "text-accent"}`}>
+            {source.model.note}
+          </p>
         </div>
         <div className="shrink-0">{action}</div>
       </div>
@@ -190,6 +193,36 @@ function SourceCard({ source, busy, onSync, onRefresh }: {
   );
 }
 
+function ModelPanel({ model }: { model: ModelStatus }) {
+  let state: string;
+  if (!model.enabled) {
+    state = "Hosted model calls are off (IGNEOUS_LLM_ENABLED=false). Search and the graph work; Ask is unavailable.";
+  } else if (!model.configured) {
+    state = "No Bedrock key is set (AWS_BEARER_TOKEN_BEDROCK in the API's environment), so no model is called. "
+      + "Search and the graph work without it.";
+  } else {
+    state = "Ask, AI extraction, summaries and the checks on each connection send text to a model on Amazon Bedrock. "
+      + "They read only the sources opted in here; everything else stays on this computer and reaches the model only "
+      + "as a count. Search may also send your question, never your records, to pick out names and dates.";
+  }
+  return (
+    <section id="model" className="mt-8 rounded-md border border-line bg-panel px-5 py-4" aria-labelledby="model-heading">
+      <h2 id="model-heading" className="text-sm font-medium text-ink">Hosted model</h2>
+      <p className="mt-1 max-w-xl text-sm leading-6 text-muted">{state}</p>
+      <p className="mt-2 text-sm text-soft">
+        Opted in:{" "}
+        {model.sources.length
+          ? model.sources.map((id, i) => <span key={id}>{i > 0 && ", "}<code className="font-mono text-xs">{id}</code></span>)
+          : "none yet, so Ask stays off."}
+      </p>
+      <p className="mt-2 max-w-xl text-xs leading-5 text-muted">
+        To opt a source in, add the id its entry shows to IGNEOUS_LLM_SOURCES in api/.env (comma-separated) and
+        restart the API. Local files and Apple Notes also need IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true.
+      </p>
+    </section>
+  );
+}
+
 function BuildGraph({ job, itemCount, onRun, starting }: { job: Job | null; itemCount: number; onRun: () => void; starting: boolean }) {
   const running = job?.status === "running";
   const p = job?.progress;
@@ -233,6 +266,7 @@ function BuildGraph({ job, itemCount, onRun, starting }: { job: Job | null; item
 
 export default function SourcesPage() {
   const [sources, setSources] = useState<SourceInfo[] | null>(null);
+  const [model, setModel] = useState<ModelStatus | null>(null);
   const [pipeline, setPipeline] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -248,6 +282,7 @@ export default function SourcesPage() {
       const [s, j] = await Promise.all([api.sources(ctl.signal), api.jobs(ctl.signal)]);
       if (request.current !== ctl) return;
       setSources(s.sources);
+      setModel(s.model);
       setPipeline(j.jobs.find((x) => x.source === "pipeline") ?? null);
       setError(null);
     } catch (cause) {
@@ -293,7 +328,8 @@ export default function SourcesPage() {
         <h1 className="text-xl font-semibold tracking-tight text-ink">Sources</h1>
         <p className="mt-1 max-w-2xl text-sm leading-6 text-muted">
           Connect an account, upload an export, or point Igneous at something on this computer. Everything stays on
-          this computer. Work down the list, then build the graph at the bottom.
+          this computer, except text from the sources you opt in to the hosted model (at the bottom). Work down the
+          list, then build the graph.
         </p>
       </header>
 
@@ -324,6 +360,7 @@ export default function SourcesPage() {
             </section>
           ))}
           <BuildGraph job={pipeline} itemCount={total} starting={starting} onRun={() => void start(api.runPipeline)} />
+          {model && <ModelPanel model={model} />}
         </>
       )}
     </main>

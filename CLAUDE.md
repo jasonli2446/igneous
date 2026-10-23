@@ -48,7 +48,9 @@ Export formats are sources too: add the entry to `SOURCES` and an inline form in
   committed, exported, pasted into issues or PRs, or shown in a demo. Select it with
   `IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous_personal`.
 - When inspecting personal data, print counts and shapes, not message contents or names.
-- Every source is **read-only**. Model calls go through `api/igneous/llm.py` only.
+- Every source is **read-only**. Model calls go through `api/igneous/llm.py` only, and a prompt carries text only
+  from sources `llm.allowed_sources()` returns and names only of nodes `llm.visible_nodes()` returns; everything
+  else is a count (#179). A new model call gets a test in `api/tests/test_model_policy.py`.
 - Secrets (OAuth client JSON, tokens) live in git-ignored `data/` or encrypted in Postgres. Never in the repo,
   issues, PRs or logs.
 

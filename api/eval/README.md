@@ -10,6 +10,10 @@ uv run python eval/run_eval.py --no-qa   # retrieval only, free, ~15 s
 uv run python eval/run_eval.py           # + Q&A for both configs, ~150 model calls, ~6 min
 ```
 
+Q&A, `make_gold.py` and `er_labels.py draft|review` send records to the model, so they run only when every
+source in the database is opted in: `IGNEOUS_LLM_SOURCES=email` on the Enron database. Otherwise they stop
+and say which sources aren't.
+
 Results land in `results/<date>.json`; `results/<date>-answers.jsonl` has both configs' answers side by side
 for the blind A/B grading in criterion 4.
 

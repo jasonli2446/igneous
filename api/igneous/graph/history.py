@@ -70,8 +70,7 @@ def refresh_commitment_status(s: Session) -> int:
     With no approved model source it leaves the conservative ``open`` status intact.
     """
     from igneous.config import settings
-    from igneous.graph.extract import allowed_sources
-    from igneous.llm import LLMDisabled, structured
+    from igneous.llm import LLMDisabled, allowed_sources, structured
 
     changed = 0
     rows = s.execute(text("""

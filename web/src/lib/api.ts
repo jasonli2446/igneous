@@ -68,6 +68,7 @@ export type Expert = {
 export type AskResult = {
   answerable: boolean;
   answer: string;
+  reason?: "no_opted_in_sources"; // nothing the question may read is opted in to the hosted model
   citations: Hit[];
   evidence: Hit[];
   timing: { retrieve_s: number; total_s?: number };
@@ -294,7 +295,11 @@ export type SourceInfo = {
   can_sync: boolean;
   coming_soon: boolean;
   job: Job | null;
+  // Whether a hosted model may read this source, and how to change that (#179).
+  model: { id: string; allowed: "yes" | "partly" | "no"; note: string };
 };
+
+export type ModelStatus = { enabled: boolean; configured: boolean; sources: string[]; local_sources: boolean };
 
 async function send<T>(method: string, path: string, body?: unknown, params: Record<string, string> = {}) {
   const url = new URL(path, API);
@@ -316,7 +321,7 @@ export const api = {
   importTakeout,
   importLinkedin,
   job: (id: string, signal?: AbortSignal) => get<Job>(`/jobs/${id}`, {}, signal),
-  sources: (signal?: AbortSignal) => get<{ sources: SourceInfo[] }>("/sources", {}, signal),
+  sources: (signal?: AbortSignal) => get<{ sources: SourceInfo[]; model: ModelStatus }>("/sources", {}, signal),
   jobs: (signal?: AbortSignal) => get<{ jobs: Job[] }>("/jobs", {}, signal),
   syncSource: (id: string, account?: string) => send<Job>("POST", `/sources/${id}/sync`, undefined, account ? { account } : {}),
   runPipeline: () => send<Job>("POST", "/pipeline/run"),

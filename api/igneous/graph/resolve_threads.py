@@ -100,27 +100,41 @@ def candidate_pairs(ts: list[dict], mentions: set[tuple[int, int]] = frozenset()
     return [(a, b) for _, a, b in out[:MAX_PAIRS]]
 
 
-def _card(s: Session, t: dict) -> str:
-    people = s.execute(text("SELECT name FROM nodes WHERE id = ANY(:i) LIMIT 6"), {"i": list(t["people"])}).scalars().all()
+def _readable(s: Session, ts: list[dict]) -> tuple[set[int], set[int]]:
+    """What the judge may read (#179): the threads' records in opted-in sources, and the people who appear in
+    such records."""
+    from igneous.llm import allowed_sources, visible_nodes
+
+    sources = allowed_sources()
+    items = sorted(set().union(*(t["items"] for t in ts))) if ts else []
+    shown = set(s.execute(text("SELECT id FROM source_items WHERE id = ANY(:i) AND source = ANY(CAST(:src AS text[]))"),
+                          {"i": items, "src": sorted(sources)}).scalars()) if sources and items else set()
+    people = set().union(*(t["people"] for t in ts)) if ts else set()
+    return shown, visible_nodes(s, people, sources)
+
+
+def _card(s: Session, t: dict, can_see: tuple[set[int], set[int]]) -> str:
+    """One thread as the judge reads it: name, kind, span and size, with people and record titles only from
+    opted-in sources."""
+    shown, people_shown = can_see
+    people = s.execute(text("SELECT name FROM nodes WHERE id = ANY(:i) LIMIT 6"),
+                       {"i": list(t["people"] & people_shown)}).scalars().all()
     titles = s.execute(text("""
         SELECT left(title, 90) FROM source_items WHERE id = ANY(:i) AND coalesce(title, '') <> ''
-        ORDER BY occurred_at DESC NULLS LAST LIMIT 6"""), {"i": list(t["items"])}).scalars().all()
+        ORDER BY occurred_at DESC NULLS LAST LIMIT 6"""), {"i": list(t["items"] & shown)}).scalars().all()
     span = f"{t['a']:%Y-%m-%d} to {t['b']:%Y-%m-%d}" if t["a"] and t["b"] else "unknown span"
     return (f"'{t['name']}' ({t['kind'] or 'thread'}, {span}, {len(t['items'])} records)\n"
             f"   people: {', '.join(people) or 'none recorded'}\n   records: " + " | ".join(titles))
 
 
-def judge(s: Session, a: dict, b: dict) -> dict:
-    """same | related | distinct, with the relation in words. Cached; without the model, only exact-name
-    duplicates merge and nothing is linked."""
+def judge(s: Session, a: dict, b: dict, can_see: tuple[set[int], set[int]] | None = None) -> dict:
+    """same | related | distinct, with the relation in words. Cached; without the model, or when either thread has
+    no record the model may read, only exact-name duplicates merge and nothing is linked."""
     from igneous.llm import LLMDisabled, structured
 
     fallback = {"relation": "same" if (a["name"] or "").lower() == (b["name"] or "").lower() else "distinct",
                 "label": "", "confidence": 0.5, "reason": "same name"}
-    if not settings.llm_enabled:
-        return fallback
     a, b = sorted((a, b), key=lambda t: t["key"])  # a stable A/B, so the cached direction means the same thing
-    prompt = f"A: {_card(s, a)}\n\nB: {_card(s, b)}"
     # Keyed by the two threads' identities, not their exact current records: a judgment is reused while the
     # threads stay the same things, so it doesn't re-roll every time a few records shift.
     ident = "|".join(sorted([a["key"], b["key"]]))
@@ -128,6 +142,10 @@ def judge(s: Session, a: dict, b: dict) -> dict:
     cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
     if cached is not None:
         return cached
+    can_see = can_see or _readable(s, [a, b])
+    if not settings.llm_enabled or not (a["items"] & can_see[0] and b["items"] & can_see[0]):
+        return fallback
+    prompt = f"A: {_card(s, a, can_see)}\n\nB: {_card(s, b, can_see)}"
     try:
         system = ("Two threads were found in someone's records (projects, trips, classes, jobs). Decide how they relate. "
             "'same' ONLY if they are one and the same thing found twice: the same named project or product, the "
@@ -195,8 +213,9 @@ def run(s: Session, log=print) -> dict:
 
     related, stats = [], {"pairs": 0, "same": 0, "related": 0, "distinct": 0, "same_not_merged": 0}
     verdicts: dict[tuple[int, int], dict] = {}
+    can_see = _readable(s, ts)
     for a, b in candidate_pairs(ts, _mentions(s, ts)):
-        v = judge(s, a, b)
+        v = judge(s, a, b, can_see)
         verdicts[(min(a["id"], b["id"]), max(a["id"], b["id"]))] = v
         stats["pairs"] += 1
         stats[v.get("relation", "distinct")] = stats.get(v.get("relation", "distinct"), 0) + 1

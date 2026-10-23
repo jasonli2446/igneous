@@ -412,10 +412,11 @@ def test_locate_spans():
 
 
 def test_automatic_extraction_requires_explicit_source_opt_in(monkeypatch):
+    from igneous import llm
     from igneous.graph import extract
 
-    assert extract.allowed_sources("") == frozenset()
-    assert extract.allowed_sources(" gmail, ai_chats ,gmail ") == frozenset({"gmail", "ai_chats"})
+    assert llm.allowed_sources("") == frozenset()
+    assert llm.allowed_sources(" gmail, ai_chats ,gmail ") == frozenset({"gmail", "ai_chats"})
 
     class Session:
         def __init__(self):
@@ -427,12 +428,12 @@ def test_automatic_extraction_requires_explicit_source_opt_in(monkeypatch):
 
     session = Session()
     messages = []
-    monkeypatch.setattr(extract.settings, "llm_sources", "")
+    monkeypatch.setattr(llm.settings, "llm_sources", "")
     assert extract.run(session, log=messages.append) == 0
     assert session.calls == []
     assert "IGNEOUS_LLM_SOURCES" in messages[0]
 
-    monkeypatch.setattr(extract.settings, "llm_sources", "ai_chats")
+    monkeypatch.setattr(llm.settings, "llm_sources", "ai_chats")
     assert extract.run(session) == 0
     query, params = session.calls[0]
     assert "si.source = ANY(CAST(:sources AS text[]))" in query
@@ -445,10 +446,42 @@ def test_ask_retrieves_only_explicitly_approved_sources(monkeypatch):
 
     captured = []
     monkeypatch.setattr(qa, "apply", lambda _s, _q, f: f or Filters())
-    monkeypatch.setattr(qa, "allowed_sources", lambda: frozenset({"ai_chats"}))
+    monkeypatch.setattr(qa.llm, "allowed_sources", lambda: frozenset({"ai_chats"}))
     monkeypatch.setattr(qa, "hybrid", lambda _s, _q, f, **_kwargs: captured.append(f) or [])
     assert qa.answer(object(), "What did I decide?")["answerable"] is False
     assert captured[0].sources == ("ai_chats",)
+
+
+def test_ask_with_nothing_opted_in_calls_no_model_and_searches_nothing(monkeypatch):
+    from igneous.rag import qa
+    from igneous.rag.search import Filters
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("must not run")
+
+    monkeypatch.setattr(qa, "hybrid", forbidden)
+    monkeypatch.setattr(qa.llm, "structured", forbidden)
+    monkeypatch.setattr(qa, "apply", forbidden)  # constraint parsing may call the model too
+    monkeypatch.setattr(qa.llm.settings, "llm_sources", "")
+    out = qa.answer(object(), "What did I decide?")
+    assert out["answerable"] is False and out["reason"] == "no_opted_in_sources"
+    assert "IGNEOUS_LLM_SOURCES" in out["answer"] and out["evidence"] == []
+
+    # A question limited to sources that aren't opted in is not widened to every source (it used to be).
+    monkeypatch.setattr(qa.llm.settings, "llm_sources", "gmail")
+    monkeypatch.setattr(qa, "apply", lambda _s, _q, f: Filters(sources=("imessage",)))
+    out = qa.answer(object(), "What did Sam text me?")
+    assert out["reason"] == "no_opted_in_sources" and "imessage" in out["answer"]
+
+
+def test_local_sources_need_their_own_switch_as_well(monkeypatch):
+    from igneous import llm
+
+    monkeypatch.setattr(llm.settings, "local_sources_model_enabled", False)
+    assert llm.allowed_sources("fs,notes,gmail") == frozenset({"gmail"})
+    monkeypatch.setattr(llm.settings, "local_sources_model_enabled", True)
+    assert llm.allowed_sources("fs,notes,gmail") == frozenset({"fs", "notes", "gmail"})
+    assert llm.allowed_sources("") == frozenset()  # the switch alone opts nothing in
 
 
 def test_extraction_spans_index_the_stored_body():
@@ -1299,6 +1332,9 @@ def test_entity_names_normalize_and_drop_generic():
 
 
 def test_entity_screening_caches_verdicts_in_database(monkeypatch):
+    import hashlib
+    import json
+
     from igneous.graph import entities
 
     class Result:
@@ -1318,16 +1354,32 @@ def test_entity_screening_caches_verdicts_in_database(monkeypatch):
             if "SELECT response FROM llm_cache" in sql:
                 return Result(self.cache.get(params["key"]))
             if "INSERT INTO llm_cache" in sql:
-                self.cache[params["key"]] = __import__("json").loads(params["response"])
+                self.cache[params["key"]] = json.loads(params["response"])
             return Result()
 
     session = Session()
     calls = []
+    monkeypatch.setattr(entities.settings, "llm_enabled", True)
     monkeypatch.setattr(entities, "_screen", lambda names: calls.append(names) or set(names))
-    assert entities._screened(session, ["igneous"]) == {"igneous"}
-    assert entities._screened(session, ["igneous"]) == {"igneous"}
+    assert entities._screened(session, ["igneous"], {"igneous"}) == {"igneous"}
+    assert entities._screened(session, ["igneous"], {"igneous"}) == {"igneous"}
     assert calls == [["igneous"]]
     assert any("llm_cache" in sql for sql, _ in session.calls)
+
+    # A name whose anchors appear only in sources the model may not read is kept without asking, and that
+    # fallback is not cached as a verdict: once the name may be shown, the model is asked.
+    calls.clear()
+    assert entities._screened(session, ["lunch club"], set()) == {"lunch club"}
+    assert calls == [] and not any("lunch club" in json.dumps(v) for v in session.cache.values())
+    monkeypatch.setattr(entities, "_screen", lambda names: calls.append(names) or set())
+    assert entities._screened(session, ["lunch club"], {"lunch club"}) == set()
+    assert calls == [["lunch club"]]
+
+    # A keep cached before verdicts were marked may be an old fallback: asked again once it may be shown.
+    key = "entities-screen:v1:" + hashlib.sha256(b"old name").hexdigest()
+    session.cache[key] = {"keep": True, "name": "old name"}
+    assert entities._screened(session, ["old name"], {"old name"}) == set()
+    assert session.cache[key]["by"] == "model"
 
 
 def test_project_merge_requires_two_shared_people():

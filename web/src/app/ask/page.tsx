@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Fragment, useEffect, useState } from "react";
 import { InlineError, Skeleton } from "@/components/ui";
 import { api, AskResult, Hit } from "@/lib/api";
@@ -86,7 +87,17 @@ export default function AskPage() {
         </div>
       )}
 
-      {res && !busy && (
+      {res && !busy && res.reason === "no_opted_in_sources" && (
+        <div className="mt-6 rounded-md border border-line bg-panel p-4" role="status">
+          <div className="mb-1 text-xs font-medium text-muted">Nothing to ask yet</div>
+          <p className="leading-relaxed text-soft">{res.answer}</p>
+          <Link href="/settings#model" className="mt-3 inline-block text-sm font-medium text-accent underline underline-offset-4">
+            Open Sources
+          </Link>
+        </div>
+      )}
+
+      {res && !busy && !res.reason && (
         <>
           <div className={`mt-6 rounded-md border p-4 ${res.answerable ? "border-line bg-panel" : "border-danger/40"}`}>
             {!res.answerable && <div className="mb-1 text-xs font-medium text-danger">Not answerable from the evidence</div>}
@@ -120,7 +131,7 @@ export default function AskPage() {
 
 const SOURCE_LABELS: Record<string, string> = {
   gmail: "Email", email: "Email", imessage: "Messages", gcal: "Calendar", drive: "Drive", fs: "Files",
-  ai_chats: "AI chat", apple_notes: "Notes", github: "GitHub", takeout_activity: "Google activity",
+  ai_chats: "AI chat", notes: "Notes", github: "GitHub", takeout_activity: "Google activity", takeout_maps: "Maps",
   takeout_chrome: "Browsing", takeout_meet: "Meet", takeout_chat: "Google Chat", takeout_tasks: "Tasks", linkedin: "LinkedIn",
 };
 

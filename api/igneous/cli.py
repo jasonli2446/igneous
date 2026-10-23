@@ -234,6 +234,11 @@ def export(target: str = typer.Argument(..., help="lightrag"), out: Path = typer
     if target != "lightrag":
         raise typer.BadParameter("only 'lightrag' is a file export; Bedrock reads the bedrock_kb view directly")
     from igneous.interop.lightrag import write
+    from igneous.llm import allowed_sources
+
+    if not allowed_sources():
+        raise typer.BadParameter("LightRAG sends the export to its model, so it holds only opted-in sources and "
+                                 "none is: set IGNEOUS_LLM_SOURCES (email for the Enron demo)")
 
     with SessionLocal() as s:
         print(write(s, out, limit))

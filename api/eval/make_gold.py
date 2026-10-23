@@ -79,6 +79,7 @@ def norm(t: str) -> str:
 
 def main(n: int, n_unanswerable: int, n_multihop: int, seed: int, hard: bool = False, append: bool = False):
     with SessionLocal() as s:
+        llm.require_whole_corpus(s)  # it sends sampled records to the model
         rows = s.execute(text("""
             SELECT si.id, si.title, si.body_text FROM nodes n JOIN source_items si ON si.id = n.source_item_id
             WHERE n.type = 'Message' AND length(si.body_text) BETWEEN 400 AND 4000

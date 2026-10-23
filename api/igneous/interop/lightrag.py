@@ -2,7 +2,8 @@
 
 LightRAG then queries OUR entities and relationships (resolved people, extracted mentions, correspondence ties)
 instead of re-extracting its own from raw text. Every entity and relationship points at the chunk it came
-from via `source_id`, which is how LightRAG keeps facts tied to evidence.
+from via `source_id`, which is how LightRAG keeps facts tied to evidence. LightRAG sends these chunks to its
+model, so only records from opted-in sources are exported (#179, igneous/llm.py).
 
 Schema (from LightRAG.ainsert_custom_kg):
   chunks:        content, source_id, chunk_order_index, file_path
@@ -16,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.graph.resolve import P, split_name, unresolvable
+from igneous.llm import allowed_sources
 
 CANON = "COALESCE((SELECT canonical_id FROM canonical WHERE node_id = {x}), {x})"
 
@@ -24,17 +26,18 @@ def export(s: Session, limit_messages: int | None = None) -> dict:
     """Messages are scoped to those with extraction or correspondence among resolved people, newest first."""
     lim = "LIMIT :lim" if limit_messages else ""
     msgs = s.execute(text(f"""
-        SELECT m.id AS msg, c.id AS chunk, c.text, si.external_id
+        SELECT m.id AS msg, c.id AS chunk, c.text, si.source, si.external_id
         FROM nodes m JOIN chunks c ON c.node_id = m.id AND c.ord = 0
         JOIN source_items si ON si.id = c.source_item_id
         WHERE m.type = 'Message' AND EXISTS (SELECT 1 FROM edges e WHERE e.src = m.id AND e.type = 'MENTIONS')
+          AND si.source = ANY(CAST(:sources AS text[]))
         ORDER BY si.occurred_at DESC NULLS LAST {lim}
-    """), {"lim": limit_messages}).all()
+    """), {"lim": limit_messages, "sources": sorted(allowed_sources())}).all()
     msg_ids = [m.msg for m in msgs]
     chunk_of = {m.msg: f"igneous-c{m.chunk}" for m in msgs}
 
     chunks = [{"content": m.text, "source_id": chunk_of[m.msg], "chunk_order_index": 0,
-               "file_path": f"email/{m.external_id}"} for m in msgs]
+               "file_path": f"{m.source}/{m.external_id}"} for m in msgs]
 
     # People who sent or were mentioned in these messages, folded to their canonical identity.
     rows = s.execute(text(f"""

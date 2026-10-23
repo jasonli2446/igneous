@@ -39,8 +39,8 @@ Every API setting is an environment variable with the prefix `IGNEOUS_`; you can
 # Which database to use. Omit for the Enron demo DB "igneous". Use a separate DB for your own data (see below).
 # IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous_personal
 
-# Sources whose text may be sent to the hosted model for extraction. Empty (the default) sends nothing.
-# Comma-separated source ids, for example: email  or  gmail,ai_chats
+# Sources a hosted model may read (Ask, AI extraction, the checks on each link). Empty, the default, sends
+# nothing, and Ask stays off. Comma-separated ids from the Sources page: email (the Enron demo) or gmail,ai_chats,takeout
 IGNEOUS_LLM_SOURCES=
 
 # Optional
@@ -61,7 +61,8 @@ export AWS_REGION=us-east-1           # default if unset
 Without the key, `/ask` returns 503 and extraction is skipped; everything else works. The default chat model is
 `us.anthropic.claude-sonnet-5-5` (`IGNEOUS_LLM_MODEL`), with `IGNEOUS_LLM_CHEAP_MODEL` for high-volume yes/no judgments.
 Embeddings and the reranker run locally (FastEmbed), so the first search or pipeline run downloads small model files.
-Local documents and Apple Notes never reach a model unless `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`.
+A model reads only the sources in `IGNEOUS_LLM_SOURCES` ([Model calls](#model-calls)); local documents and Apple
+Notes also need `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`.
 
 ### 4. Start the API and the web app
 
@@ -105,7 +106,7 @@ make demo       # make migrate, igneous sync email --mailbox allen-p, igneous pi
 ```
 
 `make demo` calls the model for up to 100 messages (`EXTRACT=100`); that needs `AWS_BEARER_TOKEN_BEDROCK` and
-`IGNEOUS_LLM_SOURCES=email`. Run `make demo EXTRACT=0` to skip model calls. `make baseline` ingests six mailboxes
+`IGNEOUS_LLM_SOURCES=email`, which Ask and the evaluation need too. Run `make demo EXTRACT=0` to skip model calls. `make baseline` ingests six mailboxes
 (about 26k emails; embedding takes about 45 minutes on CPU, and search falls back to lexical for unembedded chunks
 meanwhile). Then try searching `jeff.skilling` or `phillip.allen` on the Graph page.
 
@@ -154,8 +155,8 @@ cd api && uv run igneous verify-synthetic-corpus ../data/synthetic-cross-source
 
 `igneous pipeline` runs spine -> chunk -> embed -> extract -> topics -> resolve. The topics stage lowercases and
 conservatively lemmatizes keys, merges only high-similarity local-embedding duplicates, and adds `RELATED_TO` after
-three shared messages; moved `ABOUT` edges keep their original provenance. Extraction calls the model only for
-sources explicitly listed in `IGNEOUS_LLM_SOURCES`; set it to `email` before `make demo`, then use `EXTRACT=0` to
+three shared messages; moved `ABOUT` edges keep their original provenance. Extraction, like every model call,
+reads only sources listed in `IGNEOUS_LLM_SOURCES`; set it to `email` before `make demo`, then use `EXTRACT=0` to
 skip calls or `EXTRACT=500` to process more. Everything is incremental: re-running only processes what changed.
 `docker compose up` also runs the api and web in containers.
 
@@ -166,7 +167,7 @@ skip calls or `EXTRACT=500` to process more. Everything is incremental: re-runni
 | `api/igneous/connectors/` | `base.py` connector contract + resumable sync runner; `email_maildir.py` Enron importer |
 | `api/igneous/graph/` | `spine.py` deterministic graph (stage one); `extract.py` LLM mentions/topics with span provenance (stage two); `resolve.py` entity resolution; `traversal.py` k-hop + people view |
 | `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
-| `api/igneous/llm.py` | the only place model calls happen |
+| `api/igneous/llm.py` | structured model calls and the rule for what a model may read (`allowed_sources`, `visible_nodes`); `providers.py` talks to Bedrock |
 | `api/eval/` | gold questions, ER labels, harnesses, results (see `api/eval/README.md`) |
 | `api/igneous/pipeline.py` | per-stage watermarks; every stage is incremental and safe to re-run |
 | `api/igneous/main.py` | FastAPI: `/search`, `/ask`, `/graph/search`, `/graph/subgraph`, `/graph/people`, `/graph/node/{id}`, `/graph/node/{id}/evidence`, `/stats` |
@@ -203,9 +204,16 @@ application model access goes through `api/igneous/providers.py`: local FastEmbe
 cross-encoder reranker, and the existing Bedrock chat client. Select them with `IGNEOUS_EMBEDDING_PROVIDER`,
 `IGNEOUS_RERANK_PROVIDER`, and `IGNEOUS_CHAT_PROVIDER`; the supported defaults are `fastembed`, `cross_encoder`,
 and `bedrock`. `IGNEOUS_LLM_ENABLED=false` turns off hosted model calls (search and the graph keep working; `/ask`
-returns 503). Automatic extraction is separately off by default: explicitly set `IGNEOUS_LLM_SOURCES` to the
-comma-separated source IDs you approve (for example `gmail,ai_chats`). This lets you import private AI-chat
-history without sending it to a hosted model; an explicit `/ask` request remains a user-initiated model call.
+returns 503).
+
+**What a model may read.** Only the sources listed in `IGNEOUS_LLM_SOURCES`: the comma-separated ids the Sources
+page shows (`gmail,ai_chats`; `takeout` covers every Takeout product, `ai_chats` every AI chat import). Every hosted
+call follows one rule (`api/igneous/llm.py`): a prompt carries text only from records in those sources, names only of
+people and things that appear in them, and counts for everything else. Local files and Apple Notes also need
+`IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`. Search may also send the question itself (never records) to pick out
+names and dates. Empty, the default, means no model call at all; Ask then says to opt a source in. Results the model
+gave earlier stay cached and keep counting. The Sources page shows, per source, whether
+a model may read it.
 
 Q&A reranks the graph-expanded candidate pool down to the top 8 evidence chunks. Set
 `IGNEOUS_RERANKER_ENABLED=false` to preserve graph retrieval order, or adjust the bounded input with
@@ -225,8 +233,9 @@ claude mcp add igneous -e AWS_REGION=us-east-1 -e AWS_BEARER_TOKEN_BEDROCK=$AWS_
   -- uv run --directory "$(pwd)/api" igneous mcp
 ```
 
-The model credentials only matter for `ask`; MCP clients don't pass your shell's environment through, so
-set them with `-e` as above (other tools work without them). Postgres must be running (`make db`).
+The model credentials only matter for `ask`, which reads only the sources in `IGNEOUS_LLM_SOURCES` (`api/.env`, since
+the server runs from `api/`). MCP clients don't pass your shell's environment through, so set the credentials with
+`-e` as above (other tools work without them). Postgres must be running (`make db`).
 
 ## Google (Gmail, Drive, Calendar, Contacts)
 

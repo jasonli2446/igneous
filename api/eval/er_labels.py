@@ -98,6 +98,7 @@ def review(workers: int = 4):
     rows = list(csv.DictReader(OUT.open()))
     todo = [r for r in rows if r.get("reviewer", "") == "" and r["label"] in ("0", "1")]
     with SessionLocal() as s:
+        llm.require_whole_corpus(s)  # it sends each identity's mail to the model
         prompts = {id(r): (f"Identity A: {r['a_name']} <{r['a_key']}>\n{rich_profile(s, int(r['a_id']))}\n\n=====\n\n"
                            f"Identity B: {r['b_name']} <{r['b_key']}>\n{rich_profile(s, int(r['b_id']))}") for r in todo}
 
@@ -130,6 +131,7 @@ def review(workers: int = 4):
 
 def draft(n: int, seed: int):
     with SessionLocal() as s:
+        llm.require_whole_corpus(s)  # it sends each identity's mail to the model
         pairs = candidates(s)
         # Stratify by score so labels cover clear positives, clear negatives, and the hard middle.
         bands = {"low": [p for p in pairs if p[2] < 0.4], "mid": [p for p in pairs if 0.4 <= p[2] < 0.85],
