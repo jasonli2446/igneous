@@ -776,10 +776,15 @@ def view(s: Session, seed: int, per: int = 6) -> dict:
     meaningful = [mc for mc in ranked
                   if mc[0]["id"] in backbone_ids or mc[1] == "People" or mc[1] == "Groups"
                   or (mc[0]["id"] in sustained and mc[1] not in ("Events",))]
-    backbone = [mc for mc in meaningful if mc[0]["id"] in backbone_ids]
-    rest = [mc for mc in meaningful if mc[0]["id"] not in backbone_ids]
+    # Only where you work and study is guaranteed a place; pinned threads (from your resume or the gold set)
+    # compete on strength like everything else, so a hobby that fills your calendar isn't crowded out by a
+    # small resume project.
+    orgs = {o for o, _sch, _to in life}
+    backbone = [mc for mc in meaningful if mc[0]["id"] in orgs]
+    rest = [mc for mc in meaningful if mc[0]["id"] not in orgs]
+    # The ring beyond your orgs: about as many things (projects, trips, hobbies, classes) as people.
     people = [mc for mc in rest if mc[1] == "People"][:int(size * 0.5)]
-    things = [mc for mc in rest if mc[1] != "People"][:max(0, size - len(backbone) - len(people))]
+    things = [mc for mc in rest if mc[1] != "People"][:max(int(size * 0.5), size - len(people))]
     first = backbone + sorted(people + things, key=lambda mc: -mc[0]["strength"])
     # An org from your resume stands for its own thread (graph/backbone.py): show it once, as the org.
     stands = dict(s.execute(text("""SELECT (props->>'thread')::bigint, id FROM nodes

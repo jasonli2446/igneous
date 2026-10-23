@@ -1973,3 +1973,16 @@ def test_part_of_direction_comes_from_the_named_container():
     assert '"part_of"' in src and "container" in src and "a_part_of_b" not in src  # no A/B label to flip
     # An umbrella still shows its own repo, people and chats after its sub-projects.
     assert "_own_content" in inspect.getsource(traversal.children)
+
+
+def test_ongoing_threads_have_no_window_and_nested_names_are_judged():
+    from datetime import datetime
+
+    from igneous.graph.resolve_threads import candidate_pairs
+    from igneous.graph.threads import ONGOING
+
+    assert ONGOING.search("hobby") and ONGOING.search("club") and not ONGOING.search("trip")
+    assert not ONGOING.search("club project")  # a bounded thing done by a club
+    a = {"id": 1, "name": "Climbing", "items": {1}, "people": set(), "a": datetime(2024, 1, 1), "b": datetime(2026, 1, 1)}
+    b = {"id": 2, "name": "Climbing Club", "items": {9}, "people": set(), "a": datetime(2024, 8, 1), "b": datetime(2025, 4, 1)}
+    assert len(candidate_pairs([a, b])) == 1  # nothing shared, but one name is inside the other
