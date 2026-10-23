@@ -2,7 +2,8 @@
 
 Adding a connector or import format? Add an entry to SOURCES here and update web/src/app/settings (CLAUDE.md,
 "Setup lives in the UI"). Static text lives in SOURCES; `describe()` adds live status; `build()` constructs the
-connector exactly as `igneous sync <id>` does.
+connector exactly as `igneous sync <id>` does. `model_use()` says whether a hosted model may read each source
+(#179): the same rule every model call follows (igneous/llm.py).
 """
 import glob
 import os
@@ -14,7 +15,7 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from igneous import jobs
+from igneous import jobs, llm
 from igneous.config import settings
 from igneous.connectors import ai_chats, apple_notes, github, google_auth, imessage, mac_contacts, secrets
 
@@ -63,8 +64,7 @@ SOURCES: list[dict] = [
     {"id": "linkedin", "kind": "import", "name": "LinkedIn", "group": "Exports you upload",
      "reads": "Your LinkedIn profile (positions, education, projects, skills) and your connections with their company, "
               "position and connection date. Positions and education become your employers and schools; connections "
-              "become named people linked to their companies. Login data is never read, and the data stays local "
-              "unless you opt in (IGNEOUS_LLM_SOURCES).",
+              "become named people linked to their companies. Login data is never read.",
      "steps": ["On linkedin.com click Me, then Settings & Privacy, then Data privacy, then Get a copy of your data.",
                "For the fast option choose Want something in particular? and tick Connections only (usually minutes). "
                "For positions, education, projects and skills choose Download larger data archive "
@@ -74,8 +74,7 @@ SOURCES: list[dict] = [
      "cli": "igneous import linkedin ~/Downloads/Basic_LinkedInDataExport.zip"},
     {"id": "takeout", "kind": "import", "name": "Google Takeout", "group": "Exports you upload",
      "reads": "Your Google My Activity (Search, YouTube, Maps, Gemini and the rest), Chrome history and bookmarks, "
-              "and Maps places and visits. Gemini chats are part of My Activity (a Gemini-only export works too). "
-              "Takeout data stays local and is never sent to a model unless you opt in (IGNEOUS_LLM_SOURCES).",
+              "and Maps places and visits. Gemini chats are part of My Activity (a Gemini-only export works too).",
      "steps": ["Go to takeout.google.com and click Deselect all.",
                "Tick My Activity, Chrome, and Maps (your places). If you see Location History (Timeline), tick it too.",
                "On My Activity click Multiple formats and change Activity records from HTML to JSON. HTML is not read.",
@@ -100,16 +99,14 @@ SOURCES: list[dict] = [
      "cli": "igneous sync ai_chats"},
     {"id": "fs", "kind": "local", "name": "Local files", "group": "On this computer",
      "reads": "Metadata for every non-secret file in the folders you choose, plus text from readable documents. "
-              "Secrets are skipped and document text is redacted. Local text never reaches a model unless "
-              "IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true.",
+              "Secrets are skipped and document text is redacted.",
      "steps": ["Set IGNEOUS_FILESYSTEM_ROOTS to a comma-separated list of folders (in api/.env or the API's "
                "environment), then restart the API. With no setting, existing Documents, Desktop, Downloads, and "
                "iCloud Drive folders are used.",
                "Press Sync now. Each sync reconciles deletions without reopening unchanged file bodies."],
      "cli": "igneous sync fs --path ~/Documents/notes"},
     {"id": "notes", "kind": "local", "name": "Apple Notes", "group": "On this computer",
-     "reads": "Unlocked Notes.app titles and bodies from the local database. Bodies are redacted and never sent "
-              "to a model unless IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true.",
+     "reads": "Unlocked Notes.app titles and bodies from the local database. Bodies are redacted.",
      "steps": [*FDA_STEPS, "Press Sync now. Locked notes are skipped."], "cli": "igneous sync notes"},
     {"id": "email", "kind": "local", "name": "Enron demo mailbox", "group": "Demo",
      "reads": "The public Enron email corpus. For demos and evaluation only; never mix it with your own data.",
@@ -119,6 +116,31 @@ SOURCES: list[dict] = [
 BY_ID = {s["id"]: s for s in SOURCES}
 SYNCABLE = {s["id"] for s in SOURCES if s["kind"] in ("google", "local", "remote")}
 IMPORT_TOOL = {"chatgpt", "gemini", "claude_ai"}  # raw_meta.tool values stored under source 'ai_chats'
+MODEL_ID = {"chatgpt": "ai_chats", "claude_ai": "ai_chats"}  # the IGNEOUS_LLM_SOURCES id that covers an export
+
+
+def model_use(sid: str, allowed: frozenset[str]) -> dict:
+    """Whether a hosted model may read this source (yes | partly | no), and how to change that."""
+    from igneous.connectors.takeout import TAKEOUT_SOURCES
+
+    mid = MODEL_ID.get(sid, sid)
+    stored = TAKEOUT_SOURCES if mid == "takeout" else (mid,)
+    n = sum(v in allowed for v in stored)
+    state = "yes" if n == len(stored) else "partly" if n else "no"
+    if state == "yes":
+        note = f"Opted in: a hosted model may read it (IGNEOUS_LLM_SOURCES lists {mid})."
+    elif state == "partly":
+        note = f"Partly opted in: IGNEOUS_LLM_SOURCES lists some of it. Add {mid} to opt in all of it."
+    elif sid in ("gcontacts", "maccontacts"):
+        note = ("Cards are never sent to a model. Names from them label people in the records of opted-in "
+                f"sources. To opt the cards in, add {mid} to IGNEOUS_LLM_SOURCES.")
+    else:
+        note = (f"Never sent to a hosted model. To allow it, add {mid} to IGNEOUS_LLM_SOURCES"
+                + (" and set IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true" if mid in llm.LOCAL_SOURCES else "")
+                + (" (that covers all AI chat history)" if mid != sid else "") + ", then restart the API.")
+    if sid == "takeout":  # stored with the other AI chats, not under a takeout_* source
+        note += " Its Gemini chats count as AI chats (ai_chats)."
+    return {"id": mid, "allowed": state, "note": note}
 
 
 # ---- requirement checks: cheap, read-only, no network ----
@@ -196,6 +218,7 @@ def describe(s: Session) -> list[dict]:
     google_accounts = google_auth.accounts(s)
     github_accounts = google_auth.accounts(s, "github")
     ai_local = sum(n for tool, n in export_counts.items() if tool not in IMPORT_TOOL)
+    allowed = llm.allowed_sources()
 
     out = []
     for src in SOURCES:
@@ -246,7 +269,8 @@ def describe(s: Session) -> list[dict]:
         row.update(status=status, message=message, items=count, last_sync=last, accounts=accounts,
                    requirements_ok=ok, can_sync=sid in SYNCABLE and ok and (kind != "google" or bool(google_accounts))
                    and (sid != "github" or bool(github_accounts)),
-                   coming_soon=kind == "planned", job=job_view(job) if job else None)
+                   coming_soon=kind == "planned", job=job_view(job) if job else None,
+                   model=model_use(sid, allowed))
         out.append(row)
     return out
 

@@ -2,7 +2,9 @@
 
 Rules handle common, unambiguous phrasing locally.  A schema-constrained provider
 call is only a best-effort fallback and its output is validated before use, so a
-model outage or malformed response never changes an unconstrained search.
+model outage or malformed response never changes an unconstrained search. It sends
+only the question, and only once some source is opted in (#179): with none, a
+search makes no hosted call at all.
 """
 from __future__ import annotations
 
@@ -105,6 +107,10 @@ def _rule_constraints(question: str) -> Constraints:
 
 def _fallback(question: str) -> Constraints:
     """Return provider output only when it conforms to our narrow local contract."""
+    from igneous.llm import allowed_sources
+
+    if not allowed_sources():
+        return Constraints()
     try:
         result = providers.chat([
             {"role": "system", "content": _FALLBACK_SYSTEM},

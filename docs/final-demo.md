@@ -18,11 +18,13 @@ they work on any graph that has trips, projects and an owner. Swap in your own n
    ```bash
    claude mcp add igneous --scope user \
      -e IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous_personal \
+     -e IGNEOUS_LLM_SOURCES=<the ids you opt in, e.g. gmail,ai_chats> \
      -e AWS_REGION=us-east-1 -e AWS_BEARER_TOKEN_BEDROCK="$AWS_BEARER_TOKEN_BEDROCK" \
      -- "$(pwd)/api/.venv/bin/igneous" mcp
    claude mcp list | grep igneous     # -> ✔ Connected
    ```
-   Drop `IGNEOUS_DATABASE_URL` to demo on Enron. The Bedrock variables only matter for `ask` and summaries.
+   Drop `IGNEOUS_DATABASE_URL` and use `IGNEOUS_LLM_SOURCES=email` to demo on Enron. The Bedrock variables only
+   matter for `ask` and summaries, and those read only the sources in `IGNEOUS_LLM_SOURCES`.
 4. **Quiet other MCP servers.** Claude Code waits for every configured server at startup. A server that
    times out (for example a stale `figma` entry) shows as one failed "waiting for MCP servers" step at the
    start of the session. Remove or disable it before recording.
@@ -156,4 +158,5 @@ Adding "two records is enough" to prompt 4 keeps it short; without it the agent 
 | First tool call says "waiting for MCP servers" | Another configured server is slow; igneous still connects. Remove the slow one before recording. |
 | A trip or org opens with almost nothing | A rebuild is running or just crashed. Let it finish (or re-run `threads`, `backbone`). |
 | `ask` returns "ask is unavailable" | The MCP env is missing the Bedrock token; re-run the `claude mcp add` with `-e AWS_BEARER_TOKEN_BEDROCK=...`. |
+| `ask` says no source is opted in | The MCP env has no `IGNEOUS_LLM_SOURCES`; re-run the `claude mcp add` with `-e IGNEOUS_LLM_SOURCES=...`. |
 | `me` takes ~10 s | First call after a graph change; it's cached after that. Warm it before recording. |

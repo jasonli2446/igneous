@@ -20,7 +20,7 @@ Formats are not guaranteed by Google and change without notice, so every field i
 file that fails to parse is reported in `notes` rather than aborting the import.
 
 Everything stored passes through redact(), and URLs lose tracking parameters. The sources below stay out of
-every model call unless named in IGNEOUS_LLM_SOURCES (see rag/qa.py and graph/extract.py).
+every model call unless named in IGNEOUS_LLM_SOURCES (`takeout` names them all; see igneous/llm.py).
 """
 import csv
 import io

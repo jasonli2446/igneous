@@ -14,6 +14,9 @@ an edge is re-judged only when its evidence changes. After each run the verdict 
 The user's corrections are verdicts too (source='user'): an unlink in the inspector writes 'drop', and the
 model sees the user's most similar past corrections as examples, so a kind of mistake corrected once is
 judged differently afterwards.
+
+The judge reads only what may reach a model (#179, igneous/llm.py): evidence from opted-in sources, and only
+edges whose two ends appear in such records. An edge it may see no evidence for is left as it is.
 """
 import hashlib
 import json
@@ -69,7 +72,8 @@ def _edges(s: Session, pending_only: bool = True) -> list[dict]:
     """Derived edges with their natural keys and evidence (source, date, title, snippet per item)."""
     claims = [f"{t}|{x}" for t, x in CLAIMS]
     rows = s.execute(text("""
-        SELECT e.id, e.type, e.extractor, e.props, a.type || ':' || a.key AS src_key, a.name AS src_name,
+        SELECT e.id, e.type, e.extractor, e.props, a.id AS src_id, b.id AS dst_id,
+               a.type || ':' || a.key AS src_key, a.name AS src_name,
                a.type AS src_type, b.type || ':' || b.key AS dst_key, b.name AS dst_name, b.type AS dst_type,
                b.props->>'kind' AS dst_kind,
                (SELECT array_agg(x ORDER BY x) FROM (
@@ -81,35 +85,41 @@ def _edges(s: Session, pending_only: bool = True) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def _profile(s: Session, natural: str) -> str:
+def _profile(s: Session, natural: str, sources: frozenset[str]) -> str:
     """For "same person?": what one identity looks like on its own (name, address or number, who it talks to,
-    what about). Two addresses of one human rarely share messages, so shared items are the wrong evidence."""
+    what about), from opted-in sources. Two addresses of one human rarely share messages, so shared items are
+    the wrong evidence."""
     nid = _id(s, natural)
     if nid is None:
         return "(missing)"
     n = s.execute(text("SELECT name, key, props->>'named_by' FROM nodes WHERE id = :i"), {"i": nid}).first()
     peers = s.execute(text("""
         WITH m AS (SELECT dst AS m FROM edges WHERE src = :i AND type = 'SENT'
-                   UNION SELECT src FROM edges WHERE dst = :i AND type = 'RECEIVED')
-        SELECT p.name, count(*) FROM m JOIN edges x ON (x.dst = m.m AND x.type = 'SENT') OR (x.src = m.m AND x.type = 'RECEIVED')
+                   UNION SELECT src FROM edges WHERE dst = :i AND type = 'RECEIVED'),
+        shown AS (SELECT m.m FROM m JOIN nodes mn ON mn.id = m.m JOIN source_items si ON si.id = mn.source_item_id
+                  WHERE si.source = ANY(CAST(:src AS text[])))
+        SELECT p.name, count(*) FROM shown m
+        JOIN edges x ON (x.dst = m.m AND x.type = 'SENT') OR (x.src = m.m AND x.type = 'RECEIVED')
         JOIN nodes p ON p.id = CASE WHEN x.type = 'SENT' THEN x.src ELSE x.dst END
         WHERE p.id <> :i AND p.type = 'Person' GROUP BY p.name ORDER BY 2 DESC LIMIT 5
-    """), {"i": nid}).all()
+    """), {"i": nid, "src": sorted(sources)}).all()
     subjects = s.execute(text("""
         SELECT DISTINCT left(si.title, 70) FROM edges e JOIN nodes m ON m.id = CASE WHEN e.type = 'SENT' THEN e.dst ELSE e.src END
         JOIN source_items si ON si.id = m.source_item_id
         WHERE ((e.src = :i AND e.type IN ('SENT', 'ATTENDED')) OR (e.dst = :i AND e.type = 'RECEIVED')) AND si.title <> ''
+          AND si.source = ANY(CAST(:src AS text[]))
         LIMIT 5
-    """), {"i": nid}).scalars().all()
+    """), {"i": nid, "src": sorted(sources)}).scalars().all()
     card = " (from a contact card)" if n[2] == "contacts" else ""
     return (f"name '{n[0]}'{card}, identifier {n[1]}; talks most with: "
             + (", ".join(f"{p} ({c})" for p, c in peers) or "nobody recorded")
             + "; topics: " + ("; ".join(subjects) or "none recorded"))
 
 
-def _evidence(s: Session, edge: dict) -> list[dict]:
-    """What the judge reads. Item evidence when the edge has it; otherwise the items that connect both ends
-    (shared messages/events for people, or the thread's items the person appears in)."""
+def _evidence(s: Session, edge: dict, sources: frozenset[str]) -> tuple[list[dict], bool]:
+    """What the judge reads, and whether records it may not see also exist. Item evidence when the edge has it;
+    otherwise the items that connect both ends (shared messages/events for people, or the thread's items the
+    person appears in). Only items from opted-in sources are shown."""
     ids = [i for i in (edge["items"] or []) if i]
     if not ids and edge["dst_type"] == "Project":
         # A membership with no recorded evidence: the project's own items this person is on (not anything they
@@ -134,14 +144,18 @@ def _evidence(s: Session, edge: dict) -> list[dict]:
             WHERE n.source_item_id IS NOT NULL LIMIT 40
         """), {"a": _id(s, edge["src_key"]), "b": _id(s, edge["dst_key"])}).scalars())
     if not ids:
-        return []
+        return [], False
     rows = s.execute(text("""
         SELECT si.id, si.source, si.occurred_at, coalesce(si.title, '') AS title,
                left(coalesce(si.body_text, ''), 1200) AS body,
-               (SELECT count(*) FROM jsonb_array_elements(COALESCE(si.raw_meta->'to', '[]') || COALESCE(si.raw_meta->'cc', '[]'))) AS recipients
-        FROM source_items si WHERE si.id = ANY(:ids) ORDER BY si.occurred_at DESC NULLS LAST LIMIT :n
-    """), {"ids": ids, "n": MAX_EVIDENCE}).mappings().all()
-    return [dict(r) for r in rows]
+               (SELECT count(*) FROM jsonb_array_elements(COALESCE(si.raw_meta->'to', '[]') || COALESCE(si.raw_meta->'cc', '[]'))) AS recipients,
+               EXISTS (SELECT 1 FROM source_items o WHERE o.id = ANY(:ids)
+                       AND NOT (o.source = ANY(CAST(:src AS text[])))) AS unseen
+        FROM source_items si WHERE si.id = ANY(:ids) AND si.source = ANY(CAST(:src AS text[]))
+        ORDER BY si.occurred_at DESC NULLS LAST LIMIT :n
+    """), {"ids": ids, "src": sorted(sources), "n": MAX_EVIDENCE}).mappings().all()
+    # No row from an opted-in source means every one of these records is unseen.
+    return [dict(r) for r in rows], (rows[0]["unseen"] if rows else True)
 
 
 def _id(s: Session, natural: str) -> int | None:
@@ -159,34 +173,46 @@ def _snippet(item: dict, terms: list[str]) -> str:
     return body[:SNIPPET]
 
 
-def _examples(s: Session, claim: tuple[str, str], k: int = 4) -> list[dict]:
-    """The user's own corrections of this kind of relationship, most recent first: few-shot examples."""
-    return [dict(r) for r in s.execute(text("""
-        SELECT src_key, dst_key, verdict, reason FROM edge_verdicts
-        WHERE source = 'user' AND type = :t AND extractor = :x ORDER BY updated_at DESC LIMIT :k
-    """), {"t": claim[0], "x": claim[1], "k": k}).mappings()]
+def _examples(s: Session, claim: tuple[str, str], sources: frozenset[str], k: int = 4) -> list[dict]:
+    """The user's own corrections of this kind of relationship, most recent first: few-shot examples. Only
+    corrections whose two ends appear in opted-in records."""
+    from igneous.llm import visible_nodes
+
+    rows = [dict(r) for r in s.execute(text("""
+        SELECT v.src_key, v.dst_key, v.verdict, v.reason, a.id AS a, b.id AS b FROM edge_verdicts v
+        JOIN nodes a ON a.type = split_part(v.src_key, ':', 1)
+                    AND a.key = substr(v.src_key, length(split_part(v.src_key, ':', 1)) + 2)
+        JOIN nodes b ON b.type = split_part(v.dst_key, ':', 1)
+                    AND b.key = substr(v.dst_key, length(split_part(v.dst_key, ':', 1)) + 2)
+        WHERE v.source = 'user' AND v.type = :t AND v.extractor = :x ORDER BY v.updated_at DESC LIMIT :n
+    """), {"t": claim[0], "x": claim[1], "n": k * 5}).mappings()]
+    seen = visible_nodes(s, [r["a"] for r in rows] + [r["b"] for r in rows], sources)
+    return [r for r in rows if r["a"] in seen and r["b"] in seen][:k]
 
 
-def _describe_identity(s: Session, edge: dict) -> tuple[str, str]:
-    head = f"A: {_profile(s, edge['src_key'])}\nB: {_profile(s, edge['dst_key'])}"
+def _describe_identity(s: Session, edge: dict, sources: frozenset[str]) -> tuple[str, str]:
+    head = f"A: {_profile(s, edge['src_key'], sources)}\nB: {_profile(s, edge['dst_key'], sources)}"
     return head, hashlib.sha256(head.encode()).hexdigest()
 
 
-def _describe(edge: dict, evidence: list[dict]) -> tuple[str, str]:
+def _describe(edge: dict, evidence: list[dict], unseen: bool = False) -> tuple[str, str]:
     terms = [edge["dst_name"], edge["src_name"]]
     lines = [f"  - [{e['source']}, {e['occurred_at']:%Y-%m-%d}{f', {e['recipients']} recipients' if e['recipients'] else ''}] "
              f"{e['title'][:100]} :: {_snippet(e, terms)}" for e in evidence if e.get("occurred_at")]
     head = (f"A = {edge['src_type']} '{edge['src_name']}'; B = {edge['dst_type']} '{edge['dst_name']}'"
             + (f" ({edge['dst_kind']})" if edge.get("dst_kind") else ""))
     body = "\n".join(lines) or "  (no evidence items)"
+    if unseen:
+        body += "\n  (more records about them are in sources not shared with you)"
     digest = hashlib.sha256((head + body).encode()).hexdigest()
     return f"{head}\nEvidence:\n{body}", digest
 
 
-def _judge_batch(s: Session, claim: tuple[str, str], batch: list[tuple[dict, str, str]]) -> list[dict]:
+def _judge_batch(s: Session, claim: tuple[str, str], batch: list[tuple[dict, str, str]],
+                 sources: frozenset[str]) -> list[dict]:
     from igneous.llm import LLMDisabled, structured
 
-    examples = _examples(s, claim)
+    examples = _examples(s, claim, sources)
     ex = ""
     if examples:
         ex = "The person has corrected these before (follow the same judgment):\n" + "\n".join(
@@ -200,7 +226,8 @@ def _judge_batch(s: Session, claim: tuple[str, str], batch: list[tuple[dict, str
             "alone: keep (the records show it), drop (they don't: e.g. only a passing mention, a mass mailing, a "
             "coincidence of names), or unsure. Give a confidence 0-1 and one short reason a person would "
             "understand, naming the records ('3 emails with them planning the trip', 'only on a 40-person club "
-            "newsletter'). Be strict: a relationship the records don't show is a drop.",
+            "newsletter'). Be strict: a relationship the records don't show is a drop. When an edge says more "
+            "records are in sources not shared with you and the records shown don't settle it, answer unsure.",
             prompt,
             {"type": "object", "additionalProperties": False, "required": ["edges"], "properties": {"edges": {
                 "type": "array", "items": {"type": "object", "additionalProperties": False,
@@ -265,28 +292,40 @@ def apply_verdicts(s: Session) -> int:
 
 def run(s: Session, log=print, budget: int = BUDGET) -> dict:
     """Judge every derived edge that has no verdict for its current evidence; then apply all verdicts."""
+    from igneous.llm import allowed_sources, visible_nodes
+
     ensure_table(s)
-    stats = {"judged": 0, "keep": 0, "drop": 0, "unsure": 0, "cached": 0, "calls": 0}
-    if not settings.llm_enabled:
+    stats = {"judged": 0, "keep": 0, "drop": 0, "unsure": 0, "cached": 0, "calls": 0, "not_shared": 0}
+    sources = allowed_sources()
+    if not settings.llm_enabled or not sources:
         stats["applied"] = apply_verdicts(s)
         s.commit()
         return stats
     known = {(r[0], r[1], r[2], r[3]): (r[4], r[5]) for r in s.execute(text(
         "SELECT src_key, dst_key, type, extractor, evidence, source FROM edge_verdicts"))}
     todo: dict[tuple[str, str], list[tuple[dict, str, str]]] = {}
-    for edge in _edges(s):
+    edges = _edges(s)
+    visible = visible_nodes(s, [e["src_id"] for e in edges] + [e["dst_id"] for e in edges], sources)
+    for edge in edges:
         k = (edge["src_key"], edge["dst_key"], edge["type"], edge["extractor"])
         prior = known.get(k)
         if prior and prior[1] == "user":
             continue  # the user decided; never re-judged
-        evidence = [] if edge["type"] == "SAME_AS" else _evidence(s, edge)
+        if edge["src_id"] not in visible or edge["dst_id"] not in visible:
+            stats["not_shared"] += 1  # its ends appear only in sources the model may not read
+            continue
+        evidence, unseen = ([], False) if edge["type"] == "SAME_AS" else _evidence(s, edge, sources)
+        if unseen and not evidence:
+            stats["not_shared"] += 1  # every record behind it is in a source the model may not read
+            continue
         if evidence and not edge["items"]:
             # A link proposed without records: what the judge reads becomes its evidence, so the why-view shows
             # what the verdict was made on instead of "no evidence".
             for e in evidence:
                 s.execute(text("INSERT INTO edge_evidence (edge_id, source_item_id, kind, detail) "
                                "VALUES (:e, :s, 'verified-on', '{}')"), {"e": edge["id"], "s": e["id"]})
-        desc, digest = (_describe_identity(s, edge) if edge["type"] == "SAME_AS" else _describe(edge, evidence))
+        desc, digest = (_describe_identity(s, edge, sources) if edge["type"] == "SAME_AS"
+                        else _describe(edge, evidence, unseen))
         if prior and prior[0] == digest:
             stats["cached"] += 1
             continue
@@ -299,7 +338,7 @@ def run(s: Session, log=print, budget: int = BUDGET) -> dict:
             if stats["calls"] >= budget:
                 break
             batch = items[i:i + BATCH]
-            results = _judge_batch(s, claim, batch)
+            results = _judge_batch(s, claim, batch, sources)
             stats["calls"] += 1
             for (edge, _desc, digest), r in zip(batch, results, strict=False):
                 s.execute(text("""

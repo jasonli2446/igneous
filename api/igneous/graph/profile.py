@@ -52,7 +52,7 @@ SCHEMA = {
 def documents(s: Session) -> list:
     """Candidate self-describing documents: resume/CV-titled files, newest first."""
     return s.execute(text(r"""
-        SELECT id, title, occurred_at, body_text FROM source_items
+        SELECT id, source, title, occurred_at, body_text FROM source_items
         WHERE source IN ('fs', 'drive', 'notes') AND coalesce(body_text, '') <> ''
           AND (title ~* '(resume|résumé|\mcv\M|curriculum vitae|linkedin)')
           AND length(body_text) BETWEEN 400 AND 30000
@@ -61,15 +61,17 @@ def documents(s: Session) -> list:
 
 
 def extract(s: Session, doc) -> dict | None:
-    """One cached structured read of a document. Uses the stronger model: this is the backbone, once per version."""
-    from igneous.llm import LLMDisabled, structured
+    """One cached structured read of a document. Uses the stronger model: this is the backbone, once per version.
+    A version already read keeps counting with the model off; a new one is read only if its source is opted in
+    (#179)."""
+    from igneous.llm import LLMDisabled, allowed_sources, structured
 
-    if not settings.llm_enabled:
-        return None
     key = "profile-extract:v3:" + hashlib.sha256(doc.body_text.encode()).hexdigest()
     cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
     if cached is not None:
         return cached
+    if not settings.llm_enabled or doc.source not in allowed_sources():
+        return None
     try:
         out, _ = structured(
             "Read a document and, if it describes its owner (a resume, CV or profile), extract their history as "

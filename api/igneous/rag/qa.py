@@ -9,8 +9,6 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous import llm
-from igneous.config import settings
-from igneous.graph.extract import allowed_sources
 from igneous.rag.constraints import apply
 from igneous.rag.rerank import rerank
 from igneous.rag.search import Filters, _where, hybrid
@@ -100,19 +98,31 @@ def _evidence_block(items: list[dict]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+NO_SOURCES = ("Ask sends the passages it finds to a hosted model, and no source is opted in for that. Add a "
+              "source id to IGNEOUS_LLM_SOURCES in api/.env (for example gmail), restart the API, and ask again. "
+              "The Sources page shows each source's id.")
+
+
+def _not_opted_in(message: str) -> dict:
+    return {"answerable": False, "answer": message, "citations": [], "evidence": [], "timing": {"retrieve_s": 0.0},
+            "reason": "no_opted_in_sources"}
+
+
 def answer(s: Session, question: str, f: Filters | None = None, use_graph: bool = True,
            mode: str = "hybrid") -> dict:
     t0 = time.time()
+    # A question is consent to ask a model about the sources opted in for it (#179), not about everything:
+    # retrieval and graph expansion stay inside that list, and with nothing on it no model is called at all.
+    approved = llm.allowed_sources()
+    if not approved:
+        return _not_opted_in(NO_SOURCES)
     f = apply(s, question, f)
-    # A question is explicit consent to ask a model, not to disclose every local source.
-    # Keep retrieval and graph expansion inside the same source allow-list as extraction.
-    approved = allowed_sources()
-    f.sources = tuple(sorted(approved.intersection(f.sources) if f.sources else approved))
+    sources = approved.intersection(f.sources) if f.sources else approved
+    if not sources:
+        return _not_opted_in(f"This question is limited to {', '.join(sorted(f.sources))}, and none of those is "
+                             f"opted in to the hosted model (opted in: {', '.join(sorted(approved))}).")
+    f.sources = tuple(sorted(sources))
     hits = hybrid(s, question, f, k=CONTEXT_CHUNKS, mode=mode)
-    # Local filesystem and Notes evidence is searchable in the UI, but cannot be supplied to any model
-    # (reranker, embedder, or LLM) until the owner has explicitly opted in.
-    if not settings.local_sources_model_enabled:
-        hits = [hit for hit in hits if hit["source"] not in ("fs", "notes")]
     candidates = hits + expand(s, hits, f=f) if use_graph else hits
     t_rerank = time.time()
     context = rerank(question, candidates, keep=CONTEXT_CHUNKS) if use_graph else candidates

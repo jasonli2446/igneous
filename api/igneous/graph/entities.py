@@ -5,8 +5,8 @@ Nothing is configured. A name becomes a candidate when the data itself treats it
   - a named group chat active on 5+ days
   - a Drive / local folder holding 2+ files
   - the repo an AI coding session ran in
-Generic names ("Lunch", "1:1", "Office hours") are dropped by document frequency and by a one-time, cached
-LLM check when the model is enabled (otherwise a stop-list).
+Generic names ("Lunch", "1:1", "Office hours") are dropped by document frequency and a stop-list, and by a
+one-time, cached LLM check for names that appear in opted-in sources (#179) when the model is enabled.
 
 Each surviving name becomes one `Project` node. Every item that mentions it (by phrase match on its chunks,
 across all sources) gets a PART_OF edge to it with the matched span as evidence; the anchors themselves link
@@ -171,17 +171,13 @@ def _components(s: Session, anchors: list[tuple[int, str]]) -> list[list[tuple[i
     return list(groups.values())
 
 
-def _screen(names: list[str]) -> set[str]:
-    """Ask the model, once per name (cached in pipeline_state), which names are a specific thing (a project,
-    game, club, course, org, product) rather than a generic activity. Without the model, keep them all."""
+def _screen(names: list[str]) -> set[str] | None:
+    """Ask the model which names are a specific thing (a project, game, club, course, org, product) rather than a
+    generic activity. None when the model can't answer."""
     from igneous.llm import LLMDisabled, structured
 
     if not names:
         return set()
-    if not settings.local_sources_model_enabled:
-        # Project candidates include local folder and repository names; do not disclose even those to a model
-        # until the owner opts in. The conservative generic stop-list still filters obvious non-projects.
-        return set(names)
     try:
         out, _ = structured(
             "You classify short names taken from someone's calendar, group chats and folders. Keep a name if it "
@@ -193,23 +189,28 @@ def _screen(names: list[str]) -> set[str]:
              "required": ["keep"], "additionalProperties": False}, max_tokens=2000)
         return {k.strip().lower() for k in out["keep"]} & set(names)
     except LLMDisabled:
-        return set(names)
+        return None
 
 
-def _screened(s: Session, names: list[str]) -> set[str]:
-    """Cache one deterministic verification verdict per candidate in Postgres, not local disk."""
+def _screened(s: Session, names: list[str], shown: set[str]) -> set[str]:
+    """The names that are specific things: one model verdict per name, cached in Postgres. Only names in `shown`
+    (an anchor appears in opted-in records) go to the model; the rest are kept, since the stop-list already
+    dropped the generic ones. Only real model verdicts are cached. A cached keep without that mark may be an
+    old fallback, so it is asked again once the name may be shown."""
     kept = set()
     for name in names:
         key = "entities-screen:v1:" + hashlib.sha256(name.encode()).hexdigest()
         cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :key"), {"key": key}).scalar()
-        if cached is None:
-            verdict = name in _screen([name])
-            s.execute(text("""
-                INSERT INTO llm_cache (cache_key, response) VALUES (:key, CAST(:response AS jsonb))
-                ON CONFLICT (cache_key) DO NOTHING
-            """), {"key": key, "response": json.dumps({"keep": verdict, "name": name})})
-        else:
+        if cached is not None and (cached.get("by") == "model" or not cached.get("keep")):
             verdict = bool(cached.get("keep"))
+        else:
+            answer = _screen([name]) if name in shown and settings.llm_enabled else None
+            verdict = answer is None or name in answer
+            if answer is not None:
+                s.execute(text("""
+                    INSERT INTO llm_cache (cache_key, response) VALUES (:key, CAST(:response AS jsonb))
+                    ON CONFLICT (cache_key) DO UPDATE SET response = EXCLUDED.response
+                """), {"key": key, "response": json.dumps({"keep": verdict, "name": name, "by": "model"})})
         if verdict:
             kept.add(name)
     return kept
@@ -234,6 +235,8 @@ def _edge(s: Session, src: int, dst: int, type_: str, props: dict, sid: int | No
 
 
 def run(s: Session, log=print) -> int:
+    from igneous.llm import visible_nodes
+
     # Nothing touched since the last completed rebuild: avoid a costly, quota-free but
     # unnecessary scan. Dirty node markers are retained for resolve below.
     if not dirty.pending(s):
@@ -242,7 +245,9 @@ def run(s: Session, log=print) -> int:
     # Equal names only propose a merge. Strong single anchors remain Projects; only corroborated pairs combine.
     cands = {f"{name}:{min(node_id for node_id, _ in component)}": {**candidate, "anchors": component, "screen": name}
              for name, candidate in cands.items() for component in _components(s, candidate["anchors"])}
-    screened = _screened(s, sorted({candidate["screen"] for candidate in cands.values()}))
+    visible = visible_nodes(s, [nid for c in cands.values() for nid, _ in c["anchors"]])
+    shown = {c["screen"] for c in cands.values() if any(nid in visible for nid, _ in c["anchors"])}
+    screened = _screened(s, sorted({candidate["screen"] for candidate in cands.values()}), shown)
     keep = {key for key, candidate in cands.items() if candidate["screen"] in screened}
     # Rebuild this stage's output from scratch: cheap, and new evidence always reaches old entities.
     s.execute(text("DELETE FROM edges WHERE extractor = :x"), {"x": EXTRACTOR})

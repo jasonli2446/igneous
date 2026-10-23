@@ -145,15 +145,9 @@ def store(s: Session, item, body: str, out: dict) -> dict:
     return stats
 
 
-def allowed_sources(value: str | None = None) -> frozenset[str]:
-    """Return source IDs explicitly approved for automatic hosted-model extraction."""
-    return frozenset(source.strip() for source in (value if value is not None else settings.llm_sources).split(",")
-                     if source.strip())
-
-
 def run(s: Session, limit: int = 200, log=print) -> int:
     """Extract the newest opted-in source items. Empty ``IGNEOUS_LLM_SOURCES`` means no automatic model calls."""
-    sources = allowed_sources()
+    sources = llm.allowed_sources()
     if not sources:
         log("  extraction skipped: set IGNEOUS_LLM_SOURCES to opt in a source")
         return 0

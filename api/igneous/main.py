@@ -20,7 +20,7 @@ from igneous.graph.entity_api import router as entity_router
 from igneous.graph.history import commitments, decisions, relationship_history
 from igneous.graph.traversal import GraphFilters, expand, explain, neighborhood, network, people, view
 from igneous.items import router as items_router
-from igneous.llm import LLMDisabled
+from igneous.llm import LLMDisabled, model_status
 from igneous.rag import qa
 from igneous.rag.constraints import apply
 from igneous.rag.search import Filters, experts, hybrid
@@ -175,8 +175,9 @@ async def import_takeout(request: Request):
 
 @app.get("/sources")
 def list_sources(s: Session = Depends(get_session)):
-    """Every connector and import format with plain-language setup, requirement checks, and live status."""
-    return {"sources": sources.describe(s)}
+    """Every connector and import format with plain-language setup, requirement checks, and live status, plus
+    whether hosted model calls are on and which sources they may read."""
+    return {"sources": sources.describe(s), "model": model_status()}
 
 
 @app.post("/import/linkedin")

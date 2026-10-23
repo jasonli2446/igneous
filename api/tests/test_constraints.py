@@ -46,9 +46,10 @@ def test_explicit_filters_win_and_provider_failure_leaves_search_unconstrained(m
 
 
 def test_provider_fallback_uses_merged_interface_and_validates_result(monkeypatch):
-    from igneous import providers
+    from igneous import llm, providers
     from igneous.rag.constraints import apply
 
+    monkeypatch.setattr(llm.settings, "llm_sources", "gcal")
     calls = []
 
     def chat(messages, schema, **options):
@@ -72,6 +73,12 @@ def test_provider_fallback_uses_merged_interface_and_validates_result(monkeypatc
     assert filters.person_id == 7 and filters.source == "gcal"
     assert filters.since == datetime(2001, 5, 1) and filters.until is None
     assert calls[0][2] == {"max_tokens": 180}
+
+    # With nothing opted in, a search sends nothing anywhere, not even the question (#179).
+    monkeypatch.setattr(llm.settings, "llm_sources", "")
+    calls.clear()
+    assert apply(Session(), "What did the planning discussion cover?").person_id is None
+    assert calls == []
 
 
 def test_person_id_filter_includes_canonical_aliases():

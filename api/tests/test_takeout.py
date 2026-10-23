@@ -347,7 +347,9 @@ def test_search_joins_existing_project_after_rebuild(db, zpath):
 
 
 def test_takeout_sources_are_hidden_from_models_by_default():
-    from igneous.graph.extract import allowed_sources
+    from igneous.llm import allowed_sources
 
     assert not set(takeout.TAKEOUT_SOURCES) & allowed_sources("")
     assert set(takeout.TAKEOUT_SOURCES) - allowed_sources("takeout_maps") == set(takeout.TAKEOUT_SOURCES) - {"takeout_maps"}
+    # "takeout" is the id the Sources page shows; it covers every product stored under its own source value.
+    assert allowed_sources("takeout") == frozenset(takeout.TAKEOUT_SOURCES)

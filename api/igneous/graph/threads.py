@@ -231,8 +231,7 @@ def _sample(items: list, n: int = 40) -> list:
 def _judge(s: Session, c: dict) -> dict:
     """Decide what the candidate is, which of its records belong, and which words define it. Model only with
     opted-in sources; cached per candidate content. Fallback (no model): the seed term defines it."""
-    from igneous.graph.extract import allowed_sources
-    from igneous.llm import LLMDisabled, structured
+    from igneous.llm import LLMDisabled, allowed_sources, structured
 
     allowed = allowed_sources()
     month = c["start"].strftime("%b %Y") if c["start"].strftime("%b %Y") == c["end"].strftime("%b %Y") \
@@ -245,10 +244,16 @@ def _judge(s: Session, c: dict) -> dict:
     lines = [f"{i}. [{r.source}, {r.occurred_at:%Y-%m-%d}] {r.title[:120]} :: {re.sub(r'\\s+', ' ', r.body)[:240]}"
              for i, r in enumerate(shown)]
     others = {src: n for src, n in c["sources"].items() if src not in allowed}
-    prompt = (f"Shared terms: {', '.join(c['terms'][:8])}\nWindow: {c['start']:%Y-%m-%d} to {c['end']:%Y-%m-%d}"
-              f" ({len(c['items'])} records; a sample is listed)\nRecords:\n" + "\n".join(lines) +
-              (f"\nAlso, records not shown (counts only): {json.dumps(others)}" if others else ""))
-    key = "threads-judge:v2:" + hashlib.sha256(prompt.encode()).hexdigest()
+
+    def prompt_with(terms: list[str]) -> str:
+        return (f"Shared terms: {', '.join(terms)}\nWindow: {c['start']:%Y-%m-%d} to {c['end']:%Y-%m-%d}"
+                f" ({len(c['items'])} records; a sample is listed)\nRecords:\n" + "\n".join(lines) +
+                (f"\nAlso, records not shown (counts only): {json.dumps(others)}" if others else ""))
+    # Terms were mined from every source; the model sees only those its records contain (#179). The cache key
+    # stays the whole question, so judgments made before that rule still count.
+    seen = " ".join(f"{r.title} {r.body}" for r in shown).lower()
+    prompt = prompt_with([t for t in c["terms"][:8] if t.lower() in seen])
+    key = "threads-judge:v2:" + hashlib.sha256(prompt_with(c["terms"][:8]).encode()).hexdigest()
     cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
     if cached is None:
         try:
@@ -627,6 +632,8 @@ def umbrellas(s: Session, keep_keys: list[str]) -> int:
     """Long-running things several threads sit under: an org, lab, program or club ("the Lab" over Acme Client,
     Project Atlas and the kiosk prototype). The opposite of a thread: persistent (many months, no single burst) and
     concentrated in a group of threads. Proposes thread PART_OF umbrella edges; the verifier checks each."""
+    from igneous.llm import allowed_sources, visible_nodes
+
     threads_ = s.execute(text("""
         SELECT t.id, t.key FROM nodes t WHERE t.type = 'Project' AND t.props->>'derived' = 'threads'
           AND t.key = ANY(:keep)"""), {"keep": keep_keys}).all()
@@ -654,6 +661,8 @@ def umbrellas(s: Session, keep_keys: list[str]) -> int:
     org_names = [f" {re.sub(r'[^a-z0-9]+', ' ', n.lower()).strip()} " for n in s.execute(text("""
         SELECT o.name FROM edges e JOIN nodes o ON o.id = e.dst
         WHERE e.type = 'WORKED_AT' AND e.extractor IN ('profile', 'user')""")).scalars()]
+    sources = allowed_sources()
+    seen = visible_nodes(s, {t for by_thread in share.values() for t in by_thread}, sources)  # may be named (#179)
     for term, by_thread in share.items():
         if len(by_thread) < UMBRELLA_THREADS:
             continue
@@ -663,14 +672,16 @@ def umbrellas(s: Session, keep_keys: list[str]) -> int:
         if (COURSE_CODE.fullmatch(term.strip()) or norm in thread_names
                 or (len(norm.split()) >= 2 and any(f" {norm} " in o for o in org_names))):
             continue
-        months = s.execute(text("""
-            SELECT count(DISTINCT date_trunc('month', occurred_at)) FROM source_items
-            WHERE occurred_at IS NOT NULL AND (title ILIKE :q OR body_text ILIKE :q)
-        """), {"q": f"%{term}%"}).scalar()
+        months, shareable = s.execute(text("""
+            SELECT count(DISTINCT date_trunc('month', occurred_at)), COALESCE(bool_or(source = ANY(CAST(:src AS text[]))), false)
+            FROM source_items WHERE occurred_at IS NOT NULL AND (title ILIKE :q OR body_text ILIKE :q)
+        """), {"q": f"%{term}%", "src": sorted(sources)}).one()
         if (months or 0) < UMBRELLA_MONTHS:
             continue
         names = dict(s.execute(text("SELECT id, name FROM nodes WHERE id = ANY(:i)"), {"i": list(by_thread)}).all())
-        if not _is_umbrella(s, term, [names[t] for t in by_thread if t in names], months):
+        named = [names[t] for t in by_thread if t in names]
+        if not _is_umbrella(s, term, named, months,
+                            [names[t] for t in by_thread if t in names and t in seen] if shareable else []):
             continue
         key = "umbrella:" + term.lower()
         keep_keys.append(key)
@@ -701,18 +712,24 @@ def umbrellas(s: Session, keep_keys: list[str]) -> int:
     return built
 
 
-def _is_umbrella(s: Session, term: str, thread_names: list[str], months: int) -> bool:
+def _is_umbrella(s: Session, term: str, thread_names: list[str], months: int, shown: list[str]) -> bool:
     """Is `term` the name of an organization, lab, program, club or team these threads belong to? Boilerplate
-    shared across threads ("Zoom", "Best", "Eastern Time") isn't. Cached; without the model, not accepted."""
+    shared across threads ("Zoom", "Best", "Eastern Time") isn't. Cached; without the model, not accepted.
+
+    `shown` is what the model may read (#179): the threads among them that have opted-in records, and nothing at
+    all when no opted-in record mentions the term. The cache key is the whole question, so a judgment made
+    before that rule still counts."""
     from igneous.llm import LLMDisabled, structured
 
-    if not settings.llm_enabled:
-        return False
-    prompt = f"Term: {term}\nPresent across {months} months.\nThreads whose records often mention it:\n" + \
-        "\n".join(f"- {n}" for n in sorted(thread_names)[:20])
-    key = "threads-umbrella:v1:" + hashlib.sha256(prompt.encode()).hexdigest()
+    def prompt_with(names: list[str]) -> str:
+        return f"Term: {term}\nPresent across {months} months.\nThreads whose records often mention it:\n" + \
+            "\n".join(f"- {n}" for n in sorted(names)[:20])
+    key = "threads-umbrella:v1:" + hashlib.sha256(prompt_with(thread_names).encode()).hexdigest()
     cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
     if cached is None:
+        if not settings.llm_enabled or not shown:
+            return False
+        prompt = prompt_with(shown)
         try:
             cached, _ = structured(
                 "Decide whether a term is the name of an organization, lab, program, club, team or company that "

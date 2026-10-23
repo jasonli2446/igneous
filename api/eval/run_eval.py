@@ -14,6 +14,7 @@ import time
 from datetime import date
 from pathlib import Path
 
+from igneous import llm
 from igneous.db import SessionLocal
 from igneous.rag import qa
 from igneous.rag.search import hybrid
@@ -45,6 +46,9 @@ def main(run_qa: bool, limit: int | None):
     report = {"date": date.today().isoformat(), "n_answerable": len(ans), "n_unanswerable": len(unans)}
 
     with SessionLocal() as s:
+        if run_qa:
+            # Ask reads only opted-in sources: with the corpus not opted in, every answer would be an abstention.
+            llm.require_whole_corpus(s)
         report["recall@10"] = {m: round(recall(s, ans, m), 3) for m in ("hybrid", "dense", "lexical")}
         multi = [q for q in ans if q["kind"].startswith("multihop")]
         report["recall@10_multihop"] = {m: round(recall(s, multi, m), 3) for m in ("hybrid", "dense")}

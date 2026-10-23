@@ -311,7 +311,7 @@ def summarize(s: Session, node_id: int, model=_model_summary) -> dict | None:
     facts = gather(s, node_id)
     if facts is None:
         return None
-    from igneous.graph.extract import allowed_sources
+    from igneous.llm import allowed_sources
     sources = allowed_sources()
     highlights = [{k: c[k] for k in ("id", "name", "type", "category", "why")} for c in facts["connections"]]
     body = {"summary": "", "highlights": highlights, "sources": [], "generated_by": "fallback"}
