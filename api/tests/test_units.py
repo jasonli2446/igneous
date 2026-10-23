@@ -1962,3 +1962,14 @@ def test_mcp_server_starts_light_and_exposes_graph_tools():
     from igneous import mcp_server as m
     for tool in ("me", "find", "open_node", "why_connected", "sources", "read_item", "search", "ask"):
         assert callable(getattr(m, tool))
+
+
+def test_part_of_direction_comes_from_the_named_container():
+    import inspect
+
+    from igneous.graph import resolve_threads, traversal
+
+    src = inspect.getsource(resolve_threads)
+    assert '"part_of"' in src and "container" in src and "a_part_of_b" not in src  # no A/B label to flip
+    # An umbrella still shows its own repo, people and chats after its sub-projects.
+    assert "_own_content" in inspect.getsource(traversal.children)

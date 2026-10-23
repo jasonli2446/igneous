@@ -966,8 +966,16 @@ def children(s: Session, node: int, ntype: str) -> list[int]:
               AND NOT COALESCE((p.props->>'self')::bool, false) AND COALESCE(p.props->>'kind', '') <> 'service'
             GROUP BY 1""" ), {"n": node}).all()
         return list(stated) + earned_cut([(i, w * 2) for i, w in subs]) + earned_cut([(i, float(w)) for i, w in people], hi=8)
-    if subs or stated:  # an umbrella: its projects are the picture; their detail is one click deeper
-        return list(stated) + [i for i in earned_cut([(i, w) for i, w in subs]) if i not in stated]
+    if subs or stated:
+        # An umbrella shows its projects first; its own people, chats and repo still follow, so a project that
+        # also has a sub-project (a class with its capstone) never opens to just that one.
+        top = list(stated) + [i for i in earned_cut([(i, w) for i, w in subs]) if i not in stated]
+        return top + [i for i in _own_content(s, node) if i not in top]
+    return _own_content(s, node)
+
+
+def _own_content(s: Session, node: int) -> list[int]:
+    """A project's own content: where its work lives (repo), its people, its group chats and key documents."""
     # Where the work lives: the repository or folder that holds most of its records (the GitHub repo for a
     # coding project), one link instead of its issues one by one.
     homes = s.execute(text("""
