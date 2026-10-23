@@ -117,8 +117,6 @@ def _date(v: str):
 
 def run(s: Session, log=print) -> dict:
     """Build the backbone from every self-describing document, newest first (newer wins, older adds history)."""
-    from igneous.graph import threads
-
     self_id = s.execute(text("SELECT id FROM nodes WHERE type = 'Person' AND (props->>'self')::bool LIMIT 1")).scalar()
     if self_id is None:
         return {"documents": 0}
@@ -127,8 +125,6 @@ def run(s: Session, log=print) -> dict:
     my_names = {n.lower() for n in s.execute(text("""
         SELECT n.name FROM nodes n WHERE n.id = :me OR n.id IN (SELECT node_id FROM canonical WHERE canonical_id = :me)
     """), {"me": self_id}).scalars() if n and "@" not in n}
-    threads.ensure_registry(s)
-    threads._migrate_registry(s)
     orgs: dict[str, dict] = {}
     projects: dict[str, dict] = {}
     schools: dict[str, dict] = {}

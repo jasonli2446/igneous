@@ -27,17 +27,8 @@ def _fernet() -> Fernet:
     return Fernet(key_file.read_bytes())
 
 
-def _ensure_table(s: Session) -> None:
-    s.execute(text("""
-        CREATE TABLE IF NOT EXISTS oauth_tokens (
-            provider text NOT NULL, account text NOT NULL, token_enc bytea NOT NULL,
-            updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (provider, account))
-    """))
-
-
 def save(s: Session, provider: str, account: str, secret: str) -> None:
     """Encrypt and persist a secret. Callers must never log ``secret``."""
-    _ensure_table(s)
     s.execute(text("""
         INSERT INTO oauth_tokens (provider, account, token_enc) VALUES (:p, :a, :t)
         ON CONFLICT (provider, account) DO UPDATE SET token_enc = EXCLUDED.token_enc, updated_at = now()
@@ -47,7 +38,6 @@ def save(s: Session, provider: str, account: str, secret: str) -> None:
 
 def load(s: Session, provider: str, account: str | None = None) -> tuple[str, str]:
     """Return the requested (or most recently saved) decrypted secret."""
-    _ensure_table(s)
     row = s.execute(text("""
         SELECT account, token_enc FROM oauth_tokens WHERE provider = :p
           AND (CAST(:a AS text) IS NULL OR account = :a) ORDER BY updated_at DESC LIMIT 1
@@ -58,5 +48,4 @@ def load(s: Session, provider: str, account: str | None = None) -> tuple[str, st
 
 
 def accounts(s: Session, provider: str) -> list[str]:
-    _ensure_table(s)
     return list(s.execute(text("SELECT account FROM oauth_tokens WHERE provider = :p ORDER BY 1"), {"p": provider}).scalars())
