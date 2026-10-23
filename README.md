@@ -175,7 +175,7 @@ skip calls or `EXTRACT=500` to process more. Everything is incremental: re-runni
 | `api/igneous/pipeline.py` | per-stage watermarks; every stage is incremental and safe to re-run |
 | `api/igneous/main.py` | FastAPI: `/search`, `/ask`, `/graph/search`, `/graph/subgraph`, `/graph/people`, `/graph/node/{id}`, `/graph/node/{id}/evidence`, `/stats` |
 | `api/migrations/` | the whole schema, as plain SQL migrations (`0001_core_schema.py` onward); app code never creates tables |
-| `web/` | Next.js: explorer (sigma.js) with inspector + evidence, Ask, Search |
+| `web/` | Next.js: the 3D explorer (`Graph3D.tsx`, 3d-force-graph) with the inspector and why-view, Ask, Search, and the Sources page |
 
 ## Your own Messages (iMessage / SMS)
 

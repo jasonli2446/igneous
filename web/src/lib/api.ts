@@ -74,24 +74,6 @@ export type AskResult = {
   timing: { retrieve_s: number; total_s?: number };
 };
 
-export type Evidence = {
-  id: number;
-  type: string;
-  confidence: number | null;
-  model: string | null;
-  extractor: string;
-  extractor_version: string;
-  props: { role?: string; quote?: string };
-  title: string | null;
-  occurred_at: string | null;
-  external_id: string;
-  window: string;
-  hl_start: number;
-  hl_end: number;
-  other_name: string;
-  other_type: string;
-};
-
 export type Explanation = {
   a: { id: number; name: string };
   b: { id: number; name: string };
@@ -118,29 +100,6 @@ export type WhyEdge = {
   id: number; type: string; extractor: string; src: number; dst: number; src_name: string | null; dst_name: string | null;
   verdict: "keep" | "drop" | "unsure" | null; reason: string | null; why?: string | null; confidence: number | null; evidence: SourceCard[];
   from?: number; to?: number;
-};
-
-export type TimelineEdge = {
-  id: number;
-  type: string;
-  direction: "outgoing" | "incoming";
-  counterpart: { id: number; type: string; name?: string | null };
-  interval: { from: string | null; to: string | null };
-  provenance: {
-    extractor: string;
-    extractor_version: string;
-    model: string | null;
-    confidence: number | null;
-    evidence: { source_item_id: number | null; source: string | null; occurred_at: string | null; span: { start: number; end: number } | null };
-  };
-};
-
-export type Timeline = {
-  mode: "activity" | "relationship";
-  a: { id: number; type: string };
-  b: { id: number; type: string } | null;
-  edges: TimelineEdge[];
-  truncated: boolean;
 };
 
 export type NodeDetail = GNode & {
@@ -351,7 +310,6 @@ export const api = {
     return (await r.json()) as AskResult;
   },
   askSuggestions: () => get<string[]>("/ask/suggestions", {}),
-  evidence: (id: number) => get<{ evidence: Evidence[] }>(`/graph/node/${id}/evidence`, { limit: 30 }),
   graphVersion: (signal?: AbortSignal) => get<{ version: string }>("/graph/version", {}, signal),
   view: (seed?: number, signal?: AbortSignal) => get<Subgraph & { seed: number }>("/graph/view", { seed }, signal),
   expandNode: (seed: number, node: number, visible: number[], offset = 0, signal?: AbortSignal) =>
@@ -363,8 +321,6 @@ export const api = {
     get<{ options: { label: string; type: string; src: number; dst: number }[] }>("/graph/link/options", { a, b }),
   addLink: (src: number, dst: number, type: string, note?: string) =>
     send<{ id: number; src: number; dst: number; type: string }>("POST", "/graph/link", { src, dst, type, note }),
-  timeline: (a: number, b?: number, limit = 50, signal?: AbortSignal) =>
-    get<Timeline>("/timeline", { a, b, limit }, signal),
   entity: (id: number) => get<EntityDetail>(`/graph/entity/${id}`, {}),
   renameEntity: (id: number, name: string) => send<Correction>("POST", `/graph/entity/${id}/rename`, { name }),
   hideEntity: (id: number) => send<Correction>("POST", `/graph/entity/${id}/hide`),
