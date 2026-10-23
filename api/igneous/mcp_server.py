@@ -2,9 +2,9 @@
 
     uv run igneous mcp          # stdio; see README for the client config
 
-Graph tools (me, find, open_node, why_connected, sources, read_item) let an agent explore; `search` and `ask` read
-the text, and `ask` runs the server-side retrieval pipeline (graph expansion + cite-or-abstain) so it doesn't spend
-turns redoing it. Every result
+Graph tools (me, find, open_node, why_connected, sources, read_item, and the lower-level get_node, neighbors,
+correspondents, evidence) let an agent explore; `search` and `ask` read the text, and `ask` runs the server-side
+retrieval pipeline (graph expansion + cite-or-abstain) so it doesn't spend turns redoing it. Every result
 carries node / chunk ids so the agent can cite. Tool results go to whatever model the MCP client uses:
 that's an outbound path for user content (CO-1), the same as a configured model provider.
 """

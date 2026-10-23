@@ -231,8 +231,9 @@ mode makes one paid Bedrock chat request and is never run by the test suite.
 
 ## MCP server (use the graph from Claude Code, Claude Desktop, Cursor)
 
-Read-only tools: `me` (the big picture), `find` (a name to node ids), `open_node`, `why_connected`, `sources`,
-`read_item`, `search` and `ask`.
+Twelve read-only tools: `me` (the big picture), `find` (a name to node ids), `open_node`, `why_connected`, `sources`
+and `read_item` for the graph; `search` and `ask` for the text; and the lower-level `get_node`, `neighbors`,
+`correspondents` and `evidence`.
 
 ```bash
 claude mcp add igneous -e AWS_REGION=us-east-1 -e AWS_BEARER_TOKEN_BEDROCK=$AWS_BEARER_TOKEN_BEDROCK \
