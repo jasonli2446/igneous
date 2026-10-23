@@ -1,7 +1,7 @@
 # Evaluation
 
-`questions.jsonl` is the gold set (77 questions): 50 single-email, 15 multi-hop (asked in terms of email A,
-answered only by a reply B in the same thread), 12 unanswerable. Generated from the corpus by
+`questions.jsonl` is the gold set (82 questions): 50 single-email, 20 multi-hop (asked in terms of email A,
+answered only by a reply B in the same thread; 5 of them hard), 12 unanswerable. Generated from the corpus by
 `make_gold.py` and filtered so every answer quote appears verbatim in its gold email. **Spot-check by hand
 before the final report** — generated questions can be oddly specific.
 

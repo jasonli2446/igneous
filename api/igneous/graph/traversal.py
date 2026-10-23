@@ -1063,7 +1063,7 @@ def fallback_neighbors(s: Session, node: int, head: int, exclude: set[int], k: i
         WHERE x.id NOT IN {HIDDEN} AND COALESCE(x.props->>'kind', '') <> 'service'
           -- A person's messages and one-on-one chats are the person; only bigger things or other people go beside.
           AND NOT (:person AND (x.type = 'Message' OR (x.type = 'Thread' AND NOT COALESCE((x.props->>'group')::bool, false))))
-          AND NOT (x.type = 'File' AND x.name ~* '\.(ts|tsx|js|jsx|mjs|py|go|rs|java|c|h|cpp|json|ya?ml|toml|lock|css|scss|sh|sql|env)$')
+          AND NOT (x.type = 'File' AND x.name ~* '\\.(ts|tsx|js|jsx|mjs|py|go|rs|java|c|h|cpp|json|ya?ml|toml|lock|css|scss|sh|sql|env)$')
         GROUP BY 1 ORDER BY 2 DESC LIMIT 60
     """), {"n": node, "person": bool(person)}).all()
     # A single message stands for its conversation: the group chat it's in, else the person it's with. Only a

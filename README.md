@@ -156,7 +156,8 @@ Re-run it safely to restore the exact fixture, or validate an existing output wi
 cd api && uv run igneous verify-synthetic-corpus ../data/synthetic-cross-source
 ```
 
-`igneous pipeline` runs spine -> chunk -> embed -> extract -> topics -> resolve. The topics stage lowercases and
+`igneous pipeline` runs spine -> chunk -> embed -> extract -> topics -> entities -> profile -> threads -> backbone -> self
+-> resolve -> organizations -> verify (`api/igneous/pipeline.py`, the same list Rebuild runs). The topics stage lowercases and
 conservatively lemmatizes keys, merges only high-similarity local-embedding duplicates, and adds `RELATED_TO` after
 three shared messages; moved `ABOUT` edges keep their original provenance. Extraction, like every model call,
 reads only sources listed in `IGNEOUS_LLM_SOURCES`; set it to `email` before `make demo`, then use `EXTRACT=0` to
@@ -167,13 +168,13 @@ skip calls or `EXTRACT=500` to process more. Everything is incremental: re-runni
 
 | Path | What |
 |---|---|
-| `api/igneous/connectors/` | `base.py` connector contract + resumable sync runner; `email_maildir.py` Enron importer |
-| `api/igneous/graph/` | `spine.py` deterministic graph (stage one); `extract.py` LLM mentions/topics with span provenance (stage two); `resolve.py` entity resolution; `traversal.py` k-hop + people view |
+| `api/igneous/connectors/` | `base.py` connector contract + resumable sync runner; one module per source (`gmail.py`, `gcal.py`, `drive.py`, `github.py`, `imessage.py`, `ai_chats.py`, `filesystem.py`, `takeout.py`, `linkedin.py`, ...); `redact.py` strips secrets before anything is stored |
+| `api/igneous/graph/` | `spine.py` deterministic graph; `extract.py` model mentions with span provenance; `entities.py`, `threads.py`, `resolve_threads.py`, `profile.py`, `backbone.py` derived projects, life threads and your orgs; `resolve.py` entity resolution; `verify.py` checks every derived link; `traversal.py` what the explorer shows; `invariants.py` `igneous check-graph` |
 | `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
 | `api/igneous/llm.py` | structured model calls and the rule for what a model may read (`allowed_sources`, `visible_nodes`); `providers.py` talks to Bedrock |
 | `api/eval/` | gold questions, ER labels, harnesses, results (see `api/eval/README.md`) |
 | `api/igneous/pipeline.py` | per-stage watermarks; every stage is incremental and safe to re-run |
-| `api/igneous/main.py` | FastAPI: `/search`, `/ask`, `/graph/search`, `/graph/subgraph`, `/graph/people`, `/graph/node/{id}`, `/graph/node/{id}/evidence`, `/stats` |
+| `api/igneous/main.py` | FastAPI app: search, ask, the explorer's `/graph/*` routes, sources, sync and import jobs (the full list at <http://localhost:8000/docs>) |
 | `api/migrations/` | the whole schema, as plain SQL migrations (`0001_core_schema.py` onward); app code never creates tables |
 | `web/` | Next.js: the 3D explorer (`Graph3D.tsx`, 3d-force-graph) with the inspector and why-view, Ask, Search, and the Sources page |
 
@@ -198,7 +199,8 @@ cd api && uv run igneous sync imessage --since-days 90 && uv run igneous pipelin
 
 - Enron has no `In-Reply-To`/`References` headers. Threads are keyed on subject + participants; `REPLIES_TO` is inferred and sparse.
 - Enron stores one email in several folders with different Message-IDs. Messages dedupe on a content fingerprint (`raw_meta.fingerprint`).
-- Embedding model is a placeholder (`bge-small-en-v1.5`, 384-d) until the Bedrock interop decision (#11).
+- Embeddings stay local (`bge-small-en-v1.5`, 384-d, FastEmbed); Bedrock as a second index was dropped
+  (`docs/decisions/0002-bedrock-interop.md`).
 
 ## Model calls
 
@@ -229,7 +231,8 @@ mode makes one paid Bedrock chat request and is never run by the test suite.
 
 ## MCP server (use the graph from Claude Code, Claude Desktop, Cursor)
 
-Read-only tools: `search`, `find_entity`, `get_node`, `correspondents`, `neighbors`, `evidence`, `ask`.
+Read-only tools: `me` (the big picture), `find` (a name to node ids), `open_node`, `why_connected`, `sources`,
+`read_item`, `search` and `ask`.
 
 ```bash
 claude mcp add igneous -e AWS_REGION=us-east-1 -e AWS_BEARER_TOKEN_BEDROCK=$AWS_BEARER_TOKEN_BEDROCK \
