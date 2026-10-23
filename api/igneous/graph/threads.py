@@ -45,6 +45,9 @@ UMBRELLA_THREADS = 2     # ...at least this many threads
 SOURCES = ("gmail", "email", "imessage", "gcal", "drive", "fs", "notes", "ai_chats", "github",
            "takeout_activity", "takeout_chrome", "takeout_tasks", "takeout_meet", "takeout_chat")
 
+# Kinds of thread that don't happen in one window (the judge names kinds freely, so match words).
+ONGOING = re.compile(r"^(?!.*\b(project|application|trip|event)\b).*\b(hobby|hobbies|club|sport|recurring|friend|friends|"
+                     r"group|team|community|band|league|lessons|practice)\b", re.I)
 COURSE_CODE = re.compile(r"[A-Za-z]{2,5}\s?\d{3}[A-Za-z]?")
 # Capitalized phrases (1-3 words), or course-style codes ("CS 401").
 TERM = re.compile(r"\b(?:[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,}){0,2}|[A-Z]{2,5}\s?\d{3})\b")
@@ -422,7 +425,9 @@ def _registered_all(rows, items: list) -> dict[str, dict]:
         if not terms:
             continue
         lo = hi = None
-        if row.span_start and row.span_end and row.origin in ("burst", "name"):
+        # A trip or event happened in a window; a hobby, club, sport or friend group is ongoing, so every mention
+        # of its terms counts whenever it happened (a climbing gym session two years after the chat began).
+        if row.span_start and row.span_end and row.origin in ("burst", "name") and not ONGOING.search(row.kind or ""):
             lo, hi = row.span_start - _td(days=30), row.span_end + _td(days=30)
         specs.append((row.key, terms, lo, hi))
     # Whole-word matching: a short defining term ("eta") must not match inside other words ("beta", "theta").
@@ -445,7 +450,10 @@ def _registered_all(rows, items: list) -> dict[str, dict]:
 
 def _write_thread(s: Session, key: str, name: str, kind: str | None, terms: list[str], members: list,
                   extra: dict) -> int:
-    span = sorted(r.occurred_at for r in members)
+    # Its span is what happened plus what's planned soon: a calendar repeat set for 2040 isn't activity.
+    from datetime import UTC, datetime
+    horizon = datetime.now(UTC) + timedelta(days=180)
+    span = sorted(r.occurred_at for r in members if r.occurred_at <= horizon) or sorted(r.occurred_at for r in members)
     props = {"derived": "threads", "kind": kind or "thread", "terms": terms[:6],
              "start": span[0].isoformat(), "end": span[-1].isoformat(),
              "sources": dict(Counter(r.source for r in members)), "records": len(members), **extra}

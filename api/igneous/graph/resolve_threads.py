@@ -83,7 +83,10 @@ def candidate_pairs(ts: list[dict], mentions: set[tuple[int, int]] = frozenset()
     out = []
     for i, a in enumerate(ts):
         for b in ts[i + 1:]:
-            named = (a["id"], b["id"]) in mentions or (b["id"], a["id"]) in mentions
+            # One's whole name is inside the other's ("Climbing" in "Climbing Club"): likely one contains the other.
+            na, nb = f" {_norm_name(a['name'])} ", f" {_norm_name(b['name'])} "
+            nested = len(na.strip()) >= 4 and len(nb.strip()) >= 4 and na != nb and (na in nb or nb in na)
+            named = (a["id"], b["id"]) in mentions or (b["id"], a["id"]) in mentions or nested
             if not named and a["a"] and b["a"] and a["b"] and b["b"]:
                 gap = max((b["a"] - a["b"]).days, (a["a"] - b["b"]).days)
                 if gap > NEAR_DAYS:
