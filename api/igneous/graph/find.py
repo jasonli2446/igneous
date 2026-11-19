@@ -3,6 +3,7 @@
 Returns at most a handful of entities (people, projects, group conversations, events, organizations, places,
 folders, repos, files), deduped by canonical identity, never messages, services or hidden projects. Ranking is
 text-match quality first (exact > prefix > word prefix > substring > fuzzy), then closeness to the seed.
+Repository-shaped people are excluded; unconfirmed identifier-only people follow named people and two-way contacts.
 """
 import math
 import re
@@ -16,6 +17,46 @@ TYPES = ("Person", "Project", "Thread", "Event", "Organization", "Place", "Folde
 LIMIT = 8
 CANDIDATES = 150
 GENERIC_THREADS = ("(no subject)", "")
+REPOSITORY_NAME = r"^[[:alnum:]_.-]+/[[:alnum:]_.-]+$"
+
+
+def _bare_handle(name: str, key: str, props: dict) -> bool:
+    """An identifier used as a label, rather than a name learned from a person/contact."""
+    if props.get("named_by") in ("contacts", "linkedin", "user") or props.get("renamed"):
+        return False
+    label = name.strip().casefold()
+    identities = {key.casefold(), str(props.get("github_login", "")).casefold()}
+    if key.startswith("github:"):
+        identities.add(key.split(":", 1)[1].casefold())
+    elif "@" in key:
+        identities.add(key.split("@", 1)[0].casefold())
+    return label in identities
+
+
+def _two_way(s: Session, heads: list[int]) -> set[int]:
+    """Candidate identities with reciprocal conversation, including their canonical aliases."""
+    if not heads:
+        return set()
+    return set(s.execute(text("""
+        WITH identities AS (
+            SELECT id AS node, id AS head FROM nodes WHERE id = ANY(:heads)
+            UNION SELECT node_id, canonical_id FROM canonical WHERE canonical_id = ANY(:heads)
+        ), traffic AS (
+            SELECT p.head, COALESCE(c.canonical_id, r.dst) AS peer, true AS outbound
+            FROM identities p JOIN edges e ON e.src = p.node AND e.type = 'SENT'
+            JOIN edges r ON r.src = e.dst AND r.type = 'RECEIVED'
+            JOIN nodes m ON m.id = e.dst AND NOT COALESCE((m.props->>'hidden')::bool, false)
+            LEFT JOIN canonical c ON c.node_id = r.dst
+            UNION ALL
+            SELECT p.head, COALESCE(c.canonical_id, e.src), false
+            FROM identities p JOIN edges r ON r.dst = p.node AND r.type = 'RECEIVED'
+            JOIN edges e ON e.dst = r.src AND e.type = 'SENT'
+            JOIN nodes m ON m.id = r.src AND NOT COALESCE((m.props->>'hidden')::bool, false)
+            LEFT JOIN canonical c ON c.node_id = e.src
+        )
+        SELECT head FROM traffic WHERE head <> peer GROUP BY head, peer
+        HAVING bool_or(outbound) AND bool_or(NOT outbound)
+    """), {"heads": heads}).scalars())
 
 
 def match_quality(q: str, name: str) -> float:
@@ -69,17 +110,21 @@ def find(s: Session, q: str, seed: int | None = None, limit: int = LIMIT) -> lis
     sim = "similarity(lower(n.name), lower(:q))" if trgm else "0.0"
     rows = s.execute(text(f"""
         SELECT n.id AS alias, n.type, n.name AS alias_name, n.key, h.id AS head, h.name AS head_name, h.key AS head_key,
+               h.props AS head_props,
                {sim} AS sim
         FROM nodes n LEFT JOIN canonical c ON c.node_id = n.id JOIN nodes h ON h.id = COALESCE(c.canonical_id, n.id)
         WHERE n.type = ANY(:types)
           AND NOT COALESCE((n.props->>'hidden')::bool, false) AND NOT COALESCE((h.props->>'hidden')::bool, false)
           AND COALESCE(n.props->>'kind', '') <> 'service' AND COALESCE(h.props->>'kind', '') <> 'service'
+          AND NOT (n.type = 'Person' AND (n.name ~ :repo OR h.name ~ :repo
+                   OR n.key ~ :repo_key OR h.key ~ :repo_key))
           AND NOT (n.type = 'Thread' AND n.name = ANY(:generic))
           AND (n.name ILIKE :like OR (n.type = 'Person' AND n.key ILIKE :like) {"OR " + sim + " > 0.35" if trgm else ""})
         ORDER BY (lower(n.name) = lower(:q)) DESC, (n.name ILIKE :prefix) DESC, length(n.name), n.id
         LIMIT :cands
     """), {"types": list(TYPES), "generic": list(GENERIC_THREADS), "q": q, "like": f"%{q}%", "prefix": f"{q}%",
-           "cands": CANDIDATES}).mappings().all()
+           "cands": CANDIDATES, "repo": REPOSITORY_NAME,
+           "repo_key": "^github:" + REPOSITORY_NAME[1:]}).mappings().all()
     if not rows:
         return []
 
@@ -95,7 +140,9 @@ def find(s: Session, q: str, seed: int | None = None, limit: int = LIMIT) -> lis
             continue
         cur = best.get(r["head"])
         if cur is None or quality > cur["quality"]:
-            best[r["head"]] = {"id": r["head"], "type": r["type"], "name": r["head_name"], "quality": quality}
+            best[r["head"]] = {"id": r["head"], "type": r["type"], "name": r["head_name"], "quality": quality,
+                               "bare_handle": r["type"] == "Person" and _bare_handle(
+                                   r["head_name"], r["head_key"], r["head_props"])}
     cands = list(best.values())
     # Thread-like heads can't be canonical; people always keep type Person.
     ids = [c["id"] for c in cands]
@@ -107,6 +154,7 @@ def find(s: Session, q: str, seed: int | None = None, limit: int = LIMIT) -> lis
         seed_ids = [head, *s.execute(text("SELECT node_id FROM canonical WHERE canonical_id = :h"), {"h": head}).scalars()]
     people = [c["id"] for c in cands if c["type"] == "Person"]
     shared = _closeness(s, seed_ids, people)
+    two_way = _two_way(s, [c["id"] for c in cands if c["bare_handle"]])
 
     degree = dict(s.execute(text("""
         SELECT x, count(*) FROM (SELECT src AS x FROM edges WHERE src = ANY(:ids) UNION ALL
@@ -130,8 +178,10 @@ def find(s: Session, q: str, seed: int | None = None, limit: int = LIMIT) -> lis
         msgs, recent = shared.get(c["id"], (0, 0))
         near = math.log1p(msgs) / 6 if msgs else math.log1p(degree.get(c["id"], 0)) / 12
         # Match quality dominates (a name that starts with what you typed always beats one that merely contains it:
-        # "drew" finds Drew Lee before Andrew); closeness only orders matches of the same quality.
+        # "drew" finds Drew Lee before Andrew); unconfirmed handles are a lower tier below these matches.
         c["score"] = round(c["quality"] * 10 + min(1.0, near) * (1.0 if t == "Person" else 0.6), 4)
+        if c["bare_handle"] and c["id"] not in two_way:
+            c["score"] -= 11  # keep searchable, after named people and reciprocal correspondents
         c["category"] = CATEGORY.get("Group" if t == "Thread" else t)
         if t == "Person":
             c["context"] = (f"{_plural(recent, 'message')} this month" if recent else

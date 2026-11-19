@@ -324,7 +324,7 @@ def build_github(b: Builder, item) -> None:
     identities = [meta.get("author", {}), *meta.get("commits", [])]
     for identity in identities:
         login, email = identity.get("login"), identity.get("email")
-        if not login:
+        if not isinstance(login, str) or not login.strip() or "/" in login:
             continue
         pid = b.node("Person", f"github:{login.lower()}", login, {"github_login": login})
         b.edge(pid, mid, "SENT", item.occurred_at, item.id)
@@ -338,7 +338,7 @@ def build_github(b: Builder, item) -> None:
             """), {"a": a, "b": c, "sid": item.id})
     for comment in meta.get("comments", []):
         login = comment.get("login")
-        if login:
+        if isinstance(login, str) and login.strip() and "/" not in login:
             pid = b.node("Person", f"github:{login.lower()}", login, {"github_login": login})
             b.edge(pid, mid, "SENT", item.occurred_at, item.id)
 
