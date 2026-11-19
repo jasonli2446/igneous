@@ -229,10 +229,10 @@ def resolve(undo: bool = typer.Option(False, help="delete every SAME_AS merge"))
 
 @app.command()
 def export(target: str = typer.Argument(..., help="lightrag"), out: Path = typer.Argument(...),
-           limit: int = typer.Option(None, help="newest N messages only")):
+           limit: int = typer.Option(None, min=1, help="newest N eligible evidence records only")):
     """Export the graph for an external engine (criterion 5)."""
     if target != "lightrag":
-        raise typer.BadParameter("only 'lightrag' is a file export; Bedrock reads the bedrock_kb view directly")
+        raise typer.BadParameter("only 'lightrag' is a file export; Bedrock Knowledge Bases are out of scope (decision 0002)")
     from igneous.interop.lightrag import write
     from igneous.llm import allowed_sources
 
