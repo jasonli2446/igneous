@@ -198,15 +198,40 @@ def derive_introductions(s: Session) -> int:
         "window_days": INTRO_WINDOW_DAYS}).rowcount or 0
 
 
-def commitments(s: Session, status: str = "open", limit: int = 50) -> list[dict]:
-    """Return cited model-derived claims, never mixing them with user-authored facts."""
+def commitments(s: Session, status: str = "open", limit: int = 50, node_id: int | None = None) -> list[dict]:
+    """Cited model-derived claims, optionally scoped to a node's own or directly connected records.
+
+    A person's scope includes sent/received messages; an entity's scope includes its member records.
+    Scope is applied before the result limit, and merged identities share the same records.
+    """
+    if node_id is not None:
+        from igneous.timeline import _entity
+        node_id = _entity(s, node_id)["id"]
     rows = s.execute(text("""
+        WITH scope AS (
+            SELECT CAST(:node_id AS bigint) AS id WHERE CAST(:node_id AS bigint) IS NOT NULL
+            UNION SELECT node_id FROM canonical WHERE canonical_id = :node_id
+        ), items AS (
+            SELECT source_item_id AS id FROM nodes WHERE id IN (SELECT id FROM scope)
+            UNION SELECT m.source_item_id FROM edges link JOIN nodes m ON m.id = CASE
+                WHEN link.src IN (SELECT id FROM scope) THEN link.dst ELSE link.src END
+            WHERE (link.src IN (SELECT id FROM scope) OR link.dst IN (SELECT id FROM scope))
+              AND link.type IN ('SENT', 'RECEIVED', 'ATTENDED', 'PART_OF', 'IN_THREAD', 'ATTACHED', 'CONTAINS')
+              AND COALESCE(link.props->>'verdict', '') <> 'drop'
+            UNION SELECT link.source_item_id FROM edges link
+            WHERE (link.src IN (SELECT id FROM scope) OR link.dst IN (SELECT id FROM scope))
+              AND COALESCE(link.props->>'verdict', '') <> 'drop'
+            UNION SELECT ev.source_item_id FROM edges link JOIN edge_evidence ev ON ev.edge_id = link.id
+            WHERE (link.src IN (SELECT id FROM scope) OR link.dst IN (SELECT id FROM scope))
+              AND COALESCE(link.props->>'verdict', '') <> 'drop'
+        )
         SELECT n.id, n.name, n.props, e.source_item_id, e.span_start, e.span_end, si.source, si.occurred_at
         FROM nodes n JOIN edges e ON e.dst = n.id AND e.type = 'HAS_COMMITMENT' AND e.extractor = :ex
         JOIN source_items si ON si.id = e.source_item_id
         WHERE n.type = 'Commitment' AND (:status = 'all' OR COALESCE(n.props->>'status', 'open') = :status)
-        ORDER BY si.occurred_at DESC NULLS LAST LIMIT :limit
-    """), {"ex": EXTRACTOR, "status": status, "limit": limit}).mappings()
+          AND (CAST(:node_id AS bigint) IS NULL OR e.source_item_id IN (SELECT id FROM items))
+        ORDER BY si.occurred_at DESC NULLS LAST, n.id DESC LIMIT :limit
+    """), {"ex": EXTRACTOR, "status": status, "limit": limit, "node_id": node_id}).mappings()
     return [{"id": r["id"], "what": r["props"].get("what"), "who": r["props"].get("who"),
              "by_when": r["props"].get("by_when"), "status": r["props"].get("status", "open"),
              "derived": True, "origin": "model", "evidence": {"source_item_id": r["source_item_id"],

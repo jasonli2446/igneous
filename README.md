@@ -231,9 +231,15 @@ mode makes one paid Bedrock chat request and is never run by the test suite.
 
 ## MCP server (use the graph from Claude Code, Claude Desktop, Cursor)
 
-Twelve read-only tools: `me` (the big picture), `find` (a name to node ids), `open_node`, `why_connected`, `sources`
-and `read_item` for the graph; `search` and `ask` for the text; and the lower-level `get_node`, `neighbors`,
-`correspondents` and `evidence`.
+Fourteen read-only tools: `me` (the big picture), `find` (a name to node ids), `open_node`, `why_connected`,
+`timeline`, `commitments`, `sources` and `read_item` for the graph; `search` and `ask` for the text; and the
+lower-level `get_node`, `neighbors`, `correspondents` and `evidence`.
+
+`timeline(node_id, other_node_id=None, limit=50)` returns dated activity or a pair's direct relationship history,
+with source item ids and no source text. `commitments(node_id, status="open", limit=50)` returns existing promises
+from that node's records, with who/what, status and source spans. For a person it includes messages they sent or
+received; check `who` before attributing a promise. Both resolve merged identities, accept limits from 1 to 200,
+and work without model credentials. Commitments also accepts `resolved` or `all` for status.
 
 ```bash
 claude mcp add igneous -e AWS_REGION=us-east-1 -e AWS_BEARER_TOKEN_BEDROCK=$AWS_BEARER_TOKEN_BEDROCK \

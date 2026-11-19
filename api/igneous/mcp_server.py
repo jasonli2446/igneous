@@ -2,13 +2,16 @@
 
     uv run igneous mcp          # stdio; see README for the client config
 
-Graph tools (me, find, open_node, why_connected, sources, read_item, and the lower-level get_node, neighbors,
+Graph tools (me, find, open_node, why_connected, timeline, commitments, sources, read_item, and the lower-level get_node, neighbors,
 correspondents, evidence) let an agent explore; `search` and `ask` read the text, and `ask` runs the server-side
 retrieval pipeline (graph expansion + cite-or-abstain) so it doesn't spend turns redoing it. Every result
 carries node / chunk ids so the agent can cite. Tool results go to whatever model the MCP client uses:
 that's an outbound path for user content (CO-1), the same as a configured model provider.
 """
+from typing import Annotated, Literal
+
 from mcp.server.mcpserver import MCPServer
+from pydantic import Field
 from sqlalchemy import text
 
 from igneous.db import SessionLocal
@@ -25,7 +28,8 @@ server = MCPServer(
         "How to use it: `me` for the big picture; `find` to turn a name into a node_id; `open_node` for what "
         "something is made of (a trip's travellers and group chat, an org's projects, a person's world); "
         "`why_connected` to explain a link with the records behind it; `sources` and `read_item` to read those "
-        "records. Questions about structure (who went, who's on it, what's under it, how are they linked) are "
+        "records; `timeline` for dated activity or a pair's relationship history; `commitments` for cited promises "
+        "in a node's records. Questions about structure (who went, who's on it, what's under it, how are they linked) are "
         "answered by the graph tools directly, usually in 2-4 calls. Use `search` or `ask` only for what was "
         "said (a decision, a date, a detail in the text), not for facts the graph tools already returned. "
         "Cite node_ids and item_ids. Everything is read-only."
@@ -273,6 +277,38 @@ def why_connected(a: int, b: int) -> dict:
             "events": [{"name": e["name"], "date": str(e["at"])[:10]} for e in r["events"]],
             "direct_links": [link(e) for e in r.get("direct") or []],
             "path": [link(e) for e in r.get("path") or []] or None}
+
+
+@server.tool()
+def timeline(node_id: Annotated[int, Field(ge=1)], other_node_id: Annotated[int, Field(ge=1)] | None = None,
+             limit: Annotated[int, Field(ge=1, le=200)] = 50) -> dict:
+    """Dated activity for a node, or direct relationship history with `other_node_id`, newest first.
+    Resolves merged identities; returns bounded graph metadata and source item ids, without source text.
+    Use `read_item` on an evidence source_item_id for the underlying record."""
+    from igneous.timeline import EntityNotFoundError
+    from igneous.timeline import timeline as _timeline
+
+    with SessionLocal() as s:
+        try:
+            return _timeline(s, a=node_id, b=other_node_id, limit=limit)
+        except EntityNotFoundError as e:
+            return {"error": f"no node {e.args[0]}"}
+
+
+@server.tool()
+def commitments(node_id: Annotated[int, Field(ge=1)], status: Literal["open", "resolved", "all"] = "open",
+                limit: Annotated[int, Field(ge=1, le=200)] = 50) -> dict:
+    """Cited, model-derived promises in records connected to a person, project, organization or conversation.
+    For a person, includes messages they sent or received, not just promises they personally made: check `who`.
+    Returns existing claims only, with status and verified source spans; never calls a model or changes data."""
+    from igneous.graph.history import commitments as _commitments
+    from igneous.timeline import EntityNotFoundError
+
+    with SessionLocal() as s:
+        try:
+            return {"node_id": node_id, "commitments": _commitments(s, status=status, limit=limit, node_id=node_id)}
+        except EntityNotFoundError as e:
+            return {"error": f"no node {e.args[0]}"}
 
 
 @server.tool()
