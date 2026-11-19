@@ -61,11 +61,15 @@ cites the gold email 90% vs. 77% baseline (100% vs. 93% on multi-hop, 5/5 vs. 0/
 
 ```bash
 uv run igneous export lightrag /tmp/igneous_kg.json
-uv run --with lightrag-hku python eval/lightrag_demo.py /tmp/igneous_kg.json "What did Mike Grigsby say about UBS?"
+uv run --with lightrag-hku==1.5.7 python eval/lightrag_demo.py /tmp/igneous_kg.json --load-only
+uv run --with lightrag-hku==1.5.7 python eval/lightrag_demo.py /tmp/igneous_kg.json "What did Mike Grigsby say about UBS?"
 ```
 
 Point at: **"LLM calls during load: 0"**. LightRAG didn't re-extract anything; it answered from our
-entities, resolved people, and topics.
+entities, resolved people, and topics. The exporter also carries projects, organization memberships, hierarchy
+and relationship history when the selected corpus contains them. On synthetic multi-source data, demonstrate
+"Who worked on <project>?" and "What projects are under <organization>?". Use `--context-only --keyword "<name>"`
+to inspect the cited graph context without a hosted request. The email-only Enron demo has no derived projects.
 
 Then Claude Code with the MCP server: "Who does Kenneth Lay email most?" -> uses `find_entity` +
 `correspondents`.

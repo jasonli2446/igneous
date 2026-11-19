@@ -250,6 +250,43 @@ The model credentials only matter for `ask`, which reads only the sources in `IG
 the server runs from `api/`). MCP clients don't pass your shell's environment through, so set the credentials with
 `-e` as above (other tools work without them). Postgres must be running (`make db`).
 
+## LightRAG export
+
+`igneous export lightrag <file>` exports the existing graph with its evidence: resolved people, mentions and
+topics, projects/life threads, conversation containers, organizations/schools, memberships, hierarchy,
+introductions, commitments and decisions. Hidden nodes, dropped links and facts without readable evidence are
+omitted. Only sources allowed by `IGNEOUS_LLM_SOURCES` are included; local files/Notes also require their model
+switch. Use the shareable Enron database or synthetic fixtures for demos, never the personal database.
+
+```bash
+cd api
+IGNEOUS_LLM_SOURCES=email uv run igneous export lightrag /tmp/igneous_kg.json
+uv run --with lightrag-hku==1.5.7 python eval/lightrag_demo.py /tmp/igneous_kg.json --load-only
+```
+
+Export makes no model calls and changes no database rows. `--limit N` selects the newest N eligible evidence
+records across sources. Export-only chunks cover supporting records not indexed by the search pipeline, such
+as a LinkedIn profile. Facts with text spans cite a chunk containing the span; other facts prefer a chunk naming
+their endpoints. Same-named entities remain separate, with a type/id suffix when needed.
+
+LightRAG stores one relationship per entity pair. Multiple facts about a pair are combined into one description;
+when they need different records, its citation points to an evidence bundle containing those source excerpts
+and their original paths. Loading uses local embeddings, with no LLM re-extraction. An ordinary demo question
+uses the configured Bedrock model for keyword extraction and answering. To inspect graph retrieval without
+hosted calls, supply the entity name explicitly:
+
+```bash
+uv run --with lightrag-hku==1.5.7 python eval/lightrag_demo.py /tmp/igneous_kg.json \
+  "Who worked on Widget Tracker?" --context-only --keyword "Widget Tracker"
+```
+
+That example requires a synthetic export containing Widget Tracker. Run the database-backed exporter tests,
+including the actual LightRAG loader and retrieval checks, with:
+
+```bash
+uv run --with lightrag-hku==1.5.7 python -m pytest -q tests/test_lightrag.py
+```
+
 ## Google (Gmail, Drive, Calendar, Contacts)
 
 1. Put the OAuth desktop client JSON at `data/google/client_secret.json` (git-ignored).
