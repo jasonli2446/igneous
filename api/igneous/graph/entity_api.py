@@ -126,21 +126,17 @@ def merge(node_id: int, body: MergeBody, s: Session = Depends(get_session)):
 def unlink(node_id: int, body: UnlinkBody, s: Session = Depends(get_session)):
     """Drop one item or person from this entity, and keep it dropped across rebuilds."""
     _project(s, node_id)
-    edges = [dict(r) for r in s.execute(text("""
-        SELECT src, dst, type, props, extractor_version, confidence, source_item_id, span_start, span_end
-        FROM edges WHERE src = :m AND dst = :p AND type IN ('PART_OF', 'INVOLVED_IN')
-          AND extractor IN (:x, 'threads', 'hierarchy')
-    """), {"m": body.node, "p": node_id, "x": overrides.EXTRACTOR}).mappings()]
-    if not edges:
+    from igneous.graph import corrections, dirty, verify
+    eid = s.execute(text("""
+        SELECT id FROM edges WHERE src=:m AND dst=:p AND type IN ('PART_OF','INVOLVED_IN')
+            AND extractor <> ALL(:stated) ORDER BY id LIMIT 1
+    """), {"m": body.node, "p": node_id, "stated": list(verify.STATED)}).scalar()
+    if eid is None:
         raise HTTPException(404, "That isn't linked to this entity")
-    # Also a labeled verdict: the verifier keeps it dropped on every rebuild and learns from it (few-shot).
-    from igneous.graph import verify
-    for e in s.execute(text("""
-        SELECT e.type, e.extractor FROM edges e WHERE e.src = :m AND e.dst = :p AND e.type IN ('PART_OF', 'INVOLVED_IN')
-    """), {"m": body.node, "p": node_id}).all():
-        verify.record_correction(s, _key(s, body.node), _key(s, node_id), e.type, e.extractor, "drop",
-                                 "removed by you")
-    return {**_commit(s, "unlink", [_key(s, node_id), _key(s, body.node)], data={"edges": edges}), "id": node_id}
+    result = corrections.reject(s, eid)
+    dirty.touch(s)
+    s.commit()
+    return {**result, "op": "unlink", "id": node_id}
 
 
 @router.delete("/overrides/{override_id}")
@@ -154,7 +150,11 @@ def undo(override_id: int, s: Session = Depends(get_session)):
         entities.run(s, log=None)  # commits; rebuilds the folded entity, then replays the remaining overrides
     else:
         if row["op"] == "unlink":
-            overrides.restore_unlink(s, row["data"])
+            if (row["data"] or {}).get("pair_correction"):
+                from igneous.graph import corrections
+                corrections.restore(s, row)
+            else:
+                overrides.restore_unlink(s, row["data"])
         overrides.apply(s)
         s.commit()
     return {"undone": override_id, "op": row["op"]}
@@ -169,30 +169,16 @@ def edge_is_wrong(body: WrongEdgeBody, s: Session = Depends(get_session)):
     """'This is wrong' on any derived link: recorded as your verdict (it stays gone on every rebuild and teaches
     the verifier), and the link leaves the graph now. Links read straight from your data (who sent an email) can't
     be wrong this way; only inferred ones can."""
-    from igneous.graph import verify
-    e = s.execute(text("""
-        SELECT e.type, e.extractor, a.type || ':' || a.key AS a, b.type || ':' || b.key AS b
-        FROM edges e JOIN nodes a ON a.id = e.src JOIN nodes b ON b.id = e.dst WHERE e.id = :i"""), {"i": body.edge}).first()
-    if e is None:
-        raise HTTPException(404, "No such link")
-    if e.extractor == "spine":
-        raise HTTPException(400, "This link comes straight from your data, not from inference")
-    verify.record_correction(s, e.a, e.b, e.type, e.extractor, "drop", "you said this is wrong")
-    # A correction applies at the level you made it: "this email isn't part of that project" means its whole
-    # conversation isn't, so every other message in the same thread linked the same way goes too.
-    siblings = s.execute(text("""
-        SELECT m2.type || ':' || m2.key, x.type, x.extractor, x.id
-        FROM edges src_e JOIN edges it ON it.src = src_e.src AND it.type = 'IN_THREAD'
-        JOIN edges it2 ON it2.dst = it.dst AND it2.type = 'IN_THREAD' JOIN nodes m2 ON m2.id = it2.src
-        JOIN edges x ON x.src = m2.id AND x.dst = src_e.dst AND x.type = src_e.type
-        WHERE src_e.id = :i AND x.extractor <> 'spine' AND m2.id <> src_e.src"""), {"i": body.edge}).all()
-    for key, type_, extractor, _id in siblings:
-        verify.record_correction(s, key, e.b, type_, extractor, "drop", "you said this conversation isn't part of it")
-    verify.apply_verdicts(s)
-    from igneous.graph import dirty
+    from igneous.graph import corrections, dirty
+    try:
+        result = corrections.reject(s, body.edge)
+    except LookupError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     dirty.touch(s)  # the graph changed: cached views must not serve the old link
     s.commit()
-    return {"removed": body.edge, "also_removed": len(siblings), "edges": [body.edge, *(r.id for r in siblings)]}
+    return result
 
 
 class SamePersonBody(BaseModel):
@@ -229,22 +215,40 @@ class RestoreBody(BaseModel):
 @router.post("/graph/edge/restore")
 def restore_edges(body: RestoreBody, s: Session = Depends(get_session)):
     """Undo "This is wrong": bring the removed links back and forget the verdicts that removed them."""
-    from igneous.graph import dirty
+    from igneous.graph import corrections, dirty, verify
+    groups = s.execute(text("""
+        SELECT id,op,node_keys,value,data FROM overrides WHERE data->>'pair_correction'='true'
+            AND EXISTS (SELECT 1 FROM jsonb_array_elements(data->'edges') e WHERE (e->>'id')::bigint=ANY(:i))
+        ORDER BY id DESC FOR UPDATE
+    """), {"i": body.edges}).mappings().all()
+    restored, grouped = [], set()
+    for group in groups:
+        grouped.update(e["id"] for e in group["data"]["edges"])
+        overrides.remove(s, group["id"])
+        restored.extend(corrections.restore(s, dict(group)))
+    legacy = [i for i in body.edges if i not in grouped]
     rows = s.execute(text("""
         SELECT d.id, a.type || ':' || a.key AS a, b.type || ':' || b.key AS b, d.type, d.extractor
         FROM edges_dropped d JOIN nodes a ON a.id = d.src JOIN nodes b ON b.id = d.dst WHERE d.id = ANY(:i)
-    """), {"i": body.edges}).all()
+    """), {"i": legacy}).all()
     for r in rows:
-        s.execute(text("DELETE FROM edge_verdicts WHERE src_key = :a AND dst_key = :b AND type = :t AND extractor = :x"),
+        s.execute(text("""DELETE FROM edge_verdicts WHERE src_key=:a AND dst_key=:b AND type=:t AND extractor=:x
+                          AND (source <> 'user' OR evidence NOT LIKE 'override:%')"""),
                   {"a": r.a, "b": r.b, "t": r.type, "x": r.extractor})
     s.execute(text("""
         INSERT INTO edges SELECT id, src, dst, type, props - 'verdict' - 'reason', valid_from, valid_to, extractor,
                extractor_version, model, confidence, source_item_id, span_start, span_end
         FROM edges_dropped WHERE id = ANY(:i) ON CONFLICT DO NOTHING"""), {"i": [r.id for r in rows]})
     s.execute(text("DELETE FROM edges_dropped WHERE id = ANY(:i)"), {"i": [r.id for r in rows]})
+    verify.apply_verdicts(s)
+    if any(r.type == "SAME_AS" for r in rows):
+        from igneous.graph.resolve import refresh_canonical
+        refresh_canonical(s, commit=False)
     dirty.touch(s)
     s.commit()
-    return {"restored": [r.id for r in rows]}
+    candidates = sorted({*restored, *(r.id for r in rows)})
+    return {"restored": list(s.execute(text("SELECT id FROM edges WHERE id=ANY(:i) ORDER BY id"),
+                                     {"i": candidates}).scalars())}
 
 
 # How two kinds of thing can be connected, in plain words (the add-a-connection menu), and the edge each means.

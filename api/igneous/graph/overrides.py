@@ -51,7 +51,8 @@ def plan(rows: list[dict]) -> Plan:
                 p.merges[fold] = keep
                 p.merges = {f: (keep if k == fold else k) for f, k in p.merges.items()}  # keep chains one deep
         elif r["op"] == "unlink" and len(keys) == 2:
-            p.unlinks.add((keys[0], keys[1]))
+            if not (r.get("data") or {}).get("pair_correction"):
+                p.unlinks.add((keys[0], keys[1]))
 
     p.renames = {survivor(k): v for k, v in p.renames.items()}
     p.hidden = {survivor(k) for k in p.hidden}

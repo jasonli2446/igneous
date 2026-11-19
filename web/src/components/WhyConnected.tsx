@@ -26,8 +26,10 @@ const REL: Record<string, string> = {
   SENT: "sent", RECEIVED: "received", IN_THREAD: "is in", REPLIES_TO: "replied to", AUTHORED: "authored", SAME_AS: "is the same as",
 };
 
+const STATED = new Set(["spine", "user", "profile", "contacts", "self", "github", "linkedin"]);
+
 /** One link: who and how, the verifier's reason when it has judged it, and the items it came from. */
-function EdgeCard({ e, terms, onWrong }: { e: WhyEdge; terms: string[]; onWrong?: (e: WhyEdge) => void }) {
+function EdgeCard({ e, terms, onWrong, busy }: { e: WhyEdge; terms: string[]; onWrong?: (e: WhyEdge) => void; busy?: boolean }) {
   return (
     <li className="rounded-md border border-line p-2.5">
       <div className="flex items-start gap-2">
@@ -43,8 +45,8 @@ function EdgeCard({ e, terms, onWrong }: { e: WhyEdge; terms: string[]; onWrong?
             {ORIGIN[e.extractor] ?? "Inferred automatically; not checked yet."}
           </p>}
       {e.evidence.length > 0 && <div className="mt-2"><SourceRows items={e.evidence} highlight={terms} /></div>}
-      {e.extractor !== "spine" && onWrong && (
-        <button onClick={() => onWrong(e)} className="mt-2 text-xs text-muted hover:text-danger hover:underline">
+      {!STATED.has(e.extractor) && onWrong && (
+        <button disabled={busy} onClick={() => onWrong(e)} className="mt-2 text-xs text-muted hover:text-danger hover:underline disabled:opacity-50">
           This is wrong
         </button>
       )}
@@ -59,22 +61,34 @@ function range(a: string | null, b: string | null) {
 }
 
 /** The evidence behind a link: what two people actually share. */
-export default function WhyConnected({ a, b, onCloseAction, onOpenAction, onChangedAction }: {
+export default function WhyConnected({ a, b, revision = 0, onCloseAction, onOpenAction, onChangedAction, onRestoredAction }: {
   a: number; b: number; onCloseAction: () => void; onOpenAction: (id: number) => void;
+  revision?: number; onRestoredAction?: () => void;
   /** A link was removed: the page drops it (and anything only it was holding) from what's on screen. */
   onChangedAction?: (removed: { src: number; dst: number; edges: number[]; text: string }) => void;
 }) {
   const [r, setR] = useState<Explanation | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const [saving, setSaving] = useState(false);
   // "This is wrong": your verdict removes the link now and keeps it gone on every rebuild.
   const wrong = (edge: WhyEdge) => {
+    if (saving) return;
+    setSaving(true);
     api.edgeIsWrong(edge.id).then((r) => {
       setAttempt((n) => n + 1);
-      const more = r.also_removed ? ` (and ${r.also_removed} other message${r.also_removed === 1 ? "" : "s"} in that conversation)` : "";
       onChangedAction?.({ src: edge.src, dst: edge.dst, edges: r.edges,
-                          text: `Removed "${edge.src_name}" from "${edge.dst_name}"${more}.` });
-    }).catch((e) => setErr(String(e)));
+                          text: `Removed ${r.edges.length} inferred connection${r.edges.length === 1 ? "" : "s"}.` });
+    }).catch((e) => setErr(String(e))).finally(() => setSaving(false));
+  };
+
+  const undo = (id: number) => {
+    if (saving) return;
+    setSaving(true);
+    api.undoCorrection(id).then(() => {
+      setAttempt((n) => n + 1);
+      onRestoredAction?.();
+    }).catch((e) => setErr(String(e))).finally(() => setSaving(false));
   };
 
   useEffect(() => {
@@ -83,7 +97,7 @@ export default function WhyConnected({ a, b, onCloseAction, onOpenAction, onChan
     setErr(null);
     api.explain(a, b).then((x) => live && setR(x)).catch((e) => live && setErr(String(e)));
     return () => { live = false; };
-  }, [a, b, attempt]);
+  }, [a, b, attempt, revision]);
 
   return (
     <div className="space-y-4 p-4 text-sm">
@@ -109,13 +123,36 @@ export default function WhyConnected({ a, b, onCloseAction, onOpenAction, onChan
               across {r.conversations.length} conversation{r.conversations.length === 1 ? "" : "s"}</>}
             {r.messages > 0 && r.events.length > 0 && ", and "}
             {r.events.length > 0 && <>{r.events.length} shared event{r.events.length === 1 ? "" : "s"}</>}
-            {r.messages === 0 && r.events.length === 0 && !r.direct.length && !r.path && "No connection found within three steps."}
+            {r.messages === 0 && r.events.length === 0 && !r.direct.length && !r.path && !r.corrections?.length && "No connection found within three steps."}
           </p>
+
+          {r.corrections?.length > 0 && (
+            <section aria-label="Earlier corrections">
+              <h3 className="mb-2 text-xs font-medium text-muted">Earlier corrections</h3>
+              <ul className="space-y-2">
+                {r.corrections.map((c) => (
+                  <li key={c.override_id ?? `${c.src}-${c.dst}`} className="rounded-md border border-line p-2.5">
+                    <p className="text-xs leading-relaxed text-soft">
+                      You rejected inferred connections between {c.src_name} and {c.dst_name} on{" "}
+                      {new Date(c.updated_at).toLocaleDateString()}. This also blocks later inferred links between them.
+                    </p>
+                    {c.reason && <p className="mt-1 text-xs text-muted">{c.reason}</p>}
+                    {c.override_id !== null && (
+                      <button disabled={saving} onClick={() => undo(c.override_id!)}
+                        className="mt-2 text-xs text-accent hover:underline disabled:opacity-50">
+                        Undo removal
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
 
           {r.direct.length > 0 && (
             <section aria-label="Why linked">
               <h3 className="mb-2 text-xs font-medium text-muted">Why they&apos;re linked</h3>
-              <ul className="space-y-2">{r.direct.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} onWrong={wrong} />)}</ul>
+              <ul className="space-y-2">{r.direct.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} onWrong={wrong} busy={saving} />)}</ul>
             </section>
           )}
 
@@ -124,7 +161,7 @@ export default function WhyConnected({ a, b, onCloseAction, onOpenAction, onChan
               <h3 className="mb-2 text-xs font-medium text-muted">
                 {r.path.length <= 2 ? "How they're linked" : `Linked through ${r.path.length - 1} other thing${r.path.length === 2 ? "" : "s"}`}
               </h3>
-              <ul className="space-y-2">{r.path.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} onWrong={wrong} />)}</ul>
+              <ul className="space-y-2">{r.path.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} onWrong={wrong} busy={saving} />)}</ul>
             </section>
           )}
 

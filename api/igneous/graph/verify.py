@@ -28,6 +28,8 @@ from sqlalchemy.orm import Session
 from igneous.config import settings
 
 VERSION = "1"
+# Facts read directly from sources or explicitly stated by the user are not guesses.
+STATED = ("spine", "user", "profile", "contacts", "self", "github", "linkedin")
 # Relationships derived by heuristics, and what they claim, phrased for the judge.
 CLAIMS = {
     ("PART_OF", "threads"): "the item is part of this thread of the person's life (trip, class, job, project...)",
@@ -233,42 +235,44 @@ def apply_verdicts(s: Session) -> int:
 
     A dropped edge moves to `edges_dropped` (kept for the why-view and audit) rather than being flagged, so every
     query in the system ignores it without having to know about verdicts."""
+    # A user rejects the pair, not one rule's spelling of its relationship. Model judgments remain scoped to
+    # their exact edge. Pick one verdict per edge so multiple earlier corrections cannot duplicate an archive.
     moved = s.execute(text("""
-        WITH d AS (
-            DELETE FROM edges e USING nodes a, nodes b, edge_verdicts v
-            WHERE a.id = e.src AND b.id = e.dst AND v.src_key = a.type || ':' || a.key
-              AND v.dst_key = b.type || ':' || b.key AND v.type = e.type AND v.extractor = e.extractor
-              AND v.verdict = 'drop'
-              -- Undoing an identity merge needs a confident drop: a weak doubt must not split one person in two.
-              AND (e.type <> 'SAME_AS' OR v.confidence >= 0.8)
-            RETURNING e.*, v.reason AS _reason)
+        WITH matches AS (
+            SELECT e.id, v.reason, false AS user_verdict, v.updated_at
+            FROM edges e JOIN nodes a ON a.id=e.src JOIN nodes b ON b.id=e.dst
+            JOIN edge_verdicts v ON v.src_key=a.type || ':' || a.key AND v.dst_key=b.type || ':' || b.key
+                AND v.type=e.type AND v.extractor=e.extractor
+            WHERE v.verdict='drop' AND v.source <> 'user' AND e.extractor <> ALL(:stated)
+                AND (e.type <> 'SAME_AS' OR v.confidence >= 0.8)
+            UNION ALL
+            SELECT e.id, v.reason, true, v.updated_at FROM edge_verdicts v
+            JOIN nodes a ON a.type=split_part(v.src_key, ':', 1)
+                AND a.key=substr(v.src_key, length(split_part(v.src_key, ':', 1)) + 2)
+            JOIN nodes b ON b.type=split_part(v.dst_key, ':', 1)
+                AND b.key=substr(v.dst_key, length(split_part(v.dst_key, ':', 1)) + 2)
+            JOIN edges e ON (e.src=a.id AND e.dst=b.id) OR (e.src=b.id AND e.dst=a.id)
+            WHERE v.source='user' AND v.verdict='drop' AND e.extractor <> ALL(:stated)
+        ), doomed AS (
+            SELECT DISTINCT ON (id) id, reason FROM matches ORDER BY id,user_verdict DESC,updated_at DESC
+        ), d AS (
+            DELETE FROM edges e USING doomed WHERE e.id = doomed.id RETURNING e.*, doomed.reason AS _reason)
         INSERT INTO edges_dropped SELECT id, src, dst, type, props || jsonb_build_object('verdict', 'drop', 'reason', _reason),
                valid_from, valid_to, extractor, extractor_version, model, confidence, source_item_id, span_start, span_end
-        FROM d
-    """)).rowcount
-    # "These two aren't related" covers every kind of derived link between them, either direction: rejecting
-    # Igneous-RELATED_TO-Epic must also stop a later Igneous-PART_OF-Epic guess.
-    moved += s.execute(text("""
-        WITH d AS (
-            DELETE FROM edges e USING nodes a, nodes b, edge_verdicts v
-            WHERE a.id = e.src AND b.id = e.dst AND a.type = 'Project' AND b.type = 'Project'
-              AND v.source = 'user' AND v.verdict = 'drop'
-              AND ((v.src_key = a.type || ':' || a.key AND v.dst_key = b.type || ':' || b.key)
-                   OR (v.src_key = b.type || ':' || b.key AND v.dst_key = a.type || ':' || a.key))
-              AND e.extractor NOT IN ('user', 'profile')
-            RETURNING e.*, v.reason AS _reason)
-        INSERT INTO edges_dropped SELECT id, src, dst, type, props || jsonb_build_object('verdict', 'drop', 'reason', _reason),
-               valid_from, valid_to, extractor, extractor_version, model, confidence, source_item_id, span_start, span_end
-        FROM d ON CONFLICT DO NOTHING
-    """)).rowcount
-    return moved + s.execute(text("""
+        FROM d RETURNING type
+    """), {"stated": list(STATED)}).scalars().all()
+    if "SAME_AS" in moved:
+        from igneous.graph.resolve import refresh_canonical
+        refresh_canonical(s, commit=False)
+    return len(moved) + s.execute(text("""
         UPDATE edges e SET props = e.props || jsonb_build_object('verdict', v.verdict, 'reason', v.reason,
                                                                   'confidence', v.confidence, 'verified_by', v.source)
         FROM nodes a, nodes b, edge_verdicts v
         WHERE a.id = e.src AND b.id = e.dst AND v.src_key = a.type || ':' || a.key
           AND v.dst_key = b.type || ':' || b.key AND v.type = e.type AND v.extractor = e.extractor
+          AND e.extractor <> ALL(:stated)
           AND (e.props->>'verdict' IS DISTINCT FROM v.verdict OR e.props->>'reason' IS DISTINCT FROM v.reason)
-    """)).rowcount
+    """), {"stated": list(STATED)}).rowcount
 
 
 def run(s: Session, log=print, budget: int = BUDGET) -> dict:
@@ -341,11 +345,13 @@ def run(s: Session, log=print, budget: int = BUDGET) -> dict:
 
 
 def record_correction(s: Session, src_key: str, dst_key: str, type_: str, extractor: str, verdict: str,
-                      reason: str | None = None) -> None:
+                      reason: str | None = None, override_id: int | None = None) -> None:
     """A user's correction is a verdict that wins forever and teaches the judge (few-shot)."""
     s.execute(text("""
         INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, confidence, reason, source)
-        VALUES (:a, :b, :t, :x, 'user', :v, 1.0, :r, 'user')
+        VALUES (:a, :b, :t, :x, :evidence, :v, 1.0, :r, 'user')
         ON CONFLICT (src_key, dst_key, type, extractor) DO UPDATE SET verdict = EXCLUDED.verdict,
-            reason = EXCLUDED.reason, source = 'user', confidence = 1.0, updated_at = now()
-    """), {"a": src_key, "b": dst_key, "t": type_, "x": extractor, "v": verdict, "r": reason})
+            evidence = EXCLUDED.evidence, reason = EXCLUDED.reason, source = 'user', confidence = 1.0,
+            updated_at = now()
+    """), {"a": src_key, "b": dst_key, "t": type_, "x": extractor, "v": verdict, "r": reason,
+           "evidence": f"override:{override_id}" if override_id is not None else "user"})

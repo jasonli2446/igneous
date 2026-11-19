@@ -84,6 +84,8 @@ export type Explanation = {
   shared: SourceCard[];
   direct: WhyEdge[];
   path: WhyEdge[] | null;
+  corrections: { override_id: number | null; src: number; dst: number; src_name: string; dst_name: string;
+    reason: string | null; updated_at: string }[];
 };
 
 /** A source item as lists show it: enough to display, Open and View. */

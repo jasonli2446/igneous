@@ -305,9 +305,11 @@ def explain(s: Session, a: int, b: int, limit: int = 8) -> dict:
         c["excerpt"] = name_handles(c["excerpt"], named)
         out.append(c)
     links = connection(s, ids["a"], ids["b"], named, allow_path=total == 0 and not events)
+    from igneous.graph.corrections import for_pair
     return {"a": {"id": a, "name": names.get(a)}, "b": {"id": b, "name": names.get(b)},
             "messages": total, "conversations": out, "events": [dict(e) for e in events],
-            "shared": shared_items(s, ids["a"], ids["b"], named) if total else [], **links}
+            "shared": shared_items(s, ids["a"], ids["b"], named) if total else [],
+            "corrections": for_pair(s, ids["a"], ids["b"]), **links}
 
 
 EDGE_EVIDENCE_LIMIT = 5
