@@ -242,7 +242,7 @@ def _human_name(name: str, handles: set[str]) -> bool:
             and "(" not in name)
 
 
-def refresh_canonical(s: Session) -> int:
+def refresh_canonical(s: Session, *, commit: bool = True) -> int:
     """Union-find over Person SAME_AS edges; each cluster's canonical node is its best-connected member, so
     the explorer shows "Kenneth Lay" with all his addresses folded in. Scoped to Person nodes: rows for other
     node types (e.g. project merges) are left alone. The user's own cluster (props.self) is headed by the
@@ -310,7 +310,8 @@ def refresh_canonical(s: Session) -> int:
                 s.execute(text("UPDATE nodes SET name = :n WHERE id = :id"), {"n": named[0].name, "id": head})
     if rows:
         s.execute(text("INSERT INTO canonical (node_id, canonical_id) VALUES (:n, :c)"), rows)
-    s.commit()
+    if commit:
+        s.commit()
     return len(clusters)
 
 

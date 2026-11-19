@@ -276,6 +276,7 @@ def why_connected(a: int, b: int) -> dict:
                               for c in r["conversations"]],
             "events": [{"name": e["name"], "date": str(e["at"])[:10]} for e in r["events"]],
             "direct_links": [link(e) for e in r.get("direct") or []],
+            "corrections": r.get("corrections", []),
             "path": [link(e) for e in r.get("path") or []] or None}
 
 

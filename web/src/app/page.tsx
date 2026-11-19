@@ -26,6 +26,7 @@ export default function Explorer() {
   const [canvasKey, setCanvasKey] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
   const [why, setWhy] = useState<{ a: number; b: number } | null>(null);
+  const [correctionRevision, setCorrectionRevision] = useState(0);
   // Which node brought each node onto the screen, so clicking an expanded node collapses what it added.
   const [introducedBy, setIntroducedBy] = useState<Map<number, number>>(new Map());
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
@@ -177,17 +178,33 @@ export default function Explorer() {
   }, []);
 
   const dropLink = useCallback(({ src, dst, edges, text }: { src: number; dst: number; edges?: number[]; text?: string }) => {
-    let removed: Subgraph | null = null;
+    const before = dataRef.current;
+    const removedIds = new Set(edges);
+    const isRemoved = (e: GEdge) => edges
+      ? removedIds.has(e.id)
+      : (e.src === src && e.dst === dst) || (e.src === dst && e.dst === src);
+    const removedEdges = before.edges.filter(isRemoved);
     setData((prev) => {
-      removed = prev;
-      const edges = prev.edges.filter((e) => !((e.src === src && e.dst === dst) || (e.src === dst && e.dst === src)));
+      const edges = prev.edges.filter((e) => !isRemoved(e));
       const linked = new Set(edges.flatMap((e) => [e.src, e.dst]));
       const seed = prev.nodes.find((n) => n.kind === "seed")?.id;
       return { ...prev, edges, nodes: prev.nodes.filter((n) => n.id === seed || linked.has(n.id)) };
     });
     if (edges?.length && text) {
       showToast(text, () => {
-        api.restoreEdges(edges).then(() => { if (removed) setData(removed); setToast(null); }).catch(() => {});
+        api.restoreEdges(edges).then((result) => {
+          const restoredIds = new Set(result.restored);
+          setData((current) => {
+            const known = new Set(current.edges.map((e) => e.id));
+            const restored = removedEdges.filter((e) => restoredIds.has(e.id) && !known.has(e.id));
+            const needed = new Set(restored.flatMap((e) => [e.src, e.dst]));
+            const nodes = new Map(current.nodes.map((n) => [n.id, n]));
+            before.nodes.forEach((n) => { if (needed.has(n.id) && !nodes.has(n.id)) nodes.set(n.id, n); });
+            return { ...current, nodes: [...nodes.values()], edges: [...current.edges, ...restored] };
+          });
+          setCorrectionRevision((n) => n + 1);
+          setToast(null);
+        }).catch((e) => setError(`Couldn't undo the removal: ${String(e)}`));
       });
     }
   }, [showToast]);
@@ -432,9 +449,9 @@ export default function Explorer() {
       <aside aria-hidden={!panelOpen} inert={!panelOpen}
         className={`absolute inset-y-0 right-0 z-20 w-full max-w-96 overflow-y-auto border-l border-line bg-panel transition-transform duration-200 ${panelOpen ? "translate-x-0" : "translate-x-full"}`}>
         {why ? (
-          <WhyConnected a={why.a} b={why.b} onCloseAction={closePanel}
+          <WhyConnected a={why.a} b={why.b} revision={correctionRevision} onCloseAction={closePanel}
             onOpenAction={(id) => { setWhy(null); openFromPanel(id); }}
-            onChangedAction={dropLink} />
+            onChangedAction={dropLink} onRestoredAction={retry} />
         ) : (
           <Inspector id={detailId} onExpandAction={toggle} onCloseAction={closePanel}
             expanded={detailId !== null && expanded.has(detailId)}
