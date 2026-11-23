@@ -349,6 +349,97 @@ def test_search_joins_existing_project_after_rebuild(db, zpath):
             s.commit()
 
 
+LEE = {"name": "Lee Park", "email": "lee@example.com", "user_type": "Human"}
+SPACE_MSGS = {"messages": [
+    {"creator": LEE, "created_date": "Tuesday, May 6, 2025 at 7:00:00\u202fPM UTC", "text": "rules recap tonight?",
+     "topic_id": "t", "message_id": "s1"}]}
+SPACE_INFO = {"name": "Gloomhaven Night", "members": [CHAT_GROUP["members"][0], CHAT_GROUP["members"][1], LEE]}
+CALENDAR = "\r\n".join([
+    "BEGIN:VCALENDAR", "PRODID:-//Google Inc//Google Calendar 70.9054//EN", "VERSION:2.0", "X-WR-CALNAME:me@example.com",
+    "X-WR-TIMEZONE:America/New_York",
+    "BEGIN:VEVENT", "DTSTART:20250604T180000Z", "DTEND:20250604T183000Z", "DTSTAMP:20250801T000000Z",
+    "ORGANIZER;CN=Sam Lee:mailto:sam@example.com", "UID:EVT123@google.com",
+    "ATTENDEE;PARTSTAT=ACCEPTED;CN=Me:mailto:me@example.com", "SUMMARY:Standup", "END:VEVENT",
+    "BEGIN:VEVENT", "DTSTART;TZID=America/New_York:20250505T190000", "DTEND;TZID=America/New_York:20250505T220000",
+    "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=4", "DTSTAMP:20250801T000000Z", "UID:gloom@google.com",
+    "ATTENDEE;PARTSTAT=ACCEPTED;CN=Lee Park:mailto:lee@example.com", "SUMMARY:Gloomhaven Night", "END:VEVENT",
+    "END:VCALENDAR", ""]).encode()
+
+
+@pytest.fixture
+def chat_and_calendar(tmp_path):
+    """A minimal export: a named space, a direct message, a single event and a weekly series."""
+    return build_zip(tmp_path / "takeout-20250801T000000Z-001.zip", {
+        "Google Chat/Groups/Space AAAAgloom/group_info.json": SPACE_INFO,
+        "Google Chat/Groups/Space AAAAgloom/messages.json": SPACE_MSGS,
+        "Google Chat/Groups/DM abc/group_info.json": CHAT_GROUP,
+        "Google Chat/Groups/DM abc/messages.json": CHAT_MSGS,
+        "Google Chat/Users/User 1234/user_info.json": {"user": {"name": "Me", "email": "me@example.com"}},
+        "Calendar/me@example.com.ics": CALENDAR})
+
+
+def test_spaces_are_called_by_their_names_and_direct_messages_by_who_is_in_them(chat_and_calendar):
+    items, report = takeout.parse([chat_and_calendar])
+    ids = by_id(items)
+    space, dm = ids["chat/space-aaaagloom/2025-05-06"], ids["chat/dm-abc/2025-05-06"]
+    assert space.title == "Gloomhaven Night, 2025-05-06" and space.raw_meta["space"] is True
+    assert dm.title == "Sam Lee, 2025-05-06" and dm.raw_meta["conversation"] == "Sam Lee"  # you aren't named
+    assert dm.raw_meta["space"] is False and "Lee Park: rules recap tonight?" in space.body_text
+    events = sorted(i.external_id for i in items if i.source == "gcal")
+    assert events == ["me@example.com/me@example.com/EVT123"] + [
+        f"me@example.com/me@example.com/gloom_202505{d}T230000Z" for d in ("05", "12", "19", "26")]
+    assert report["parts"] == {"chat": 2, "calendar": 5} and report["counts"]["calendar_events"] == 2
+    assert all(i.raw_meta["product"] == "Calendar" for i in items if i.source == "gcal")
+
+
+def test_takeout_calendar_and_chat_build_one_event_per_series_and_named_threads(db, chat_and_calendar):
+    from igneous import sources
+    from igneous.graph import spine
+
+    with SessionLocal() as s:
+        first = takeout.run_import(s, [chat_and_calendar])
+        assert first["inserted"] == 7 and first["parts"]["calendar"] == 5
+    with SessionLocal() as s:
+        again = takeout.run_import(s, [chat_and_calendar])
+        assert (again["inserted"], again["updated"], again["unchanged"]) == (0, 0, 7)  # the same zip changes nothing
+        spine.run(s)
+        threads = dict(s.execute(text("""SELECT name, (props->>'group')::bool FROM nodes
+                                         WHERE type = 'Thread' AND key LIKE 'takeout-chat:%'""")).all())
+        assert threads == {"Gloomhaven Night": True, "Sam Lee": False}
+        events = dict(s.execute(text("SELECT name, props->>'series' FROM nodes WHERE type = 'Event'")).all())
+        assert events == {"Standup": "false", "Gloomhaven Night": "true"}
+        (attended,) = s.execute(text("""SELECT count(*) FROM edges e JOIN nodes p ON p.id = e.src
+                                        JOIN nodes ev ON ev.id = e.dst AND ev.name = 'Gloomhaven Night'
+                                        WHERE e.type = 'ATTENDED' AND p.key = 'lee@example.com'""")).one()
+        assert attended == 1  # one edge for the series, spanning its occurrences
+        counts = {row["id"]: row["items"] for row in sources.describe(s)}
+        assert counts["takeout"] == 7 and counts["gcal"] == 0  # the export's events count for the export
+
+
+def test_a_calendar_sync_takes_over_an_exported_event_and_the_export_leaves_it(db, chat_and_calendar):
+    from fakes import FakeCalendar
+
+    from igneous import sources
+    from igneous.connectors.base import run_sync
+    from igneous.connectors.gcal import CalendarConnector
+
+    moved = {"id": "EVT123", "iCalUID": "EVT123@google.com", "summary": "Standup (moved)",
+             "start": {"dateTime": "2025-06-05T18:00:00Z"}, "end": {"dateTime": "2025-06-05T18:30:00Z"}}
+    with SessionLocal() as s:
+        takeout.run_import(s, [chat_and_calendar])
+        service = FakeCalendar([{"id": "me@example.com", "summary": "me@example.com"}],
+                               [{"items": [moved], "nextSyncToken": "t1"}])
+        stats = run_sync(s, CalendarConnector(None, "me@example.com", service=service), account="me@example.com")
+        assert (stats["inserted"], stats["updated"]) == (0, 1)  # the exported event, now as Google Calendar has it
+        again = takeout.run_import(s, [chat_and_calendar])
+        assert (again["inserted"], again["updated"]) == (0, 0) and any("already synced" in n for n in again["notes"])
+        title = s.execute(text("SELECT title FROM source_items WHERE source = 'gcal' AND external_id = "
+                               "'me@example.com/me@example.com/EVT123'")).scalar_one()
+        assert title == "Standup (moved)"  # the older export doesn't move it back
+        counts = {row["id"]: row["items"] for row in sources.describe(s)}
+        assert (counts["takeout"], counts["gcal"]) == (6, 1)
+
+
 def test_takeout_sources_are_hidden_from_models_by_default():
     from igneous.llm import allowed_sources
 

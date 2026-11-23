@@ -42,7 +42,7 @@ def connectors(s: Session, folder: Path) -> list[tuple[str, Callable]]:
     from igneous import sources
     from igneous.connectors.ai_exports import ExportConnector, preflight
     from igneous.connectors.linkedin import LinkedInConnector
-    from igneous.connectors.takeout import TakeoutConnector
+    from igneous.connectors.takeout import TakeoutConnector, synced_events
 
     ex = manifest(folder)["exports"]
     ((_, mail),) = sources.BY_ID["email"]["build"](
@@ -52,7 +52,7 @@ def connectors(s: Session, folder: Path) -> list[tuple[str, Callable]]:
     return [
         ("mail", mail),
         ("documents", documents),
-        ("takeout", lambda: TakeoutConnector([folder / ex["takeout"]])),
+        ("takeout", lambda: TakeoutConnector([folder / ex["takeout"]], synced=synced_events(s))),
         ("linkedin", lambda: LinkedInConnector([folder / ex["linkedin"]])),
         ("chatgpt", lambda: ExportConnector(chatgpt, preflight(chatgpt))),
     ]

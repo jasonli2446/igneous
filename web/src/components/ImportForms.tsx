@@ -150,7 +150,7 @@ function TakeoutForm({ onDone }: { onDone: () => void }) {
       {done && (
         <div>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-            <Stat label="New days" value={done.inserted} />
+            <Stat label="New entries" value={done.inserted} />
             <Stat label="Updated" value={done.updated} />
             <Stat label="Unchanged" value={done.unchanged} />
             <Stat label="Places" value={done.places} />

@@ -7,7 +7,7 @@ by stable record keys, and describes the default seed.
       uv run python eval/persona_eval.py [--qa]
 
 Without --qa it makes no model calls. --qa asks every question through Ask, which reads only opted-in sources: opt
-in the persona's (IGNEOUS_LLM_SOURCES=email,fs,takeout,linkedin,ai_chats with IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true)
+in the persona's (IGNEOUS_LLM_SOURCES=email,fs,takeout,gcal,linkedin,ai_chats with IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true)
 and set AWS_BEARER_TOKEN_BEDROCK.
 """
 import argparse

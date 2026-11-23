@@ -91,7 +91,8 @@ def hiring(life: Life) -> None:
              "parser -> database -> dashboard\n- My story: the shell pipe bug from CS 341 P1\n- Project: the beach "
              "data paper for ENVS 210\n- Ask: how code reaches the boats, what broke last season, first month\n")
     interview = life.event("Interview: Mira Castellanos / Northwind", at(d(2024, 12, 3), "14:00"), 90,
-                           location="Google Meet", attendees=(owen, p("priya")), organizer=owen)
+                           location="Google Meet", attendees=(owen, p("priya")), organizer=owen,
+                           tag="northwind.interview")
     life.mail(at(d(2024, 11, 20), "10:02"), owen, [ME], "Invitation: Interview: Mira Castellanos / Northwind @ "
               "Tue Dec 3, 2024 2pm - 3:30pm (EST) (mcastellanos@lakeshore.example.edu)",
               "Owen Brandt has invited you to an event.\n\nInterview: Mira Castellanos / Northwind\nTuesday Dec 3, "
@@ -209,7 +210,7 @@ def field_trials(life: Life) -> None:
              "        p *= 1 - k\n        out.append(x)\n    return out\n")
     life.event("Heron field trials", at(d(2025, 6, 9), "07:00"), 240, location="Avalon North Beach launch",
                attendees=(jonah, priya, alex), organizer=jonah,
-               rrule="FREQ=WEEKLY;BYDAY=MO,WE,FR;UNTIL=20250627T235900Z")
+               rrule="FREQ=WEEKLY;BYDAY=MO,WE,FR;UNTIL=20250627T235900Z", tag="heron.trials")
     life.mail(at(d(2025, 6, 2), "08:00"), jonah, [ME], "Invitation: Heron field trials @ Weekly on Monday, "
               "Wednesday, Friday from 7am to 11am (EDT) (mcastellanos@lakeshore.example.edu)",
               "Jonah Feld has invited you to an event.\n\nHeron field trials\nWeekly on Monday, Wednesday, Friday "
@@ -237,9 +238,11 @@ def routine(life: Life) -> None:
     life.space("northwind", "Northwind software", team)
     life.space("dm-priya", "", [ME, priya])
     rng = life.rng("northwind")
-    standup = life.event("Northwind standup (remote)", at(JOB_START, "09:30"), 15, location="Google Meet",
+    # A repeating event starts on its first day: the first Monday, Wednesday or Friday of the job.
+    first_standup = days(JOB_START, JOB_START + timedelta(days=6), "MWF")[0]
+    standup = life.event("Northwind standup (remote)", at(first_standup, "09:30"), 15, location="Google Meet",
                          attendees=(priya, owen, alex, jonah), organizer=priya,
-                         rrule="FREQ=WEEKLY;BYDAY=MO,WE,FR;UNTIL=20260702T235900Z")
+                         rrule="FREQ=WEEKLY;BYDAY=MO,WE,FR;UNTIL=20260702T235900Z", tag="northwind.standup")
     one_on_one = life.event("Mira / Priya 1:1", at(d(2025, 1, 30), "16:00"), 30, location="Google Meet",
                             attendees=(priya,), organizer=priya, rrule="FREQ=WEEKLY;INTERVAL=2;BYDAY=TH")
     life.event("Northwind (in office)", at(JOB_START, "13:00"), 300, location="22 Pier Rd",

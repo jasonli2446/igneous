@@ -108,7 +108,7 @@ class PageVisit:
 
 @dataclass
 class Event:
-    """A Google Calendar event, as Takeout's Calendar export writes it (no importer reads it yet)."""
+    """A Google Calendar event, as Takeout's Calendar export writes it: one that repeats is one event with a rule."""
     uid: str
     summary: str
     start: datetime
@@ -119,6 +119,15 @@ class Event:
     organizer: Person = ME
     rrule: str = ""
     zone: str = "home"
+    tag: str | None = None  # the gold set names its (first) occurrence by this tag
+
+    def occurrence_id(self, near: datetime) -> str:
+        """Google Calendar's id for the event on the day of `near`: an occurrence of a repeating event is
+        `<id>_<its start in UTC>`, a single event its own id."""
+        if not self.rrule:
+            return self.uid
+        start = at(local(near, self.zone).date(), local(self.start, self.zone).strftime("%H:%M"), self.zone)
+        return f"{self.uid}_{start:%Y%m%dT%H%M%SZ}"
 
 
 @dataclass
@@ -127,7 +136,7 @@ class Meeting:
     start: datetime
     minutes: int
     code: str = ""                     # a meeting's code; "" for a direct call
-    event_id: str = ""
+    event_id: str = ""                 # the calendar event it was joined from (its occurrence's, for a repeating one)
     counterparts: tuple[Person, ...] = ()
 
 
@@ -264,7 +273,7 @@ class Life:
         h = self.unique("meet", start.isoformat())
         letters = "".join(chr(97 + int(h[i:i + 2], 16) % 26) for i in range(0, 20, 2))
         code = "" if call else f"{letters[:3]}-{letters[3:7]}-{letters[7:10]}"
-        m = Meeting(start, minutes, code, event.uid if event else "", tuple(counterparts))
+        m = Meeting(start, minutes, code, event.occurrence_id(start) if event else "", tuple(counterparts))
         self.meetings.append(m)
         return m
 

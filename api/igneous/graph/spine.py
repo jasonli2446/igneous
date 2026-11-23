@@ -788,13 +788,15 @@ def build_file(b: Builder, item) -> None:
 
 
 def build_takeout_chat(b: Builder, item) -> None:
-    """A Google Chat conversation-day, shaped like an iMessage one: a Message in a Thread per conversation,
-    People keyed by email. Whoever spoke SENT the day; everyone in the conversation RECEIVED it."""
+    """A Google Chat conversation-day, shaped like an iMessage one: a Message in a Thread per conversation, called
+    what the conversation is (a space's name, or the people in a direct message), People keyed by email. A space is
+    a group, as is any conversation of more than two. Whoever spoke SENT the day; everyone in it RECEIVED it."""
     meta = item.raw_meta
     mid = b.node("Message", f"takeout_chat:{item.external_id}", item.title, {"source": "takeout_chat"}, record=True,
                  fallback="(chat)")
-    tid = b.node("Thread", f"takeout-chat:{meta.get('group')}", f"Google Chat {meta.get('group', '')}".strip(),
-                 {"source": "takeout_chat", "group": len(meta.get("participants", [])) > 2})
+    tid = b.node("Thread", f"takeout-chat:{meta.get('group')}", meta.get("conversation") or None,
+                 {"source": "takeout_chat", "group": bool(meta.get("space")) or len(meta.get("participants", [])) > 2},
+                 fallback="Google Chat")
     b.edge(mid, tid, "IN_THREAD", item.occurred_at, record=True)
     senders = set(meta.get("senders", []))
     for email in meta.get("participants", []):

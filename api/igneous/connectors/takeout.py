@@ -1,6 +1,7 @@
-"""Google Takeout (My Activity incl. Gemini, Chrome, Maps) as day-items, places, and visits.
+"""Google Takeout (My Activity incl. Gemini, Chrome, Maps, Chat, Tasks, Meet, Calendar) as day-items, places, visits
+and events.
 
-Input: one or several Takeout .zip files (a split export), an extracted folder, or a loose JSON file. Big JSON
+Input: one or several Takeout .zip files (a split export), an extracted folder, or a loose JSON or .ics file. Big JSON
 members are streamed with ijson, so a multi-GB zip is never read into memory; only the compact per-day
 aggregates are. Pass every zip of an export in one run: a day's items are rebuilt from everything seen, so
 importing the parts one at a time would overwrite a day with its partial view.
@@ -16,11 +17,20 @@ What is read (names are matched case-insensitively and tolerate a missing "Takeo
   Location History*/Semantic Location History/YYYY/YYYY_MONTH.json   place visits (placeVisit)
   Timeline.json (on-device export)            semanticSegments[].visit; names are usually absent
   Records.json (raw location points) is skipped: huge and low value.
+  Google Chat/Groups/<space or DM>/           one item per conversation per day, called by the space's name
+                                              (group_info.json), a direct message by the people in it besides you
+                                              (Google Chat/Users/*/user_info.json names you)
+  Tasks/Tasks.json                            one item per list
+  Google Meet/ConferenceHistory/conference_history_records.csv   one item per call
+  Calendar/<calendar>.ics                     one Google Calendar record per occurrence, keyed as a Google Calendar
+                                              sync keys the same event (connectors/ical.py)
 Formats are not guaranteed by Google and change without notice, so every field is read defensively and a
 file that fails to parse is reported in `notes` rather than aborting the import.
 
 Everything stored passes through redact(), and URLs lose tracking parameters. The sources below stay out of
-every model call unless named in IGNEOUS_LLM_SOURCES (`takeout` names them all; see igneous/llm.py).
+every model call unless named in IGNEOUS_LLM_SOURCES (`takeout` names them all; see igneous/llm.py). Gemini chats
+are stored as AI chats (`ai_chats`) and calendar events as Google Calendar's (`gcal`), the way their own import and
+sync store them, so they follow those sources' opt-ins.
 """
 import csv
 import io
@@ -38,14 +48,20 @@ from typing import BinaryIO
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import ijson
+from sqlalchemy import text
 
 from igneous import source_catalog
+from igneous.connectors import ical
 from igneous.connectors.ai_chats import _ts
 from igneous.connectors.ai_exports import export_items, gemini_conversations
 from igneous.connectors.base import Checkpoint, SourceItem
 from igneous.connectors.redact import redact
 
 TAKEOUT_SOURCES = source_catalog.of_connector("takeout")
+# Products read into another source's records, stored as that source's own import or sync stores them: the part of
+# the report each is counted under.
+PART = {"ai_chats": "gemini", "gcal": "calendar"}
+EXPECTED = "My Activity, Chrome, Maps, Location History, Google Chat, Tasks, Google Meet or Calendar"
 # My Activity products that are advertising/analytics telemetry, not things you did.
 SKIP_PRODUCTS = {"ads", "google analytics", "takeout"}
 MAX_LINES = 1000  # per item; a day with more than this is almost certainly a script, not you
@@ -227,10 +243,11 @@ class Tree:
                         self.members.append(Member(_logical([p.name, *rel]), lambda full=full: open(full, "rb")))
         elif zipfile.is_zipfile(p):
             self._add_zip(p)
-        elif p.suffix.lower() in (".json", ".html", ".csv"):
+        elif p.suffix.lower() in (".json", ".html", ".csv", ".ics"):
             self.members.append(Member(p.name, lambda p=p: open(p, "rb")))
         else:
-            raise TakeoutError(f"{p.name} is not a Takeout .zip, an extracted folder, or a JSON file.")
+            raise TakeoutError(f"{p.name} is not a Takeout .zip, an extracted folder, or a JSON or calendar (.ics) "
+                               "file.")
 
     def _add_zip(self, p: Path):
         zf = zipfile.ZipFile(p)
@@ -269,6 +286,8 @@ def classify(path: str) -> tuple[str, str | None] | None:
             return "chat_user", None
     if "tasks" in dirs and name == "tasks.json":
         return "tasks", None
+    if name.endswith(".ics"):  # Calendar/<calendar>.ics
+        return "calendar", Path(parts[-1]).stem
     if name == "conference_history_records.csv":
         return "meet", None
     stem = Path(parts[-1]).stem
@@ -394,7 +413,10 @@ class _Import:
         self.lists: dict[tuple[str, str], list[dict]] = defaultdict(list)  # (kind, list name) -> places
         self.list_secrets: dict[tuple[str, str], int] = defaultdict(int)
         self.reading: list[tuple[str, str, str]] = []
-        self.chat: dict[str, dict] = {}  # group dir -> {members, days: {day: [(at, email, text)]}}
+        self.chat: dict[str, dict] = {}  # group dir -> {name, members, days: {day: [(at, email, text)]}}
+        self.chat_user: str | None = None  # you, as Chat's export names you
+        self.calendars: list[ical.Calendar] = []
+        self.calendar_report = ical.Report()
         self.tasks: list[dict] = []
         self.meet: list[dict] = []
         self.notes: list[str] = []
@@ -434,12 +456,14 @@ class _Import:
 
     # -- chat / tasks / meet / reading list
     def read_chat(self, m: Member, group: str | None, kind: str):
-        g = self.chat.setdefault(group or "?", {"members": {}, "days": defaultdict(list)})
+        g = self.chat.setdefault(group or "?", {"name": None, "members": {}, "days": defaultdict(list)})
 
         def go():
             with m.open() as fh:
                 data = json.load(fh)
             if kind == "chat_group":
+                if isinstance(data.get("name"), str) and data["name"].strip():
+                    g["name"] = data["name"].strip()  # a space's name; a direct message has none
                 for u in data.get("members") or []:
                     if isinstance(u, dict) and u.get("email"):
                         g["members"][u["email"].lower()] = u.get("name") or u["email"]
@@ -452,6 +476,24 @@ class _Import:
                 g["members"].setdefault(who["email"].lower(), who.get("name") or who["email"])
                 g["days"][at.date().isoformat()].append((at, who["email"].lower(), text_))
                 self.counts["chat_messages"] += 1
+        self._safe(m, go)
+
+    def read_chat_user(self, m: Member):
+        """Chat's user_info.json: who you are, so a direct message is called by the other people in it."""
+        def go():
+            with m.open() as fh:
+                data = json.load(fh)
+            user = data.get("user") if isinstance(data, dict) and isinstance(data.get("user"), dict) else {}
+            if isinstance(user.get("email"), str) and "@" in user["email"]:
+                self.chat_user = user["email"].strip().lower()
+        self._safe(m, go)
+
+    def read_calendar(self, m: Member, name: str):
+        def go():
+            with m.open() as fh:
+                cal = ical.read(fh.read(), name)
+            if cal is not None:
+                self.calendars.append(cal)
         self._safe(m, go)
 
     def read_tasks(self, m: Member):
@@ -692,17 +734,25 @@ class _Import:
                                        "end": c["end"].isoformat() if c["end"] else None, "redactions": red[0]})
         for group, g in sorted(self.chat.items()):
             members = g["members"]
+            # A space is called by its name; a direct message (or a group without a name) by the people in it besides
+            # you, as Google Chat shows them.
+            others = [members[e] for e in sorted(members) if e != self.chat_user] or [members[e] for e in sorted(members)]
+            called = g["name"] or ", ".join(others[:4]) + (" and others" if len(others) > 4 else "")
             for day, msgs in sorted(g["days"].items()):
                 msgs.sort(key=lambda m_: m_[0])
                 red = [0]
+                name = _red(called, red) or "Google Chat"
                 lines = [f"[{at:%H:%M}] {members.get(em, em)}: {_red(_clean_text(text_), red)}"
                          for at, em, text_ in msgs[:MAX_LINES]]
                 yield SourceItem(source="takeout_chat", external_id=f"chat/{_slug(group)}/{day}",
-                                 title=f"Google Chat, {day}", body_text="\n".join(lines), occurred_at=msgs[0][0],
+                                 title=f"{name}, {day}", body_text="\n".join(lines), occurred_at=msgs[0][0],
                                  mime="text/plain",
-                                 raw_meta={"product": "Google Chat", "group": group, "day": day,
-                                           "participants": sorted(members), "senders": sorted({m_[1] for m_ in msgs}),
-                                           "turns": len(msgs), "redactions": red[0]})
+                                 raw_meta={"product": "Google Chat", "group": group, "day": day, "conversation": name,
+                                           "space": bool(g["name"]), "participants": sorted(members),
+                                           "senders": sorted({m_[1] for m_ in msgs}), "turns": len(msgs),
+                                           "redactions": red[0]})
+        if self.calendars:
+            yield from ical.items(self.calendars, ical.account(self.calendars, self.chat_user), self.calendar_report)
 
     def _bookmark_item(self) -> Iterator[SourceItem]:
         if not self.bookmarks:
@@ -726,8 +776,7 @@ def parse(paths: list[Path], progress: Callable[[dict], None] | None = None) -> 
         todo = [(m, c) for m in members if (c := classify(m.path)) is not None]
         html = [m for m, (kind, _) in todo if kind == "activity_html"]
         if not todo:
-            raise TakeoutError("No Takeout data found. Expected My Activity, Chrome, Maps or Location History "
-                               "folders inside the zip.")
+            raise TakeoutError(f"No Takeout data found. Expected {EXPECTED} folders inside the zip.")
         for i, (m, (kind, hint)) in enumerate(todo, 1):
             if progress:
                 progress({"file": m.path.rsplit("/", 1)[-1], "files_done": i - 1, "files_total": len(todo)})
@@ -744,6 +793,10 @@ def parse(paths: list[Path], progress: Callable[[dict], None] | None = None) -> 
                 imp.read_reading_list(m)
             elif kind in ("chat_messages", "chat_group"):
                 imp.read_chat(m, hint, kind)
+            elif kind == "chat_user":
+                imp.read_chat_user(m)
+            elif kind == "calendar":
+                imp.read_calendar(m, hint or "Calendar")
             elif kind == "tasks":
                 imp.read_tasks(m)
             elif kind == "meet":
@@ -767,6 +820,10 @@ def parse(paths: list[Path], progress: Callable[[dict], None] | None = None) -> 
             imp.note(f"{len(html)} My Activity file(s) are in HTML format and were skipped. Re-export My Activity "
                      "with Multiple formats set to JSON.")
         items = list(imp.items())
+        for note in imp.calendar_report.notes():
+            imp.note(note)
+        if imp.calendars:
+            imp.counts["calendar_events"] = imp.calendar_report.events
     if not items:
         raise TakeoutError("Found Takeout files but nothing readable in them." + (
             " My Activity is in HTML format; re-export it as JSON (Multiple formats, Activity records: JSON)."
@@ -775,21 +832,29 @@ def parse(paths: list[Path], progress: Callable[[dict], None] | None = None) -> 
     places |= {p["key"] for ps in imp.lists.values() for p in ps}
     by_source: dict[str, int] = defaultdict(int)
     for it in items:
-        by_source["gemini" if it.source == "ai_chats" else it.source.removeprefix("takeout_")] += 1
+        by_source[PART.get(it.source) or it.source.removeprefix("takeout_")] += 1
     report = {"parts": dict(by_source), "counts": dict(imp.counts), "notes": imp.notes, "places": len(places),
               "redactions": sum(i.raw_meta.get("redactions", 0) for i in items)}
     return items, report
 
 
 class TakeoutConnector:
-    """Adapter for run_sync. Parses everything first (day-items need the whole export), then emits."""
+    """Adapter for run_sync. Parses everything first (day-items need the whole export), then emits. `synced` names the
+    calendar events among the export's that a Google Calendar sync stored (`synced_events`): those stay as synced,
+    since the live calendar is newer than any export, and a sync after an older export brings back nothing it moved."""
     name = "takeout"
 
-    def __init__(self, paths: list[Path], progress: Callable[[dict], None] | None = None):
-        self.paths, self.progress, self.report = paths, progress, {}
+    def __init__(self, paths: list[Path], progress: Callable[[dict], None] | None = None,
+                 synced: Callable[[list[str]], set[str]] | None = None):
+        self.paths, self.progress, self.synced, self.report = paths, progress, synced, {}
 
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint]:
         items, self.report = parse(self.paths, self.progress)
+        live = self.synced([i.external_id for i in items if i.source == "gcal"]) if self.synced else set()
+        if live:
+            items = [i for i in items if not (i.source == "gcal" and i.external_id in live)]
+            self.report["notes"].append(f"{len(live)} calendar events were already synced from Google Calendar: "
+                                        "they are kept as synced.")
         for n, item in enumerate(items, 1):
             if self.progress:
                 self.progress({"items": n, "items_total": len(items)})
@@ -797,12 +862,22 @@ class TakeoutConnector:
         yield Checkpoint({"items": len(items)})
 
 
+def synced_events(s) -> Callable[[list[str]], set[str]]:
+    """Which of these calendar records a Google Calendar sync stored (an export's copy names its `product`)."""
+    def synced(ids: list[str]) -> set[str]:
+        return set(s.execute(text("""
+            SELECT external_id FROM source_items
+            WHERE source = 'gcal' AND external_id = ANY(:ids) AND raw_meta->>'product' IS NULL
+        """), {"ids": ids}).scalars()) if ids else set()
+    return synced
+
+
 def run_import(s, paths: list[Path], progress: Callable[..., None] | None = None) -> dict:
     """Import into source_items (the `igneous import takeout` / POST /import/takeout body). Re-running on the
     same export changes nothing: external ids are stable and unchanged items keep their content hash."""
     from igneous.connectors.base import run_sync
 
-    conn = TakeoutConnector(paths, progress)
+    conn = TakeoutConnector(paths, progress, synced_events(s))
     stats = run_sync(s, conn, account="default")
     return {**conn.report, **stats}  # the stored items' redaction count, which includes the parser's
 
@@ -831,9 +906,9 @@ def preflight(paths: list[Path]) -> dict:
     """Cheap synchronous check (lists names, reads no JSON): fail fast with a readable reason."""
     with Tree(paths) as members:
         kinds = [c[0] for m in members if (c := classify(m.path))]
-    readable = [k for k in kinds if k not in ("activity_html", "records")]
+    readable = [k for k in kinds if k not in ("activity_html", "records", "chat_user")]
     if not readable:
         raise TakeoutError("No readable Takeout data found." + (
             " My Activity is in HTML format; re-export it as JSON (Multiple formats, Activity records: JSON)."
-            if "activity_html" in kinds else " Expected My Activity, Chrome, Maps or Location History folders."))
+            if "activity_html" in kinds else f" Expected {EXPECTED} folders."))
     return {"files": len(readable)}

@@ -144,8 +144,8 @@ are six people's mail, so nobody is "you" there: search for `jeff.skilling` or `
 Enron is mail only. The synthetic persona has every kind of source, so it shows what mail alone can't: life
 threads, the backbone of schools and workplaces, the profile, and evidence across sources. It is Mira Castellanos,
 an invented computer science student, from August 2024 to October 2026: a mailbox, a Google Takeout export (chat,
-tasks, Meet, Maps, My Activity, Chrome, and a calendar no importer reads yet), LinkedIn and ChatGPT exports, and a
-documents folder with resumes, notes and a git checkout (`api/igneous/persona`). Generated from a seed on this
+tasks, Meet, Maps, My Activity, Chrome, and her calendar), LinkedIn and ChatGPT exports, and a documents folder with
+resumes, notes and a git checkout (`api/igneous/persona`). Generated from a seed on this
 computer, with no network or model calls:
 
 ```bash
@@ -158,7 +158,7 @@ how), never with raw inserts, and the persona's sync refuses any database other 
 holds records, so it never mixes with Enron or your own data. The build places the classes and the job's threads
 under Lakeshore University and Northwind Robotics by their email domains. Without a model, threads are named by their
 term and month ("Lisbon · Jan-Mar 2025"); with `AWS_BEARER_TOKEN_BEDROCK` set and its sources opted in
-(`IGNEOUS_LLM_SOURCES=email,fs,takeout,linkedin,ai_chats`, `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`), a Rebuild
+(`IGNEOUS_LLM_SOURCES=email,fs,takeout,gcal,linkedin,ai_chats`, `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`), a Rebuild
 also names them and checks where each was placed. Its gold set (threads, the identities that are one person, Ask
 questions) makes it an eval too: `api/eval/README.md`. `docs/final-demo.md` runs on it.
 
@@ -311,7 +311,8 @@ times (2 by default). `IGNEOUS_LLM_ENABLED=false` turns off hosted model calls (
 `/ask` returns 503).
 
 **What a model may read.** Only the sources listed in `IGNEOUS_LLM_SOURCES`: the comma-separated ids the Sources
-page shows (`gmail,ai_chats`; `takeout` covers every Takeout product, `ai_chats` every AI chat import). Every hosted
+page shows (`gmail,ai_chats`; `takeout` covers every Takeout product but its Gemini chats and calendar, which count as
+`ai_chats` and `gcal` like those sources' own records; `ai_chats` covers every AI chat import). Every hosted
 call follows one rule (`api/igneous/llm.py`): a prompt carries text only from records in those sources, names only of
 people and things that appear in them, and counts for everything else. Local files and Apple Notes also need
 `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`. Search and Ask may also send the question itself (never a record) to the

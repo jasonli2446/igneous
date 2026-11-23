@@ -73,19 +73,24 @@ def test_every_importer_reads_every_file_it_is_given(full):
     items, report = takeout.parse([full / ex["takeout"]])
     with zipfile.ZipFile(full / ex["takeout"]) as zf:
         names = [n for n in zf.namelist() if not n.endswith("/")]
-    unread = sorted(n.split("/", 1)[1] for n in names
-                    if (kind := takeout.classify(n.split("/", 1)[1])) is None or kind[0] == "chat_user")
-    assert unread[0] == "Calendar/mcastellanos@lakeshore.example.edu.ics" and unread[1].startswith("Google Chat/Users/")
-    assert unread[2:] == ["archive_browser.html"]  # no importer reads a calendar yet
+    unread = sorted(n.split("/", 1)[1] for n in names if takeout.classify(n.split("/", 1)[1]) is None)
+    assert unread == ["archive_browser.html"]
     c = report["counts"]
     assert (c["chat_messages"], c["tasks"], c["meet_conferences"], c["place_visits"], c["chrome_visits"]) == (
         counts["chat_lines"], counts["tasks"], counts["meetings"], counts["place_visits"], counts["page_visits"])
-    assert c["activity_entries"] == counts["activity"]
+    assert c["activity_entries"] == counts["activity"] and c["calendar_events"] == counts["calendar_events"]
     gemini_days = {i.external_id for i in items if i.source == "ai_chats"}
     assert report["parts"]["gemini"] == len(gemini_days) and 0 < len(gemini_days) <= counts["gemini_prompts"]
-    assert report["notes"] == [] and report["redactions"] == 0
+    assert report["notes"] == [] and report["redactions"] == 0  # her calendar is her account's: keyed as Google's
     assert {i.source for i in items} == {"takeout_chat", "takeout_tasks", "takeout_meet", "takeout_maps",
-                                         "takeout_activity", "takeout_chrome", "ai_chats"}
+                                         "takeout_activity", "takeout_chrome", "ai_chats", "gcal"}
+    # Spaces by their names, direct messages by the other person; every Meet call joined from the calendar finds the
+    # occurrence it was.
+    called = {i.raw_meta["conversation"] for i in items if i.source == "takeout_chat"}
+    assert {"Lisbon spring break", "CS 452 Raft team", "Priya Raman"} <= called and not any("Space" in x for x in called)
+    events = {i.external_id.rsplit("/", 1)[1] for i in items if i.source == "gcal"}
+    joined = [i.raw_meta["event_id"] for i in items if i.source == "takeout_meet" and i.raw_meta["event_id"]]
+    assert joined and set(joined) <= events
 
     found, report = linkedin.find_items([full / ex["linkedin"]])
     assert (report["profile"], report["positions"], report["education"], report["connections"]) == (
@@ -210,7 +215,7 @@ def test_a_slice_builds_its_graph_through_the_sources_registry_and_the_pipeline(
     assert {s["id"]: s["items"] for s in sources.describe(db)}["persona"] == sum(stored.values())
 
     monkeypatch.setattr(llm, "structured", stub)
-    monkeypatch.setattr(llm.settings, "llm_sources", "email,fs,takeout,linkedin,ai_chats")
+    monkeypatch.setattr(llm.settings, "llm_sources", sources.PERSONA_IDS)
     monkeypatch.setattr(llm.settings, "local_sources_model_enabled", True)
     pipeline.run(db)
 
