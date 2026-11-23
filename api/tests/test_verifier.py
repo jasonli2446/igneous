@@ -56,12 +56,16 @@ def edge(s, src: int, dst: int, type_: str, extractor: str = "spine", props: dic
 
 
 def mail(s, ref: str, sender: int, to: list[int], subject: str, body: str, when: datetime) -> tuple[int, int]:
-    """A gmail record and its Message node, sent by `sender` to `to`."""
+    """A gmail record and its Message node, sent by `sender` to `to`, whose headers name each of them as the spine
+    records it (spine_node_support)."""
     sid = item(s, "gmail", ref, subject, body, when)
     m = node(s, "Message", f"gmail:{ref}", subject, source_item=sid)
     edge(s, sender, m, "SENT", source_item=sid, when=when)
     for r in to:
         edge(s, m, r, "RECEIVED", source_item=sid, when=when)
+    s.execute(text("""INSERT INTO spine_node_support (node_id, source_item_id, name, rank)
+                      SELECT id, :sid, name, 3 FROM nodes WHERE id = ANY(:ids) ON CONFLICT DO NOTHING"""),
+              {"sid": sid, "ids": [sender, *to]})
     return sid, m
 
 
