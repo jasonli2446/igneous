@@ -3,11 +3,22 @@
 `canonical` maps each Person that resolution merged to its cluster's head (the head maps to itself); a node with no
 row is its own head. Only Person nodes are merged. The owner is the Person keyed 'me' (created by the spine and the
 self stage), and is always the head of its own cluster.
+
+Every reader follows one rule: a person is their identity head. Every Person id the API returns is a head, and
+each identity's records count for that head.
 """
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 OWNER_KEY = "me"
+
+
+class NotFound(LookupError):
+    """No node has this id."""
+
+    def __init__(self, node_id: int):
+        super().__init__(f"No node {node_id}")
+        self.node_id = node_id
 
 
 def self_id(s: Session) -> int | None:
@@ -25,11 +36,31 @@ def head(s: Session, node_id: int) -> int:
     return s.execute(text(f"SELECT {head_sql(':id')}"), {"id": node_id}).scalar_one()
 
 
+def heads(s: Session, node_ids) -> dict[int, int]:
+    """{node: its identity head} for each of `node_ids`."""
+    ids = sorted({int(i) for i in node_ids})
+    if not ids:
+        return {}
+    return dict(s.execute(text("""
+        SELECT x, COALESCE(c.canonical_id, x) FROM unnest(CAST(:ids AS bigint[])) AS x
+        LEFT JOIN canonical c ON c.node_id = x"""), {"ids": ids}).all())
+
+
 def members(s: Session, node_id: int) -> list[int]:
     """Every identity in `node_id`'s cluster, `node_id` included ([node_id] when it isn't merged)."""
     ids = s.execute(text(f"SELECT node_id FROM canonical WHERE canonical_id = {head_sql(':id')}"),
                     {"id": node_id}).scalars().all()
     return sorted({node_id, *ids})
+
+
+def node(s: Session, node_id: int) -> dict:
+    """The node `node_id` names, as readers show it: for a person, their identity head (another address of theirs is
+    them). {id, type, key, name, props, source_item_id}. Raises NotFound."""
+    row = s.execute(text(f"""SELECT id, type, key, name, props, source_item_id FROM nodes
+                             WHERE id = {head_sql(':id')}"""), {"id": node_id}).mappings().first()
+    if row is None:
+        raise NotFound(node_id)
+    return dict(row)
 
 
 def card_keys(meta: dict) -> list[str]:
