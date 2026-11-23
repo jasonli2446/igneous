@@ -161,8 +161,9 @@ Re-run it safely to restore the exact fixture, or validate an existing output wi
 cd api && uv run igneous verify-synthetic-corpus ../data/synthetic-cross-source
 ```
 
-`igneous pipeline` runs spine -> chunk -> embed -> extract -> topics -> entities -> profile -> threads -> backbone -> self
--> resolve -> organizations -> verify (`api/igneous/pipeline.py`, the same list Rebuild runs). The topics stage lowercases and
+`igneous pipeline` runs redact -> spine -> chunk -> embed -> extract -> topics -> entities -> profile -> threads -> backbone
+-> self -> resolve -> organizations -> verify (`api/igneous/pipeline.py`, the same list Rebuild runs); redact applies the
+current credential rules to items stored under older ones, before anything reads them. The topics stage lowercases and
 conservatively lemmatizes keys, merges only high-similarity local-embedding duplicates, and adds `RELATED_TO` after
 three shared messages; moved `ABOUT` edges keep their original provenance. Extraction, like every model call,
 reads only sources listed in `IGNEOUS_LLM_SOURCES`; set it to `email` before `make demo`, then use `EXTRACT=0` to
@@ -173,7 +174,7 @@ skip calls or `EXTRACT=500` to process more. Everything is incremental: re-runni
 
 | Path | What |
 |---|---|
-| `api/igneous/connectors/` | `base.py` connector contract + resumable sync runner, which stores every item's title and text with the credentials `redact.py` matches replaced by `[REDACTED:<kind>]`; one module per source (`gmail.py`, `gcal.py`, `drive.py`, `github.py`, `imessage.py`, `ai_chats.py`, `filesystem.py`, `takeout.py`, `linkedin.py`, ...) |
+| `api/igneous/connectors/` | `base.py` connector contract + resumable sync runner, which stores every item's title and text with the credentials `redact.py` matches replaced by `[REDACTED:<kind>]` (and `redact_stored`, the pipeline's first step, which brings items stored under an older version of those rules up to date); one module per source (`gmail.py`, `gcal.py`, `drive.py`, `github.py`, `imessage.py`, `ai_chats.py`, `filesystem.py`, `takeout.py`, `linkedin.py`, ...) |
 | `api/igneous/graph/` | `spine.py` deterministic graph; `extract.py` model mentions with span provenance; `entities.py`, `threads.py`, `resolve_threads.py`, `profile.py`, `backbone.py` derived projects, life threads and your orgs; `resolve.py` entity resolution; `verify.py` checks every derived link; `traversal.py` what the explorer shows; `invariants.py` `igneous check-graph` |
 | `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
 | `api/igneous/llm.py` | structured model calls and the rule for what a model may read (`allowed_sources`, `visible_nodes`); `providers.py` talks to Bedrock |

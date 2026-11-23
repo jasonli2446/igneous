@@ -15,6 +15,7 @@ from typing import Protocol
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous.connectors import redact as rules
 from igneous.connectors.redact import redact, redact_moving
 
 
@@ -63,12 +64,11 @@ def _count(redactions) -> int:
     return redactions if isinstance(redactions, int) else 0
 
 
-def stored(item: SourceItem) -> SourceItem:
-    """The item as it is stored: no NUL characters, no credentials in its title or text, and its boundaries
-    moved with the text. Removals are added to `raw_meta["redactions"]`."""
+def _store(item: SourceItem, offsets: list[int]) -> tuple[SourceItem, list[int]]:
+    """`stored(item)`, and where each of `offsets` (positions in its text) lands in the stored text."""
     meta = _without_nul(item.raw_meta)
     bounds = meta.get("boundaries") if isinstance(meta.get("boundaries"), list) else []
-    marks = [b[k] for b in bounds for k in ("start", "end")]
+    marks = [b[k] for b in bounds for k in ("start", "end")] + list(offsets)
     body, marks = _without_nul(item.body_text, marks)
     body, body_found, marks = redact_moving(body, marks)
     title, title_found = redact(_without_nul(item.title))
@@ -79,7 +79,13 @@ def stored(item: SourceItem) -> SourceItem:
         meta["redactions"] = _count(meta.get("redactions")) + found
         if bounds:
             meta["boundaries_redacted"] = True  # the chunker trusts boundaries that moved with the redactions
-    return replace(item, title=title, body_text=body, raw_meta=meta)
+    return replace(item, title=title, body_text=body, raw_meta=meta), marks[2 * len(bounds):]
+
+
+def stored(item: SourceItem) -> SourceItem:
+    """The item as it is stored: no NUL characters, no credentials in its title or text (`redact.VERSION` of the
+    rules), and its boundaries moved with the text. Removals are added to `raw_meta["redactions"]`."""
+    return _store(item, [])[0]
 
 
 @dataclass
@@ -122,12 +128,14 @@ class Connector(Protocol):
 
 
 UPSERT = text("""
-INSERT INTO source_items (source, external_id, content_hash, mime, title, body_text, raw_meta, occurred_at)
-VALUES (:source, :external_id, :content_hash, :mime, :title, :body_text, CAST(:raw_meta AS jsonb), :occurred_at)
+INSERT INTO source_items (source, external_id, content_hash, mime, title, body_text, raw_meta, occurred_at,
+                          redaction_version)
+VALUES (:source, :external_id, :content_hash, :mime, :title, :body_text, CAST(:raw_meta AS jsonb), :occurred_at,
+        :redaction_version)
 ON CONFLICT (source, external_id) DO UPDATE SET
     content_hash = EXCLUDED.content_hash, mime = EXCLUDED.mime, title = EXCLUDED.title,
     body_text = EXCLUDED.body_text, raw_meta = EXCLUDED.raw_meta, occurred_at = EXCLUDED.occurred_at,
-    item_class = NULL, updated_at = now()
+    redaction_version = EXCLUDED.redaction_version, item_class = NULL, updated_at = now()
 WHERE source_items.content_hash <> EXCLUDED.content_hash
 RETURNING (xmax = 0) AS inserted
 """)
@@ -213,6 +221,7 @@ def run_sync(s: Session, connector: Connector, account: str = "default", limit: 
             "source": item.source, "external_id": item.external_id, "content_hash": item.content_hash,
             "mime": item.mime, "title": item.title, "body_text": item.body_text,
             "raw_meta": json.dumps(item.raw_meta, default=str), "occurred_at": item.occurred_at,
+            "redaction_version": rules.VERSION,
         }).first()
         if row is None:
             stats["unchanged"] += 1
@@ -224,3 +233,69 @@ def run_sync(s: Session, connector: Connector, account: str = "default", limit: 
         seen += 1
     s.commit()
     return stats
+
+
+# Offsets into an item's text that the graph stores: the spans of model-derived edges (and of edges the verifier
+# dropped, which keep their columns).
+_SPANS = text("""
+    SELECT 'edges' AS tab, id, span_start, span_end FROM edges WHERE source_item_id = :i AND span_start IS NOT NULL
+    UNION ALL
+    SELECT 'edges_dropped', id, span_start, span_end FROM edges_dropped WHERE source_item_id = :i AND span_start IS NOT NULL
+""")
+
+
+def redact_stored(s: Session, batch: int = 500) -> dict:
+    """Bring items stored under an earlier version of the redaction rules (`redact.VERSION`) up to the current one:
+    the pipeline's first step, so the spine and the chunks only ever read redacted text.
+
+    Each item gets the transform `run_sync` gives new ones (`stored`). One whose title or text changes is rewritten
+    with its content hash, the spans graph edges hold into its text move with it, nodes named by its old title take
+    the new one, and `updated_at` moves so the spine and the chunk stage redo it (its chunks, and so their
+    embeddings, are made again); a rebuild is marked in the same transaction. Any other item only records the version
+    and the hash of its stored content, so syncing it again reads as unchanged. With every item current, this is one
+    index lookup.
+    """
+    from igneous.graph import dirty
+
+    checked = changed = 0
+    after = 0
+    while True:
+        rows = s.execute(text("""
+            SELECT id, source, external_id, title, body_text, mime, occurred_at, raw_meta FROM source_items
+            WHERE redaction_version < :v AND id > :after ORDER BY id LIMIT :n
+        """), {"v": rules.VERSION, "after": after, "n": batch}).all()
+        if not rows:
+            break
+        current: dict[int, str] = {}  # id -> hash of the items whose stored content stays as it is
+        for row in rows:
+            old = SourceItem(row.source, row.external_id, row.title, row.body_text, row.occurred_at, row.mime,
+                             row.raw_meta or {})
+            new = stored(old)
+            values = {"i": row.id, "v": rules.VERSION, "h": new.content_hash}
+            if (new.title, new.body_text, new.raw_meta) == (old.title, old.body_text, old.raw_meta):
+                current[row.id] = new.content_hash
+                continue
+            if new.body_text != old.body_text and (spans := s.execute(_SPANS, {"i": row.id}).all()):
+                _, moved = _store(old, [p for span in spans for p in (span.span_start, span.span_end)])
+                for k, span in enumerate(spans):
+                    s.execute(text(f"UPDATE {span.tab} SET span_start = :a, span_end = :b WHERE id = :id"),
+                              {"a": moved[2 * k], "b": moved[2 * k + 1], "id": span.id})
+            if new.title != old.title and old.title:
+                s.execute(text("UPDATE nodes SET name = :new WHERE source_item_id = :i AND name = :old"),
+                          {"i": row.id, "new": new.title or "", "old": old.title})
+            s.execute(text("""
+                UPDATE source_items SET title = :t, body_text = :b, raw_meta = CAST(:m AS jsonb), content_hash = :h,
+                       redaction_version = :v, item_class = NULL, updated_at = now()
+                WHERE id = :i"""), {**values, "t": new.title, "b": new.body_text,
+                                    "m": json.dumps(new.raw_meta, default=str)})
+            changed += 1
+        s.execute(text("""
+            UPDATE source_items si SET redaction_version = :v, content_hash = u.h
+            FROM unnest(CAST(:ids AS bigint[]), CAST(:hashes AS text[])) AS u(id, h) WHERE si.id = u.id
+        """), {"v": rules.VERSION, "ids": list(current), "hashes": list(current.values())})
+        checked += len(rows)
+        after = rows[-1].id
+        if changed:
+            dirty.mark_rebuild(s)
+        s.commit()
+    return {"checked": checked, "redacted": changed}

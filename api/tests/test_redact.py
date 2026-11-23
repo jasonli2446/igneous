@@ -54,10 +54,21 @@ def test_json_style_keys_are_matched():
     assert '"api_key": "[REDACTED:assigned_secret]"' in out and counts == {"assigned_secret": 3}
 
 
-def test_redaction_is_idempotent():
-    once, _ = redact('DB_PASSWORD=supersecretvalue and postgres://u:pw12345@h/db and "token": "abcdefgh12345"')
-    twice, counts = redact(once)
-    assert twice == once and counts == {}  # placeholders aren't re-matched (a scan of stored text reads 0)
+EVERY_KIND = {  # one synthetic credential per pattern
+    "github_token": GH, "anthropic_key": "sk-ant-api03-" + "a" * 30, "openai_key": "sk-proj-" + "b" * 30,
+    "aws_access_key": "AKIA" + "C" * 16, "bedrock_bearer": "ABSK" + "d" * 44, "google_api_key": "AIza" + "e" * 35,
+    "google_oauth": "ya29." + "f" * 30, "google_client_secret": "GOCSPX-" + "g" * 24, "slack_token": "xoxb-" + "1" * 20,
+    "stripe_key": "sk_live_" + "h" * 20, "jwt": "eyJ" + "i" * 12 + ".eyJ" + "j" * 12 + "." + "k" * 12,
+    "private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----",
+    "url_credentials": "postgres://user:pw12345@db/x", "assigned_secret": 'DB_PASSWORD="supersecretvalue"',
+}
+
+
+def test_redaction_is_idempotent_for_every_pattern():
+    once, counts = redact("\n".join(f"{kind}: {value}" for kind, value in EVERY_KIND.items()))
+    assert set(counts) == {kind for kind, _ in PATTERNS}  # the sample covers every pattern
+    twice, again = redact(once)
+    assert twice == once and again == {}  # a placeholder never matches again: stored text redacts to itself
 
 
 def test_a_remote_loses_its_user_name_and_token():
@@ -115,6 +126,105 @@ def test_a_long_ai_chat_turn_is_redacted_before_it_is_shortened():
     (item,) = ai_chats.day_items("claude_code", "s1", {"title": None, "cwd": None, "branches": []},
                                  [{"at": at, "role": "me", "text": turn}])
     assert "sk-ant" not in item.body_text and item.raw_meta["redactions"] == 1
+
+
+# ---- items stored before the current rules ----
+
+def old_row(s, source: str, external_id: str, title: str, body: str | None, meta: dict, content_hash: str = "old") -> int:
+    """A row as it was stored before redaction was versioned: as read, at version 0."""
+    return s.execute(text("""
+        INSERT INTO source_items (source, external_id, content_hash, title, body_text, raw_meta, mime)
+        VALUES (:s, :e, :h, :t, :b, CAST(:m AS jsonb), 'text/plain') RETURNING id
+    """), {"s": source, "e": external_id, "h": content_hash, "t": title, "b": body, "m": json.dumps(meta)}).scalar_one()
+
+
+def item_row(s, item_id: int) -> dict:
+    return dict(s.execute(text("""SELECT title, body_text, raw_meta, content_hash, redaction_version, updated_at
+                                   FROM source_items WHERE id = :i"""), {"i": item_id}).mappings().one())
+
+
+def test_items_stored_before_the_rules_are_redacted_and_chunked_again(committed_db):
+    from igneous.connectors.base import redact_stored
+    from igneous.db import SessionLocal
+    from igneous.graph import spine
+    from igneous.rag import chunking
+
+    page1, page2 = f"Deploy with {GH} today", "Second page"
+    body = f"{page1}\n\n{page2}"
+    bounds = [{"kind": "page", "index": 1, "start": 0, "end": len(page1)},
+              {"kind": "page", "index": 2, "start": len(page1) + 2, "end": len(body)}]
+    with SessionLocal() as s:
+        item = old_row(s, "drive", "me/f1", f"Plan {GH}", body, {"boundaries": bounds, "drive_id": "f1",
+                                                                 "path": "drive/f1", "parents": []})
+        s.commit()
+        spine.run(s)
+        chunking.run(s)
+        assert GH in s.execute(text("SELECT string_agg(text, ' ') FROM chunks")).scalar_one()
+        s.execute(text("UPDATE chunks SET embedding = CAST(:v AS vector)"), {"v": json.dumps([0.0] * 384)})
+        topic = s.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Topic', 't', 't') RETURNING id")).scalar_one()
+        file_node = s.execute(text("SELECT id FROM nodes WHERE source_item_id = :i"), {"i": item}).scalar_one()
+        start = body.index(page2)
+        s.execute(text("""INSERT INTO edges (src, dst, type, extractor, source_item_id, span_start, span_end)
+                          VALUES (:a, :b, 'MENTIONS', 'llm', :i, :s, :e)"""),
+                  {"a": file_node, "b": topic, "i": item, "s": start, "e": start + len(page2)})
+        s.execute(text("DELETE FROM dirty_rebuild"))
+        s.commit()
+        before = item_row(s, item)
+
+    with SessionLocal() as s:
+        assert redact_stored(s) == {"checked": 1, "redacted": 1}
+        after = item_row(s, item)
+        text_, (b1, b2) = after["body_text"], after["raw_meta"]["boundaries"]
+        assert after["title"] == "Plan [REDACTED:github_token]" and GH not in text_
+        assert text_[b1["start"]:b1["end"]] == "Deploy with [REDACTED:github_token] today" and text_[b2["start"]:b2["end"]] == page2
+        assert after["raw_meta"]["redactions"] == 2 and after["raw_meta"]["boundaries_redacted"] is True
+        assert after["redaction_version"] == 1 and after["updated_at"] > before["updated_at"]
+        span = s.execute(text("SELECT span_start, span_end FROM edges WHERE source_item_id = :i"), {"i": item}).one()
+        assert text_[span.span_start:span.span_end] == page2  # the model's span still points at its words
+        assert s.execute(text("SELECT name FROM nodes WHERE id = :n"), {"n": file_node}).scalar_one() == after["title"]
+        assert s.execute(text("SELECT count(*) FROM dirty_rebuild")).scalar_one() == 1
+
+        chunking.run(s)
+        chunks = s.execute(text("SELECT text, embedding IS NULL AS fresh FROM chunks WHERE source_item_id = :i"),
+                           {"i": item}).all()
+        assert chunks and all(GH not in c.text and c.fresh for c in chunks)  # embed redoes them
+
+        assert redact_stored(s) == {"checked": 0, "redacted": 0}  # nothing is out of date
+
+
+def test_a_new_version_of_the_rules_checks_every_item_again(db, monkeypatch):
+    from igneous.connectors import redact as rules
+    from igneous.connectors.base import redact_stored
+
+    item = old_row(db, "gmail", "m1", "Hello", f"key {GH}", {"labels": []})
+    assert redact_stored(db) == {"checked": 1, "redacted": 1}
+    first = item_row(db, item)
+    assert redact_stored(db) == {"checked": 0, "redacted": 0}
+    monkeypatch.setattr(rules, "VERSION", 2)
+    assert redact_stored(db) == {"checked": 1, "redacted": 0}  # redacted text stays as it is
+    again = item_row(db, item)
+    assert again["redaction_version"] == 2 and (again["body_text"], again["content_hash"]) == (
+        first["body_text"], first["content_hash"])
+
+
+def test_an_item_redacted_in_place_reads_as_unchanged_when_synced_again(db):
+    from igneous.connectors.base import redact_stored
+
+    leaky = SourceItem("gmail", "m1", "Hello", f"key {GH}", raw_meta={"labels": ["INBOX"]})
+    clean = SourceItem("fs", "k/a.txt", "a.txt", "plain words", raw_meta={"path": "k/a.txt", "size": 11})
+    old_row(db, "gmail", "m1", leaky.title, leaky.body_text, leaky.raw_meta, leaky.content_hash)
+    clean_id = old_row(db, "fs", "k/a.txt", clean.title, clean.body_text, clean.raw_meta, "a-hash-of-the-file-bytes")
+    unchanged_since = item_row(db, clean_id)["updated_at"]
+    redact_stored(db)
+    assert item_row(db, clean_id)["updated_at"] == unchanged_since  # nothing to redact: only stamped
+    assert run_sync(db, Items("gmail", [leaky]))["unchanged"] == 1
+    assert run_sync(db, Items("fs", [clean]))["unchanged"] == 1
+
+
+def test_the_pipeline_redacts_before_anything_reads_the_items():
+    from igneous.pipeline import stages
+
+    assert list(stages())[:2] == ["redact", "spine"]
 
 
 def test_the_remote_scrub_migration_strips_stored_credentials(db):

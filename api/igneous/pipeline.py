@@ -28,6 +28,7 @@ def run_all(s: Session) -> dict:
 
 def stages(extract: int = 0) -> dict:
     """Every pipeline stage by name, in run order (shared by `igneous pipeline` and the UI's Rebuild button)."""
+    from igneous.connectors.base import redact_stored
     from igneous.graph import (
         backbone,
         entities,
@@ -43,7 +44,8 @@ def stages(extract: int = 0) -> dict:
     from igneous.graph import extract as ex
     from igneous.rag import chunking, embed
 
-    return {"spine": spine.run, "chunk": chunking.run, "embed": embed.run,
+    # redact first: items stored under older credential rules are brought up to date before anything reads them.
+    return {"redact": redact_stored, "spine": spine.run, "chunk": chunking.run, "embed": embed.run,
             "extract": lambda s: ex.run(s, limit=extract) if extract else 0,
             "topics": topics.run,
             "entities": lambda s: entities.run(s, log=None),

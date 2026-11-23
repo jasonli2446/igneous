@@ -2,11 +2,17 @@
 
 Mail, chats and AI transcripts are full of pasted secrets (tokens, keys, connection strings). The sync runner
 (`base.run_sync`) passes every item's title and text through here before storing it, so a match is replaced with
-`[REDACTED:<kind>]` and never reaches source_items, chunks, embeddings or a prompt. A connector that shortens text
-redacts it first, so a secret cut in half can't slip through. Patterns are deliberately broad: a false positive
-costs a few characters of context; a false negative leaks a credential.
+`[REDACTED:<kind>]` and never reaches source_items, chunks, embeddings or a prompt. Items stored under an earlier
+VERSION of these rules are brought up to date by the pipeline's first step (`base.redact_stored`). A connector that
+shortens text redacts it first, so a secret cut in half can't slip through. Patterns are deliberately broad: a false
+positive costs a few characters of context; a false negative leaks a credential.
 """
 import re
+
+# The version of PATTERNS that stored items carry (`source_items.redaction_version`). Bump it with any change to
+# PATTERNS: the next pipeline run applies the new rules to every item stored under the old ones. Redacting is
+# idempotent (a placeholder never matches again), so items without new matches stay as they are.
+VERSION = 1
 
 # (kind, pattern). Order matters: specific formats before the generic catch-alls.
 PATTERNS: list[tuple[str, re.Pattern]] = [
