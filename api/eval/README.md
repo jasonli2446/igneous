@@ -189,7 +189,7 @@ IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous
   uv run python eval/persona_eval.py
 ```
 
-On the default seed with the model off (2026-11-23, main at `178431b`), after `make persona` (one pipeline run) and
+On the default seed with the model off (2026-11-23, main at `ed585c1`), after `make persona` (one pipeline run) and
 after a second run:
 
 | | One run | Two runs |
@@ -201,7 +201,7 @@ after a second run:
 | Who took part: missing or wrongly there | 0 | 0 |
 | Identities: clusters P / R | 1.00 / 0.94 | 1.00 / 0.94 |
 | Identities: pairs ≥ 0.5, P / R | 1.00 / 0.83 | 1.00 / 0.83 |
-| Ask retrieval, recall@10 over 13 answerable questions: hybrid / dense / lexical | 0.77 / 0.62 / 0.85 | the same |
+| Ask retrieval, recall@10 over 13 answerable questions: hybrid / dense / lexical | 0.85 / 0.77 / 0.85 | the same |
 
 - Most duplicates are a Project the entities stage named from a folder ("Lisbon 2025", "CS 341 Operating Systems",
   "tidepool") beside the thread the threads stage found for the same thing; CS 481 is also split in two threads
@@ -218,7 +218,7 @@ after a second run:
 - The only identity left apart is classmate Alex Chen's LinkedIn profile: two people share the name, so the name
   alone joins neither.
 - Retrieval moves by a question or two between builds of the same seed (hybrid recall@10 from 0.77 to 0.92 over
-  three builds): lexical search orders equal scores by however the rows were stored, and the vector index (HNSW) is
+  four builds): lexical search orders equal scores by however the rows were stored, and the vector index (HNSW) is
   approximate.
 - With the model off, threads keep their fallback names ("Lisbon · Jan-Mar 2025", kind "thread"). `--qa` needs the
   model.
