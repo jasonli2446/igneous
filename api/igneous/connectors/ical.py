@@ -179,12 +179,12 @@ class Report:
     cut: list[str] = field(default_factory=list)  # repeating events with more than MAX_OCCURRENCES
 
     def notes(self) -> list[str]:
-        out = [f"The export doesn't name the address of the calendar {name}, so its {n} events are keyed by the "
+        out = [f"The export doesn't name the address of the calendar {name}, so its events ({n}) are keyed by the "
                "export: syncing Google Calendar later stores its own record of each (still one event in the graph)."
                for name, n in sorted(self.unkeyed.items())]
         if self.foreign:
-            out.append(f"{self.foreign} events came from other calendar programs and carry no Google event id: syncing "
-                       "Google Calendar later stores its own record of each (still one event in the graph).")
+            out.append(f"Events from other calendar programs carry no Google event id ({self.foreign}): syncing Google "
+                       "Calendar later stores its own record of each (still one event in the graph).")
         out += [f"{title} repeats more than {MAX_OCCURRENCES:,} times; its latest {MAX_OCCURRENCES:,} are kept."
                 for title in self.cut]
         return out
