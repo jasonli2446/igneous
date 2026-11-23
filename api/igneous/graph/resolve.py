@@ -25,7 +25,9 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.graph import dirty, identity
+from igneous.graph.names import GENERATIONAL
 from igneous.graph.organizations import PERSONAL_DOMAINS
+from igneous.graph.self_identity import NAME_PARTICLES
 
 EXTRACTOR = "er"
 VERSION = "2"      # links in place from another version are scored again
@@ -105,13 +107,20 @@ class P:
 
 
 def split_name(name: str, key: str) -> tuple[str, str]:
-    """Best-effort (first, last), lowercase. Handles 'Last, First', 'First M Last', and first.last@ keys."""
+    """Best-effort (first, last), lowercase. Handles 'Last, First', 'First M Last' (the surname keeps its particles,
+    'Eric Le Dain' -> ledain, and is never a generational suffix, 'Errol McLaughlin Jr.' -> mclaughlin), and
+    first.last@ keys."""
     n = re.sub(r"\(.*?\)|\".*?\"|<.*?>", "", name).strip().lower()
     if "," in n:
         last, first = (x.strip() for x in n.split(",", 1))
     else:
         parts = [p for p in re.split(r"\s+", n) if p]
-        first, last = (parts[0], parts[-1]) if len(parts) >= 2 else (parts[0] if parts else "", "")
+        while len(parts) > 2 and parts[-1].rstrip(".") in GENERATIONAL:
+            parts.pop()
+        at = len(parts) - 1  # where the surname starts
+        while at > 1 and parts[at - 1] in NAME_PARTICLES:
+            at -= 1
+        first, last = (parts[0], " ".join(parts[at:])) if len(parts) >= 2 else (parts[0] if parts else "", "")
     if not last and "@" in key:  # fall back to the address: phillip.allen@ -> phillip, allen
         bits = [b for b in re.split(r"[._]", key.split("@")[0]) if b]
         if len(bits) >= 2:
