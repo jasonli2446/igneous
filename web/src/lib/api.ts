@@ -45,6 +45,10 @@ export type Hit = {
   title: string | null;
   occurred_at: string | null;
   matched: string[];
+  // Ask's evidence only: how a graph neighbour was reached from a hit, and the cross-encoder's score.
+  relation?: "reply" | "thread" | "correspondents";
+  via_chunk_id?: number;
+  rerank_score?: number;
 };
 
 export type ExpertEvidence = {
@@ -69,10 +73,37 @@ export type AskResult = {
   answerable: boolean;
   answer: string;
   reason?: "no_opted_in_sources"; // nothing the question may read is opted in to the hosted model
-  citations: Hit[];
-  evidence: Hit[];
+  citations: Hit[]; // empty unless the answer stands
+  evidence: Hit[]; // everything the model was shown
   timing: { retrieve_s: number; total_s?: number };
 };
+
+/** A failed call to the API: the HTTP status (0 when the API couldn't be reached) and the API's own explanation. */
+export class ApiError extends Error {
+  constructor(readonly status: number, readonly detail: string) {
+    super(detail);
+    this.name = "ApiError";
+  }
+}
+
+async function requestJson<T>(url: URL, init?: RequestInit): Promise<T> {
+  let r: Response;
+  try {
+    r = await fetch(url, init);
+  } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") throw e;
+    throw new ApiError(0, "Could not reach the API. Check that it is running.");
+  }
+  if (!r.ok) {
+    const detail: unknown = (await r.json().catch(() => ({}))).detail;
+    // FastAPI explains a rejected request as a list of {loc, msg}.
+    const message = typeof detail === "string" ? detail
+      : Array.isArray(detail) ? detail.map((d: { loc?: unknown[]; msg?: string }) => `${(d.loc ?? []).slice(1).join(".")}: ${d.msg}`).join("; ")
+      : `${r.status} ${url.pathname}`;
+    throw new ApiError(r.status, message);
+  }
+  return (await r.json()) as T;
+}
 
 export type Explanation = {
   a: { id: number; name: string };
@@ -302,15 +333,12 @@ export const api = {
   people: (seed: number, limit = 60, signal?: AbortSignal) => get<Subgraph>("/graph/people", { seed, limit }, signal),
   network: (seed: number, people = 50, hubs = 30, signal?: AbortSignal) =>
     get<Subgraph>("/graph/network", { seed, people, hubs }, signal),
-  ask: async (question: string, use_graph = true) => {
-    const r = await fetch(new URL("/ask", API), {
+  ask: (question: string, use_graph = true) =>
+    requestJson<AskResult>(new URL("/ask", API), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ question, use_graph }),
-    });
-    if (!r.ok) throw new Error(`${r.status} ${(await r.json().catch(() => ({}))).detail ?? "/ask"}`);
-    return (await r.json()) as AskResult;
-  },
+    }),
   askSuggestions: () => get<string[]>("/ask/suggestions", {}),
   graphVersion: (signal?: AbortSignal) => get<{ version: string }>("/graph/version", {}, signal),
   view: (seed?: number, signal?: AbortSignal) => get<Subgraph & { seed: number }>("/graph/view", { seed }, signal),

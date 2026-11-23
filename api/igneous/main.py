@@ -7,7 +7,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, Uploa
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -22,7 +22,7 @@ from igneous.graph.entity_api import router as entity_router
 from igneous.graph.history import commitments, decisions, relationship_history
 from igneous.graph.traversal import GraphFilters, expand, explain, neighborhood, network, people, view
 from igneous.items import router as items_router
-from igneous.llm import LLMDisabled, model_status
+from igneous.llm import LLMDisabled, ProviderError, model_status
 from igneous.rag import qa
 from igneous.rag.constraints import apply
 from igneous.rag.search import Filters, experts, hybrid
@@ -319,18 +319,24 @@ def run_pipeline():
 
 
 class AskBody(BaseModel):
-    question: str
-    person: str | None = None
-    use_graph: bool = True  # False = the ablation baseline (criterion 4)
-    mode: str = "hybrid"
+    question: str = Field(min_length=1, max_length=2000, pattern=r"\S")
+    person: str | None = None  # an address: only messages it sent or received
+    # False: the eval's baseline (dense retrieval, no graph expansion, no reranking).
+    use_graph: bool = True
+    mode: Literal["hybrid", "lexical", "dense"] = "hybrid"
 
 
 @app.post("/ask")
 def ask(body: AskBody, s: Session = Depends(get_session)):
+    """A cited answer from the sources opted in to the hosted model (IGNEOUS_LLM_SOURCES), or `answerable: false`.
+    503 when the hosted model is off or not configured, 502 when it fails to answer (a refusal, a cut-off or
+    empty response); `detail` says which."""
     try:
         return qa.answer(s, body.question, Filters(person=body.person), use_graph=body.use_graph, mode=body.mode)
     except LLMDisabled as e:
-        raise HTTPException(503, str(e)) from e
+        raise HTTPException(503, f"The hosted model is not available: {e}") from e
+    except ProviderError as e:
+        raise HTTPException(502, f"The hosted model failed to answer: {e}") from e
 
 
 @app.get("/ask/suggestions")

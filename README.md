@@ -222,10 +222,14 @@ names and dates. Empty, the default, means no model call at all; Ask then says t
 gave earlier stay cached and keep counting. The Sources page shows, per source, whether
 a model may read it.
 
-Q&A reranks the graph-expanded candidate pool down to the top 8 evidence chunks. Set
-`IGNEOUS_RERANKER_ENABLED=false` to preserve graph retrieval order, or adjust the bounded input with
-`IGNEOUS_RERANKER_POOL_SIZE` (32 by default). If its model files cannot load, Q&A logs a warning and safely
-preserves that order instead.
+**How Ask picks its evidence** (`api/igneous/rag/qa.py`). Hybrid search retrieves a pool of
+`IGNEOUS_RERANKER_POOL_SIZE` passages (32 by default), graph expansion adds each hit's direct replies and the
+messages nearest to it in time in its thread, and the local cross-encoder scores hits and neighbours together and
+keeps the best 8. With `IGNEOUS_RERANKER_ENABLED=false`, or when its model files can't load (Q&A logs a warning),
+the 8 follow retrieval order but 3 places go to graph neighbours of the top hits, so a reply that answers without
+the question's words still reaches the model. An answer cites its evidence (chunk, source item and node ids); when
+the model can't answer from it, Ask says so and cites nothing. A failed model call is a 502 and an unavailable
+model a 503, each with a message.
 
 To verify providers without credentials, run `cd api && uv run python scripts/provider_smoke.py`. It exercises the
 local embedding and reranking models only. Add `--hosted` only with an explicit real `AWS_BEARER_TOKEN_BEDROCK`; that

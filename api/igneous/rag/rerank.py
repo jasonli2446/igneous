@@ -1,6 +1,10 @@
-"""Optional local cross-encoder reranking for Q&A evidence."""
+"""Local cross-encoder reranking for Q&A evidence (FastEmbed, no hosted call).
+
+Optional by design: when it is turned off (IGNEOUS_RERANKER_ENABLED=false) or its model can't run, `rerank` returns
+None and Q&A chooses the evidence without it (`qa.choose`). A model that failed once is not retried in the same
+process, so a missing model file costs one attempt, not one per question.
+"""
 import logging
-from functools import lru_cache
 
 from igneous.config import settings
 from igneous.providers import rerank as score_documents
@@ -9,42 +13,26 @@ log = logging.getLogger(__name__)
 _load_failure: Exception | None = None
 
 
-class _ConfiguredCrossEncoder:
-    """Compatibility adapter that keeps Q&A's safe optional-reranker behavior."""
-
-    def rerank(self, question: str, documents: list[str]) -> list[float]:
-        return score_documents(question, documents)
-
-
-@lru_cache(maxsize=1)
-def _model() -> _ConfiguredCrossEncoder:
-    return _ConfiguredCrossEncoder()
-
-
-def rerank(question: str, items: list[dict], keep: int) -> list[dict]:
-    """Score a bounded candidate pool, or preserve retrieval order when unavailable."""
+def rerank(question: str, items: list[dict], keep: int) -> list[dict] | None:
+    """The `keep` items the cross-encoder scores highest for `question`, best first, each with its `rerank_score`;
+    None when reranking is off or its model can't run."""
     global _load_failure
 
-    keep = max(keep, 0)
-    pool = items[:max(settings.reranker_pool_size, 0)]
-    if not pool or not settings.reranker_enabled:
-        return pool[:keep]
+    if not settings.reranker_enabled:
+        return None
     if _load_failure:
-        log.warning("Cross-encoder reranker unavailable; using retrieval order: %s", _load_failure)
-        return pool[:keep]
-
+        log.warning("Cross-encoder reranker unavailable; Q&A chooses evidence without it: %s", _load_failure)
+        return None
+    if not items:
+        return []
     try:
-        scores = _model().rerank(question, [item["text"] for item in pool])
-    except Exception as exc:  # Model download, ONNX, or optional dependency failure must not break Q&A.
+        scores = score_documents(question, [item["text"] for item in items])
+    except Exception as exc:  # A model download, ONNX or dependency failure must not break Q&A.
         _load_failure = exc
-        log.warning("Cross-encoder reranker unavailable; using retrieval order: %s", exc)
-        return pool[:keep]
-
-    if len(scores) != len(pool):
-        raise RuntimeError(f"reranker returned {len(scores)} scores for {len(pool)} candidates")
-
-    ranked = []
-    for item, score in zip(pool, scores, strict=True):
-        # Preserve retrieval score semantics; cross-encoder logits are only comparable within this pool.
-        ranked.append({**item, "rerank_score": round(float(score), 4)})
-    return sorted(ranked, key=lambda item: item["rerank_score"], reverse=True)[:keep]
+        log.warning("Cross-encoder reranker unavailable; Q&A chooses evidence without it: %s", exc)
+        return None
+    if len(scores) != len(items):
+        raise RuntimeError(f"reranker returned {len(scores)} scores for {len(items)} candidates")
+    # Cross-encoder logits are comparable only within one pool; each item keeps its retrieval score as well.
+    ranked = [{**item, "rerank_score": round(float(score), 4)} for item, score in zip(items, scores, strict=True)]
+    return sorted(ranked, key=lambda item: item["rerank_score"], reverse=True)[:max(keep, 0)]

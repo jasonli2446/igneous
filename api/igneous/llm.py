@@ -12,10 +12,10 @@ from sqlalchemy.orm import Session
 
 from igneous import source_catalog
 from igneous.config import settings
-from igneous.providers import LLMDisabled, chat
+from igneous.providers import LLMDisabled, ProviderError, chat
 
-__all__ = ["LLMDisabled", "allowed_sources", "cache_lookup", "cache_store", "model_status", "require_whole_corpus",
-           "structured", "visible_nodes"]
+__all__ = ["LLMDisabled", "ProviderError", "allowed_sources", "cache_lookup", "cache_store", "model_status",
+           "require_whole_corpus", "structured", "visible_nodes"]
 
 LOCAL_SOURCES = source_catalog.LOCAL_TEXT  # also need IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED
 

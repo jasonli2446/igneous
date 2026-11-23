@@ -32,7 +32,9 @@ class Settings(BaseSettings):
     embedding_dim: int = 384
     embedding_batch_size: int = 128
     rerank_provider: str = "cross_encoder"
-    # Cross-encoder runs only in Q&A after graph expansion. It never blocks search if unavailable.
+    # Ask's local cross-encoder: it scores the retrieved and graph-expanded passages together (at most
+    # reranker_pool_size of them, which is also how many passages Ask retrieves) and keeps the best. Off, or when
+    # its model can't load, Ask keeps retrieval order and holds places for graph neighbours (rag/qa.py).
     reranker_enabled: bool = True
     reranker_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
     reranker_pool_size: int = 32
