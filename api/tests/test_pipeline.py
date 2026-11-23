@@ -143,6 +143,45 @@ def test_introductions_never_involve_a_service_the_self_stage_found(db):
     assert db.execute(text("SELECT props->>'kind' FROM nodes WHERE key = 'noreply@alerts.test'")).scalar() == "service"
 
 
+def test_where_people_work_attaches_to_identities_merged_in_the_same_build(db):
+    """Jordan's home address (on his card, with his company) merges with his busier school address by score."""
+    jordan = {"jordan.lee@school.test": "Jordan Lee", "jlee@home.test": "Jordan Lee"}
+    for i, address in enumerate(jordan):
+        for k in range(3 - 2 * i):
+            mail(db, f"j{i}{k}", address, ["ana@q.test", "bo@r.test"], f"Weekend {k}", day(3 * i + k), names=jordan)
+    card(db, "acct/people/1", "Jordan Lee", emails=["jlee@home.test"], orgs=["Initech"])
+    db.commit()
+    pipeline.run(db)
+    (person,) = db.execute(text("""SELECT p.key FROM edges e JOIN nodes p ON p.id = e.src
+                                   WHERE e.type = 'WORKED_AT' AND e.extractor = 'organizations'""")).scalars()
+    assert person == "jordan.lee@school.test"  # the head of his identities, the one with most mail
+
+
+def test_the_verifier_judges_the_links_written_in_the_same_build(db, monkeypatch):
+    """A model that rejects every link: on the first build, the people found for a project are already checked."""
+    for i in range(3):
+        event(db, f"acct/cal/gn_{i}", "Gloomhaven Night", day(7 * i), ["kai@y.test", "lu@z.test"], ME, "gn")
+    for i in range(2):
+        mail(db, f"gn{i}", ME, ["kai@y.test"], f"Gloomhaven Night {i}", day(3 + i), sent=True,
+             body="Are we still on for Gloomhaven Night this week? I'll bring the expansion.")
+    db.commit()
+
+    def model(system, user, schema, **_options):
+        props = schema["properties"]
+        if "edges" in props:
+            return {"edges": [{"edge": i, "verdict": "drop", "confidence": 0.9, "reason": "not shown"}
+                              for i in range(user.count("### Edge "))]}, {}
+        if "keep" in props:
+            return {"keep": [line[2:] for line in user.splitlines() if line.startswith("- ")]}, {}
+        return {k: {"array": [], "boolean": False, "number": 0}.get(v.get("type"), "") for k, v in props.items()}, {}
+
+    monkeypatch.setattr(llm, "structured", model)
+    monkeypatch.setattr(llm.settings, "llm_sources", "gmail,gcal")
+    pipeline.run(db)
+    assert db.execute(text("SELECT count(*) FROM edges WHERE type = 'INVOLVED_IN'")).scalar() == 0
+    assert db.execute(text("SELECT count(*) FROM edges_dropped WHERE type = 'INVOLVED_IN'")).scalar() == 1
+
+
 def test_corrections_apply_after_the_last_stage_that_writes_projects(db):
     """Backbone names your org's thread on every run; your rename of it still holds after a rebuild."""
     linkedin_profile(db, "Mo Self", [{"org": "Acme Robotics", "title": "Engineer", "start": "2024-01"}])
