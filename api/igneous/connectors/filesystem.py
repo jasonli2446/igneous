@@ -48,8 +48,11 @@ def _is_secret(name: str) -> bool:
     return bool(SECRET_NAMES.match(name)) or Path(name).suffix.lower() in SECRET_SUFFIXES
 
 
+READER = 2  # recorded with each file's stat: a changed metadata layout reads unchanged files again once
+
+
 def _fingerprint(stat: os.stat_result) -> list[int]:
-    return [stat.st_mtime_ns, stat.st_size]
+    return [stat.st_mtime_ns, stat.st_size, READER]
 
 
 def _depth(path: Path) -> tuple[int, str]:
@@ -112,6 +115,7 @@ class _Root:
     path: Path
     key: str
     below: str  # "" when the folder is its own anchor
+    name: str  # the anchor's basename; absolute paths never enter stored metadata
 
     def id(self, relative: str) -> str:
         """The id of `relative` ("." for the folder itself) below this folder, without the key."""
@@ -140,7 +144,8 @@ class FilesystemConnector:
     them all is scanned as a root of its own, for the same reason. A folder inside another scanned one with the same
     anchor is scanned as part of it.
 
-    The cursor maps each stored id to the mtime and size it was stored at, so an unchanged file is never reopened;
+    The cursor maps each stored id to its mtime, size and reader version, so an unchanged file under the current
+    reader is never reopened;
     a scan replaces only its own folders' entries. A folder that cannot be listed stays as it was: its items are
     kept and its cursor entries carried over.
     """
@@ -165,7 +170,8 @@ class FilesystemConnector:
         resolved |= {c for r in free for c in configured if c.is_relative_to(r) and c.is_dir()}
         outer = sorted((r for r in resolved
                         if not any(o != r and r.is_relative_to(o) and anchor(o) == anchor(r) for o in resolved)), key=str)
-        self.roots = tuple(_Root(r, _root_key(anchor(r)), _below(r, anchor(r))) for r in outer)
+        self.roots = tuple(_Root(r, _root_key(anchor(r)), _below(r, anchor(r)), anchor(r).name or "/")
+                           for r in outer)
         # The keys current ids are under (other syncs of these folders use them too): never an earlier scan's.
         self.in_use = {_root_key(a) for a in configured if anchor(a) == a} | {root.key for root in self.roots}
 
@@ -245,7 +251,8 @@ class FilesystemConnector:
         fingerprint = _fingerprint(stat)
         if previous.get(external_id) == fingerprint:
             return external_id, None, fingerprint
-        meta = {"path": external_id, "folders": _folders(external_id.rsplit("/", 1)[0]), "size": stat.st_size}
+        meta = {"path": external_id, "folders": _folders(external_id.rsplit("/", 1)[0]), "size": stat.st_size,
+                "root_name": root.name}
         body, mime = None, None
         # Only a document the parsers read, and not too large, is opened at all; anything else is its metadata.
         if not supported(path.name):
@@ -284,4 +291,5 @@ class FilesystemConnector:
         return repo_id, SourceItem(
             source=self.name, external_id=repo_id, title=name, body_text=None,
             occurred_at=datetime.fromtimestamp(stat.st_mtime, UTC),
-            raw_meta={"path": folder, "folders": _folders(folder), "kind": "repo", "repo": name, "remote": remote}), None
+            raw_meta={"path": folder, "folders": _folders(folder), "root_name": root.name,
+                      "kind": "repo", "repo": name, "remote": remote}), None
