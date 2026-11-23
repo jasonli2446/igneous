@@ -222,3 +222,92 @@ def test_a_resume_project_is_found_by_its_name_never_by_a_word_used_for_other_th
         "Kestrel Mobile Suite", "Kestrel"]
     assert records(db, kestrel) == set(db.execute(text("SELECT id FROM source_items WHERE external_id = ANY(:e)"),
                                                   {"e": mine}).scalars())
+
+
+def capstone(s) -> None:
+    """The persona's CS 481 over a spring term, among a year of everyday mail: the professor's weekly mail names the
+    course; its project is named "Harborline" (mail and a design doc that name the course too, and the team chat that
+    doesn't) and its last event "Demo Day" (the same). A planning note names the course in the autumn."""
+    life_threads._everyday(s)
+    team = ["+15550000001", "+15550000002"]
+    life_threads._mail(s, "plan", ME, ["prof.kim@state.edu"], "Spring courses", at(20),
+                       "For spring I'm planning CS 481 and two electives.")
+    for i in range(8):
+        life_threads._mail(s, f"cs481-{i}", "prof.kim@state.edu", [ME], f"CS 481 week {i + 1}", at(100 + 10 * i),
+                           "Readings for this week are posted.")
+    for i in range(3):
+        life_threads._mail(s, f"team{i}", "ana@pals.test", [ME, "bo@pals.test"], "CS 481 capstone team: Harborline",
+                           at(104 + 5 * i), "Harborline, our CS 481 capstone: a live map of the harbor shuttle.")
+    life_threads._doc(s, "fs", "school/cs481/harborline-design.md", "harborline-design.md", at(112),
+                      "CS 481 capstone: Harborline design.")
+    for d in range(4):
+        life_threads._chat_day(s, "chat-harbor", "Harborline team", team, at(106 + 6 * d),
+                               f"Harborline standup {d}: map matching done")
+    for i in range(2):
+        life_threads._mail(s, f"demo{i}", "prof.kim@state.edu", [ME], "CS 481 Demo Day", at(168 + 4 * i),
+                           "CS 481 Demo Day is Friday, 1-5pm in the ballroom.")
+    life_threads._doc(s, "fs", "school/cs481/demo-day-slides.md", "demo-day-slides.md", at(170),
+                      "Demo Day slides for CS 481.")
+    for d in range(3):
+        life_threads._chat_day(s, "chat-harbor", "Harborline team", team, at(166 + 3 * d), f"Demo Day poster {d}")
+    s.commit()
+
+
+def course_thread(s) -> tuple[int, str]:
+    (only,) = s.execute(text("""SELECT id, name FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'
+                                AND (name ILIKE '%481%' OR name ILIKE '%harborline%' OR name ILIKE '%demo day%')""")).all()
+    return only
+
+
+@pytest.mark.usefixtures("local_models")
+def test_a_class_found_under_its_project_and_its_demo_day_is_one_thread(db):
+    """With the model off: CS 481's code in the professor's mail seeds the class over its term, and the bursts of
+    "Harborline" and "Demo Day", most of whose records name the course, are its parts: one thread holds them all."""
+    capstone(db)
+    pipeline.run(db)
+    tid, name = course_thread(db)
+    assert name.startswith("CS 481")
+    held = records(db, tid)
+    chats = set(db.execute(text("SELECT id FROM source_items WHERE source = 'imessage'")).scalars())
+    assert chats <= held  # the team chat's days name only the project or the event
+    plan = db.execute(text("SELECT id FROM source_items WHERE external_id = 'plan'")).scalar_one()
+    assert plan not in held  # the autumn's planning note is outside the term
+    parts = db.execute(text("SELECT name FROM thread_registry WHERE status = 'merged' ORDER BY name")).scalars()
+    assert [p.split(" · ")[0] for p in parts] == ["Demo Day", "Harborline"]
+    before = (name, held)
+    pipeline.run(db)
+    assert (course_thread(db)[1], records(db, tid)) == before  # a second run changes nothing
+
+
+@pytest.mark.usefixtures("local_models")
+def test_a_class_found_as_two_threads_before_comes_together(db):
+    """A registry from before the course was seeded holds the project and the event as threads of their own: they
+    name one course in one term, so they are one thread, with no model."""
+    capstone(db)
+    for key, term, a, b in (("thread:harborline", "Harborline", at(104), at(130)),
+                            ("thread:demo-day", "Demo Day", at(166), at(172))):
+        db.execute(text("""INSERT INTO thread_registry (key, name, kind, terms, span_start, span_end, status, origin,
+                                                        judged)
+                           VALUES (:k, :n, 'thread', ARRAY[CAST(:t AS text)], :a, :b, 'active', 'burst', false)"""),
+                   {"k": key, "n": f"{term} · then", "t": term, "a": a, "b": b})
+    db.commit()
+    pipeline.run(db)
+    tid, name = course_thread(db)
+    assert name.startswith("CS 481")  # the class keeps the thread; its project and its event fold in
+    aliases = set(db.execute(text("SELECT jsonb_array_elements_text(props->'aliases') FROM nodes WHERE id = :t"),
+                             {"t": tid}).scalars())
+    assert {"Harborline · then", "Demo Day · then"} <= aliases
+
+
+def test_a_shared_course_code_within_one_term_is_one_thread():
+    from datetime import timedelta
+
+    from igneous.graph.resolve_threads import same_course
+
+    def thread(i, start, days):
+        return {"id": i, "a": at(start), "b": at(start) + timedelta(days=days)}
+
+    codes = {1: {"CS 481"}, 2: {"CS 481"}, 3: {"CS 481"}, 4: {"CS 452"}}
+    assert same_course(thread(1, 0, 40), thread(2, 50, 30), codes)["relation"] == "same"  # within NEAR_DAYS
+    assert same_course(thread(1, 0, 40), thread(3, 300, 30), codes) is None  # the same code, another term
+    assert same_course(thread(1, 0, 40), thread(4, 10, 30), codes) is None  # another course
