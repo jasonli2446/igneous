@@ -235,8 +235,8 @@ cd api && uv run igneous sync imessage && uv run igneous pipeline
 
 - Enron has no `In-Reply-To`/`References` headers. Threads are keyed on subject + participants; `REPLIES_TO` is inferred and sparse.
 - Enron stores one email in several folders with different Message-IDs. Messages dedupe on a content fingerprint (`raw_meta.fingerprint`).
-- Embeddings stay local (`bge-small-en-v1.5`, 384-d, FastEmbed); Bedrock as a second index was dropped
-  (`docs/decisions/0002-bedrock-interop.md`). Each chunk records the model behind its vector: setting
+- Embeddings are made on this computer (`bge-small-en-v1.5`, 384-d, FastEmbed; `docs/decisions/0001-local-embeddings.md`);
+  Bedrock as a second index was dropped (`docs/decisions/0002-bedrock-interop.md`). Each chunk records the model behind its vector: setting
   `IGNEOUS_EMBEDDING_MODEL` to another 384-dimensional model re-embeds every chunk on the next pipeline run, and search
   compares only vectors from the configured model meanwhile; another dimension needs a migration.
 
