@@ -206,8 +206,9 @@ The Google steps (the OAuth client file) are under [Google](#google-gmail-drive-
 invented document-style files plus two ICS calendar events that reuse the public Enron demo persona addresses, so
 they link to the Enron graph (the synthetic persona above is a separate, whole life with its own people).
 It makes no network or model calls and **does not import** the data. The Local files source reads the documents
-(`igneous sync fs --path ../data/synthetic-cross-source`); no source reads ICS calendars. Every output is labeled
-synthetic and excludes real email text, credentials, and personal data.
+(`igneous sync fs --path ../data/synthetic-cross-source`), and the Google Takeout import reads the calendar, as it reads
+any calendar file given on its own (`igneous import takeout ../data/synthetic-cross-source/calendar.ics`). Every output
+is labeled synthetic and excludes real email text, credentials, and personal data.
 Re-run it safely to restore the exact fixture, or validate an existing output with:
 
 ```bash
