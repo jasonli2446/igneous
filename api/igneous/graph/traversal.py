@@ -112,17 +112,37 @@ def label(name: str | None, node_type: str, named: dict[str, str]) -> str | None
 CATEGORY = {"Person": "People", "Thread": "Groups", "Event": "Events", "Organization": "Organizations",
             "Project": "Projects", "File": "Files", "Folder": "Files", "Topic": "Topics", "Place": "Places"}
 
-# A judged thread's kind ("trip", "TA job", "book club") names its section, by whole words, first match wins.
+# A judged thread's kind ("trip", "TA job", "book club") names its section, by whole words, first match wins, and says
+# what it is for placing it under one of your organizations (graph/backbone.py): a class, work, something of your own
+# (a trip, a hobby, a party, a side project), or nothing either way (a project, an event: whose it is shows elsewhere).
 _KIND_SECTIONS = [
-    (("trip", "travel", "vacation", "visit"), "Trips"),
-    (("course", "class", "lecture", "seminar", "lab section", "coursework"), "Courses"),
-    (("job", "internship", "work", "employment", "ta", "teaching assistant", "role", "position"), "Work"),
-    (("hobby", "game", "sport", "club", "climbing", "music", "campaign"), "Hobbies"),
-    (("project", "client", "startup", "research", "hackathon", "repo", "app", "platform", "thesis"), "Projects"),
-    (("event", "party", "wedding", "concert", "festival"), "Events"),
+    (("trip", "trips", "travel", "travels", "vacation", "holiday", "visit"), "Trips", "personal"),
+    (("course", "class", "lecture", "seminar", "lab section", "coursework", "capstone"), "Courses", "class"),
+    (("job", "internship", "intern", "work", "employment", "ta", "teaching assistant", "role", "position", "hiring",
+      "interview", "onboarding", "field trial", "field trials"), "Work", "work"),
+    (("hobby", "hobbies", "game", "games", "sport", "sports", "club", "climbing", "music", "band", "league",
+      "campaign"), "Hobbies", "personal"),
+    (("side project", "personal project"), "Projects", "personal"),
+    (("project", "client", "startup", "research", "hackathon", "repo", "app", "platform", "thesis"), "Projects", None),
+    (("party", "wedding", "concert", "festival", "hangout"), "Events", "personal"),
+    (("event",), "Events", None),
 ]
 # Sections of things that are not projects: a kind never takes one of these names for itself.
 _RESERVED = frozenset({"People", "Groups", "Files", "Topics", "Places"})
+
+
+def _kind_entry(kind: str | None) -> tuple[str, str | None] | None:
+    """(section, what it is for placing) of the first entry of _KIND_SECTIONS the kind names, or None."""
+    phrase = f" {' '.join(re.findall(r'[a-z0-9]+', (kind or '').lower()))} "
+    return next(((section, placing) for terms, section, placing in _KIND_SECTIONS
+                 if any(f" {t} " in phrase for t in terms)), None)
+
+
+def placing_kind(kind: str | None) -> str | None:
+    """What a judged kind says a thread is, for placing it under an organization: 'class', 'work', 'personal', or None
+    (a kind that says neither, or no kind)."""
+    entry = _kind_entry(kind)
+    return entry[1] if entry else None
 
 
 def section_for_kind(kind: str | None) -> str:
@@ -132,10 +152,8 @@ def section_for_kind(kind: str | None) -> str:
     words = re.findall(r"[a-z0-9]+", (kind or "").lower())
     if not words or words == ["thread"]:
         return "Projects"
-    phrase = f" {' '.join(words)} "
-    for terms, section in _KIND_SECTIONS:
-        if any(f" {t} " in phrase for t in terms):
-            return section
+    if entry := _kind_entry(kind):
+        return entry[0]
 
     def plural(w: str) -> str:
         return w if w.endswith("s") else w + "s"
@@ -168,7 +186,8 @@ _HOW = {
     "thread-resolution": "Suggested automatically from the two threads' names and records.",
     "er": "Matched automatically by name and contacts.",
     "organizations": "Suggested from email domains and contact cards.",
-    "backbone": "Placed under your school or workplace from its emails and dates.",
+    "backbone": "Placed under your school or workplace: what it is (a class there, work there), whose email it "
+                "involves, your dates there, or what you wrote about a role there.",
     "entities": "Found from what these records share (a folder, a series, a group chat).",
     "topic-normalization": "Merged automatically from similar topic names.",
     "relationship-history": "Inferred from who wrote to whom, and when.",
@@ -349,16 +368,26 @@ def _shared(s: Session, focus: Iterable[int], people: Iterable[int]) -> dict[tup
 # Why two things are linked.
 # ---------------------------------------------------------------------------------------------------------------
 
+def _as_drawn(s: Session, node: dict) -> tuple[list[int], dict[int, int]]:
+    """The nodes a node is, as the explorer draws it, and {stand-in: the node} for those it draws as the node: a person
+    is all of their identities, and an organization that stands for a thread (graph/backbone.py) is that thread too,
+    since what is placed under the organization hangs on its thread."""
+    ids = identity.members(s, node["id"])
+    thread = (node["props"] or {}).get("thread") if node["type"] == "Organization" else None
+    return ([*ids, int(thread)], {int(thread): node["id"]}) if thread else (ids, {})
+
+
 def explain(s: Session, a: int, b: int, limit: int = 8, named: dict[str, str] | None = None) -> dict:
     """Why two nodes are connected: the conversations they share (message counts, dates, the latest excerpt), the
     events they both attended, their latest shared messages, the links between them (each with where it came from, its
     reason and evidence), or the shortest path when there are none, and the corrections you made to the pair. A person
-    is all of their identities; a phone number reads as its contact (`named`, `names` by default). Raises
-    identity.NotFound, and ValueError when a and b are one identity."""
+    is all of their identities, and an organization that stands for a thread is that thread too (a thread the backbone
+    placed under it is linked to its thread); a phone number reads as its contact (`named`, `names` by default).
+    Raises identity.NotFound, and ValueError when a and b are one identity."""
     na, nb = identity.node(s, a), identity.node(s, b)
-    if na["id"] == nb["id"]:
+    (ids_a, alias_a), (ids_b, alias_b) = _as_drawn(s, na), _as_drawn(s, nb)
+    if na["id"] == nb["id"] or set(ids_a) & set(ids_b):
         raise ValueError("Those are the same node: pick two different things.")
-    ids_a, ids_b = identity.members(s, na["id"]), identity.members(s, nb["id"])
     named = names(s) if named is None else named
     convo = s.execute(text(f"""
         WITH a AS (SELECT e.dst AS m FROM edges e WHERE e.src = ANY(:a) AND e.type = 'SENT'
@@ -398,13 +427,23 @@ def explain(s: Session, a: int, b: int, limit: int = 8, named: dict[str, str] | 
         "thread_id": c["thread_id"] if c["shown"] else None, "thread": label(c["thread"], "Thread", named),
         "messages": c["messages"], "people": people.get(c["thread_id"], 0), "first": c["first"], "last": c["last"],
         "source": c["source"], "excerpt": name_handles(c["excerpt"], named)} for c in convo]
-    links = connection(s, ids_a, ids_b, named, allow_path=total == 0 and not events)
+    alias = {**alias_a, **alias_b}
+    links = connection(s, ids_a, ids_b, named, allow_path=total == 0 and not events, alias=alias)
     from igneous.graph.corrections import for_pair
+    # Your corrections to the pair, each end as drawn: a placement you rejected under an organization's own thread is
+    # one between the thread and the organization.
+    shown = {na["id"]: na["name"], nb["id"]: nb["name"]}
+    corrected = for_pair(s, ids_a, ids_b)
+    for c in corrected:
+        for end in ("src", "dst"):
+            if c[end] in alias:
+                c[end] = alias[c[end]]
+                c[f"{end}_name"] = shown[c[end]]
     return {"a": {"id": na["id"], "name": label(na["name"], na["type"], named)},
             "b": {"id": nb["id"], "name": label(nb["name"], nb["type"], named)},
             "messages": total, "conversations": conversations, "events": [dict(e) for e in events],
             "shared": shared_items(s, ids_a, ids_b, named) if total else [],
-            "corrections": for_pair(s, ids_a, ids_b), **links}
+            "corrections": corrected, **links}
 
 
 def shortest_path(adj: dict[int, list[tuple[int, int]]], start: set[int], goal: set[int],
@@ -469,14 +508,17 @@ def shared_items(s: Session, ids_a: list[int], ids_b: list[int], named: dict[str
     return [item_card(dict(r), named) for r in rows]
 
 
-def connection(s: Session, ids_a: list[int], ids_b: list[int], named: dict[str, str], allow_path: bool = True) -> dict:
+def connection(s: Session, ids_a: list[int], ids_b: list[int], named: dict[str, str], allow_path: bool = True,
+               alias: dict[int, int] | None = None) -> dict:
     """Works for any pair: `direct` = edges between the two (all their identities), each with its reason and
     evidence items; when there are none, `path` = the shortest route through shown nodes (at most 3 hops) with each
-    hop's evidence. Each end of an edge or a hop is shown as its identity head."""
+    hop's evidence. Each end of an edge or a hop is shown as its identity head, or as the node it stands in for
+    (`alias`: an organization's thread is shown as the organization)."""
     edge_cols = "e.id, e.src, e.dst, e.type, e.extractor, e.props, e.confidence"
+    alias = alias or {}
 
     def views(rows: list[dict], hops: list[tuple[int, int]] | None = None) -> list[dict]:
-        ends = identity.heads(s, [x for r in rows for x in (r["src"], r["dst"])])
+        ends = {n: alias.get(h, h) for n, h in identity.heads(s, [x for r in rows for x in (r["src"], r["dst"])]).items()}
         about = {i: (n, t) for i, n, t in s.execute(text("SELECT id, name, type FROM nodes WHERE id = ANY(:i)"),
                                                      {"i": sorted(set(ends.values()))})}
         ev = _evidence(s, [r["id"] for r in rows], named)
@@ -675,7 +717,7 @@ def your_orgs(s: Session, me: list[int]) -> list[tuple[int, bool, object]]:
             SELECT DISTINCT ON (e.dst) e.dst AS org, (e.props->>'school') IS NOT NULL AS school, e.valid_to
             FROM edges e JOIN nodes o ON o.id = e.dst AND o.type = 'Organization' AND {visible('o')}
             WHERE e.src = ANY(:me) AND e.type = 'WORKED_AT' AND e.extractor = ANY(:yours)
-            ORDER BY e.dst, e.valid_to IS NULL DESC, e.valid_to DESC) o
+            ORDER BY e.dst, e.valid_to IS NULL DESC, e.valid_to DESC, e.id) o
         ORDER BY valid_to IS NULL DESC, valid_to DESC, org
     """), {"me": me, "yours": list(YOUR_ORGS)})]
 

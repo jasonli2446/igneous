@@ -419,7 +419,9 @@ def graph_expand(node: int = Query(..., ge=1), seed: int | None = Query(None, ge
 def graph_explain(a: int = Query(..., ge=1), b: int = Query(..., ge=1), s: Session = Depends(get_session)):
     """Why a and b are connected: shared conversations and events, their latest messages together, the links between
     them (each with its `origin`, `stated` and, in plain words, `how` it was made) or the shortest path, and your
-    corrections to the pair. 404 for an unknown node, 422 when a and b are one."""
+    corrections to the pair. Each is taken as the explorer draws it: a person is all of their identities, and an
+    organization is the thread it stands for too, so a thread placed under it shows that placement. 404 for an unknown
+    node, 422 when a and b are one (two identities of one person, or an organization and its own thread)."""
     try:
         return explain(s, a, b)
     except ValueError as e:

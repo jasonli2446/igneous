@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from igneous.db import get_session
 from igneous.graph import corrections, overrides
 from igneous.graph.corrections import apply_now, recording
+from igneous.graph.derived import rekeyed
 from igneous.graph.visibility import group_conversation, not_service
 
 router = APIRouter()
@@ -48,7 +49,9 @@ def _aliases(props: dict, name: str) -> list[str]:
 
 @router.get("/graph/entity/{node_id}")
 def entity(node_id: int = Path(ge=1), items: int = Query(30, ge=1, le=200), s: Session = Depends(get_session)):
-    """Everything known about one derived entity: who is in it, where it lives, and the evidence per item."""
+    """Everything known about one derived entity: what kind of thing it is and when it happened (`kind`, `start`,
+    `end`; for a role, the organization it is at: `role_of`), who is in it, where it lives, and the evidence per
+    item."""
     p = _project(s, node_id)
     # A person is their identity head, and only group conversations are groups; no service is a member.
     members = s.execute(text(f"""
@@ -86,12 +89,18 @@ def entity(node_id: int = Path(ge=1), items: int = Query(30, ge=1, le=200), s: S
     events.sort(key=lambda x: (x["date"] is None, str(x["date"])), reverse=False)
     rows.sort(key=lambda x: str(x["date"] or ""), reverse=True)
     props = p["props"] or {}
-    # The corrections that shape it (your rename, your hide, what you merged into it), each undone by its id.
+    # The corrections that shape it (your rename, your hide, what you merged into it), each undone by its id: made on
+    # it under any key it had (an organization's thread follows its organization's key: graph/derived.py rekeyed).
+    natural = f"Project:{p['key']}"
     shaped = [dict(r) for r in s.execute(text("""
         SELECT id AS override_id, op, value, created_at FROM overrides
-        WHERE undone_at IS NULL AND op IN ('rename', 'hide', 'merge') AND node_keys[1] = :k ORDER BY id
-    """), {"k": f"Project:{p['key']}"}).mappings()]
+        WHERE undone_at IS NULL AND op IN ('rename', 'hide', 'merge') AND node_keys[1] = ANY(:k) ORDER BY id
+    """), {"k": [natural, *sorted(k for k, now in rekeyed(s).items() if now == natural)]}).mappings()]
+    # A role (graph/backbone.py) is shown with the organization it is at and when you held it.
+    role_of = s.execute(text("SELECT name FROM nodes WHERE id = :o AND type = 'Organization'"),
+                        {"o": props["role_of"]}).scalar() if props.get("kind") == "role" and props.get("role_of") else None
     return {"id": p["id"], "name": p["name"], "key": p["key"], "aliases": _aliases(props, p["name"]),
+            "kind": props.get("kind"), "start": props.get("start"), "end": props.get("end"), "role_of": role_of,
             "anchors": props.get("anchors", []), "hidden": bool(props.get("hidden")),
             "people": people, "groups": groups, "events": events, "items": rows[:items],
             "counts": {"people": len(people), "groups": len(groups), "events": len(events), "items": len(rows)},
@@ -222,7 +231,8 @@ def suggestions(limit: int = Query(50, ge=1, le=200), s: Session = Depends(get_s
 
     rows = s.execute(text("""
         SELECT e.id AS edge, e.type, e.extractor, a.id AS src, a.name AS src_name, a.type AS src_type,
-               b.id AS dst, b.name AS dst_name, b.type AS dst_type, v.reason, v.confidence
+               b.id AS dst, b.name AS dst_name, b.type AS dst_type, b.props->>'kind' AS dst_kind, v.reason,
+               v.confidence
         FROM edges e JOIN nodes a ON a.id = e.src JOIN nodes b ON b.id = e.dst
         JOIN edge_verdicts v ON v.src_key = a.type || ':' || a.key AND v.dst_key = b.type || ':' || b.key
             AND v.type = e.type AND v.extractor = e.extractor

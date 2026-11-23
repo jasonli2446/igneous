@@ -110,25 +110,35 @@ def _briefs(s: Session, d: "Disclosure", ids: list[int]) -> list[dict]:
 
 
 def _history(s: Session, d: "Disclosure", me: int) -> list[dict]:
-    """Where you worked and studied, newest first: your resume's, LinkedIn's and your own WORKED_AT links. A title is
-    record text, shared only from an opted-in record (or when you stated the link yourself)."""
+    """Where you worked and studied, newest first: each role your resume or LinkedIn lists (an internship, then the
+    job: one organization's link holds them, props.roles, graph/profile.py), with its own dates, and each link you
+    stated yourself. A title is record text, shared only from an opted-in record (the one that lists the role), or
+    when you stated the link yourself."""
     rows = s.execute(text("""
-        SELECT e.dst AS org, e.extractor, e.props->>'title' AS title, (e.props->>'school') IS NOT NULL AS school,
-               e.valid_from, e.valid_to, si.source
+        SELECT e.dst AS org, e.extractor, e.props, e.valid_from, e.valid_to, si.source
         FROM edges e LEFT JOIN source_items si ON si.id = e.source_item_id
         WHERE e.src = :me AND e.type = 'WORKED_AT' AND e.extractor IN ('profile', 'user')
           AND COALESCE(e.props->>'verdict', '') <> 'drop'
-        ORDER BY e.valid_from DESC NULLS LAST, e.id"""), {"me": me}).mappings().all()
+        ORDER BY e.id"""), {"me": me}).mappings().all()
+    listed = {int(r["source_item_id"]) for row in rows for r in (row["props"] or {}).get("roles") or []
+              if r.get("source_item_id") is not None}
+    sources = dict(s.execute(text("SELECT id, source FROM source_items WHERE id = ANY(:i)"),
+                             {"i": sorted(listed)}).all()) if listed else {}
     named = d.names(r["org"] for r in rows)
     out = []
     for r in rows:
         if r["org"] not in named:
             d.withhold_nodes("Organization")
             continue
-        out.append({"node_id": r["org"], "name": named[r["org"]], "school": r["school"],
-                    "title": r["title"] if r["extractor"] == "user" or d.readable(r["source"]) else None,
-                    "from": _day(r["valid_from"]), "to": _day(r["valid_to"]) or "present"})
-    return out
+        props = r["props"] or {}
+        roles = [(role, sources.get(role.get("source_item_id"))) for role in props.get("roles") or []] or [
+            ({"title": props.get("title"), "start": r["valid_from"], "end": r["valid_to"],
+              "school": props.get("school")}, r["source"])]
+        for role, source in roles:
+            out.append({"node_id": r["org"], "name": named[r["org"]], "school": bool(role.get("school")),
+                        "title": role.get("title") if r["extractor"] == "user" or d.readable(source) else None,
+                        "from": _day(role.get("start")), "to": _day(role.get("end")) or "present"})
+    return sorted(out, key=lambda h: h["from"] or "", reverse=True)
 
 
 @server.tool()
@@ -172,11 +182,14 @@ def open_node(node_id: NodeId) -> dict:
     with _reading() as (s, d):
         n = identity.node(s, node_id)
         opened = expand(s, identity.self_id(s), n["id"], [], k=8)
+        # What it is part of, as the explorer draws it: an organization's own thread (graph/backbone.py) is the
+        # organization.
         parents = s.execute(text("""
-            SELECT p.id FROM edges e JOIN nodes p ON p.id = e.dst
+            SELECT DISTINCT CASE WHEN p.type = 'Project' AND p.props ? 'org' THEN (p.props->>'org')::bigint ELSE p.id END
+            FROM edges e JOIN nodes p ON p.id = e.dst
             WHERE e.src = :i AND e.type = 'PART_OF' AND p.type IN ('Project', 'Organization')
               AND COALESCE(e.props->>'verdict', '') <> 'drop'
-            ORDER BY p.id"""), {"i": n["id"]}).scalars().all()
+            ORDER BY 1"""), {"i": n["id"]}).scalars().all()
         stats = gather(s, n["id"])["stats"]
         facts = _facts(s, [n["id"]]).get(n["id"], {})
         return d.report({"node_id": n["id"], "name": d.name(n["id"]), **facts,

@@ -155,8 +155,9 @@ make persona CLEAN=1  # the same, replacing an igneous_persona that exists
 
 Each export goes through its own source on the Sources page (the "Synthetic persona" entry in the Demo group says
 how), never with raw inserts, and the persona's sync refuses any database other than `igneous_persona` that already
-holds records, so it never mixes with Enron or your own data. The build places the classes and the job's threads
-under Lakeshore University and Northwind Robotics by their email domains. Without a model, threads are named by their
+holds records, so it never mixes with Enron or your own data. The build places the classes under Lakeshore
+University and the job's threads under Northwind Robotics, the Heron field trials under the internship, and leaves
+the trips with classmates and her side project on their own. Without a model, threads are named by their
 term and month ("Lisbon · Jan-Mar 2025"); with `AWS_BEARER_TOKEN_BEDROCK` set and its sources opted in
 (`IGNEOUS_LLM_SOURCES=email,fs,takeout,linkedin,ai_chats`, `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`), a Rebuild
 also names them and checks where each was placed. Its gold set (threads, the identities that are one person, Ask
@@ -352,7 +353,7 @@ Eleven tools, each calling the readers the explorer and the API use, through a r
 
 | Tool | What it returns |
 |---|---|
-| `me()` | Who you are: where you worked and studied (your resume, LinkedIn and corrections), and the explorer's first ring: your organizations, sustained projects and trips, closest people. Start here. |
+| `me()` | Who you are: where you worked and studied, each role with its own dates (your resume, LinkedIn and corrections), and the explorer's first ring: your organizations, sustained projects and trips, closest people. Start here. |
 | `find(name)` | A name to node ids: people (every address and number they use), projects, trips, classes, organizations, group chats, events, places, files |
 | `open_node(node_id)` | What a node is made of, as the explorer opens it, what it is part of, and its activity (message counts and dates) |
 | `why_connected(a, b)` | Each link between two nodes (its kind, the rule, AI check or person that made it, its reason and records), the conversations and events they share, your corrections to the pair; else the shortest path |

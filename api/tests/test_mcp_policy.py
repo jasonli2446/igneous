@@ -173,6 +173,36 @@ def test_a_read_only_session_joins_a_tests_transaction_without_changing_it(db):
     db.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES ('after', '{}')"))
 
 
+def test_me_lists_each_role_with_its_dates_and_its_title_only_from_an_opted_in_record(db, monkeypatch):
+    """An internship, then the job, at one organization: one link holds both roles (graph/profile.py). `me` lists each,
+    newest first, with its own dates, and a role's title only when the record that lists it is opted in (the drive
+    resume, not the local one); a link you stated has its own title and dates."""
+    monkeypatch.setattr(settings, "llm_sources", "drive")
+
+    def row(sql: str, **params) -> int:
+        return db.execute(text(sql), params).scalar_one()
+    me = row("""INSERT INTO nodes (type, key, name, props) VALUES ('Person', 'me', 'Mo Self', '{"self": true}')
+                RETURNING id""")
+    item = {source: row("""INSERT INTO source_items (source, external_id, content_hash, title, body_text)
+                           VALUES (:s, :s, :s, 'Resume', 'Mo Self. Northwind Robotics, Acme Labs.') RETURNING id""",
+                        s=source) for source in ("drive", "fs")}
+    org = {name: row("""INSERT INTO nodes (type, key, name, source_item_id) VALUES ('Organization', :k, :n, :i)
+                        RETURNING id""", k=f"org:{name.lower().replace(' ', '-')}", n=name, i=item["drive"])
+           for name in ("Northwind Robotics", "Acme Labs")}  # the opted-in resume names both
+    roles = [{"title": "Software Engineer", "start": "2026-07-01", "end": None, "source_item_id": item["fs"]},
+             {"title": "Software Engineering Intern", "start": "2025-01-01", "end": "2026-05-01",
+              "source_item_id": item["drive"]}]
+    db.execute(text("""INSERT INTO edges (src, dst, type, props, extractor, valid_from, source_item_id) VALUES
+                       (:me, :o, 'WORKED_AT', CAST(:p AS jsonb), 'profile', '2025-01-01', :i),
+                       (:me, :a, 'WORKED_AT', '{"title": "Advisor"}', 'user', '2024-02-01', :i)"""),
+               {"me": me, "o": org["Northwind Robotics"], "a": org["Acme Labs"], "i": item["drive"],
+                "p": json.dumps({"title": "Software Engineer", "roles": roles})})
+    assert [(h["name"], h["title"], h["from"], h["to"]) for h in call("me")["history"]] == [
+        ("Northwind Robotics", None, "2026-07-01", "present"),
+        ("Northwind Robotics", "Software Engineering Intern", "2025-01-01", "2026-05-01"),
+        ("Acme Labs", "Advisor", "2024-02-01", "present")]
+
+
 def test_unknown_ids_are_errors_not_empty_answers(graph):
     for tool, args in (("open_node", {"node_id": 99_999}), ("timeline", {"node_id": 99_999}),
                        ("why_connected", {"a": graph["me"], "b": 99_999}), ("sources", {"node_id": 99_999}),

@@ -148,6 +148,8 @@ export type NodeDetail = {
 
 export type EntityDetail = {
   id: number; name: string; key: string; aliases: string[]; anchors: string[]; hidden: boolean;
+  /** What it is ("trip", "class", "role", ...) and when (ISO dates); a role says the organization it is at. */
+  kind: string | null; start: string | null; end: string | null; role_of: string | null;
   people: { id: number; name: string; items: number }[];
   groups: { id: number; name: string; why: string | null; days: number | null }[];
   events: { id: number; name: string; date: string | null; why: string | null }[];

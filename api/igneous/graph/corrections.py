@@ -15,7 +15,7 @@ A correction made through the API (rename, hide, merge, "This is wrong", a conne
 
 A pair rejection ("This is wrong" on a link, or removing something from a project) is your 'drop' verdict on the
 pair (graph/verify.py record_correction): no derived link of any type joins the two again, in either direction, under
-any of their identities (graph/derived.py). `reject` records it with exact copies of the links it removes and the
+any of their identities and whatever key an organization of the pair takes later (graph/derived.py). `reject` records it with exact copies of the links it removes and the
 verdicts they had, so its undo (`restore`) puts back exactly those.
 """
 import json
@@ -217,15 +217,20 @@ def remove_link(s: Session, edge_id: int) -> dict:
 
 
 def outcome(s: Session, pairs) -> list[dict]:
-    """For each node pair a correction touched: whether any link still joins the two now (either direction), so a view
-    removes or restores exactly those pairs."""
-    pairs = sorted({tuple(sorted(p)) for p in pairs})
+    """For each node pair a correction touched, as the explorer draws it: whether any link still joins the two now
+    (either direction), so a view removes or restores exactly those pairs. An organization's own thread
+    (graph/backbone.py) is drawn as the organization, so a placement under it is a pair with the organization."""
+    ends = sorted({x for p in pairs for x in p})
+    drawn = dict(s.execute(text("""SELECT id, (props->>'org')::bigint FROM nodes
+                                   WHERE id = ANY(:i) AND type = 'Project' AND props ? 'org'"""), {"i": ends}).all())
+    pairs = sorted({(a, b) for a, b in (sorted((drawn.get(x, x), drawn.get(y, y))) for x, y in pairs) if a != b})
+    members = {org: {org, thread} for thread, org in drawn.items()}
     linked = {tuple(r) for r in s.execute(text("""
-        SELECT LEAST(e.src, e.dst), GREATEST(e.src, e.dst) FROM edges e
-        JOIN jsonb_to_recordset(CAST(:p AS jsonb)) AS q(a bigint, b bigint)
-          ON (e.src = q.a AND e.dst = q.b) OR (e.src = q.b AND e.dst = q.a)
+        SELECT q.a, q.b FROM jsonb_to_recordset(CAST(:p AS jsonb)) AS q(a bigint, b bigint, x bigint, y bigint)
+        JOIN edges e ON (e.src = q.x AND e.dst = q.y) OR (e.src = q.y AND e.dst = q.x)
         WHERE COALESCE(e.props->>'verdict', '') <> 'drop'
-    """), {"p": json.dumps([{"a": a, "b": b} for a, b in pairs])})}
+    """), {"p": json.dumps([{"a": a, "b": b, "x": x, "y": y} for a, b in pairs
+                            for x in members.get(a, {a}) for y in members.get(b, {b})])})}
     return [{"a": a, "b": b, "still_linked": (a, b) in linked} for a, b in pairs]
 
 
@@ -233,7 +238,7 @@ def restore(s: Session, row: dict) -> list[int]:
     """Undo one pair rejection on the graph as it is now (graph/overrides.py runs it for an undone row): its verdicts
     go back to what they were and the links it removed come back, unless another rejection of yours still covers the
     pair or a record behind them is gone. Returns the restored link ids."""
-    from igneous.graph.derived import rejections
+    from igneous.graph.derived import follow, rejections, rekeyed
 
     data = row["data"] or {}
     for v in data.get("verdicts", []):
@@ -256,12 +261,13 @@ def restore(s: Session, row: dict) -> list[int]:
             ON CONFLICT DO NOTHING
         """), {"v": json.dumps(previous)})
     blocked = rejections(s)
+    moved = rekeyed(s)
     restored = []
     for e in data.get("edges", []):
         ends = s.execute(text("""
             SELECT a.id, b.id FROM nodes a, nodes b
             WHERE a.type || ':' || a.key = :a AND b.type || ':' || b.key = :b
-        """), {"a": e["src_key"], "b": e["dst_key"]}).first()
+        """), {"a": follow(moved, e["src_key"]), "b": follow(moved, e["dst_key"])}).first()
         if ends is None or blocked.blocks(*ends):
             continue  # an end is gone, or another rejection of yours still covers the pair
         eid = s.execute(text("""
@@ -352,17 +358,27 @@ def link(s: Session, src_key: str, dst_key: str, type_: str, props: dict) -> int
 
 
 def for_pair(s: Session, a: list[int], b: list[int]) -> list[dict]:
-    """Your active rejections between two sets of nodes, for the Why panel (never their undo snapshots)."""
+    """Your active rejections between two sets of nodes, as the graph is keyed now (one made under an organization's
+    earlier key included), for the Why panel (never their undo snapshots)."""
+    from igneous.graph.derived import rekeyed
+
+    moved = rekeyed(s)
     rows = s.execute(text("""
+        WITH v AS (
+            SELECT v.reason, v.updated_at, v.evidence, COALESCE(ma.new, v.src_key) AS src_key,
+                   COALESCE(mb.new, v.dst_key) AS dst_key
+            FROM edge_verdicts v
+            LEFT JOIN unnest(CAST(:old AS text[]), CAST(:new AS text[])) AS ma(old, new) ON ma.old = v.src_key
+            LEFT JOIN unnest(CAST(:old AS text[]), CAST(:new AS text[])) AS mb(old, new) ON mb.old = v.dst_key
+            WHERE v.source='user' AND v.verdict='drop')
         SELECT v.reason, v.updated_at, n.id AS src, m.id AS dst, n.name AS src_name, m.name AS dst_name,
                o.id AS override_id
-        FROM edge_verdicts v JOIN nodes n ON n.type || ':' || n.key=v.src_key
+        FROM v JOIN nodes n ON n.type || ':' || n.key=v.src_key
         JOIN nodes m ON m.type || ':' || m.key=v.dst_key
         LEFT JOIN overrides o ON v.evidence='override:' || o.id AND o.undone_at IS NULL
-        WHERE v.source='user' AND v.verdict='drop'
-            AND ((n.id=ANY(:a) AND m.id=ANY(:b)) OR (n.id=ANY(:b) AND m.id=ANY(:a)))
+        WHERE (n.id=ANY(:a) AND m.id=ANY(:b)) OR (n.id=ANY(:b) AND m.id=ANY(:a))
         ORDER BY v.updated_at DESC LIMIT 40
-    """), {"a": a, "b": b}).mappings()
+    """), {"a": a, "b": b, "old": sorted(moved), "new": [moved[k] for k in sorted(moved)]}).mappings()
     seen, out = set(), []
     for r in rows:
         key = r["override_id"] or tuple(sorted((r["src"], r["dst"])))

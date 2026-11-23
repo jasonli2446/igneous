@@ -7,7 +7,7 @@ import NodeSummary from "@/components/NodeSummary";
 import Sources from "@/components/SourceList";
 import { InlineError, Section, Skeleton } from "@/components/ui";
 import { api, type Correction, type GEdge, type GNode, type Thing } from "@/lib/api";
-import { formatDay } from "@/lib/dates";
+import { formatDay, formatMonthRange } from "@/lib/dates";
 import { nodeColor } from "@/lib/graph-style";
 import { useLiveSearch, useRequest } from "@/lib/hooks";
 
@@ -139,6 +139,9 @@ export default function EntityInspector({ id, revision, onSelectAction, onCloseA
               className="text-xs font-normal text-muted hover:text-accent disabled:opacity-40">Rename</button>
           </h2>
         )}
+        {e.role_of
+          ? <div className="mt-0.5 text-xs text-muted">Your role at {e.role_of}{formatMonthRange(e.start, e.end) && `, ${formatMonthRange(e.start, e.end)}`}</div>
+          : formatMonthRange(e.start, e.end) && <div className="mt-0.5 text-xs text-muted">{formatMonthRange(e.start, e.end)}</div>}
         {e.aliases.length > 0 && <div className="mt-0.5 text-xs text-muted">Also known as {e.aliases.join(", ")}</div>}
         {e.hidden && <div className="mt-1 text-xs text-danger">Hidden from the graph.</div>}
         {error && <div className="mt-2"><InlineError message={error} /></div>}
