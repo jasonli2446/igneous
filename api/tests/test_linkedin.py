@@ -154,7 +154,7 @@ def test_the_profile_stage_reads_linkedin_without_a_model(db, zpath, monkeypatch
     with SessionLocal() as s:
         linkedin.run_import(s, [zpath])
         s.execute(text("INSERT INTO nodes (type, key, name, props) VALUES "
-                       "('Person', 'linkedin:me', 'Pat Example', '{\"self\": true}')"))
+                       "('Person', 'me', 'Pat Example', '{\"self\": true}')"))
         s.commit()
         try:
             stats = profile.run(s, log=None)
@@ -169,6 +169,6 @@ def test_the_profile_stage_reads_linkedin_without_a_model(db, zpath, monkeypatch
         finally:
             s.execute(text("DELETE FROM edges WHERE extractor = 'profile'"))
             s.execute(text("DELETE FROM thread_registry WHERE origin = 'profile'"))
-            s.execute(text("DELETE FROM nodes WHERE key = 'linkedin:me' OR (type = 'Organization' "
+            s.execute(text("DELETE FROM nodes WHERE (type = 'Person' AND key = 'me') OR (type = 'Organization' "
                            "AND props->>'named_by' = 'profile')"))
             s.commit()

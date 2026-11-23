@@ -24,6 +24,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.config import settings
+from igneous.graph import identity
 
 EXTRACTOR = "profile"
 VERSION = "1"
@@ -72,12 +73,12 @@ def extract(s: Session, doc) -> dict | None:
     """One cached structured read of a document. Uses the stronger model: this is the backbone, once per version.
     A version already read keeps counting with the model off; a new one is read only if its source is opted in
     (#179)."""
-    from igneous.llm import LLMDisabled, allowed_sources, structured
+    from igneous.llm import LLMDisabled, allowed_sources, cache_lookup, cache_store, structured
 
     if doc.given:  # the LinkedIn export states it outright: no model call
         return doc.given
     key = "profile-extract:v3:" + hashlib.sha256(doc.body_text.encode()).hexdigest()
-    cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
+    cached = cache_lookup(key)
     if cached is not None:
         return cached
     if not settings.llm_enabled or doc.source not in allowed_sources():
@@ -100,8 +101,7 @@ def extract(s: Session, doc) -> dict | None:
         return None
     except Exception:
         return None
-    s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb)) "
-                   "ON CONFLICT (cache_key) DO NOTHING"), {"k": key, "r": json.dumps(out)})
+    cache_store(key, out)
     return out
 
 
@@ -127,7 +127,7 @@ def _date(v: str):
 
 def run(s: Session, log=print) -> dict:
     """Build the backbone from every self-describing document, newest first (newer wins, older adds history)."""
-    self_id = s.execute(text("SELECT id FROM nodes WHERE type = 'Person' AND (props->>'self')::bool LIMIT 1")).scalar()
+    self_id = identity.self_id(s)
     if self_id is None:
         return {"documents": 0}
     s.execute(text("DELETE FROM edges WHERE extractor = :x"), {"x": EXTRACTOR})

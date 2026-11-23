@@ -5,7 +5,6 @@ gets identical fingerprinting, threading, and quoted-reply recovery. Gmail also 
 In-Reply-To headers, which the spine uses directly.
 """
 import base64
-import os
 import threading
 import time
 from collections.abc import Iterator
@@ -15,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from igneous.config import settings
 from igneous.connectors.base import Checkpoint, SourceItem
 from igneous.connectors.email_maildir import parse_message
 
@@ -45,10 +45,7 @@ class TokenBucket:
             time.sleep((n - self.tokens) / self.rate)
 
 
-# Measured 2026-10-19: this Testing-mode project was cut off at ~730 units in under a minute, about 5% of the
-# published 15k/min default. Raise IGNEOUS_GMAIL_UNITS_PER_MIN if your project's quota page shows more.
-UNITS_PER_MIN = float(os.environ.get("IGNEOUS_GMAIL_UNITS_PER_MIN", "600"))
-QUOTA = TokenBucket(rate=UNITS_PER_MIN / 60, burst=50)
+QUOTA = TokenBucket(rate=settings.gmail_units_per_min / 60, burst=50)
 
 
 def _retry(call, units: float = 5, tries: int = 6):

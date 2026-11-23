@@ -130,7 +130,7 @@ def _card(s: Session, t: dict, can_see: tuple[set[int], set[int]]) -> str:
 def judge(s: Session, a: dict, b: dict, can_see: tuple[set[int], set[int]] | None = None) -> dict:
     """same | related | distinct, with the relation in words. Cached; without the model, or when either thread has
     no record the model may read, only exact-name duplicates merge and nothing is linked."""
-    from igneous.llm import LLMDisabled, structured
+    from igneous.llm import LLMDisabled, cache_lookup, cache_store, structured
 
     fallback = {"relation": "same" if (a["name"] or "").lower() == (b["name"] or "").lower() else "distinct",
                 "label": "", "confidence": 0.5, "reason": "same name"}
@@ -139,7 +139,7 @@ def judge(s: Session, a: dict, b: dict, can_see: tuple[set[int], set[int]] | Non
     # threads stay the same things, so it doesn't re-roll every time a few records shift.
     ident = "|".join(sorted([a["key"], b["key"]]))
     key = "thread-pair:v5:" + hashlib.sha256(ident.encode()).hexdigest()
-    cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
+    cached = cache_lookup(key)
     if cached is not None:
         return cached
     can_see = can_see or _readable(s, [a, b])
@@ -173,8 +173,7 @@ def judge(s: Session, a: dict, b: dict, can_see: tuple[set[int], set[int]] | Non
         return fallback
     except Exception:  # one failed judgment must not stop the run; unjudged pairs stay separate
         return {"relation": "distinct", "label": "", "confidence": 0.0, "reason": "not judged"}
-    s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb)) "
-                   "ON CONFLICT (cache_key) DO NOTHING"), {"k": key, "r": json.dumps(out)})
+    cache_store(key, out)
     return out
 
 

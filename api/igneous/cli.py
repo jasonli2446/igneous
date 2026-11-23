@@ -9,8 +9,28 @@ from igneous.config import settings
 from igneous.db import SessionLocal
 
 app = typer.Typer(no_args_is_help=True)
-schedule_app = typer.Typer(no_args_is_help=True)
+schedule_app = typer.Typer(no_args_is_help=True, help="macOS: sync your connected sources and rebuild the graph "
+                                                      "every 30 minutes.")
 app.add_typer(schedule_app, name="schedule")
+
+# Commands that never open the database (the schedule group checks in `schedule run`, the one that does).
+NO_DATABASE = {"synthetic-corpus", "verify-synthetic-corpus", "schedule"}
+
+
+@app.callback()
+def main(ctx: typer.Context):
+    """Build and query your personal knowledge graph. Every command reads the database IGNEOUS_DATABASE_URL names
+    (api/.env); run `igneous COMMAND --help` for one command."""
+    if ctx.invoked_subcommand not in NO_DATABASE:
+        _require_schema()
+
+
+def _require_schema() -> None:
+    from igneous.db import schema_status
+
+    if problem := schema_status():
+        typer.echo(f"igneous: {problem}", err=True)
+        raise typer.Exit(code=2)
 
 
 @schedule_app.command("install")
@@ -39,6 +59,8 @@ def schedule_uninstall():
 def schedule_run():
     """LaunchAgent entry point; sources are serialized before one incremental pipeline rebuild."""
     from igneous import schedule
+
+    _require_schema()
     print(json.dumps(schedule.run_now(), default=str))
 
 

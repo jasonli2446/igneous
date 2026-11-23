@@ -2,6 +2,7 @@
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous import source_catalog
 from igneous.config import settings
 from igneous.providers import embed
 
@@ -22,9 +23,10 @@ def run(s: Session, log=print) -> int:
         rows = s.execute(text("""
             SELECT c.id, c.text FROM chunks c JOIN source_items si ON si.id = c.source_item_id
             WHERE c.embedding IS NULL
-              AND (:local_models OR si.source NOT IN ('fs', 'notes'))
+              AND (:local_models OR si.source <> ALL(CAST(:local AS text[])))
             ORDER BY c.id LIMIT :n
-        """), {"n": BATCH, "local_models": settings.local_sources_model_enabled}).all()
+        """), {"n": BATCH, "local_models": settings.local_sources_model_enabled,
+              "local": list(source_catalog.LOCAL_TEXT)}).all()
         if not rows:
             break
         vecs = embed_texts([r.text for r in rows])

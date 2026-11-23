@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated, Literal
 from urllib.parse import quote
@@ -15,7 +16,8 @@ from igneous.config import settings
 from igneous.connectors import secrets
 from igneous.connectors.ai_exports import ExportConnector, ExportError, export_items, parse_export
 from igneous.connectors.base import run_sync
-from igneous.db import SessionLocal, get_session, schema_problem
+from igneous.db import SessionLocal, get_session, schema_status
+from igneous.graph import identity
 from igneous.graph.entity_api import router as entity_router
 from igneous.graph.history import commitments, decisions, relationship_history
 from igneous.graph.traversal import GraphFilters, expand, explain, neighborhood, network, people, view
@@ -51,18 +53,20 @@ class NamedResponse(JSONResponse):
         return super().render(walk(jsonable_encoder(content)))
 
 
-app = FastAPI(title="Igneous", version="0.1.0", default_response_class=NamedResponse)
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Refuse to serve a database whose schema isn't the code's, and fail jobs a previous API process left running."""
+    if problem := schema_status():
+        raise RuntimeError(problem)
+    with SessionLocal() as s:
+        jobs.fail_interrupted(s)
+    yield
+
+
+app = FastAPI(title="Igneous", version="0.1.0", default_response_class=NamedResponse, lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.include_router(entity_router)
 app.include_router(items_router)
-
-
-@app.on_event("startup")
-def _startup():
-    with SessionLocal() as s:
-        if problem := schema_problem(s):
-            raise RuntimeError(problem)
-        jobs.fail_interrupted(s)
 
 
 @app.get("/health")
@@ -447,7 +451,7 @@ _VIEW_CACHE: dict[tuple, dict] = {}
 def graph_view(seed: int | None = None, per: int = Query(6, le=20), s: Session = Depends(get_session)):
     """The single graph: seed (default: you) -> categories that exist in the data -> their top members."""
     if seed is None:
-        seed = s.execute(text("SELECT id FROM nodes WHERE type = 'Person' AND props->>'self' = 'true' LIMIT 1")).scalar()
+        seed = identity.self_id(s)
         if seed is None:
             raise HTTPException(404, "No self node yet: run `igneous pipeline --stage self`.")
     # Ranking every relationship takes seconds on a large mailbox; the result only changes when the graph does,
@@ -504,15 +508,6 @@ def graph_node_summary(node_id: int, s: Session = Depends(get_session)):
     return out
 
 
-def cluster(s: Session, node_id: int) -> list[int]:
-    """All identities entity resolution merged with this node (just [node_id] if unmerged)."""
-    ids = s.execute(text("""
-        SELECT node_id FROM canonical WHERE canonical_id =
-            (SELECT COALESCE((SELECT canonical_id FROM canonical WHERE node_id = :id), :id))
-    """), {"id": node_id}).scalars().all()
-    return list({node_id, *ids})
-
-
 @app.get("/graph/node/{node_id}/evidence")
 def graph_evidence(node_id: int, limit: int = Query(50, le=200), s: Session = Depends(get_session)):
     """Model-derived edges touching this node, each with the source text around its span ("why do you
@@ -528,7 +523,7 @@ def graph_evidence(node_id: int, limit: int = Query(50, le=200), s: Session = De
         FROM edges e JOIN source_items si ON si.id = e.source_item_id
         WHERE (e.src = ANY(:ids) OR e.dst = ANY(:ids)) AND e.extractor <> 'spine' AND e.span_start IS NOT NULL
         ORDER BY si.occurred_at DESC NULLS LAST LIMIT :limit
-    """), {"ids": cluster(s, node_id), "limit": limit}).mappings().all()
+    """), {"ids": identity.members(s, node_id), "limit": limit}).mappings().all()
     out = []
     for r in rows:
         d = dict(r)

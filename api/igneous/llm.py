@@ -1,4 +1,4 @@
-"""Structured chat calls, and the one rule for what a hosted model may read (#179).
+"""Structured chat calls, their result cache, and the one rule for what a hosted model may read.
 
 Every hosted call follows the same policy: a prompt carries text only from records in opted-in sources
 (`allowed_sources`), names only of people and things that appear in such records (`visible_nodes`), and counts
@@ -10,22 +10,14 @@ import os
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous import source_catalog
 from igneous.config import settings
-from igneous.providers import LLMDisabled, chat, get_provider
+from igneous.providers import LLMDisabled, chat
 
-__all__ = ["LLMDisabled", "allowed_sources", "client", "model_status", "require_whole_corpus", "structured",
-           "visible_nodes"]
+__all__ = ["LLMDisabled", "allowed_sources", "cache_lookup", "cache_store", "model_status", "require_whole_corpus",
+           "structured", "visible_nodes"]
 
-LOCAL_SOURCES = ("fs", "notes")  # also need IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED
-
-
-def client():
-    """Return the existing Bedrock client for legacy integrations.
-
-    New application code should call ``igneous.providers.chat`` instead.
-    """
-    provider = get_provider()
-    return provider.chat_provider._client()  # type: ignore[attr-defined]
+LOCAL_SOURCES = source_catalog.LOCAL_TEXT  # also need IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED
 
 
 def structured(system: str, user: str, schema: dict, max_tokens: int = 4000, effort: str = "low",
@@ -38,18 +30,37 @@ def structured(system: str, user: str, schema: dict, max_tokens: int = 4000, eff
     return json.loads(result.text), result.usage
 
 
+def cache_lookup(key: str) -> dict | None:
+    """The model result stored under `key` (llm_cache), or None."""
+    from igneous.db import SessionLocal
+
+    with SessionLocal() as cs:
+        return cs.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
+
+
+def cache_store(key: str, value: dict, replace: bool = False) -> None:
+    """Store a model result under `key` in a transaction of its own, committed now: a paid result outlives the
+    caller's rollback or a killed run, and never waits for the caller's transaction. `replace` overwrites an older
+    entry; otherwise the first stored result stays."""
+    from igneous.db import SessionLocal
+
+    conflict = "DO UPDATE SET response = EXCLUDED.response, created_at = now()" if replace else "DO NOTHING"
+    with SessionLocal() as cs:
+        cs.execute(text(f"INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb)) "
+                        f"ON CONFLICT (cache_key) {conflict}"), {"k": key, "r": json.dumps(value)})
+        cs.commit()
+
+
 def allowed_sources(value: str | None = None) -> frozenset[str]:
     """Stored source values whose records may reach a hosted model: the ids in IGNEOUS_LLM_SOURCES.
 
     `takeout` (the Sources page id) stands for every Takeout product. Local files and Apple Notes also need
     IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true. Empty, the default, allows nothing."""
-    from igneous.connectors.takeout import TAKEOUT_SOURCES
-
     out: set[str] = set()
     for source in (value if value is not None else settings.llm_sources).split(","):
         source = source.strip()
         if source == "takeout":
-            out.update(TAKEOUT_SOURCES)
+            out.update(source_catalog.of_connector("takeout"))
         elif source:
             out.add(source)
     if not settings.local_sources_model_enabled:

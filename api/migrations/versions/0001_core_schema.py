@@ -13,7 +13,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- Everything a connector produces, normalized. (source, external_id) makes ingestion idempotent.
 CREATE TABLE source_items (
     id            bigserial PRIMARY KEY,
-    source        text NOT NULL,                 -- email | gmail | drive | calendar | contacts | fs
+    source        text NOT NULL,                 -- a value from igneous/source_catalog.py
     external_id   text NOT NULL,
     parent_id     bigint REFERENCES source_items(id) ON DELETE CASCADE,  -- attachment -> message
     content_hash  text NOT NULL,
@@ -28,7 +28,7 @@ CREATE TABLE source_items (
 );
 CREATE INDEX ON source_items (updated_at);
 
--- Node types: Person, Organization, Thread, Message, File, Folder, Event, Topic.
+-- Node and edge types are open text; graph/invariants.py lists each persisted edge type and its endpoints.
 CREATE TABLE nodes (
     id              bigserial PRIMARY KEY,
     type            text NOT NULL,
@@ -40,9 +40,7 @@ CREATE TABLE nodes (
 );
 CREATE INDEX nodes_name_trgm ON nodes USING gin (to_tsvector('simple', name));
 
--- Edge types: SENT, RECEIVED, MEMBER_OF, IN_THREAD, REPLIES_TO, ATTACHED, CONTAINS, ATTENDED,
--- AUTHORED, HAS_CHUNK, MENTIONS, ABOUT, RELATED_TO, SAME_AS.
--- Provenance columns are NULL for deterministic (stage one) edges and required for model-derived ones.
+-- Provenance columns (model, confidence, span) are NULL for edges read from metadata and set for model-derived ones.
 CREATE TABLE edges (
     id                 bigserial PRIMARY KEY,
     src                bigint NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,

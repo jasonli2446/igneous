@@ -27,6 +27,7 @@ from datetime import timedelta
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous import source_catalog
 from igneous.config import settings
 
 EXTRACTOR = "threads"
@@ -41,9 +42,8 @@ UMBRELLA_MONTHS = 6      # an umbrella (org, program, lab) is present across at 
 UMBRELLA_SHARE = 0.2     # ...and makes up at least this share of the items of...
 UMBRELLA_THREADS = 2     # ...at least this many threads
 
-# Sources that describe the user's life (not contact cards or raw metadata).
-SOURCES = ("gmail", "email", "imessage", "gcal", "drive", "fs", "notes", "ai_chats", "github",
-           "takeout_activity", "takeout_chrome", "takeout_tasks", "takeout_meet", "takeout_chat")
+# Where the threads of a life show up: messages, calendars, documents, code, AI chats and browsing.
+SOURCES = source_catalog.LIFE
 
 # Kinds of thread that don't happen in one window (the judge names kinds freely, so match words).
 ONGOING = re.compile(r"^(?!.*\b(project|application|trip|event)\b).*\b(hobby|hobbies|club|sport|recurring|friend|friends|"
@@ -231,7 +231,7 @@ def _sample(items: list, n: int = 40) -> list:
 def _judge(s: Session, c: dict) -> dict:
     """Decide what the candidate is, which of its records belong, and which words define it. Model only with
     opted-in sources; cached per candidate content. Fallback (no model): the seed term defines it."""
-    from igneous.llm import LLMDisabled, allowed_sources, structured
+    from igneous.llm import LLMDisabled, allowed_sources, cache_lookup, cache_store, structured
 
     allowed = allowed_sources()
     month = c["start"].strftime("%b %Y") if c["start"].strftime("%b %Y") == c["end"].strftime("%b %Y") \
@@ -254,7 +254,7 @@ def _judge(s: Session, c: dict) -> dict:
     seen = " ".join(f"{r.title} {r.body}" for r in shown).lower()
     prompt = prompt_with([t for t in c["terms"][:8] if t.lower() in seen])
     key = "threads-judge:v2:" + hashlib.sha256(prompt_with(c["terms"][:8]).encode()).hexdigest()
-    cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
+    cached = cache_lookup(key)
     if cached is None:
         try:
             cached, _ = structured(
@@ -278,8 +278,7 @@ def _judge(s: Session, c: dict) -> dict:
             return fallback
         except Exception:  # a failed judgment skips this candidate rather than stopping the run
             return {**fallback, "keep": False}
-        s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb)) "
-                       "ON CONFLICT (cache_key) DO NOTHING"), {"k": key, "r": json.dumps(cached)})
+        cache_store(key, cached)
     judged_ids = [shown[i].id for i in cached.get("members", []) if 0 <= i < len(shown)]
     return {**cached, "judged": True, "members": judged_ids, "shown": [r.id for r in shown]}
 
@@ -686,13 +685,13 @@ def _is_umbrella(s: Session, term: str, thread_names: list[str], months: int, sh
     `shown` is what the model may read (#179): the threads among them that have opted-in records, and nothing at
     all when no opted-in record mentions the term. The cache key is the whole question, so a judgment made
     before that rule still counts."""
-    from igneous.llm import LLMDisabled, structured
+    from igneous.llm import LLMDisabled, cache_lookup, cache_store, structured
 
     def prompt_with(names: list[str]) -> str:
         return f"Term: {term}\nPresent across {months} months.\nThreads whose records often mention it:\n" + \
             "\n".join(f"- {n}" for n in sorted(names)[:20])
     key = "threads-umbrella:v1:" + hashlib.sha256(prompt_with(thread_names).encode()).hexdigest()
-    cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
+    cached = cache_lookup(key)
     if cached is None:
         if not settings.llm_enabled or not shown:
             return False
@@ -709,8 +708,7 @@ def _is_umbrella(s: Session, term: str, thread_names: list[str], months: int, sh
                 max_tokens=120, model=settings.llm_cheap_model)
         except LLMDisabled:
             return False
-        s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb)) "
-                       "ON CONFLICT (cache_key) DO NOTHING"), {"k": key, "r": json.dumps(cached)})
+        cache_store(key, cached)
     return bool(cached.get("umbrella")) and (cached.get("confidence") or 0) >= 0.7
 
 

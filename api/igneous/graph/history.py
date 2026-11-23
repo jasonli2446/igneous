@@ -70,7 +70,7 @@ def refresh_commitment_status(s: Session) -> int:
     With no approved model source it leaves the conservative ``open`` status intact.
     """
     from igneous.config import settings
-    from igneous.llm import LLMDisabled, allowed_sources, structured
+    from igneous.llm import LLMDisabled, allowed_sources, cache_lookup, cache_store, structured
 
     changed = 0
     rows = s.execute(text("""
@@ -112,7 +112,7 @@ def refresh_commitment_status(s: Session) -> int:
         material = "\n---\n".join(later)
         key = "commitment-resolution:v1:" + hashlib.sha256(
             (str(row["id"]) + material).encode()).hexdigest()
-        cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :key"), {"key": key}).scalar()
+        cached = cache_lookup(key)
         if cached is None:
             try:
                 verdict, _ = structured(
@@ -123,9 +123,7 @@ def refresh_commitment_status(s: Session) -> int:
                      "required": ["resolved"], "additionalProperties": False}, max_tokens=300)
             except LLMDisabled:
                 continue
-            s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:key, CAST(:response AS jsonb)) "
-                           "ON CONFLICT (cache_key) DO NOTHING"),
-                      {"key": key, "response": json.dumps(verdict)})
+            cache_store(key, verdict)
         else:
             verdict = cached
         if verdict.get("resolved"):

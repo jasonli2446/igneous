@@ -1,20 +1,17 @@
-from contextlib import contextmanager
+from contextlib import nullcontext
 from pathlib import Path
 
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.orm import sessionmaker
 
 from igneous.config import settings
 
 engine = create_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = sessionmaker(engine, expire_on_commit=False)
 
-
-@contextmanager
-def session() -> Session:
-    with SessionLocal() as s:
-        yield s
-        s.commit()
+API_DIR = Path(__file__).resolve().parents[1]
+UPGRADE = "run `cd api && uv run alembic upgrade head`"
 
 
 def get_session():
@@ -23,22 +20,46 @@ def get_session():
         yield s
 
 
-def schema_problem(s: Session) -> str | None:
-    """None when the database is at the newest migration; otherwise what is wrong and the command that fixes it.
-    Every table comes from a migration (#181), so code running ahead of its schema fails here, not mid-request."""
+def _script():
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
-    api = Path(__file__).resolve().parents[1]
-    config = Config(str(api / "alembic.ini"))
-    config.set_main_option("script_location", str(api / "migrations"))
-    head = ScriptDirectory.from_config(config).get_current_head()
+    config = Config(str(API_DIR / "alembic.ini"))
+    config.set_main_option("script_location", str(API_DIR / "migrations"))
+    return ScriptDirectory.from_config(config)
+
+
+def schema_status(bind=None) -> str | None:
+    """None when the database is at the code's migration head; otherwise what is wrong and how to fix it.
+
+    Every table comes from a migration, so the API, the CLI and the MCP server check this before touching data and
+    refuse to run on anything else, instead of failing mid-request. `bind` is a Connection to check instead of a
+    new connection from the engine."""
+    script = _script()
+    heads = script.get_heads()
+    if len(heads) != 1:
+        return (f"the code has {len(heads)} migration heads ({', '.join(sorted(heads))}): merge them with "
+                "`cd api && uv run alembic merge heads`")
+    head, url = heads[0], (bind.engine if bind is not None else engine).url
+    name = url.database
     try:
-        current = s.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    except Exception:
-        s.rollback()
-        current = None
+        with nullcontext(bind) if bind is not None else engine.connect() as c:
+            current = c.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    except ProgrammingError:
+        return f"database {name} has no schema yet: {UPGRADE}"
+    except OperationalError as e:
+        reason = str(e.orig).strip().splitlines()[0] if e.orig else type(e).__name__
+        return (f"cannot reach database {name} at {url.host}:{url.port} ({reason}): start Postgres "
+                "(`make db`) or set IGNEOUS_DATABASE_URL")
     if current == head:
         return None
-    return (f"database {engine.url.database} is at migration {current or 'none'}, the code needs {head}: "
-            "run `cd api && uv run alembic upgrade head`")
+    if current is None:
+        return f"database {name} has no schema yet: {UPGRADE}"
+    try:
+        known = script.get_revision(current) is not None
+    except Exception:  # alembic raises ResolutionError / CommandError for a revision it doesn't have
+        known = False
+    if not known:
+        return (f"database {name} is at migration {current}, which this code doesn't have (it was migrated by "
+                f"newer code): switch to that code, or downgrade to {head} with it")
+    return f"database {name} is at migration {current}, the code needs {head}: {UPGRADE}"

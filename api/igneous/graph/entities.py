@@ -192,25 +192,24 @@ def _screen(names: list[str]) -> set[str] | None:
         return None
 
 
-def _screened(s: Session, names: list[str], shown: set[str]) -> set[str]:
-    """The names that are specific things: one model verdict per name, cached in Postgres. Only names in `shown`
+def _screened(names: list[str], shown: set[str]) -> set[str]:
+    """The names that are specific things: one model verdict per name, cached in llm_cache. Only names in `shown`
     (an anchor appears in opted-in records) go to the model; the rest are kept, since the stop-list already
-    dropped the generic ones. Only real model verdicts are cached. A cached keep without that mark may be an
-    old fallback, so it is asked again once the name may be shown."""
+    dropped the generic ones. Only model verdicts are cached (`by: model`); a cached keep without that mark is
+    asked again once the name may be shown."""
+    from igneous.llm import cache_lookup, cache_store
+
     kept = set()
     for name in names:
         key = "entities-screen:v1:" + hashlib.sha256(name.encode()).hexdigest()
-        cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :key"), {"key": key}).scalar()
+        cached = cache_lookup(key)
         if cached is not None and (cached.get("by") == "model" or not cached.get("keep")):
             verdict = bool(cached.get("keep"))
         else:
             answer = _screen([name]) if name in shown and settings.llm_enabled else None
             verdict = answer is None or name in answer
             if answer is not None:
-                s.execute(text("""
-                    INSERT INTO llm_cache (cache_key, response) VALUES (:key, CAST(:response AS jsonb))
-                    ON CONFLICT (cache_key) DO UPDATE SET response = EXCLUDED.response
-                """), {"key": key, "response": json.dumps({"keep": verdict, "name": name, "by": "model"})})
+                cache_store(key, {"keep": verdict, "name": name, "by": "model"}, replace=True)
         if verdict:
             kept.add(name)
     return kept
@@ -247,7 +246,7 @@ def run(s: Session, log=print) -> int:
              for name, candidate in cands.items() for component in _components(s, candidate["anchors"])}
     visible = visible_nodes(s, [nid for c in cands.values() for nid, _ in c["anchors"]])
     shown = {c["screen"] for c in cands.values() if any(nid in visible for nid, _ in c["anchors"])}
-    screened = _screened(s, sorted({candidate["screen"] for candidate in cands.values()}), shown)
+    screened = _screened(sorted({candidate["screen"] for candidate in cands.values()}), shown)
     keep = {key for key, candidate in cands.items() if candidate["screen"] in screened}
     # Rebuild this stage's output from scratch: cheap, and new evidence always reaches old entities.
     s.execute(text("DELETE FROM edges WHERE extractor = :x"), {"x": EXTRACTOR})
