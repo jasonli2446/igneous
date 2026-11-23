@@ -1,4 +1,4 @@
-"""One rule for every hosted model call (#179): text only from opted-in sources, names only of what appears in them.
+"""One rule for every hosted model call: text only from opted-in sources, names only of what appears in them.
 
 A synthetic graph mixes an opted-in source (gmail) with one that never is (imessage, carrying PRIVATE markers).
 Every model-calling stage runs against it with a recording provider in place of Bedrock.
@@ -24,7 +24,7 @@ def _minimal(schema: dict):
     if "enum" in schema:
         return schema["enum"][0]
     if "anyOf" in schema:
-        return _minimal(schema["anyOf"][0])
+        return None if {"type": "null"} in schema["anyOf"] else _minimal(schema["anyOf"][0])
     kind = schema.get("type")
     if isinstance(kind, list):
         kind = kind[0]
@@ -39,14 +39,14 @@ class Recorder:
 
     def __call__(self, messages, schema=None, **_options):
         self.prompts.append("\n".join(str(m["content"]) for m in messages))
-        return ChatResult(json.dumps(_minimal(schema or {})), {})
+        return ChatResult(json.dumps(_minimal(schema or {})), {"input_tokens": 0, "output_tokens": 0})
 
     def leaked(self) -> list[str]:
         return [marker for p in self.prompts for marker in PRIVATE if marker in p]
 
 
 def _wipe(s):
-    for table in ("edge_verdicts", "edges_dropped", "thread_registry", "thread_parents"):
+    for table in ("edge_verdicts", "edges_dropped", "thread_registry", "thread_parents", "dirty_nodes", "dirty_rebuild"):
         if s.execute(text("SELECT to_regclass(:t)"), {"t": table}).scalar():
             s.execute(text(f"TRUNCATE {table}"))
     s.execute(text(f"TRUNCATE {', '.join(TABLES)} RESTART IDENTITY CASCADE"))
@@ -189,7 +189,7 @@ def test_opting_in_a_document_source_lets_its_resume_be_read(graph, monkeypatch)
 
 
 def test_a_cached_resume_still_counts_with_the_model_off(graph, monkeypatch):
-    """Turning the model off used to drop the resume backbone on the next rebuild (extract returned early)."""
+    """A resume the model read earlier keeps counting with the model off: its cached reading is reused."""
     import hashlib
 
     from igneous.graph import profile
@@ -270,6 +270,92 @@ def test_question_filters_send_the_question_alone_to_the_cheap_model_once(graph,
     (prompt,) = rec.prompts
     assert prompt.endswith("\n" + question) and rec.leaked() == []
     assert "Atlas" not in prompt and "Sam Shared" not in prompt  # no record, no name from the graph
+
+
+def _record_prompts(monkeypatch, sources: str) -> Recorder:
+    rec = Recorder()
+    monkeypatch.setattr(llm, "chat", rec)
+    monkeypatch.setattr(llm.settings, "llm_enabled", True)
+    monkeypatch.setattr(llm.settings, "llm_sources", sources)
+    monkeypatch.setattr(llm.settings, "local_sources_model_enabled", False)
+    return rec
+
+
+def test_ask_reads_only_opted_in_records_even_through_the_graph(graph, monkeypatch):
+    """Ask's retrieval and its graph expansion stay inside the opted-in sources: a text in the same thread as an
+    opted-in email, even a reply to it, never reaches the prompt, while the email's opted-in neighbours do."""
+    from igneous.rag import qa, rerank
+
+    g = graph
+    with SessionLocal() as s:
+        thread = _node(s, "Thread", "thread:atlas-mail", "Atlas status")
+        for i in range(8):
+            _edge(s, g["items"][f"g{i}"], thread, "IN_THREAD")
+            _edge(s, g["items"][f"i{i}"], thread, "IN_THREAD")
+        _edge(s, g["items"]["i0"], g["items"]["g0"], "REPLIES_TO", "spine-quoted")
+        s.commit()
+    monkeypatch.setattr(rerank.settings, "reranker_enabled", False)
+    question = "What was the Atlas status in 2025?"  # the rules read the year: no question-filter call
+    rec = _record_prompts(monkeypatch, "gmail")
+    with SessionLocal() as s:
+        out = qa.answer(s, question, mode="lexical")
+    assert out["evidence"] and {e["source"] for e in out["evidence"]} == {"gmail"}
+    assert any("graph" in e["matched"] for e in out["evidence"])  # the expansion ran, inside gmail
+    assert len(rec.prompts) == 1 and rec.leaked() == [] and "Pat Private" not in rec.prompts[0]
+    # The same question with the texts opted in too does reach them through the graph: the limit is the opt-in.
+    rec = _record_prompts(monkeypatch, "gmail,imessage")
+    with SessionLocal() as s:
+        qa.answer(s, question, mode="lexical")
+    assert "PRIVATEMARKER" in rec.leaked()
+
+
+def test_node_summaries_carry_only_opted_in_records_and_names(graph, monkeypatch):
+    from igneous.graph.summary import summarize
+
+    g = graph
+    rec = _record_prompts(monkeypatch, "gmail")
+    with SessionLocal() as s:
+        for node in (g["atlas"], g["platform"], g["sam"], g["pat"], g["pat_only"], g["items"]["g0"]):
+            summarize(s, node)
+    assert rec.prompts and any("Sam Shared" in p for p in rec.prompts)
+    assert rec.leaked() == []
+
+
+def test_extraction_reads_only_opted_in_messages(graph, monkeypatch):
+    from igneous.graph import extract
+
+    monkeypatch.setattr(extract, "MIN_CHARS", 20)  # the fixture's messages are short
+    with SessionLocal() as s:  # inbox labels on both sources: only the opt-in tells the texts apart
+        s.execute(text("""UPDATE source_items SET raw_meta = '{"labels": ["INBOX"]}'
+                          WHERE source IN ('gmail', 'imessage')"""))
+        s.commit()
+    rec = _record_prompts(monkeypatch, "gmail")
+    with SessionLocal() as s:
+        extract.run(s, limit=50, log=lambda *_: None)
+    assert len(rec.prompts) == 9 and all("Atlas" in p or "Same Sam" in p for p in rec.prompts)
+    assert rec.leaked() == []
+
+
+def test_entity_screening_sends_only_names_grounded_in_opted_in_records(graph, monkeypatch):
+    """Candidate names go to the model only when an anchor appears in opted-in records: a folder of Drive files may
+    be screened with Drive opted in; a folder of local files never is."""
+    from igneous.graph import dirty, entities
+
+    with SessionLocal() as s:
+        for folder, source in (("Robotics Lab", "drive"), ("Zephyr Secret", "fs")):
+            fid = _node(s, "Folder", f"folder:{folder}", folder)
+            for n in range(2):
+                item = _item(s, source, f"{folder}/{n}", f"{folder} file {n}", "notes", T0)
+                _edge(s, fid, _node(s, "File", f"{source}:{folder}/{n}", f"{folder} file {n}", item=item), "CONTAINS",
+                      item=item)
+        dirty.mark_rebuild(s)
+        s.commit()
+    rec = _record_prompts(monkeypatch, "gmail,drive")
+    with SessionLocal() as s:
+        entities.run(s, log=None)
+        s.commit()
+    joined = "\n".join(rec.prompts).lower()
+    assert "robotics lab" in joined and "zephyr" not in joined
 
 
 def test_thread_namer_sees_only_terms_its_shown_records_contain(monkeypatch):
