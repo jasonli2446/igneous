@@ -14,8 +14,8 @@ import tempfile
 import numpy as np
 
 from igneous.config import settings
-from igneous.providers import chat
-from igneous.rag.embed import embed_texts
+from igneous.llm import complete as model_complete
+from igneous.rag.embed import DIM, embed_texts
 
 
 async def main(kg_path: str, question: str):
@@ -34,12 +34,12 @@ async def main(kg_path: str, question: str):
         messages = ([{"role": "system", "content": system_prompt}] if system_prompt else [])
         messages.extend(history_messages or [])
         messages.append({"role": "user", "content": prompt})
-        return chat(messages, max_tokens=2000, effort="low", model=settings.llm_model).text
+        return model_complete(messages, max_tokens=2000)
 
     work = tempfile.mkdtemp(prefix="igneous-lightrag-")
     try:
         rag = LightRAG(working_dir=work, llm_model_func=complete,
-                       embedding_func=EmbeddingFunc(embedding_dim=settings.embedding_dim, func=embed,
+                       embedding_func=EmbeddingFunc(embedding_dim=DIM, func=embed,
                                                     model_name=settings.embedding_model))
         await rag.initialize_storages()
         kg = json.load(open(kg_path))

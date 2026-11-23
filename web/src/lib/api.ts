@@ -30,6 +30,10 @@ export type Hit = {
   title: string | null;
   occurred_at: string | null;
   matched: string[];
+  // Ask's evidence only: how a graph neighbour was reached from a hit, and the cross-encoder's score.
+  relation?: "reply" | "thread" | "correspondents";
+  via_chunk_id?: number;
+  rerank_score?: number;
 };
 
 export type ExpertEvidence = {
@@ -50,14 +54,54 @@ export type Expert = {
   evidence: ExpertEvidence[];
 };
 
+/** What narrowed a search or an answer: the request's own filters and what the question stated (`from_question`). */
+export type AppliedFilters = {
+  sources: string[]; // stored source values; empty = every source (for Ask: every opted-in source)
+  person: { id: number; name: string | null } | null; // sent or received by any of this person's identities
+  mentions: { id: number; name: string | null } | null; // records that name this person
+  since: string | null;
+  until: string | null; // exclusive
+  from_question: ("sources" | "person" | "mentions" | "since" | "until")[];
+};
+
+export type SearchOptions = { sources?: string[]; person?: string; from?: string; to?: string; mode?: string };
+
 export type AskResult = {
   answerable: boolean;
   answer: string;
   reason?: "no_opted_in_sources"; // nothing the question may read is opted in to the hosted model
-  citations: Hit[];
-  evidence: Hit[];
+  citations: Hit[]; // empty unless the answer stands
+  evidence: Hit[]; // everything the model was shown
+  filters: AppliedFilters;
   timing: { retrieve_s: number; total_s?: number };
 };
+
+/** A failed call to the API: the HTTP status (0 when the API couldn't be reached) and the API's own explanation. */
+export class ApiError extends Error {
+  constructor(readonly status: number, readonly detail: string) {
+    super(detail);
+    this.name = "ApiError";
+  }
+}
+
+async function requestJson<T>(url: URL, init?: RequestInit): Promise<T> {
+  let r: Response;
+  try {
+    r = await fetch(url, init);
+  } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") throw e;
+    throw new ApiError(0, "Could not reach the API. Check that it is running.");
+  }
+  if (!r.ok) {
+    const detail: unknown = (await r.json().catch(() => ({}))).detail;
+    // FastAPI explains a rejected request as a list of {loc, msg}.
+    const message = typeof detail === "string" ? detail
+      : Array.isArray(detail) ? detail.map((d: { loc?: unknown[]; msg?: string }) => `${(d.loc ?? []).slice(1).join(".")}: ${d.msg}`).join("; ")
+      : `${r.status} ${url.pathname}`;
+    throw new ApiError(r.status, message);
+  }
+  return (await r.json()) as T;
+}
 
 export type Explanation = {
   a: { id: number; name: string };
@@ -127,6 +171,14 @@ async function get<T>(
   const r = await fetch(url, { signal });
   if (!r.ok) throw new Error(`${r.status} ${path}`);
   return (await r.json()) as T;
+}
+
+function searchUrl(path: string, q: string, { sources, person, from, to, mode }: SearchOptions) {
+  const url = new URL(path, API);
+  url.searchParams.set("q", q);
+  for (const s of sources ?? []) url.searchParams.append("sources", s);
+  for (const [k, v] of Object.entries({ person: person?.trim(), from, to, mode })) if (v) url.searchParams.set(k, v);
+  return url;
 }
 
 /** What an import route takes: files to upload, or a path the API reads in place (it runs on your computer). */
@@ -236,9 +288,10 @@ export const api = {
     send<{ removed: string }>("DELETE", `/sources/${provider}/accounts/${encodeURIComponent(account)}`),
   googleConnectUrl: () => new URL("/sources/google/connect", API).toString(),
   stats: () => get<{ source_items: Record<string, number>; nodes: Record<string, number>; edges: Record<string, number> }>("/stats", {}),
-  search: (q: string, opts: { source?: string; person?: string; from?: string; to?: string; mode?: string } = {}) =>
-    get<{ hits: Hit[] }>("/search", { q, ...opts }),
-  experts: (q: string, opts: { mode?: string } = {}) => get<{ experts: Expert[] }>("/experts", { q, ...opts }),
+  search: (q: string, opts: SearchOptions = {}, signal?: AbortSignal) =>
+    requestJson<{ hits: Hit[]; filters: AppliedFilters }>(searchUrl("/search", q, opts), { signal }),
+  experts: (q: string, opts: SearchOptions = {}, signal?: AbortSignal) =>
+    requestJson<{ experts: Expert[]; filters: AppliedFilters }>(searchUrl("/experts", q, opts), { signal }),
   findThings: (q: string, seed?: number, signal?: AbortSignal) =>
     get<{ results: Thing[] }>("/graph/find", { q, seed }, signal),
   nodeSummary: (id: number, signal?: AbortSignal) => get<NodeSummary>(`/graph/node/${id}/summary`, {}, signal),
@@ -248,15 +301,12 @@ export const api = {
   people: (seed: number, limit = 60, signal?: AbortSignal) => get<Subgraph>("/graph/people", { seed, limit }, signal),
   network: (seed: number, people = 50, hubs = 30, signal?: AbortSignal) =>
     get<Subgraph>("/graph/network", { seed, people, hubs }, signal),
-  ask: async (question: string, use_graph = true) => {
-    const r = await fetch(new URL("/ask", API), {
+  ask: (question: string, use_graph = true) =>
+    requestJson<AskResult>(new URL("/ask", API), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ question, use_graph }),
-    });
-    if (!r.ok) throw new Error(`${r.status} ${(await r.json().catch(() => ({}))).detail ?? "/ask"}`);
-    return (await r.json()) as AskResult;
-  },
+    }),
   askSuggestions: () => get<string[]>("/ask/suggestions", {}),
   graphVersion: (signal?: AbortSignal) => get<{ version: string }>("/graph/version", {}, signal),
   view: (seed?: number, signal?: AbortSignal) => get<Subgraph & { seed: number }>("/graph/view", { seed }, signal),

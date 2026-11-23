@@ -69,7 +69,7 @@ CREATE TABLE chunks (
     text            text NOT NULL,
     meta            jsonb NOT NULL DEFAULT '{}',
     tsv             tsvector GENERATED ALWAYS AS (to_tsvector('english', text)) STORED,
-    embedding       vector({dim}),
+    embedding       vector(384),                 -- rag/embed.py: DIM; another dimension needs a migration
     UNIQUE (source_item_id, ord)
 );
 CREATE INDEX ON chunks USING gin (tsv);
@@ -97,9 +97,7 @@ DROP TABLE IF EXISTS pipeline_state, sync_state, chunks, edges, nodes, source_it
 
 
 def upgrade():
-    from igneous.config import settings
-
-    op.execute(UP.replace("{dim}", str(settings.embedding_dim)))
+    op.execute(UP)
 
 
 def downgrade():

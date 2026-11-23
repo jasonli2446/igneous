@@ -236,8 +236,8 @@ SOURCES: list[dict] = [
     {"id": "fs", "kind": "local", "name": "Local files", "group": "On this computer",
      "reads": "Name, folder and size of every file in the folders you choose, the text of documents (PDF, .docx, "
               f".xlsx, .pptx, text and code, up to {MAX_DOCUMENT_BYTES // 2**20} MB), and each git checkout. Key "
-              "and .env files are never read, and credentials in text are redacted. Searched by keyword; "
-              "meaning-based search and hosted models need IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true.",
+              "and .env files are never read, and credentials in text are redacted. Search indexes the text on this "
+              "computer; a hosted model reads it only if you opt it in (below).",
      "steps": ["Set IGNEOUS_FILESYSTEM_ROOTS to a comma-separated list of folders (in api/.env or the API's "
                "environment), then restart the API. With no setting, existing Documents, Desktop, Downloads, and "
                "iCloud Drive folders are used.",
@@ -250,9 +250,8 @@ SOURCES: list[dict] = [
      "cli": "igneous sync fs (or --path FOLDER for one folder, leaving the others as they are)",
      "build": _local(_fs), "options": {"path"}},
     {"id": "notes", "kind": "local", "name": "Apple Notes", "group": "On this computer",
-     "reads": "Unlocked Notes.app titles and bodies from the local database, with credentials redacted. Searched by "
-              "keyword; meaning-based search and hosted models need IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true. "
-              + MAC_ONLY,
+     "reads": "Unlocked Notes.app titles and bodies from the local database, with credentials redacted. Search "
+              "indexes them on this computer; a hosted model reads them only if you opt them in (below). " + MAC_ONLY,
      "steps": [*FDA_STEPS, "Press Sync now. Locked notes are skipped."], "cli": "igneous sync notes",
      "build": _local(lambda o: apple_notes.AppleNotesConnector(o.path or apple_notes.DEFAULT_DB)),
      "options": {"path"}},

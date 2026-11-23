@@ -1,6 +1,8 @@
-"""Structure-aware chunking. Email: one chunk per message with quoted tails stripped. Parsed documents (PDF, DOCX,
-PPTX, XLSX): chunks follow the pages, sections, slides and sheets the parser recorded (#186), and each chunk says
-where in the document it is."""
+"""Structure-aware chunking, every chunk under its record's title so that a search for a subject, a file name or a
+conversation finds each part of it. Email: one chunk per message with quoted tails stripped, under "Subject:".
+Calendar events: title, time and attendees. Parsed documents (PDF, DOCX, PPTX, XLSX): chunks follow the pages,
+sections, slides and sheets the parser recorded, and each says where in the document it is. Everything else (local
+files, notes, AI chats, GitHub, Takeout days, messages) is split by length, the title first in every chunk."""
 import json
 import re
 
@@ -12,7 +14,9 @@ from igneous.pipeline import advance, watermark
 STAGE = "chunk"
 MAX_CHARS = 2000  # ~500 tokens
 OVERLAP = 200
-LAYOUT = 2  # chunk meta 'layout': documents chunked by an older layout are re-chunked once
+# Recorded in each chunk's meta. An item chunked under an older layout is chunked again once; an item whose chunks
+# come out the same keeps them and their vectors, so only changed chunks are embedded again.
+LAYOUT = 3
 
 # Lines that start a quoted reply or forwarded block in Enron/Outlook mail.
 QUOTE_START = re.compile(
@@ -92,6 +96,14 @@ def packed(title: str, units: list[tuple[str, str]]) -> list[str]:
     return out
 
 
+def titled(title: str | None, parts: list[str]) -> list[str]:
+    """Each part with the record's title on its first line, unless the part already opens with it (a note whose
+    first line is its title)."""
+    if not title:
+        return parts
+    return [part if part.startswith(title) else f"{title}\n{part}" for part in parts]
+
+
 def chunks_for(item) -> list[str]:
     body = item.body_text or ""
     if item.source == "gcal":  # title + time + people so "meeting with Sam last week" finds it
@@ -102,16 +114,16 @@ def chunks_for(item) -> list[str]:
         body = strip_quoted(body)
         header = f"Subject: {item.title}\n" if item.title else ""
         return [header + c for c in split(body)] or ([header.strip()] if header else [])
-    if item.source.startswith("takeout_"):  # a day of searches or visits: the title says which product and day
-        head = f"{item.title}\n" if item.title else ""
-        return [head + c for c in split(body)]
     units = sections(item)
     if units:
         return packed(item.title or "", units)
-    return split(body)
+    return titled(item.title, split(body))
 
 
 def run(s: Session) -> int:
+    """Chunk every item changed since the last run, and every item chunked under an older LAYOUT; returns how many
+    items it looked at. An item whose chunks come out the same keeps them, vectors included; the others' chunks are
+    replaced and wait for the embed stage."""
     since = watermark(s, STAGE)
     rows = s.execute(text("""
         SELECT si.id, si.source, si.title, si.body_text, si.occurred_at, si.updated_at, si.raw_meta,
@@ -128,16 +140,25 @@ def run(s: Session) -> int:
     # Index chat text with contact names, not numbers, so "what did Sam say" finds it (lexically and densely).
     from igneous.graph.traversal import handle_names, name_handles
     named = handle_names(s) if any(r.source == "imessage" for r in rows) else {}
+    existing = dict(s.execute(text("""
+        SELECT source_item_id, array_agg(text ORDER BY ord) FROM chunks
+        WHERE source_item_id = ANY(CAST(:ids AS bigint[])) GROUP BY 1
+    """), {"ids": [r.id for r in rows]}).all()) if rows else {}
     for item in rows:
-        s.execute(text("DELETE FROM chunks WHERE source_item_id = :id"), {"id": item.id})
-        if item.node_id is None:
-            continue  # a duplicate copy (e.g. same email in two Enron folders); its node's canonical item is chunked
-
+        if item.node_id is None:  # a duplicate copy (one email in two Enron folders); its node's item is chunked
+            s.execute(text("DELETE FROM chunks WHERE source_item_id = :id"), {"id": item.id})
+            continue
+        texts = chunks_for(item)
+        if item.source == "imessage":
+            texts = [name_handles(c, named) for c in texts]
         meta = json.dumps({"source": item.source, "title": item.title, "layout": LAYOUT,
                            "occurred_at": item.occurred_at.isoformat() if item.occurred_at else None})
-        for ord_, c in enumerate(chunks_for(item)):
-            if item.source == "imessage":
-                c = name_handles(c, named)
+        if existing.get(item.id) == texts:
+            s.execute(text("UPDATE chunks SET node_id = :nid, meta = CAST(:meta AS jsonb) WHERE source_item_id = :sid"),
+                      {"sid": item.id, "nid": item.node_id, "meta": meta})
+            continue
+        s.execute(text("DELETE FROM chunks WHERE source_item_id = :id"), {"id": item.id})
+        for ord_, c in enumerate(texts):
             s.execute(text("""
                 INSERT INTO chunks (source_item_id, node_id, ord, text, meta)
                 VALUES (:sid, :nid, :ord, :text, CAST(:meta AS jsonb))
@@ -149,10 +170,7 @@ def run(s: Session) -> int:
 
 
 def _older_layout(s: Session) -> list[int]:
-    """Parsed documents whose chunks predate LAYOUT: re-chunked once along their boundaries. Nothing else is,
-    so nothing else is re-embedded."""
+    """Items whose chunks were made under an older LAYOUT: chunked again once (run keeps those that don't change)."""
     return list(s.execute(text("""
-        SELECT DISTINCT c.source_item_id FROM chunks c JOIN source_items si ON si.id = c.source_item_id
-        WHERE jsonb_array_length(COALESCE(si.raw_meta->'boundaries', '[]')) > 0
-          AND COALESCE((c.meta->>'layout')::int, 1) < :layout
+        SELECT DISTINCT source_item_id FROM chunks WHERE COALESCE((meta->>'layout')::int, 1) < :layout
     """), {"layout": LAYOUT}).scalars())

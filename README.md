@@ -71,9 +71,10 @@ export AWS_REGION=us-east-1           # default if unset
 
 Without the key, `/ask` returns 503 and extraction is skipped; everything else works. The default chat model is
 `us.anthropic.claude-sonnet-5-5` (`IGNEOUS_LLM_MODEL`), with `IGNEOUS_LLM_CHEAP_MODEL` for high-volume yes/no judgments.
-Embeddings and the reranker run locally (FastEmbed), so the first search or pipeline run downloads small model files.
-A model reads only the sources in `IGNEOUS_LLM_SOURCES` ([Model calls](#model-calls)); local documents and Apple
-Notes also need `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`.
+Embeddings and the reranker run locally (FastEmbed) for every source, so the first search or pipeline run downloads
+small model files into `data/models` (`IGNEOUS_MODEL_CACHE_DIR` moves them). A hosted model reads only the sources in
+`IGNEOUS_LLM_SOURCES` ([Model calls](#model-calls)); local documents and Apple Notes also need
+`IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true` for that, while search indexes them on this computer either way.
 
 ### 4. Start the API and the web app
 
@@ -182,8 +183,10 @@ under it, the verifier after every link it checks, and your corrections last, so
 lowercases and conservatively lemmatizes keys, merges only high-similarity local-embedding duplicates, and adds
 `RELATED_TO` after three shared messages; moved `ABOUT` edges keep their original provenance. Extraction, like every
 model call, reads only sources listed in `IGNEOUS_LLM_SOURCES`; set it to `email` before `make demo`, then use
-`EXTRACT=0` to skip calls or `EXTRACT=500` to process more. `docker compose up` also runs the api and web in
-containers.
+`EXTRACT=0` to skip calls or `EXTRACT=500` to process more. Every chunk opens with its record's title (an email's
+subject, a file's name, a conversation's name). When the chunk layout changes (`LAYOUT` in
+`api/igneous/rag/chunking.py`), each item is chunked again once and only chunks whose text changed are embedded again.
+`docker compose up` also runs the api and web in containers.
 
 ## Layout
 
@@ -191,7 +194,7 @@ containers.
 |---|---|
 | `api/igneous/connectors/` | `base.py` connector contract + resumable sync runner, which stores every item's title, text and metadata text with the credentials `redact.py` matches replaced by `[REDACTED:<kind>]` (and `redact_stored`, the pipeline's first step, which brings items stored under an older version of those rules up to date); one module per source (`gmail.py`, `gcal.py`, `drive.py`, `github.py`, `imessage.py`, `ai_chats.py`, `filesystem.py`, `takeout.py`, `linkedin.py`, ...) |
 | `api/igneous/graph/` | `spine.py` deterministic graph; `extract.py` model mentions with span provenance; `entities.py`, `threads.py`, `resolve_threads.py`, `profile.py`, `backbone.py` derived projects, life threads and your orgs; `resolve.py` entity resolution; `verify.py` checks every derived link; `traversal.py` what the explorer shows; `invariants.py` `igneous check-graph` |
-| `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
+| `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `constraints.py` the filters a question states, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
 | `api/igneous/llm.py` | structured model calls and the rule for what a model may read (`allowed_sources`, `visible_nodes`); `providers.py` talks to Bedrock |
 | `api/eval/` | gold questions, ER labels, harnesses, results (see `api/eval/README.md`) |
 | `api/igneous/pipeline.py` | the stage list in dependency order and the one runner `igneous pipeline` and Rebuild share |
@@ -232,34 +235,51 @@ cd api && uv run igneous sync imessage && uv run igneous pipeline
 - Enron has no `In-Reply-To`/`References` headers. Threads are keyed on subject + participants; `REPLIES_TO` is inferred and sparse.
 - Enron stores one email in several folders with different Message-IDs. Messages dedupe on a content fingerprint (`raw_meta.fingerprint`).
 - Embeddings stay local (`bge-small-en-v1.5`, 384-d, FastEmbed); Bedrock as a second index was dropped
-  (`docs/decisions/0002-bedrock-interop.md`).
+  (`docs/decisions/0002-bedrock-interop.md`). Each chunk records the model behind its vector: setting
+  `IGNEOUS_EMBEDDING_MODEL` to another 384-dimensional model re-embeds every chunk on the next pipeline run, and search
+  compares only vectors from the configured model meanwhile; another dimension needs a migration.
 
 ## Model calls
 
-Q&A uses Claude Sonnet 5.5 on Amazon Bedrock. Set `AWS_BEARER_TOKEN_BEDROCK` and `AWS_REGION` (e.g. `us-east-1`);
-application model access goes through `api/igneous/providers.py`: local FastEmbed embeddings, a local FastEmbed
-cross-encoder reranker, and the existing Bedrock chat client. Select them with `IGNEOUS_EMBEDDING_PROVIDER`,
-`IGNEOUS_RERANK_PROVIDER`, and `IGNEOUS_CHAT_PROVIDER`; the supported defaults are `fastembed`, `cross_encoder`,
-and `bedrock`. `IGNEOUS_LLM_ENABLED=false` turns off hosted model calls (search and the graph keep working; `/ask`
-returns 503).
+Q&A uses Claude Sonnet 5.5 on Amazon Bedrock. Set `AWS_BEARER_TOKEN_BEDROCK` and `AWS_REGION` (e.g. `us-east-1`).
+All model access goes through `api/igneous/providers.py`: local FastEmbed embeddings and a local FastEmbed
+cross-encoder reranker, which send nothing anywhere, and Claude on Bedrock for chat (`IGNEOUS_LLM_MODEL`, and
+`IGNEOUS_LLM_CHEAP_MODEL` for high-volume checks). The Anthropic SDK retries a failed call `IGNEOUS_HOSTED_RETRIES`
+times (2 by default). `IGNEOUS_LLM_ENABLED=false` turns off hosted model calls (search and the graph keep working;
+`/ask` returns 503).
 
 **What a model may read.** Only the sources listed in `IGNEOUS_LLM_SOURCES`: the comma-separated ids the Sources
 page shows (`gmail,ai_chats`; `takeout` covers every Takeout product, `ai_chats` every AI chat import). Every hosted
 call follows one rule (`api/igneous/llm.py`): a prompt carries text only from records in those sources, names only of
 people and things that appear in them, and counts for everything else. Local files and Apple Notes also need
-`IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`. Search may also send the question itself (never records) to pick out
-names and dates. Empty, the default, means no model call at all; Ask then says to opt a source in. Results the model
-gave earlier stay cached and keep counting. The Sources page shows, per source, whether
-a model may read it.
+`IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`. Search and Ask may also send the question itself (never a record) to the
+cheap model to pick out who, where and when (below). Empty, the default, means no model call at all; Ask then says to
+opt a source in. Results the model gave earlier stay cached and keep counting. The Sources page shows, per source,
+whether a model may read it.
 
-Q&A reranks the graph-expanded candidate pool down to the top 8 evidence chunks. Set
-`IGNEOUS_RERANKER_ENABLED=false` to preserve graph retrieval order, or adjust the bounded input with
-`IGNEOUS_RERANKER_POOL_SIZE` (32 by default). If its model files cannot load, Q&A logs a warning and safely
-preserves that order instead.
+**Filters in a question.** Search and Ask read filters out of the question (`api/igneous/rag/constraints.py`):
+"from", "to", "with" or "by" a person means messages they sent or received (any of their merged addresses);
+"regarding", "involving", "mentioning" or "concerning" a person means records that name them; "in my calendar", "my
+texts", "in my email" or "my files" limits the sources (a source word only counts when it says where to look, so
+"the events that led to the crisis" limits nothing); and "in May 2001", "since 2000" or "on May 3, 2001" limits the
+dates. When the rules find none and a source is opted in, the cheap model reads the question once (cached). Filters a
+request sets itself win. Both pages show the filters they applied and mark the ones read from the question. Search
+also takes `-word` or `-"a phrase"` to leave matches out.
+
+**How Ask picks its evidence** (`api/igneous/rag/qa.py`). Hybrid search retrieves a pool of
+`IGNEOUS_RERANKER_POOL_SIZE` passages (32 by default), graph expansion adds each hit's direct replies and the
+messages nearest to it in time in its thread, and the local cross-encoder scores hits and neighbours together and
+keeps the best 8. With `IGNEOUS_RERANKER_ENABLED=false`, or when its model files can't load (Q&A logs a warning),
+the 8 follow retrieval order but 3 places go to graph neighbours of the top hits, so a reply that answers without
+the question's words still reaches the model. An answer cites its evidence (chunk, source item and node ids); when
+the model can't answer from it, Ask says so and cites nothing. A failed model call is a 502 and an unavailable
+model a 503, each with a message.
 
 To verify providers without credentials, run `cd api && uv run python scripts/provider_smoke.py`. It exercises the
-local embedding and reranking models only. Add `--hosted` only with an explicit real `AWS_BEARER_TOKEN_BEDROCK`; that
-mode makes one paid Bedrock chat request and is never run by the test suite.
+local embedding and reranking models only. Add `--hosted` only with an explicit real `AWS_BEARER_TOKEN_BEDROCK`: it
+then sends one paid, schema-constrained request to each hosted model (`IGNEOUS_LLM_MODEL` and
+`IGNEOUS_LLM_CHEAP_MODEL`), the way every model call goes, so a model that rejects the request fails there first. The
+test suite never runs it.
 
 ## MCP server (use the graph from Claude Code, Claude Desktop, Cursor)
 

@@ -369,12 +369,23 @@ def mcp():
 
 
 @app.command()
-def search(q: str, k: int = 5, mode: str = "hybrid"):
-    """Hybrid search from the terminal."""
+def search(q: str = typer.Argument(..., help="what to find; -word leaves a word out"),
+           k: int = typer.Option(5, min=1, max=50, help="how many passages"),
+           mode: str = typer.Option("hybrid", help="hybrid | lexical | dense")):
+    """Search from the terminal, as the Search page does: filters the query states ("from Jeff Skilling", "in my
+    calendar", "in May 2001") apply, and a line before the results says which."""
+    if mode not in ("hybrid", "lexical", "dense"):
+        raise typer.BadParameter("choose hybrid, lexical or dense", param_hint="--mode")
+    from igneous.rag.constraints import apply, describe
     from igneous.rag.search import hybrid
 
     with SessionLocal() as s:
-        for h in hybrid(s, q, k=k, mode=mode):
+        f = apply(s, q)
+        applied = describe(s, f)
+        if applied["from_question"]:
+            print("filters from the query:", json.dumps({name: applied[name] for name in applied["from_question"]},
+                                                        default=str))
+        for h in hybrid(s, q, f, k=k, mode=mode):
             print(f"{h['score']:.4f} {','.join(h['matched']):14s} {h['title']!r} [{h['external_id']}]")
 
 

@@ -71,3 +71,30 @@ def test_nothing_opted_in_means_no_check(db, monkeypatch):
 
     monkeypatch.setattr(llm, "structured", forbidden)
     assert history.refresh_commitment_status(db) == 0
+
+
+def test_later_messages_rank_only_by_vectors_from_the_configured_model(db, monkeypatch):
+    """A later message's vector from another embedding model lives in another space: it can't rank it first."""
+    from igneous.rag.embed import embed_query
+
+    mail(db, "c", "kai@y.test", ["me@x.test"], "Re: Budget", day(3), body="Lunch on Thursday?", thread="budget")
+    commitment = promised(db)  # its spine run builds c with a and b
+    near, far = embed_query("send the budget report"), embed_query("lunch plans for the week")
+    for external_id, vector, model in (("b", near, "another/model"), ("c", far, llm.settings.embedding_model)):
+        db.execute(text("""
+            INSERT INTO chunks (source_item_id, node_id, ord, text, embedding, embedding_model)
+            SELECT si.id, n.id, 0, si.body_text, CAST(:v AS vector), :m FROM source_items si
+            JOIN nodes n ON n.source_item_id = si.id AND n.type = 'Message' WHERE si.external_id = :x
+        """), {"v": str(vector), "m": model, "x": external_id})
+    asked = []
+
+    def model(system, user, schema, **_options):
+        asked.append(user)
+        return {"resolved": False}, {}
+
+    monkeypatch.setattr(llm, "structured", model)
+    monkeypatch.setattr(llm.settings, "llm_sources", "gmail")
+    history.refresh_commitment_status(db)
+    assert status(db, commitment) == "open"
+    # Only c has a vector from the configured model, so it comes first; b's closer vector from another model is ignored.
+    assert asked[0].index("Lunch on Thursday?") < asked[0].index("Got the budget report")
