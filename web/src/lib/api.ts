@@ -309,8 +309,12 @@ export const api = {
   restoreEdges: (edges: number[]) => send<{ restored: number[] }>("POST", "/graph/edge/restore", { edges }),
   linkOptions: (a: number, b: number, signal?: AbortSignal) =>
     get<{ options: { label: string; type: string; src: number; dst: number }[] }>("/graph/link/options", { a, b }, signal),
+  /** A fact you add between two things in the graph (POST /facts: the one write path, also the MCP tools'). */
   addLink: (src: number, dst: number, type: string, note?: string) =>
-    send<{ id: number; src: number; dst: number; type: string }>("POST", "/graph/link", { src, dst, type, note }),
+    send<{ id: number; src: number; dst: number; type: string; override_id: number }>(
+      "POST", "/facts", { subject: src, relation: type, object: dst, note }),
+  /** Take out a link you or an agent added; the answer's override_id undoes that. */
+  removeLink: (edge: number) => send<{ removed: number; override_id: number }>("DELETE", `/graph/link/${edge}`),
   entity: (id: number, signal?: AbortSignal) => get<EntityDetail>(`/graph/entity/${id}`, {}, signal),
   renameEntity: (id: number, name: string) => send<Correction>("POST", `/graph/entity/${id}/rename`, { name }),
   hideEntity: (id: number) => send<Correction>("POST", `/graph/entity/${id}/hide`),

@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     # How many times the Anthropic SDK retries a failed hosted call (connection errors, 408, 409, 429, 5xx), with
     # backoff. It is the only retry layer.
     hosted_retries: int = 2
+    # The MCP server's write tools (remember, link): an agent adds facts to the graph, tagged with its name, each one
+    # you can undo. Off, the server only reads (`igneous mcp --write` turns them on for one server).
+    mcp_write: bool = False
 
     @field_validator("data_dir", "model_cache_dir")
     @classmethod

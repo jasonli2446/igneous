@@ -35,7 +35,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.config import settings
-from igneous.graph.derived import STATED
+from igneous.graph.derived import inferred
 
 # Relationships derived by heuristics, and what each claims, phrased for the judge. A third key part names a variant
 # by the kind of node A is.
@@ -435,15 +435,15 @@ def apply_verdicts(s: Session) -> int:
 
     blocked = rejections(s).id_pairs()
     removed = s.execute(text(f"""
-        DELETE FROM edges e WHERE e.extractor <> ALL(:stated) AND {blocked_sql('e.src', 'e.dst')} RETURNING e.type
-    """), {"stated": list(STATED), "blocked": blocked}).scalars().all() if blocked else []
-    moved = s.execute(text("""
+        DELETE FROM edges e WHERE {inferred('e.extractor')} AND {blocked_sql('e.src', 'e.dst')} RETURNING e.type
+    """), {"blocked": blocked}).scalars().all() if blocked else []
+    moved = s.execute(text(f"""
         WITH doomed AS (
             SELECT e.id, a.type || ':' || a.key AS src_key, b.type || ':' || b.key AS dst_key, v.reason
             FROM edges e JOIN nodes a ON a.id = e.src JOIN nodes b ON b.id = e.dst
             JOIN edge_verdicts v ON v.src_key = a.type || ':' || a.key AND v.dst_key = b.type || ':' || b.key
                 AND v.type = e.type AND v.extractor = e.extractor
-            WHERE v.verdict = 'drop' AND v.source = 'model' AND e.extractor <> ALL(:stated)
+            WHERE v.verdict = 'drop' AND v.source = 'model' AND {inferred('e.extractor')}
                 AND (e.type <> 'SAME_AS' OR v.confidence >= 0.8)
         ), d AS (
             DELETE FROM edges e USING doomed WHERE e.id = doomed.id
@@ -459,7 +459,7 @@ def apply_verdicts(s: Session) -> int:
             confidence = EXCLUDED.confidence, source_item_id = EXCLUDED.source_item_id,
             span_start = EXCLUDED.span_start, span_end = EXCLUDED.span_end
         RETURNING type
-    """), {"stated": list(STATED)}).scalars().all()
+    """)).scalars().all()
     back = s.execute(text(f"""
         INSERT INTO edges (id, src, dst, type, props, valid_from, valid_to, extractor, extractor_version, model,
                            confidence, source_item_id, span_start, span_end)
@@ -490,15 +490,15 @@ def apply_verdicts(s: Session) -> int:
     if together or "SAME_AS" in [*removed, *moved, *back]:
         from igneous.graph.resolve import refresh_canonical
         refresh_canonical(s)
-    return len(removed) + len(moved) + len(back) + s.execute(text("""
+    return len(removed) + len(moved) + len(back) + s.execute(text(f"""
         UPDATE edges e SET props = e.props || jsonb_build_object('verdict', v.verdict, 'reason', v.reason,
                                                                   'confidence', v.confidence, 'verified_by', v.source)
         FROM nodes a, nodes b, edge_verdicts v
         WHERE a.id = e.src AND b.id = e.dst AND v.src_key = a.type || ':' || a.key
           AND v.dst_key = b.type || ':' || b.key AND v.type = e.type AND v.extractor = e.extractor
-          AND e.extractor <> ALL(:stated)
+          AND {inferred('e.extractor')}
           AND (e.props->>'verdict' IS DISTINCT FROM v.verdict OR e.props->>'reason' IS DISTINCT FROM v.reason)
-    """), {"stated": list(STATED)}).rowcount
+    """)).rowcount
 
 
 def record_correction(s: Session, src_key: str, dst_key: str, type_: str, extractor: str, verdict: str,

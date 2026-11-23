@@ -1,9 +1,10 @@
 """Corrections are intents: what you said is recorded at once, and applied to the graph as soon as it can be.
 
-A correction made through the API (rename, hide, merge, "This is wrong", a connection you add, undo) takes two steps:
+A correction made through the API (rename, hide, merge, "This is wrong", a fact you or an agent add, undo) takes two
+steps:
 
   1. `recording`: its intent is committed at once, in rows no rebuild writes (overrides, your verdicts in
-     edge_verdicts, thread_parents), keyed by natural keys (`Type:key`), never by node or edge ids. That transaction
+     edge_verdicts), keyed by natural keys (`Type:key`), never by node or edge ids. That transaction
      locks no graph row: it holds the publish lock shared, so it waits only while corrections are being applied (a
      rebuild's final step, or another correction's step 2).
   2. `apply_now`: when no rebuild is reading sources or deriving, every recorded correction is applied to the
@@ -27,7 +28,7 @@ from sqlalchemy.orm import Session
 
 from igneous import pipeline
 from igneous.graph import overrides, verify
-from igneous.graph.derived import STATED
+from igneous.graph.derived import added, inferred, stated
 
 APPLIED = {"applied": "now"}
 ON_PUBLISH = {"applied": "on_publish",
@@ -109,20 +110,19 @@ def reject(s: Session, edge_id: int) -> dict:
     root = _edge(s, edge_id)
     if root is None:
         raise LookupError("No such link")
-    if root["extractor"] in STATED:
-        raise ValueError("This link is stated in your data or added by you, not inferred")
+    if stated(root["extractor"]):
+        raise ValueError("This link is stated in your data or was added by you or an agent, not inferred")
     # Removing one email from a project removes its email conversation, as the inspector shows a conversation as one
     # item. A chat's other days are other conversations and stay.
-    siblings = s.execute(text("""
+    siblings = s.execute(text(f"""
         SELECT DISTINCT n.id AS src, :dst AS dst, x.type, x.extractor, n.type || ':' || n.key AS a, :b AS b
         FROM edges it JOIN nodes root ON root.id = it.src AND root.props->>'source' IN ('gmail', 'email')
         JOIN edges it2 ON it2.dst = it.dst AND it2.type = 'IN_THREAD'
         JOIN nodes n ON n.id = it2.src AND n.props->>'source' IN ('gmail', 'email')
         JOIN edges x ON x.src = n.id AND x.dst = :dst AND x.type = :type
-        WHERE it.src = :src AND it.type = 'IN_THREAD' AND x.extractor <> ALL(:stated)
+        WHERE it.src = :src AND it.type = 'IN_THREAD' AND {inferred('x.extractor')}
         ORDER BY 1
-    """), {"src": root["src"], "dst": root["dst"], "type": root["type"], "b": root["b"],
-           "stated": list(STATED)}).mappings().all()
+    """), {"src": root["src"], "dst": root["dst"], "type": root["type"], "b": root["b"]}).mappings().all()
     roots = {tuple(r[k] for k in ("a", "b", "type", "extractor")): dict(r) for r in [root, *siblings]}
     oid, snapshots = _reject(s, roots, "you said this connection is wrong")
     if not snapshots:
@@ -138,16 +138,16 @@ def _reject(s: Session, roots: dict[tuple, dict], reason: str, data: dict | None
     and the verdicts the roots had, for undo. Returns (override id, those copies)."""
     pairs = json.dumps([{"a": a, "b": b} for a, b in sorted({tuple(sorted((r["src"], r["dst"])))
                                                              for r in roots.values()})])
-    snapshots = s.execute(text("""
+    snapshots = s.execute(text(f"""
         SELECT to_jsonb(e) || jsonb_build_object('src_key', a.type || ':' || a.key,
             'dst_key', b.type || ':' || b.key, 'evidence', COALESCE((
                 SELECT jsonb_agg(to_jsonb(ev) ORDER BY ev.id) FROM edge_evidence ev WHERE ev.edge_id=e.id), '[]'))
         FROM jsonb_to_recordset(CAST(:pairs AS jsonb)) AS p(a bigint,b bigint)
         JOIN edges e ON (e.src=p.a AND e.dst=p.b) OR (e.src=p.b AND e.dst=p.a)
         JOIN nodes a ON a.id=e.src JOIN nodes b ON b.id=e.dst
-        WHERE e.extractor <> ALL(:stated)
+        WHERE {inferred('e.extractor')}
         ORDER BY e.id
-    """), {"pairs": pairs, "stated": list(STATED)}).scalars().all()
+    """), {"pairs": pairs}).scalars().all()
     first = next(iter(roots))
     oid = overrides.add(s, "unlink", [first[1], first[0]])
     verdicts = []
@@ -184,35 +184,30 @@ def split(s: Session, a: int, b: int) -> dict:
 
 
 def remove_link(s: Session, edge_id: int) -> dict:
-    """Record "take out this link I added": the intents behind link `edge_id` (extractor 'user') go, kept in an
-    override 'unlink' (data.user_link) whose undo puts them back. Raises LookupError for no such link and ValueError
-    for a link you didn't add."""
+    """Record "take out this link": the facts behind link `edge_id`, one you or an agent added (its extractor, 'user'
+    or 'agent:<name>'), go, kept in an override 'unlink' (data.user_link) whose undo puts them back. Something new
+    only they named goes with them. Raises LookupError for no such link and ValueError for a link no one added."""
     from igneous.graph.derived import follow, merges
 
     edge = _edge(s, edge_id)
     if edge is None:
         raise LookupError("No such link")
-    if edge["extractor"] != "user":
-        raise ValueError("Only a link you added can be taken out this way; say an inferred one is wrong instead")
+    if not added(edge["extractor"]):
+        raise ValueError("Only a link you or an agent added can be taken out this way; say an inferred one is wrong "
+                         "instead")
     folded = merges(s)
     ends = {edge["a"], edge["b"]}
     links = [dict(r) for r in s.execute(text("""
         SELECT id, op, node_keys, value, data FROM overrides
         WHERE op = 'link' AND undone_at IS NULL AND value = :t ORDER BY id"""), {"t": edge["type"]}).mappings()
-        if (follow(folded, r["node_keys"][0]), follow(folded, r["node_keys"][1])) in ((edge["a"], edge["b"]),
-                                                                                  (edge["b"], edge["a"]))]
-    parents = [list(r) for r in s.execute(text("""
-        SELECT child_key, parent_key, origin FROM thread_parents ORDER BY child_key, parent_key""")).all()
-        if edge["type"] == "PART_OF" and (follow(folded, f"Project:{r[0]}"), follow(folded, f"Project:{r[1]}"))
-        == (edge["a"], edge["b"])]
+        if overrides.by(r) == edge["extractor"]
+        and (follow(folded, r["node_keys"][0]), follow(folded, r["node_keys"][1])) in ((edge["a"], edge["b"]),
+                                                                                    (edge["b"], edge["a"]))]
     if links:
         s.execute(text("DELETE FROM overrides WHERE id = ANY(:i)"), {"i": [r["id"] for r in links]})
-    for child, parent, _origin in parents:
-        s.execute(text("DELETE FROM thread_parents WHERE child_key = :c AND parent_key = :p"), {"c": child, "p": parent})
     oid = overrides.add(s, "unlink", sorted(ends) if edge["type"] == "SAME_AS" else [edge["b"], edge["a"]], edge["type"],
                         {"user_link": True,
-                         "links": [{k: r[k] for k in ("op", "node_keys", "value", "data")} for r in links],
-                         "parents": parents})
+                         "links": [{k: r[k] for k in ("op", "node_keys", "value", "data")} for r in links]})
     return {"removed": edge_id, "override_id": oid, "pairs": [tuple(sorted((edge["src"], edge["dst"])))]}
 
 
@@ -333,22 +328,20 @@ def confirm(s: Session, edge_id: int) -> dict:
     edge = _edge(s, edge_id)
     if edge is None:
         raise LookupError("No such link")
-    if edge["extractor"] in STATED:
-        raise ValueError("This link is stated in your data or added by you, not inferred")
+    if stated(edge["extractor"]):
+        raise ValueError("This link is stated in your data or was added by you or an agent, not inferred")
     verify.record_correction(s, edge["a"], edge["b"], edge["type"], edge["extractor"], "keep",
                              "you said this connection is right")
     return {"confirmed": edge_id}
 
 
-def link(s: Session, src_key: str, dst_key: str, type_: str, props: dict) -> int | None:
-    """Record a connection you added. A Project under a Project is stated hierarchy (thread_parents, which the threads
-    stage builds on); any other connection is an override 'link'. Returns the override id (None for hierarchy)."""
-    if type_ == "PART_OF" and src_key.startswith("Project:") and dst_key.startswith("Project:"):
-        s.execute(text("""
-            INSERT INTO thread_parents (child_key, parent_key, origin) VALUES (:c, :p, 'user') ON CONFLICT DO NOTHING
-        """), {"c": src_key.split(":", 1)[1], "p": dst_key.split(":", 1)[1]})
-        return None
-    return overrides.add(s, "link", [src_key, dst_key], type_, {"props": props})
+def link(s: Session, src_key: str, dst_key: str, type_: str, props: dict, by: str = "user",
+         nodes: dict[str, dict] | None = None) -> int:
+    """Record a connection someone added (`by`: 'user', or 'agent:<name>'), as an override 'link' with its edge's
+    props, and the new things it names (`nodes`: natural key -> {type, name, kind}; graph/facts.py). Returns the
+    override id, which undoes it."""
+    return overrides.add(s, "link", [src_key, dst_key], type_,
+                         {"props": props, "by": by, **({"nodes": nodes} if nodes else {})})
 
 
 def for_pair(s: Session, a: list[int], b: list[int]) -> list[dict]:

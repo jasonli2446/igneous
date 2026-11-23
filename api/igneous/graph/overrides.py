@@ -1,4 +1,4 @@
-"""Your corrections to derived Projects and the connections you added, stored as intents and applied last.
+"""Your corrections to derived Projects and the facts you or an agent added, stored as intents and applied last.
 
 Every derived stage rebuilds its own rows on each run, so a correction can't live on the rows it corrects. It lives
 in `overrides`, keyed by natural keys (`Type:key`, e.g. `Project:thread:4f2a...`), never by node or edge ids, which
@@ -12,12 +12,14 @@ change on every rebuild:
                                         it was, for undo
   unlink  node_keys=[b, a]             a pair rejection (graph/corrections.py): your 'drop' verdicts on the pair, and
                                         exact copies of the links it removed, for undo; or, with data.user_link, a
-                                        link you added and took out again (value=its type), holding the intents it
-                                        took out, for undo
-  link    node_keys=[src, dst]         value=the edge type: a connection you added; data.props are its props
+                                        link you or an agent added and you took out again (value=its type), holding
+                                        the facts it took out, for undo
+  link    node_keys=[src, dst]         value=the edge type: a fact (graph/facts.py). data.props are its edge's props,
+                                        data.by who stated it ('user', the default, or 'agent:<name>'), data.nodes
+                                        the new things it names (natural key -> {type, name, kind})
 
-A Project you put under another Project is in `thread_parents` (origin 'user') instead: the threads stage reads it as
-it builds. The edges with extractor 'user' are exactly what these intents say: one for each, and no other.
+The edges with extractor 'user' or 'agent:<name>' are exactly what these facts say: one for each, made by whoever
+stated it, and no other. A new thing a fact names (key 'added:...') exists while a fact defines it.
 
 `apply` is a pure function of these rows. It completes undos first (an undo marks its row `undone_at`; apply reverses
 the correction and forgets the row), puts every Project back to its derived state (its props.original_name, neither
@@ -26,11 +28,23 @@ running, right after each correction (graph/corrections.py). It bumps nothing: w
 """
 import json
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from igneous.graph.derived import follow
+from igneous.graph.derived import OTHERS, added_sql, follow
+
+ADDED = "added:"  # the key of a new thing a fact named: 'added:<its name, normalized>' (graph/facts.py)
+
+
+class Link(NamedTuple):
+    """A fact's connection: its ends' natural keys, its edge type and props, and who stated it."""
+    src: str
+    dst: str
+    type: str
+    props: dict
+    by: str = "user"
 
 
 @dataclass
@@ -38,7 +52,13 @@ class Plan:
     renames: dict[str, str] = field(default_factory=dict)         # project key -> name
     hidden: set[str] = field(default_factory=set)
     merges: dict[str, str] = field(default_factory=dict)          # folded key -> surviving key
-    links: list[tuple[str, str, str, dict]] = field(default_factory=list)  # (src key, dst key, edge type, props)
+    links: list[Link] = field(default_factory=list)
+    nodes: dict[str, dict] = field(default_factory=dict)          # a new thing's key -> {type, name, kind, by}
+
+
+def by(row: dict) -> str:
+    """Who stated the fact an override 'link' records: 'user', or 'agent:<name>'."""
+    return (row.get("data") or {}).get("by") or "user"
 
 
 def plan(rows: list[dict]) -> Plan:
@@ -64,7 +84,10 @@ def plan(rows: list[dict]) -> Plan:
                 p.merges[fold] = keep
                 p.merges = {f: (keep if k == fold else k) for f, k in p.merges.items()}  # keep chains one deep
         elif r["op"] == "link" and len(keys) == 2 and r.get("value"):
-            p.links.append((keys[0], keys[1], r["value"], (r.get("data") or {}).get("props") or {}))
+            data = r.get("data") or {}
+            p.links.append(Link(keys[0], keys[1], r["value"], data.get("props") or {}, by(r)))
+            for key, new in sorted((data.get("nodes") or {}).items()):
+                p.nodes.setdefault(key, {**new, "by": by(r)})  # as the oldest fact that names it says
 
     p.renames = {survivor(k): v for k, v in p.renames.items()}
     p.hidden = {survivor(k) for k in p.hidden}
@@ -102,8 +125,37 @@ def apply(s: Session) -> dict:
     p = plan(load(s))  # with what the undos gave back (a link you added, then took out)
     _registry(s, p)
     folded = merges(s)
-    return {"undone": len(undone), "merged": _merge(s, p, folded), "projects": _projects(s, p),
-            "links": _links(s, p, folded)}
+    return {"undone": len(undone), "added": _nodes(s, p, folded), "merged": _merge(s, p, folded),
+            "projects": _projects(s, p), "links": _links(s, p, folded)}
+
+
+def _nodes(s: Session, p: Plan, folded: dict[str, str]) -> int:
+    """The new things facts name, exactly: each exists while a fact defines it, under the name its oldest fact gave
+    (a Project you renamed keeps yours, and your hide), and none that no fact defines any more (its facts undone or
+    taken out). One you folded into another thing stays folded. Returns how many it wrote or deleted."""
+    wanted = {k: d for k, d in p.nodes.items() if k not in folded}
+    have = {r.natural: r for r in s.execute(text(f"""
+        SELECT id, type || ':' || key AS natural, type, name, props FROM nodes WHERE key LIKE '{ADDED}%'"""))}
+    stale = sorted(r.id for k, r in have.items() if k not in wanted)
+    if stale:
+        s.execute(text("DELETE FROM nodes WHERE id = ANY(:i)"), {"i": stale})
+    written = len(stale)
+    for natural, d in sorted(wanted.items()):
+        type_, key = natural.split(":", 1)
+        props = {"added_by": d["by"], "original_name": d["name"], **({"kind": d["kind"]} if d.get("kind") else {})}
+        row = have.get(natural)
+        if row is None:
+            s.execute(text("INSERT INTO nodes (type, key, name, props) VALUES (:t, :k, :n, CAST(:p AS jsonb))"),
+                      {"t": type_, "k": key, "n": d["name"], "p": json.dumps(props)})
+            written += 1
+            continue
+        props |= {k: v for k, v in (row.props or {}).items() if k in OTHERS}
+        name = row.name if row.type == "Project" else d["name"]  # a Project's name is _projects' to set
+        if (name, props) != (row.name, row.props):
+            s.execute(text("UPDATE nodes SET name = :n, props = CAST(:p AS jsonb) WHERE id = :i"),
+                      {"i": row.id, "n": name, "p": json.dumps(props)})
+            written += 1
+    return written
 
 
 def _registry(s: Session, p: Plan) -> None:
@@ -199,17 +251,14 @@ def _unmerge(s: Session, r: dict) -> None:
 
 
 def _reverse(s: Session, r: dict) -> None:
-    """Undo one correction on the graph as it is now. (A link you added needs nothing here: with its row gone, the
-    link goes too, `_links`.)"""
+    """Undo one correction on the graph as it is now. (A fact needs nothing here: with its row gone, its link goes
+    too, `_links`, and so does a new thing only it named, `_nodes`.)"""
     from igneous.graph import corrections
 
     data = r.get("data") or {}
     if r["op"] == "unlink" and data.get("user_link"):
-        for link in data.get("links", []):  # the intents it took out come back
+        for link in data.get("links", []):  # the facts it took out come back
             add(s, link["op"], link["node_keys"], link["value"], link["data"])
-        for child, parent, origin in data.get("parents", []):
-            s.execute(text("""INSERT INTO thread_parents (child_key, parent_key, origin) VALUES (:c, :p, :o)
-                              ON CONFLICT DO NOTHING"""), {"c": child, "p": parent, "o": origin})
     elif r["op"] == "unlink":
         corrections.restore(s, r)
     elif r["op"] == "merge" and len(r["node_keys"]) == 2:
@@ -238,36 +287,39 @@ def _projects(s: Session, p: Plan) -> int:
 
 
 def stated_parents(s: Session) -> list[tuple[str, str]]:
-    """Projects under Projects as someone stated them (thread_parents: you, or a pinned gold set), as natural keys."""
-    return [(f"Project:{c}", f"Project:{p}") for c, p in s.execute(text(
-        "SELECT child_key, parent_key FROM thread_parents ORDER BY child_key, parent_key"))]
+    """The Projects you put under Projects, as natural keys, for the threads stage to build on (an agent's facts shape
+    no stage: `_links` writes them last)."""
+    return sorted({(x.src, x.dst) for x in plan(load(s)).links
+                   if x.type == "PART_OF" and x.by == "user" and x.src.startswith("Project:")
+                   and x.dst.startswith("Project:")})
 
 
 def _links(s: Session, p: Plan, folded: dict[str, str]) -> int:
-    """The connections you added, exactly: an edge with extractor 'user' for each intent (an override 'link', or a
-    Project under a Project in thread_parents) on whatever each end is now (a Project you folded away: the one it went
-    into), and none that no intent backs (one you took out, a 'same person' you took back). Identity clusters are
-    rebuilt when a 'same person' link comes or goes."""
-    links = [*p.links, *((c, q, "PART_OF", {"why": "you said so"}) for c, q in stated_parents(s))]
-    ids = _ids(s, [follow(folded, k) for a, b, _t, _p in links for k in (a, b)])
-    wanted: dict[tuple[int, int, str], dict] = {}
-    for a_key, b_key, type_, props in links:
-        a, b = ids.get(follow(folded, a_key)), ids.get(follow(folded, b_key))
+    """The connections facts state, exactly: an edge for each, made by whoever stated it (extractor 'user' or
+    'agent:<name>'), on whatever each end is now (a Project you folded away: the one it went into), and none that no
+    fact backs (one taken out, a 'same person' you took back). Identity clusters are rebuilt when a 'same person' link
+    comes or goes."""
+    ids = _ids(s, [follow(folded, k) for x in p.links for k in (x.src, x.dst)])
+    wanted: dict[tuple[int, int, str, str], dict] = {}
+    for x in p.links:
+        a, b = ids.get(follow(folded, x.src)), ids.get(follow(folded, x.dst))
         if a is not None and b is not None and a != b:
-            wanted[(*sorted((a, b)), type_) if type_ == "SAME_AS" else (a, b, type_)] = props
-    stale = [r for r in s.execute(text("SELECT id, src, dst, type FROM edges WHERE extractor = 'user' ORDER BY id"))
-             if (r.src, r.dst, r.type) not in wanted]
+            ends = tuple(sorted((a, b))) if x.type == "SAME_AS" else (a, b)
+            wanted[(*ends, x.type, x.by)] = x.props
+    stale = [r for r in s.execute(text(f"""
+        SELECT id, src, dst, type, extractor FROM edges WHERE {added_sql('extractor')} ORDER BY id"""))
+             if (r.src, r.dst, r.type, r.extractor) not in wanted]
     if stale:
         s.execute(text("DELETE FROM edges WHERE id = ANY(:i)"), {"i": [r.id for r in stale]})
     written, same_as = len(stale), any(r.type == "SAME_AS" for r in stale)
-    for (a, b, type_), props in sorted(wanted.items()):
+    for (a, b, type_, who), props in sorted(wanted.items()):
         new = s.execute(text("""
             INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence)
-            VALUES (:a, :b, :t, CAST(:p AS jsonb), 'user', '1', 1.0)
+            VALUES (:a, :b, :t, CAST(:p AS jsonb), :x, '1', 1.0)
             ON CONFLICT (src, dst, type, extractor) DO UPDATE SET props = EXCLUDED.props
                 WHERE edges.props IS DISTINCT FROM EXCLUDED.props
             RETURNING (xmax = 0) AS inserted
-        """), {"a": a, "b": b, "t": type_, "p": json.dumps(props or {"why": "you added this"})}).scalar()
+        """), {"a": a, "b": b, "t": type_, "x": who, "p": json.dumps(props or {"why": "you added this"})}).scalar()
         if new is not None:
             written += 1
             same_as |= bool(new) and type_ == "SAME_AS"

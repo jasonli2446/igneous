@@ -9,7 +9,8 @@ rests on are kept per graph version (graph/dirty.py), for the API and the MCP se
 Every edge says where it came from: `origin` is 'stated' (read from your data: who sent what, your contacts, your
 resume), 'user' (you added it), 'agent:<name>' (an agent added it) or 'derived' (inferred by a rule or a model, or
 drawn by the explorer itself, like the spokes from a centre), and `stated` is whether it is a fact rather than an
-inference.
+inference. A fact you or an agent added (graph/facts.py) always shows: opening either end reveals the other, and the
+link is drawn as itself, with its origin.
 """
 import hashlib
 import math
@@ -20,6 +21,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.graph import dirty, identity, visibility
+from igneous.graph.derived import added_sql
 from igneous.graph.organizations import PERSONAL_DOMAINS, YOUR_ORGS
 from igneous.graph.visibility import group_conversation, not_owner, shown, visible
 
@@ -180,12 +182,12 @@ _HOW = {
 
 def origin(extractor: str) -> tuple[str, bool]:
     """(origin, stated) of an edge, from the extractor that made it."""
-    from igneous.graph.verify import STATED
+    from igneous.graph.derived import AGENT, STATED
 
     if extractor == "user":
         return "user", True
-    if extractor and extractor.startswith("agent:"):
-        return extractor, False
+    if extractor and extractor.startswith(AGENT):
+        return extractor, True  # a fact an agent added for you (graph/facts.py)
     if extractor in STATED:
         return "stated", True
     return "derived", False
@@ -736,6 +738,11 @@ def _view(s: Session, head: int, per: int) -> dict:
     # An org from your resume stands for its own thread (graph/backbone.py): show it once, as the org.
     stands = set(s.execute(text("""SELECT (props->>'thread')::bigint FROM nodes
                                    WHERE type = 'Organization' AND props ? 'thread'""")).scalars())
+    # What you or an agent said the centre is connected to is part of its first ring, in its own section.
+    ringed = {m["id"] for m, _c in first}
+    said = [i for i in _stated_by_someone(s, head) if i not in ringed]
+    first += [({"id": i, "strength": 1.0}, category(t, k)) for i, t, k in s.execute(text(
+        "SELECT id, type, props->>'kind' FROM nodes WHERE id = ANY(:i)"), {"i": said}).all()]
     blocked = rejected(s)
     first = [(m, c) for m, c in first if m["id"] not in stands and frozenset((head, m["id"])) not in blocked]
     named = names(s)
@@ -747,8 +754,8 @@ def _view(s: Session, head: int, per: int) -> dict:
         n.update(strength=st, category=cat, kind="seed" if n["id"] == head else "entity", expandable=n["id"] != head)
     ring = [m["id"] for m, _c in first if m["id"] in on]
     edges = [drawn(head, m["id"], "RELATED", 1 + 4 * m["strength"]) for m, _c in first if m["id"] in on]
-    edges += _structure(s, ring, blocked) + _ties(s, ring, ring, blocked, per_node=2)
-    return {"seed": head, "nodes": nodes, "edges": edges, "empty": False}
+    edges = _with_facts(edges, _structure(s, ring, blocked) + _facts(s, [head, *ring], blocked))
+    return {"seed": head, "nodes": nodes, "edges": edges + _ties(s, ring, ring, blocked, per_node=2), "empty": False}
 
 
 def _nodes(s: Session, ids: Iterable[int], named: dict[str, str], keep: set[int] = frozenset()) -> list[dict]:
@@ -780,6 +787,46 @@ def _structure(s: Session, ids: list[int], blocked: set[frozenset[int]]) -> list
             seen.add((a, b))
             out.append(drawn(a, b, "PART_OF", 3, origin(extractor)))
     return out
+
+
+def _facts(s: Session, ids: list[int], blocked: set[frozenset[int]]) -> list[dict]:
+    """The facts you or an agent added that join two nodes on screen (identity heads), each drawn as the link it is,
+    with its origin. Never a 'same person' link (that is one node on screen), nor one on a pair you rejected."""
+    members = dict(s.execute(text("SELECT node_id, canonical_id FROM canonical WHERE canonical_id = ANY(:i)"),
+                             {"i": ids}).all())
+    heads = {**members, **{i: i for i in ids}}
+    rows = s.execute(text(f"""
+        SELECT e.src, e.dst, e.type, e.extractor FROM edges e
+        WHERE e.src = ANY(:m) AND e.dst = ANY(:m) AND e.type <> 'SAME_AS' AND {added_sql('e.extractor')} ORDER BY e.id
+    """), {"m": sorted(heads)}).all()
+    out, seen = [], set()
+    for src, dst, type_, extractor in rows:
+        a, b = heads[src], heads[dst]
+        if a != b and (a, b, type_) not in seen and frozenset((a, b)) not in blocked:
+            seen.add((a, b, type_))
+            out.append(drawn(a, b, type_, 3, origin(extractor)))
+    return out
+
+
+def _stated_by_someone(s: Session, node: int) -> list[int]:
+    """What you or an agent said `node` is connected to (identity heads), the latest fact first."""
+    ids = identity.members(s, node)
+    others = s.execute(text(f"""
+        SELECT CASE WHEN e.src = ANY(:m) THEN e.dst ELSE e.src END FROM edges e
+        WHERE (e.src = ANY(:m) OR e.dst = ANY(:m)) AND e.type <> 'SAME_AS' AND {added_sql('e.extractor')}
+        ORDER BY e.id DESC
+    """), {"m": ids}).scalars().all()
+    heads = identity.heads(s, others)
+    return [h for h in dict.fromkeys(heads[o] for o in others) if h not in ids]
+
+
+def _with_facts(edges: list[dict], links: list[dict]) -> list[dict]:
+    """`edges` with the drawn `links` (what is part of what, the facts) in place of the generic ties they replace,
+    each link once."""
+    joined = {frozenset((e["src"], e["dst"])) for e in links}
+    out = {e["id"]: e for e in edges if e["type"] != "RELATED" or frozenset((e["src"], e["dst"])) not in joined}
+    out.update((e["id"], e) for e in links)
+    return list(out.values())
 
 
 def _ties(s: Session, ids: list[int], focus: list[int], blocked: set[frozenset[int]], per_node: int = 2) -> list[dict]:
@@ -835,11 +882,11 @@ def person_world(s: Session, pid: int) -> list[tuple[int, str, float]]:
         FROM theirs t JOIN edges it ON it.src = t.m AND it.type = 'IN_THREAD'
         JOIN nodes g ON g.id = it.dst AND {group_conversation('g')}
         GROUP BY it.dst
-        UNION ALL  -- projects and life threads, once checked (or stated by you): no unverified guess as a fact
+        UNION ALL  -- projects and life threads, once checked (or stated): no unverified guess as a fact
         SELECT e.dst, 'Project', 1 + COALESCE((e.props->>'items')::float, 1)
         FROM edges e JOIN nodes p ON p.id = e.dst AND p.type = 'Project' AND {visible('p')}
         WHERE e.src = ANY(:ids) AND e.type = 'INVOLVED_IN'
-          AND (e.props->>'verdict' = 'keep' OR e.extractor IN ('user', 'profile', 'contacts'))
+          AND (e.props->>'verdict' = 'keep' OR e.extractor IN ('profile', 'contacts') OR {added_sql('e.extractor')})
         UNION ALL
         SELECT e.dst, 'Event', 1 FROM edges e JOIN nodes ev ON ev.id = e.dst AND ev.type = 'Event' AND {visible('ev')}
         WHERE e.src = ANY(:ids) AND e.type = 'ATTENDED'
@@ -893,15 +940,17 @@ def children(s: Session, node: int, ntype: str) -> list[int]:
                                         WHERE type = 'Organization' AND props ? 'thread'""")).all())
         out = [stands.get(c, c) for c in children(s, own, "Project")]
         return [c for c in dict.fromkeys(out) if c != node]
-    # Projects under it: the ones you stated (or your resume did) always show; others earn their place by size.
+    # Projects under it: the ones you or an agent stated (or your resume did) always show; others earn their place by
+    # size.
     stated = s.execute(text(f"""
         SELECT DISTINCT e.src FROM edges e JOIN nodes c ON c.id = e.src AND c.type = 'Project' AND {visible('c')}
-        WHERE e.dst = :n AND e.type = 'PART_OF' AND e.extractor IN ('user', 'profile') ORDER BY e.src
+        WHERE e.dst = :n AND e.type = 'PART_OF' AND (e.extractor = 'profile' OR {added_sql('e.extractor')})
+        ORDER BY e.src
     """), {"n": node}).scalars().all()
     subs = s.execute(text(f"""
         SELECT c.id, COALESCE((c.props->>'records')::float, 1) FROM edges e
         JOIN nodes c ON c.id = e.src AND c.type = 'Project' AND {visible('c')}
-        WHERE e.dst = :n AND e.type = 'PART_OF' AND e.extractor NOT IN ('user', 'profile')
+        WHERE e.dst = :n AND e.type = 'PART_OF' AND e.extractor <> 'profile' AND NOT {added_sql('e.extractor')}
         UNION
         SELECT c.id, COALESCE((c.props->>'records')::float, 1) FROM edges e
         JOIN nodes c ON c.id = e.dst AND c.type = 'Project' AND {visible('c')}
@@ -941,7 +990,8 @@ def _own_content(s: Session, node: int) -> list[int]:
     # of its own group chats; being in the trip's chat is the direct evidence the verifier didn't have.
     involved = s.execute(text(f"""
         SELECT h.id, sum(COALESCE((e.props->>'items')::float, 1)) AS items,
-               bool_or(e.props->>'verdict' = 'keep' OR e.extractor IN ('user', 'profile', 'contacts')) AS checked,
+               bool_or(e.props->>'verdict' = 'keep' OR e.extractor IN ('profile', 'contacts')
+                       OR {added_sql('e.extractor')}) AS checked,
                bool_or(e.props->>'verdict' = 'unsure') AS unsure
         FROM edges e LEFT JOIN canonical c ON c.node_id = e.src JOIN nodes h ON h.id = COALESCE(c.canonical_id, e.src)
         WHERE e.dst = :n AND e.type = 'INVOLVED_IN' AND h.type = 'Person' AND {shown('h')}
@@ -1006,8 +1056,8 @@ def fallback_neighbors(s: Session, node: int, exclude: set[int], k: int) -> list
             WHERE e.dst = ANY(:ids) AND e.type NOT IN ('SAME_AS', 'HAS_CHUNK')
               AND NOT (e.type = 'PART_OF' AND e.src = (SELECT (props->>'thread')::bigint FROM nodes WHERE id = :n))),
         direct AS MATERIALIZED (
-            SELECT o, (CASE WHEN props->>'verdict' = 'keep' OR extractor IN ('user', 'profile', 'contacts', 'spine')
-                            THEN 2 ELSE 1 END) + COALESCE(confidence, 0.5) AS w
+            SELECT o, (CASE WHEN props->>'verdict' = 'keep' OR extractor IN ('profile', 'contacts', 'spine')
+                                 OR {added_sql('extractor')} THEN 2 ELSE 1 END) + COALESCE(confidence, 0.5) AS w
             FROM links WHERE COALESCE(props->>'verdict', '') <> 'drop'),
         records AS (SELECT DISTINCT d.o FROM direct d JOIN nodes dn ON dn.id = d.o AND dn.type IN ('Message', 'Event', 'File')),
         via AS (  -- one step through the node's records: the message's thread and people, the event's attendees
@@ -1097,6 +1147,8 @@ def expand(s: Session, seed: int | None, node: int, visible_ids: list[int], k: i
         edges += [drawn(nid, p, "RELATED") for p in members if p in seen]
         new = [p for p in members if p not in seen][:GROUP_MAX]
     unlinked = {x for pair in blocked if nid in pair for x in pair}  # what you said isn't linked to it
+    # What you or an agent said it is connected to always shows, first.
+    new = [*(p for p in _stated_by_someone(s, nid) if p not in seen), *new]
     new = [p for p in dict.fromkeys(new) if p not in (nid, head) and p not in unlinked]
     # However strict the rules above are for this kind of node, opening it never shows (nearly) nothing.
     if len(new) < MIN_SHOWN:
@@ -1108,9 +1160,8 @@ def expand(s: Session, seed: int | None, node: int, visible_ids: list[int], k: i
     new = [x["id"] for x in nodes]
     edges += [drawn(nid, p, "RELATED") for p in new]
     vis = list(dict.fromkeys([*new, *seen, nid]))
-    struct = [e for e in _structure(s, vis, blocked) if e["src"] in new or e["dst"] in new]
-    linked = {(e["src"], e["dst"]) for e in struct} | {(e["dst"], e["src"]) for e in struct}
-    edges = [e for e in edges if (e["src"], e["dst"]) not in linked]  # the real "part of" replaces the generic tie
+    # The real links replace the generic ties: what is part of what, and the facts you or an agent added.
+    real = [e for e in [*_structure(s, vis, blocked), *_facts(s, vis, blocked)] if e["src"] in new or e["dst"] in new]
     # Among a group's members, show how they relate to each other too (who talks to whom), not one tie each.
     ties = _ties(s, vis, new, blocked, per_node=1 if ntype in ("Person", "Project") else 3)
-    return {"nodes": nodes, "edges": edges + struct + ties}
+    return {"nodes": nodes, "edges": _with_facts(edges, real) + ties}

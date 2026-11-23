@@ -676,10 +676,12 @@ def test_thread_terms_match_whole_words_and_course_codes_are_whole():
 
 def test_links_you_stated_are_never_judged_by_the_model():
     from igneous.graph import verify
-    from igneous.graph.derived import STATED
+    from igneous.graph.derived import STATED, stated
 
-    # the verifier only judges model-derived links; stated ones (yours: extractor 'user') are never in its claims
-    assert all(claim[1] not in STATED for claim in verify.CLAIMS)
+    # the verifier only judges model-derived links; stated ones (yours: extractor 'user', an agent's: 'agent:<name>')
+    # are never in its claims
+    assert all(not stated(claim[1]) for claim in verify.CLAIMS)
+    assert all(stated(x) for x in (*STATED, "agent:claude-code")) and not stated("threads")
 
 
 def test_person_merge_is_a_trusted_user_link(db):

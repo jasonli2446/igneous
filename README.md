@@ -67,6 +67,7 @@ IGNEOUS_LLM_SOURCES=
 # IGNEOUS_FILESYSTEM_ROOTS=~/Documents/notes,~/Desktop   # "Local files" folders (default: Documents, Desktop, Downloads, iCloud Drive)
 # IGNEOUS_WEB_URL=http://localhost:3000 # where Google sign-in sends you back
 # IGNEOUS_DATA_DIR=../data              # OAuth client, token encryption key, Enron mailboxes (relative to api/)
+# IGNEOUS_MCP_WRITE=true                # let an MCP agent add facts (remember, link), each undone in one click
 ```
 
 The Bedrock key is not a setting in `api/.env`. Save it once, and every process finds it (the API, the CLI, and the MCP
@@ -235,7 +236,7 @@ subject, a file's name, a conversation's name). When the chunk layout changes (`
 | Path | What |
 |---|---|
 | `api/igneous/connectors/` | `base.py` connector contract + resumable sync runner, which stores every item's title, text and metadata text with the credentials `redact.py` matches replaced by `[REDACTED:<kind>]` (and `redact_stored`, the pipeline's first step, which brings items stored under an older version of those rules up to date); one module per source (`gmail.py`, `gcal.py`, `drive.py`, `github.py`, `imessage.py`, `ai_chats.py`, `filesystem.py`, `takeout.py`, `linkedin.py`, ...) |
-| `api/igneous/graph/` | `spine.py` the graph read from record metadata, recording which records support each node and edge and what each says about it; `names.py` a person's name in the order it is read; `extract.py` model mentions with span provenance; `entities.py`, `threads.py`, `resolve_threads.py`, `profile.py`, `backbone.py` derived projects, life threads and your orgs; `resolve.py` entity resolution; `verify.py` checks every derived link; `traversal.py` what the explorer shows; `invariants.py` `igneous check-graph` |
+| `api/igneous/graph/` | `spine.py` the graph read from record metadata, recording which records support each node and edge and what each says about it; `names.py` a person's name in the order it is read; `extract.py` model mentions with span provenance; `entities.py`, `threads.py`, `resolve_threads.py`, `profile.py`, `backbone.py` derived projects, life threads and your orgs; `resolve.py` entity resolution; `verify.py` checks every derived link; `corrections.py`, `overrides.py` your corrections as intents, applied last; `facts.py` facts you or an agent add (`POST /facts`, MCP `remember` / `link`); `traversal.py` what the explorer shows; `invariants.py` `igneous check-graph` |
 | `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `constraints.py` the filters a question states, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
 | `api/igneous/llm.py` | structured model calls and the rule for what a model may read (`allowed_sources`, `visible_nodes`); `providers.py` talks to Bedrock |
 | `api/igneous/mcp_server.py` | the MCP tools; `disclosure.py` applies the model rule to what they return; `mcp_client.py` is `igneous mcp install` and `check` |
@@ -348,7 +349,8 @@ test suite never runs it.
 
 ## MCP server (use the graph from Claude Code, Claude Desktop, Cursor)
 
-Eleven tools, each calling the readers the explorer and the API use, through a read-only database session:
+Eleven tools, each calling the readers the explorer and the API use, through a read-only database session, and two
+that add facts, served only with writes on (below):
 
 | Tool | What it returns |
 |---|---|
@@ -363,12 +365,24 @@ Eleven tools, each calling the readers the explorer and the API use, through a r
 | `correspondents(person_node_id, limit)` | Someone's real relationships, closest first (two-way, recency-weighted) |
 | `search(query, person_node_id, include_browsing, k)` | Hybrid keyword and semantic passages, with the filters the query states |
 | `ask(question)` | A cited answer from the hosted model, or "can't answer"; the one paid tool |
+| `remember(subject, relation, object, note)` | With writes on: records a fact, such as a person took part in a project (`INVOLVED_IN`), a record or project is part of a project (`PART_OF`), someone worked at or belongs to an organization (`WORKED_AT`, `MEMBER_OF`), or two things are related (`RELATED_TO`). Each side is a node id, or a new project or organization by name |
+| `link(a, b, why)` | With writes on: records that two nodes are connected (`RELATED_TO`), and why |
 
 **What leaves through MCP.** A tool's answer goes to the model the client runs, so it follows the rule a hosted model's
 prompt follows (`api/igneous/disclosure.py`, [Model calls](#model-calls)): text only from the sources in
 `IGNEOUS_LLM_SOURCES`, names only of the people and things those records name, and counts (`withheld`) for the rest.
 With nothing opted in, the default, the tools return the graph's structure and counts only. Only `ask` calls a model,
-and like every model call it keeps the model's reading of the question in the model cache; nothing else writes.
+and like every model call it keeps the model's reading of the question in the model cache.
+
+**Writes, off by default.** With `IGNEOUS_MCP_WRITE=true` in `api/.env` (or `igneous mcp install --write` for one
+server), the agent can add to your graph what you tell it or what it finds, with `remember` and `link`. Each fact goes
+through the same path as one you add in the explorer (`POST /facts`, `api/igneous/graph/facts.py`): it is a correction
+like your others, so it holds through every rebuild and applies now (or when the rebuild that is running publishes),
+and nothing is ever written to a source. It is tagged with the agent's name as its client gives it when it connects
+(Claude Code's: `agent:claude-code`): the explorer shows the link with that origin ("Added by claude-code."), and
+**Remove** on it takes it out, with Undo. An agent can state facts only about what it can see (what the opted-in
+records name) and about you, never that two people are one, and its answer names things by the rule above. Without
+writes on, the two tools don't exist.
 
 Register it with Claude Code, at user scope so every session has it:
 
@@ -376,6 +390,7 @@ Register it with Claude Code, at user scope so every session has it:
 cd api
 uv run igneous mcp install                 # the database and opt-ins api/.env names
 uv run igneous mcp install --name igneous-enron --database igneous --sources email   # a second one, on the Enron demo
+uv run igneous mcp install --write         # one whose agent may add facts (remember, link)
 uv run igneous mcp check                   # start it as a client does and call each tool once; --ask also calls ask
 uv run igneous connect bedrock             # for ask only: save the model key where the server finds it
 ```
@@ -384,7 +399,8 @@ uv run igneous connect bedrock             # for ask only: save the model key wh
 in Claude Code's configuration: the server reads the database password from `api/.env`, and the model key from
 `AWS_BEARER_TOKEN_BEDROCK` or what `igneous connect bedrock` saved. For another client (Claude Desktop, Cursor),
 register the command `install` prints. Postgres must be running (`make db`). A tool given the id of nothing fails with
-a message, and arguments out of range are refused before the database is read.
+a message, and arguments out of range are refused before the database is read. `check` lists the write tools a server
+serves and never calls them.
 
 ## Google (Gmail, Drive, Calendar, Contacts)
 

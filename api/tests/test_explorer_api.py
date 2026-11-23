@@ -281,9 +281,16 @@ def test_every_edge_says_where_it_came_from(world, client, db):
     g = client.get("/graph/view").json()
     expanded = client.get("/graph/expand", params={"seed": w.me, "node": w.atlas, "visible": [w.me]}).json()
     for e in g["edges"] + expanded["edges"]:
-        assert e["origin"] in ("stated", "derived", "user") and e["stated"] is (e["origin"] != "derived"), e
-    spokes = [e for e in g["edges"] if e["src"] == w.me]
+        assert e["origin"] in ("stated", "derived", "user", "agent:helper"), e
+        assert e["stated"] is (e["origin"] != "derived"), e
+    spokes = [e for e in g["edges"] if e["src"] == w.me and e["type"] == "RELATED"]
     assert spokes and all(e["origin"] == "derived" and not e["stated"] for e in spokes)
+    # A fact shows as itself, in place of the spoke: yours from the centre, an agent's when Atlas opens.
+    assert [(e["type"], e["origin"]) for e in g["edges"] if {e["src"], e["dst"]} == {w.me, w.atlas}] == [
+        ("RELATED_TO", "user")]
+    assert w.ana in {n["id"] for n in expanded["nodes"]}
+    assert [(e["type"], e["origin"]) for e in expanded["edges"] if {e["src"], e["dst"]} == {w.ana, w.atlas}] == [
+        ("RELATED_TO", "agent:helper")]
     # Who is in the crew is read straight from who wrote there.
     ties = [e for e in g["edges"] if e["type"] == "PART_OF" and e["dst"] == w.crew]
     assert ties and all(e["origin"] == "stated" and e["stated"] for e in ties)
@@ -291,8 +298,8 @@ def test_every_edge_says_where_it_came_from(world, client, db):
     assert [(e["origin"], e["stated"], e["how"]) for e in links] == [("user", True, "You added this.")]
     inferred = client.get("/graph/explain", params={"a": w.ana, "b": w.atlas}).json()["direct"]
     by = {e["extractor"]: e for e in inferred}
-    assert (by["agent:helper"]["origin"], by["agent:helper"]["stated"]) == ("agent:helper", False)
-    assert by["agent:helper"]["how"] == "Added by helper. Not checked yet."
+    assert (by["agent:helper"]["origin"], by["agent:helper"]["stated"]) == ("agent:helper", True)
+    assert by["agent:helper"]["how"] == "Added by helper."
     assert (by["threads"]["origin"], by["threads"]["stated"]) == ("derived", False)
     assert by["threads"]["how"] == "Suggested automatically from shared words and timing."  # its verdict: keep
     intro = client.get("/graph/explain", params={"a": w.ana, "b": w.sam}).json()["direct"]

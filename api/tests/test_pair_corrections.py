@@ -8,8 +8,12 @@ from sqlalchemy.orm import Session
 
 from igneous import llm, mcp_server, providers
 from igneous.graph import verify
+from igneous.graph.derived import STATED, added
 from igneous.graph.resolve import refresh_canonical
 from igneous.main import app
+
+# Every extractor that states a fact: read from your data, added by you, or added by an agent.
+STATING = (*STATED, "agent:claude-code")
 
 
 @pytest.fixture
@@ -29,14 +33,15 @@ def node(s, kind, key, name=None, props=None):
 
 
 def edge(s, a, b, kind="RELATED_TO", extractor="threads", props=None, item=None):
-    """An edge; one you added (extractor 'user') with its intent, as POST /graph/link records it."""
-    props = props or ({"why": "you added this"} if extractor == "user" else {})
-    if extractor == "user":
+    """An edge; one you or an agent added (extractor 'user' or 'agent:<name>') with its fact, as POST /facts records
+    it."""
+    props = props or ({"why": "you added this"} if added(extractor) else {})
+    if added(extractor):
         s.execute(text("""INSERT INTO overrides (op, node_keys, value, data)
                           SELECT 'link', ARRAY[x.type || ':' || x.key, y.type || ':' || y.key], :t,
-                                 jsonb_build_object('props', CAST(:p AS jsonb))
+                                 jsonb_build_object('props', CAST(:p AS jsonb), 'by', CAST(:x AS text))
                           FROM nodes x, nodes y WHERE x.id = :a AND y.id = :b"""),
-                  {"a": a, "b": b, "t": kind, "p": json.dumps(props)})
+                  {"a": a, "b": b, "t": kind, "p": json.dumps(props), "x": extractor})
     return s.execute(text("""
         INSERT INTO edges (src,dst,type,extractor,extractor_version,props,source_item_id,confidence,model,
                            valid_from,valid_to,span_start,span_end)
@@ -68,7 +73,7 @@ def test_rejection_blocks_all_derived_types_and_directions_after_a_rebuild(graph
     a, b = node(s, left, "A"), node(s, right, "B")
     first = edge(s, a, b, kind)
     other = edge(s, b, a, extractor="different-rule")
-    stated = [edge(s, a, b, extractor=x) for x in verify.STATED]
+    stated = [edge(s, a, b, extractor=x) for x in STATING]
     response = client.post("/graph/edge/wrong", json={"edge": first})
     assert response.status_code == 200
     assert set(response.json()["edges"]) == {first, other}
@@ -81,7 +86,7 @@ def test_rejection_blocks_all_derived_types_and_directions_after_a_rebuild(graph
     assert {r["id"] for r in rows(s, "edges")} == set(stated)
 
 
-@pytest.mark.parametrize("extractor", verify.STATED)
+@pytest.mark.parametrize("extractor", STATING)
 def test_stated_facts_cannot_be_rejected(graph, extractor):
     s, client = graph
     a, b = node(s, "Person", "A"), node(s, "Project", "B")

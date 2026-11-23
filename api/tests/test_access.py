@@ -33,12 +33,12 @@ def test_local_host_names_are_answered_and_others_refused(client, monkeypatch):
 def test_the_web_app_reads_answers_and_no_one_else_does(client):
     ok = client.get("/health", headers={"origin": WEB})
     assert ok.status_code == 200 and ok.headers["access-control-allow-origin"] == WEB
-    preflight = client.options("/graph/link", headers={"origin": WEB, "access-control-request-method": "POST",
+    preflight = client.options("/facts", headers={"origin": WEB, "access-control-request-method": "POST",
                                                        "access-control-request-headers": "content-type"})
     assert preflight.status_code == 200 and preflight.headers["access-control-allow-origin"] == WEB
     for origin in ("http://evil.example", "http://localhost:3001", "null"):
         assert client.get("/health", headers={"origin": origin}).status_code == 403, origin
-        refused = client.options("/graph/link", headers={"origin": origin, "access-control-request-method": "POST"})
+        refused = client.options("/facts", headers={"origin": origin, "access-control-request-method": "POST"})
         assert refused.status_code == 403 and "access-control-allow-origin" not in refused.headers, origin
 
 
