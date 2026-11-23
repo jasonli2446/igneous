@@ -1,37 +1,35 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useLayoutEffect, useSyncExternalStore } from "react";
+import { applyTheme, chooseTheme, isDark, onThemeChange, OS_DARK, preferredTheme, savedTheme } from "@/lib/theme";
 
-/** Follows the OS until you choose; your choice is remembered. Exposes the current theme to the graph. */
+/** Whether the page is dark right now. Server rendering assumes light; the head script has already set the real
+ *  theme by the time this hydrates, and React re-renders with it. */
 export function useTheme() {
-  const [dark, setDark] = useState(false);
-  useEffect(() => {
-    const sync = () => setDark(document.documentElement.classList.contains("dark"));
-    sync();
-    const obs = new MutationObserver(sync);
-    obs.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
-    return () => obs.disconnect();
-  }, []);
-  return dark;
+  return useSyncExternalStore(onThemeChange, isDark, () => false);
 }
 
 export default function ThemeToggle() {
   const dark = useTheme();
-  useEffect(() => {
-    let saved: string | null = null;
-    try { saved = localStorage.getItem("theme"); } catch {}
-    const want = saved ? saved === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
-    document.documentElement.classList.toggle("dark", want);
+
+  useLayoutEffect(() => {
+    // In development React remounts the page once and resets <html> to the attributes it renders, dropping the one
+    // the head script set: put it back before paint. Until you choose, follow the OS when it switches.
+    applyTheme(preferredTheme());
+    const os = matchMedia(OS_DARK);
+    const follow = () => { if (!savedTheme()) applyTheme(os.matches ? "dark" : "light"); };
+    os.addEventListener("change", follow);
+    return () => os.removeEventListener("change", follow);
   }, []);
-  const flip = () => {
-    const next = !dark;
-    document.documentElement.classList.toggle("dark", next);
-    try { localStorage.setItem("theme", next ? "dark" : "light"); } catch {}
-  };
+
+  // The label comes from CSS (the dark: variant), so it is right from the first paint, before React hydrates.
   return (
-    <button onClick={flip} aria-label={dark ? "Switch to light mode" : "Switch to dark mode"}
+    <button type="button" onClick={() => chooseTheme(dark ? "light" : "dark")}
       className="ml-auto rounded-md px-2 py-1 text-muted hover:bg-hover hover:text-ink">
-      {dark ? "Light" : "Dark"}
+      <span className="sr-only">Switch to </span>
+      <span className="dark:hidden">Dark</span>
+      <span className="hidden dark:inline">Light</span>
+      <span className="sr-only"> mode</span>
     </button>
   );
 }

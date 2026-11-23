@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* dark: utilities follow the theme on <html data-theme> (lib/theme.ts), not the OS setting alone. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 /* Expose the tokens as Tailwind colors (bg-ink, text-muted, border-line, ...). */
 @theme inline {
   --color-bg: var(--bg);
@@ -13,71 +16,128 @@
   --color-danger: var(--danger);
 }
 
-/* Stone neutrals: the chrome stays quiet so the graph's community colors carry the screen.
-   Light = pale limestone, dark = basalt; one moss-green accent for focus and links. */
-:root {
-  --bg: #f6f6f3;
-  --panel: #fbfbf9;
-  --ink: #1f2420;
-  --soft: #4a4f49;
-  --muted: #787d75;
-  --line: #e1e2dc;
-  --hover: #ecede8;
-  --accent: #3f7a5c;
-  --danger: #b4412f;
-  color-scheme: light;
-}
-:root.dark {
-  --bg: #151714;
-  --panel: #1b1d1a;
-  --ink: #e8e8e3;
-  --soft: #c2c4bd;
-  --muted: #8b8f87;
-  --line: #2c2f2a;
-  --hover: #252824;
-  --accent: #79c29a;
-  --danger: #f08a73;
-  color-scheme: dark;
+@layer base {
+  /* Stone neutrals: the chrome stays quiet so the graph's section colors carry the screen.
+     Light = pale limestone, dark = basalt; one moss-green accent for focus and links.
+     --muted is the lightest text, and keeps 4.5:1 (WCAG AA) against --bg, --panel and --hover.
+     The 3D graph reads these at runtime (themeColors in lib/graph-style.ts), so they stay plain hex. */
+  :root {
+    --bg: #f6f6f3;
+    --panel: #fbfbf9;
+    --ink: #1f2420;
+    --soft: #4a4f49;
+    --muted: #686d66;
+    --line: #e1e2dc;
+    --hover: #ecede8;
+    --accent: #3f7a5c;
+    --danger: #b4412f;
+    /* Graph lines, faintest to strongest: a centre's spokes, what is part of what, ties between people;
+       --graph-flow is the particles moving along strong ties. */
+    --graph-spoke: #d8dad4;
+    --graph-structure: #c3c6be;
+    --graph-tie: #8b9187;
+    --graph-flow: #4b7f63;
+    color-scheme: light;
+  }
+  :root[data-theme="dark"] {
+    --bg: #151714;
+    --panel: #1b1d1a;
+    --ink: #e8e8e3;
+    --soft: #c2c4bd;
+    --muted: #8b8f87;
+    --line: #2c2f2a;
+    --hover: #252824;
+    --accent: #79c29a;
+    --danger: #f08a73;
+    --graph-spoke: #3a3d38;
+    --graph-structure: #585c55;
+    --graph-tie: #8a9187;
+    --graph-flow: #c9e7d7;
+    color-scheme: dark;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* A file input hidden inside its label (the import drop zones) shows its focus on the label. */
+  label:has(> input[type="file"]:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { scroll-behavior: auto !important; }
+  }
 }
 
-body {
-  background: var(--bg);
-  color: var(--ink);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  -webkit-font-smoothing: antialiased;
+/* Buttons and fields, so each kind looks the same everywhere. */
+@utility btn {
+  @apply rounded-md border border-line px-2.5 py-1 text-xs transition-colors hover:bg-hover disabled:opacity-50;
+}
+@utility btn-primary {
+  @apply rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50;
+}
+/* The small chips beside a row: Why, Open, View. */
+@utility btn-chip {
+  @apply rounded border border-line px-1.5 py-0.5 text-[11px] text-soft hover:bg-hover hover:text-ink disabled:opacity-50;
+}
+@utility btn-close {
+  @apply rounded px-1.5 text-lg leading-none text-muted hover:bg-hover hover:text-ink;
+}
+@utility btn-link {
+  @apply text-xs text-accent hover:underline disabled:opacity-50;
+}
+/* One row in a picker's results. */
+@utility btn-option {
+  @apply flex w-full items-center justify-between gap-2 rounded px-1.5 py-1 text-left text-xs hover:bg-hover;
+}
+@utility field {
+  @apply min-w-0 rounded border border-line bg-bg px-2 py-1 text-xs outline-none placeholder:text-muted focus:border-accent;
 }
 
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
+@layer components {
+  /* 3D graph hover tooltip (rendered by 3d-force-graph as HTML). */
+  .g3-tip {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-width: 280px;
+    padding: 6px 9px;
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--ink);
+    border: 1px solid var(--line);
+    font: 12px/1.35 ui-sans-serif, system-ui, sans-serif;
+    box-shadow: 0 4px 14px rgb(0 0 0 / 0.12);
+  }
+  .g3-tip span { color: var(--soft); }
+  .g3-tip em { color: var(--muted); font-style: normal; font-size: 11px; }
 
-/* 3D graph hover tooltip (rendered by 3d-force-graph as HTML). */
-.g3-tip {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-width: 280px;
-  padding: 6px 9px;
-  border-radius: 6px;
-  background: var(--panel);
-  color: var(--ink);
-  border: 1px solid var(--line);
-  font: 12px/1.35 ui-sans-serif, system-ui, sans-serif;
-  box-shadow: 0 4px 14px rgb(0 0 0 / 0.12);
+  .progress-slide { animation: progress-slide 1.1s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) {
+    .progress-slide { animation: none; width: 100%; opacity: 0.5; }
+  }
 }
-.g3-tip span { color: var(--soft); }
-.g3-tip em { color: var(--muted); font-style: normal; font-size: 11px; }
-/* 3d-force-graph's own tooltip wrapper is black by default; make it transparent around ours. */
-.scene-tooltip { background: transparent !important; padding: 0 !important; }
 
 @keyframes progress-slide {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(300%); }
 }
-.progress-slide { animation: progress-slide 1.1s ease-in-out infinite; }
 
-@media (prefers-reduced-motion: reduce) {
-  * { scroll-behavior: auto !important; }
-  .progress-slide { animation: none; width: 100%; opacity: 0.5; }
+/* The graph's tooltip box comes from float-tooltip, which adds its own unlayered stylesheet (a dark, padded box) when
+   the graph loads. A layer would lose to it, so this stays unlayered and one class more specific: the box becomes a
+   transparent frame around the .g3-tip card. */
+.scene-container .float-tooltip-kap {
+  padding: 0;
+  background: transparent;
+  color: inherit;
 }
