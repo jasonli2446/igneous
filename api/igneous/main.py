@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, UploadFile
@@ -26,7 +26,6 @@ from igneous.llm import LLMDisabled, model_status
 from igneous.rag import qa
 from igneous.rag.constraints import apply
 from igneous.rag.search import Filters, experts, hybrid
-from igneous.sync_status import sync_status
 from igneous.timeline import EntityNotFoundError, timeline
 
 
@@ -84,16 +83,6 @@ def stats(s: Session = Depends(get_session)):
         "edges": dict(q("SELECT type, count(*) FROM edges GROUP BY 1")),
         "chunks": s.execute(text("SELECT count(*) AS total, count(embedding) AS embedded FROM chunks")).one()._asdict(),
     }
-
-
-@app.get("/sync")
-def sync(
-    connector: Literal["email", "imessage", "gmail", "gcal", "gcontacts", "drive", "fs", "notes"] | None = None,
-    account: str | None = None,
-    s: Session = Depends(get_session),
-):
-    """Report persisted sync checkpoints; this endpoint never starts a sync."""
-    return {"syncs": sync_status(s, connector=connector, account=account)}
 
 
 @app.get("/search")
@@ -244,14 +233,19 @@ def _start_job(kind: str, source: str, runner, account: str | None = None):
 
 @app.post("/sources/{source_id}/sync")
 def sync_source(source_id: str, account: str | None = None):
-    """Run `igneous sync <source_id>` in the background; poll /jobs/{id}."""
+    """Sync a source in the background, as `igneous sync <source_id>` does: every connected account, or `account`,
+    each from where its last sync stopped. Poll /jobs/{id}."""
     if source_id not in sources.SYNCABLE:
         raise HTTPException(404, f"{source_id} is not a source you can sync from here")
     ok, message = sources.check_requirements(source_id)
     if not ok:
         raise HTTPException(422, message)
-    return _start_job("sync", source_id, lambda sess, progress: sources.build(source_id, sess, account, progress),
-                      account)
+    try:
+        sources.check_options(source_id, sources.SyncOptions(), account)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    return _start_job("sync", source_id, lambda sess, progress: sources.sync(source_id, sess, account,
+                                                                              progress=progress), account)
 
 
 @app.get("/sources/google/connect")

@@ -15,6 +15,7 @@ import json
 import zipfile
 from collections import defaultdict
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import BinaryIO
 
 from bs4 import BeautifulSoup
@@ -180,3 +181,14 @@ class ExportConnector:
 
     def sync(self, cursor: dict):
         yield from self.items
+
+
+def run_import(s, path: Path, provider: str | None = None) -> dict:
+    """Import one export file: the body of `igneous import ai-export`. Re-running it changes nothing: ids are
+    stable and unchanged items keep their content hash."""
+    from igneous.connectors.base import run_sync
+
+    with open(path, "rb") as fh:
+        kind, convs = parse_export(fh, provider)
+    stats = run_sync(s, ExportConnector(export_items(kind, convs)), account=kind)
+    return {"provider": kind, "conversations": len(convs), **stats}

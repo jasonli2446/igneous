@@ -82,7 +82,8 @@ def run(s: Session) -> dict[str, dict]:
         if not info["can_sync"]:
             continue
         try:
-            job = jobs.start("sync", source, lambda session, progress, source=source: sources.build(source, session, None, progress))
+            job = jobs.start("sync", source, lambda session, progress, source=source: sources.sync(
+                source, session, progress=progress))
         except jobs.JobBusy:
             result[source] = {"skipped": "already running"}
             continue

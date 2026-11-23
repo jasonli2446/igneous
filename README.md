@@ -86,7 +86,8 @@ Open <http://localhost:3000/settings> (**Sources** in the top bar). Every source
 **Connected accounts** (Google, GitHub), **Exports you upload** (ChatGPT, Claude.ai, LinkedIn, Google Takeout, with the
 upload or path box inline) and **On this computer** (Messages, Contacts, Claude Code and Codex chats, local files, Apple
 Notes). Each entry says what it reads, shows its status and last sync or import, and lists the steps to connect it.
-The list comes from `GET /sources`, so the page and the CLI never drift apart. Everything is read-only.
+The page shows `GET /sources`, the registry in `api/igneous/sources.py`. That registry also builds each source's
+connector, so **Sync now**, `igneous sync` and the scheduled sync read a source the same way. Everything is read-only.
 
 Connect or import at least one source, then press **Rebuild** under "Build the graph". Rebuild runs the same pipeline as
 `igneous pipeline`: it reads your sources into people, threads and events, chunks and embeds text, finds topics and
@@ -107,7 +108,7 @@ Enron demo (one mailbox, about 3k emails, end to end in a few minutes):
 
 ```bash
 make enron      # download and extract the mailboxes into data/ (~450 MB, once)
-make demo       # make migrate, igneous sync email --mailbox allen-p, igneous pipeline --extract 100
+make demo       # make migrate, igneous sync email (the allen-p demo mailbox), igneous pipeline --extract 100
 ```
 
 `make demo` calls the model for up to 100 messages (`EXTRACT=100`); that needs `AWS_BEARER_TOKEN_BEDROCK` and
@@ -133,13 +134,15 @@ The CLI uses the same `IGNEOUS_DATABASE_URL`, so `igneous sync ...` fills whiche
 ```bash
 cd api
 uv run igneous connect google                       # sign in to a Google account (read-only); repeat to add more
-uv run igneous sync gmail --since-days 90           # also: gcal, gcontacts, drive, github, imessage, maccontacts, notes, ai_chats
-uv run igneous sync fs --path ~/Documents/notes     # local files (default: IGNEOUS_FILESYSTEM_ROOTS)
-uv run igneous sync email --mailbox allen-p         # Enron demo mailbox
+uv run igneous connect github < token.txt           # a read-only GitHub token (or type it at the hidden prompt)
+uv run igneous sync gmail                           # every connected account; `igneous sync --help` lists the sources
+uv run igneous sync fs                              # local files: the IGNEOUS_FILESYSTEM_ROOTS folders
+uv run igneous sync fs --path ~/Documents/notes     # just this folder; other folders' files are left alone
+uv run igneous sync email                           # Enron demo mailbox allen-p (--mailbox to pick others)
 
 uv run igneous import takeout ~/Downloads/takeout-*.zip     # or --downloads to use ~/Downloads/takeout-*.zip
 uv run igneous import linkedin ~/Downloads/Basic_LinkedInDataExport.zip   # a zip or an extracted folder
-# ChatGPT and Claude.ai exports are uploaded on the Sources page.
+uv run igneous import ai-export ~/Downloads/chatgpt-export.zip            # ChatGPT or Claude.ai, zip or JSON
 
 uv run igneous pipeline                             # build the graph from whatever is new (same as Rebuild)
 uv run igneous pipeline --extract 200               # also LLM-extract up to 200 newest messages (costs money)
@@ -184,17 +187,23 @@ skip calls or `EXTRACT=500` to process more. Everything is incremental: re-runni
 
 Use the personal database (see Setup). Reads `~/Library/Messages/chat.db` read-only; each conversation-day becomes one
 item. The app that runs the API or CLI (Terminal, iTerm, your editor) needs Full Disk Access (System Settings,
-Privacy & Security). Press Sync now on the Messages entry, or:
+Privacy & Security). Press Sync now on the Messages entry, or run the same sync from the command line (the first sync
+reads the last 90 days; `--since-days` changes that):
 
 ```bash
-cd api && uv run igneous sync imessage --since-days 90 && uv run igneous pipeline
+cd api && uv run igneous sync imessage && uv run igneous pipeline
 ```
 
 **Never commit or demo personal data** (proposal CO-5): use the Enron DB for anything shared.
 
 ## Adding a stage or connector
 
-- **Connector:** implement `sync(cursor) -> Iterator[SourceItem | Checkpoint]` (see `connectors/base.py`), register it in `cli.py`.
+- **Connector:** a class whose `sync(cursor)` yields `SourceItem`s, a `Checkpoint` whenever what came before may be
+  committed, and a `Tombstone` for each item a change feed reports removed, or a final `CompletedScan` (with the
+  scopes it listed) when it listed everything (`connectors/base.py`; `run_sync` redacts and stores what it yields).
+  Then add its entry to `SOURCES` in `api/igneous/sources.py`, with the `build` that makes it (the CLI, the Sources
+  page and the scheduler all use that one) and the steps to set it up; each value it stores in
+  `source_items.source` to `source_catalog.py`; and how the spine turns its items into nodes (`graph/spine.py`).
 - **Pipeline stage:** read rows newer than `watermark(s, STAGE)`, write, then `advance(...)`. See `rag/chunking.py`.
 
 ## Known gaps in the baseline

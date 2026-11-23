@@ -86,8 +86,8 @@ CARD_COLS = """si.id, si.source, si.external_id, si.title, si.occurred_at, si.ra
 
 
 def _roots() -> list[Path]:
-    from igneous.sources import _fs_roots
-    return _fs_roots()
+    from igneous.sources import fs_roots
+    return fs_roots()
 
 
 @router.get("/items/{item_id}")

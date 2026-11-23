@@ -39,6 +39,8 @@ A new user should only have to start the stack and follow the **Sources** page (
 Whenever you add or change a connector, an import format, a required permission, or a pipeline stage, update
 that page (and `GET /sources`) in the same PR: what it reads, how to connect it step by step, and its status.
 Export formats are sources too: add the entry to `SOURCES` and an inline form in `web/src/components/ImportForms.tsx`.
+A syncable entry's `build` is the only place its connector is made: `igneous sync`, Sync now and the scheduled sync
+all run `sources.sync`.
 (`/import` only redirects to the Sources page.)
 
 ## Data and privacy (proposal constraints CO-1, CO-2, CO-5)

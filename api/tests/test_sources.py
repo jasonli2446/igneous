@@ -1,14 +1,23 @@
-"""Sources registry shape and the background job runner. No network; jobs use a fake connector and the test database."""
+"""The Sources registry, the one path every sync takes (CLI, API, scheduler), and the background job runner.
+No network: Google and GitHub are faked, and jobs run fake connectors against the test database."""
+import json
 import time
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import text
+from typer.testing import CliRunner
 
 from igneous import jobs, sources
+from igneous.cli import app as cli
+from igneous.connectors import secrets
 from igneous.connectors.base import Checkpoint, SourceItem
+from igneous.connectors.email_maildir import MaildirConnector
+from igneous.connectors.imessage import MessagesConnector
 from igneous.db import SessionLocal
+from igneous.main import app
 
-KINDS = {"google", "local", "remote", "import", "planned"}
+KINDS = {"google", "local", "remote", "import"}
 
 
 def test_registry_shape():
@@ -18,17 +27,142 @@ def test_registry_shape():
             "chatgpt", "takeout", "claude_ai", "github"} <= set(ids)
     for s in sources.SOURCES:
         assert s["kind"] in KINDS
-        assert s["name"] and s["reads"] and s["group"]
+        assert s["name"] and s["reads"] and s["group"] and s["cli"]
         assert isinstance(s["steps"], list) and s["steps"] and all(isinstance(x, str) for x in s["steps"])
+        assert ("build" in s) == (s["kind"] != "import")  # every source you sync builds its own connector
+    assert sources.SYNCABLE == ("gmail", "gcal", "gcontacts", "drive", "github", "imessage", "maccontacts",
+                                "ai_chats", "fs", "notes", "email")
 
 
-def test_every_syncable_source_can_be_built(monkeypatch, tmp_path):
-    monkeypatch.setattr(sources.settings, "data_dir", str(tmp_path))
-    assert sources.SYNCABLE == {"gmail", "gcal", "gcontacts", "drive", "imessage", "maccontacts", "ai_chats", "fs",
-                                "notes", "email", "github"}
+def test_every_local_source_builds_its_connector_with_the_shared_defaults(db, monkeypatch, tmp_path):
+    monkeypatch.setattr(sources.settings, "filesystem_roots", str(tmp_path))
     for sid in sources.SYNCABLE:
-        ok, message = sources.check_requirements(sid)
-        assert isinstance(ok, bool) and (ok or message)
+        entry = sources.BY_ID[sid]
+        if entry["kind"] != "local":
+            continue
+        ((account, make),) = entry["build"](db, None, sources.SyncOptions())
+        connector = make()
+        assert account == "default" and connector.name == sid
+    ((_, make),) = sources.BY_ID["imessage"]["build"](db, None, sources.SyncOptions())
+    assert make().since_days == 90  # one first-sync window, whoever asks
+    ((_, make),) = sources.BY_ID["email"]["build"](db, None, sources.SyncOptions())
+    assert make().mailboxes == list(sources.DEMO_MAILBOXES)
+
+
+def test_account_sources_need_an_account_and_build_one_connector_per_account(db, monkeypatch):
+    with pytest.raises(sources.SetupNeeded, match="connect google"):
+        sources.BY_ID["gmail"]["build"](db, None, sources.SyncOptions())
+    with pytest.raises(sources.SetupNeeded, match="connect github"):
+        sources.BY_ID["github"]["build"](db, None, sources.SyncOptions())
+    secrets.save(db, "google", "a@x.com", "{}")
+    secrets.save(db, "google", "b@y.com", "{}")
+    secrets.save(db, "github", "octo", "github_pat_" + "x" * 30)
+    from igneous.connectors import google_auth
+    monkeypatch.setattr(google_auth, "load", lambda s, account: (account, None))
+    monkeypatch.setattr("igneous.connectors.gmail.build", lambda *a, **k: object())
+    pairs = sources.BY_ID["gmail"]["build"](db, None, sources.SyncOptions(all_mail=True))
+    assert [name for name, _ in pairs] == ["a@x.com", "b@y.com"]
+    gmail = pairs[0][1]()
+    assert (gmail.account, gmail.since_days, gmail.all_mail) == ("a@x.com", 90, True)
+    ((name, make),) = sources.BY_ID["github"]["build"](db, None, sources.SyncOptions())
+    assert name == "octo" and make().account == "octo"
+
+
+def test_options_a_source_does_not_take_are_refused():
+    sources.check_options("email", sources.SyncOptions(mailboxes=("lay-k",)))
+    with pytest.raises(ValueError, match="--mailbox doesn't apply to fs"):
+        sources.check_options("fs", sources.SyncOptions(mailboxes=("lay-k",)))
+    with pytest.raises(ValueError, match="fs has no accounts"):
+        sources.check_options("fs", sources.SyncOptions(), account="me@x.com")
+    with pytest.raises(ValueError, match="not a source you can sync; choose one of gmail"):
+        sources.check_options("chatgpt", sources.SyncOptions())
+
+
+class Fixed:
+    """A connector that stores `n` items, or fails."""
+
+    def __init__(self, name: str, n: int, fail: str | None = None):
+        self.name, self.n, self.fail = name, n, fail
+
+    def sync(self, cursor):
+        if self.fail:
+            raise RuntimeError(self.fail)
+        for i in range(self.n):
+            yield SourceItem(self.name, f"{self.name}/{i}", f"t{i}", "x")
+        yield Checkpoint({"n": self.n})
+
+
+def test_one_failing_account_does_not_stop_the_others(db, monkeypatch):
+    entry = {**sources.BY_ID["github"], "build": lambda s, account, opts: [
+        ("bad", lambda: Fixed("github", 0, "GitHub rejected the token")), ("good", lambda: Fixed("github", 2))]}
+    monkeypatch.setitem(sources.BY_ID, "github", entry)
+    with pytest.raises(sources.SyncFailed, match="bad: GitHub rejected the token") as failure:
+        sources.sync("github", db)
+    assert failure.value.result["inserted"] == 2 and list(failure.value.result["accounts"]) == ["good"]
+
+
+def test_the_cli_and_the_api_sync_through_the_registry(db, monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(sources, "sync", lambda *a, **k: calls.append((a[0], a[2:], k)) or {"accounts": {}})
+    assert CliRunner().invoke(cli, ["sync", "imessage", "--since-days", "30"]).exit_code == 0
+    assert calls[0][0] == "imessage" and calls[0][1][1] == sources.SyncOptions(since_days=30)
+    started = []
+    monkeypatch.setattr(jobs, "start", lambda kind, source, runner, account=None: started.append(runner) or {
+        **{k: None for k in ("id", "kind", "source", "account", "status", "started_at", "finished_at", "progress",
+                             "error", "result")}})
+    monkeypatch.setattr(sources, "check_requirements", lambda sid: (True, None))
+    assert TestClient(app).post("/sources/imessage/sync").status_code == 200
+    started[0](db, lambda *a, **k: None)
+    assert calls[1][0] == "imessage" and calls[1][2]["progress"] is not None
+
+
+def said(result) -> str:
+    """CLI output as one line of words: the error box wraps at the terminal's width."""
+    return " ".join(result.output.replace("│", " ").split())
+
+
+def test_igneous_sync_validates_the_source_and_lists_the_choices(test_db):
+    result = CliRunner().invoke(cli, ["sync", "contacts"])
+    assert result.exit_code == 2 and "choose one of gmail, gcal" in said(result)
+    assert "One of: gmail, gcal, gcontacts, drive, github" in said(CliRunner().invoke(cli, ["sync", "--help"]))
+    result = CliRunner().invoke(cli, ["sync", "fs", "--mailbox", "lay-k"])
+    assert result.exit_code == 2 and "--mailbox doesn't apply to fs" in said(result)
+
+
+def test_igneous_sync_email_reads_the_demo_mailbox_by_default(db, tmp_path, monkeypatch):
+    for box in ("allen-p", "lay-k"):
+        (tmp_path / "maildir" / box / "inbox").mkdir(parents=True)
+        (tmp_path / "maildir" / box / "inbox" / "1.").write_text(f"Message-ID: <{box}@x>\nSubject: hi\n\nbody\n")
+    monkeypatch.setattr(sources.settings, "data_dir", str(tmp_path))
+    result = CliRunner().invoke(cli, ["sync", "email"])
+    assert result.exit_code == 0, result.output
+    assert db.execute(text("SELECT external_id FROM source_items")).scalars().all() == ["allen-p/inbox/1."]
+    assert MaildirConnector  # the default is DEMO_MAILBOXES, shared with `make demo` and the Sources page
+
+
+def test_get_sync_is_gone(test_db):
+    assert TestClient(app).get("/sync").status_code == 404
+
+
+def test_igneous_connect_github_reads_the_token_from_stdin(db, monkeypatch):
+    from igneous.connectors import github
+
+    seen = []
+    monkeypatch.setattr(github, "account_for", lambda token: seen.append(token) or "octo")
+    result = CliRunner().invoke(cli, ["connect", "github"], input="github_pat_" + "t" * 30 + "\n")
+    assert result.exit_code == 0 and "connected octo" in result.output
+    assert secrets.accounts(db, "github") == ["octo"] and secrets.load(db, "github", "octo")[1] == "github_pat_" + "t" * 30
+    monkeypatch.setattr(github, "account_for", lambda token: (_ for _ in ()).throw(github.GithubError("rejected")))
+    assert CliRunner().invoke(cli, ["connect", "github"], input="x").exit_code == 2
+
+
+def test_igneous_import_ai_export(db, tmp_path):
+    export = tmp_path / "conversations.json"
+    export.write_text(json.dumps([{"uuid": "u1", "name": "Plan", "chat_messages": [
+        {"sender": "human", "text": "hello", "created_at": "2025-04-01T10:00:00Z"}]}]))
+    result = CliRunner().invoke(cli, ["import", "ai-export", str(export)])
+    assert result.exit_code == 0 and "claude_ai: 1 conversations; 1 new" in result.output
+    assert db.execute(text("SELECT external_id FROM source_items")).scalars().all() == ["claude_ai/u1/2025-04-01"]
 
 
 def test_requirements_report_missing_client_secret_and_blocked_messages(monkeypatch, tmp_path):
@@ -88,10 +222,15 @@ def test_job_runs_in_background_and_records_counts(committed_db):
     assert done["finished_at"] is not None
 
 
-def test_failed_job_keeps_error_text(committed_db):
+def test_failed_job_keeps_error_text_and_what_did_sync(committed_db):
     job = jobs.start("sync", "jobtest-bad", lambda s, p: jobs.run_connector(s, FakeConnector(1, fail=True), "x", p))
     done = wait_done(job["id"])
-    assert done["status"] == "failed" and done["error"] == "boom"
+    assert done["status"] == "failed" and done["error"] == "boom" and done["result"] is None
+
+    def partly(s, p):
+        raise sources.SyncFailed("b@y.com: token expired", {"inserted": 2, "accounts": {"a@x.com": {}}})
+    done = wait_done(jobs.start("sync", "jobtest-partly", partly)["id"])
+    assert done["error"] == "b@y.com: token expired" and done["result"]["inserted"] == 2
 
 
 def test_one_running_job_per_source(committed_db):
@@ -124,6 +263,13 @@ def test_describe_lists_every_source_with_status(committed_db):
     assert [r["id"] for r in rows] == [s["id"] for s in sources.SOURCES]
     for r in rows:
         assert r["status"] in {"not_set_up", "ready", "syncing", "needs_attention"}
-        assert isinstance(r["items"], int)
+        assert isinstance(r["items"], int) and "build" not in r
     github = next(r for r in rows if r["id"] == "github")
-    assert github["can_sync"] is False and github["coming_soon"] is False
+    assert github["can_sync"] is False
+
+
+def test_a_saved_github_token_is_an_account(db):
+    secrets.save(db, "github", "octo", "github_pat_" + "x" * 30)
+    github = next(r for r in sources.describe(db) if r["id"] == "github")
+    assert [a["account"] for a in github["accounts"]] == ["octo"] and github["can_sync"] is True
+    assert MessagesConnector  # imported for the build test above

@@ -15,21 +15,6 @@ export type NodeSummary = {
 export type Subgraph = { nodes: GNode[]; edges: GEdge[]; categories?: GNode[] };
 export type GraphFilters = { source?: string; edgeTypes?: string[]; from?: string; to?: string };
 
-export type SyncStatus = {
-  connector: string;
-  account: string;
-  status: "known" | "never_synced";
-  last_synced_at: string | null;
-  cursor_age_seconds: number | null;
-  item_count: number;
-  item_count_scope: "connector";
-  cursor: {
-    present: boolean;
-    keys: string[];
-    gmail_backfill_in_progress: boolean;
-  };
-};
-
 function graphParams(filters: GraphFilters = {}) {
   return { source: filters.source, types: filters.edgeTypes, from: filters.from, to: filters.to };
 }
@@ -289,7 +274,6 @@ export const api = {
   saveGithubToken: (token: string) => send<{ stored: boolean }>("POST", "/sources/github/token", { token }),
   googleConnectUrl: () => new URL("/sources/google/connect", API).toString(),
   stats: () => get<{ source_items: Record<string, number>; nodes: Record<string, number>; edges: Record<string, number> }>("/stats", {}),
-  sync: (signal?: AbortSignal) => get<{ syncs: SyncStatus[] }>("/sync", {}, signal),
   search: (q: string, opts: { source?: string; person?: string; from?: string; to?: string; mode?: string } = {}) =>
     get<{ hits: Hit[] }>("/search", { q, ...opts }),
   experts: (q: string, opts: { mode?: string } = {}) => get<{ experts: Expert[] }>("/experts", { q, ...opts }),

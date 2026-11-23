@@ -90,7 +90,8 @@ def _work(job_id: str, runner: Runner, session_factory) -> None:
         with session_factory() as s:
             result = runner(s, progress)
     except Exception as e:
-        status, error = "failed", (str(e) or type(e).__name__)[:500]
+        # A sync that failed for some accounts still reports what the others stored.
+        status, error, result = "failed", (str(e) or type(e).__name__)[:500], getattr(e, "result", None)
     final = None
     if result and {"inserted", "updated", "unchanged"} <= result.keys():
         final = {"items": result["inserted"] + result["updated"] + result["unchanged"]}
