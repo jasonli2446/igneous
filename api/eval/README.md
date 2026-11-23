@@ -166,6 +166,10 @@ IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous
   uv run python eval/threads_eval.py
 ```
 
+The tests score a synthetic life the same way: `tests/life_threads.py` writes a year of invented records and their
+gold threads (`GOLD`, in that format), and `tests/test_life_threads.py` requires every one found once, under its
+parent.
+
 ## The synthetic persona
 
 `make persona` builds `igneous_persona` from a fictional student's generated exports (`api/igneous/persona`). Its gold

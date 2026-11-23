@@ -58,8 +58,8 @@ def upgrade():
             span_end   timestamptz,
             status     text NOT NULL DEFAULT 'active',
             merged_into text,                         -- for status 'merged': the surviving thread's key
-            pinned     boolean NOT NULL DEFAULT false,   -- gold set or a user correction: never dropped
-            origin     text NOT NULL DEFAULT 'burst',    -- burst | name | gold | user | profile
+            pinned     boolean NOT NULL DEFAULT false,   -- built whenever a record names it (your resume's projects)
+            origin     text NOT NULL DEFAULT 'burst',    -- burst | name | profile | gold
             confidence real,
             created_at timestamptz NOT NULL DEFAULT now(),
             updated_at timestamptz NOT NULL DEFAULT now());

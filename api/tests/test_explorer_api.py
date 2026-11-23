@@ -222,6 +222,27 @@ def test_the_opening_view_shows_your_org_once_and_never_a_pair_you_rejected(worl
     assert all({e["src"], e["dst"]} != {w.me, w.bo} for e in expanded["edges"])
 
 
+def test_a_pair_you_rejected_stays_out_under_another_address_and_after_a_merge(world, client, db):
+    """You said Sam, by his other address, isn't in Atlas, and that Ana isn't in a thread since found to be Atlas: the
+    explorer joins neither to Atlas, in the opening view or when Atlas is opened (the reading the derived stages
+    write by, graph/derived.py)."""
+    w = world
+    db.execute(text("""INSERT INTO thread_registry (key, name, terms, status, merged_into) VALUES
+                       ('thread:atlas', 'Atlas', '{Atlas}', 'active', NULL),
+                       ('thread:atlas-v1', 'Atlas v1', '{Atlas}', 'merged', 'thread:atlas')"""))
+    db.execute(text("""INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, source) VALUES
+                       ('Person:sam.lee@b.test', 'Project:thread:atlas', 'INVOLVED_IN', 'threads', 'user', 'drop', 'user'),
+                       ('Person:ana@acme.test', 'Project:thread:atlas-v1', 'INVOLVED_IN', 'threads', 'user', 'drop',
+                        'user')"""))
+    db.execute(text("UPDATE graph_version SET version = version + 1"))
+    out = {frozenset((w.sam, w.atlas)), frozenset((w.ana, w.atlas))}
+    g = client.get("/graph/view").json()
+    assert not out & {frozenset((e["src"], e["dst"])) for e in g["edges"]}
+    opened = client.get("/graph/expand", params={"seed": w.me, "node": w.atlas, "visible": [w.me]}).json()
+    assert not {w.sam, w.ana} & {n["id"] for n in opened["nodes"]}
+    assert not out & {frozenset((e["src"], e["dst"])) for e in opened["edges"]}
+
+
 def test_a_tie_goes_through_the_one_context_two_people_share(world, client, db):
     """Ana and Sam only ever write in the crew: the crew is how they know each other, so their line goes through it.
     Once they write to each other outside it, they are linked directly."""

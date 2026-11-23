@@ -179,12 +179,16 @@ def test_where_people_work_attaches_to_identities_merged_in_the_same_build(db):
 
 
 def test_the_verifier_judges_the_links_written_in_the_same_build(db, monkeypatch):
-    """A model that rejects every link: on the first build, the people found for a project are already checked."""
+    """A model that rejects every link: on the first build, the people found for a project are already checked. Kai
+    is on the project's own calendar series (the record lists him), which settles his link without a model; Mo only
+    wrote about it, so the model's drop takes his out."""
     for i in range(3):
         event(db, f"acct/cal/gn_{i}", "Gloomhaven Night", day(7 * i), ["kai@y.test", "lu@z.test"], ME, "gn")
     for i in range(2):
         mail(db, f"gn{i}", ME, ["kai@y.test"], f"Gloomhaven Night {i}", day(3 + i), sent=True,
              body="Are we still on for Gloomhaven Night this week? I'll bring the expansion.")
+        mail(db, f"mo{i}", "mo@q.test", [ME], f"Gloomhaven Night recap {i}", day(5 + i),
+             body="Gloomhaven Night was fun, wish I could have come.")
     db.commit()
 
     def model(system, user, schema, **_options):
@@ -199,8 +203,10 @@ def test_the_verifier_judges_the_links_written_in_the_same_build(db, monkeypatch
     monkeypatch.setattr(llm, "structured", model)
     monkeypatch.setattr(llm.settings, "llm_sources", "gmail,gcal")
     pipeline.run(db)
-    assert db.execute(text("SELECT count(*) FROM edges WHERE type = 'INVOLVED_IN'")).scalar() == 0
-    assert db.execute(text("SELECT count(*) FROM edges_dropped WHERE type = 'INVOLVED_IN'")).scalar() == 1
+    involved = rows(db, """SELECT p.key, e.props->>'verdict', e.props->>'verified_by' FROM edges e
+                           JOIN nodes p ON p.id = e.src WHERE e.type = 'INVOLVED_IN'""")
+    assert involved == [("kai@y.test", "keep", "evidence")]
+    assert rows(db, "SELECT src_key FROM edges_dropped WHERE type = 'INVOLVED_IN'") == [("Person:mo@q.test",)]
 
 
 def test_corrections_apply_after_the_last_stage_that_writes_projects(db):

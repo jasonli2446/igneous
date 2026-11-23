@@ -11,8 +11,9 @@ What each record contributed. `spine_node_support` / `spine_edge_support` list t
 built from. Building a record first removes what it built before, so an update replaces exactly its contribution, and
 deleting a record deletes its support rows. Whatever loses a supporting record is queued (database triggers, so a
 sync's prune or tombstone counts too) and `settle` deletes what nothing holds any more at the end of the run, by the
-rule a deleted record's trigger follows for other stages' nodes too (`node_held`, migration 0012): never the owner or
-what an edge of yours holds, and no person or organization while another stage's edge with a record behind it uses it.
+rule a deleted record's trigger follows for other stages' nodes too (`node_held`, migrations 0012 and 0013): never the
+owner, and no person or organization while an edge of yours or another stage's edge with a record behind it uses it.
+(A connection you added to a message is an intent, made again when its record comes back: graph/corrections.py.)
 A node several records share (an event series, an email filed in two folders, a Drive file two accounts see, a person
 in many messages) stays while any of them remains, and its `source_item_id` points at one of the records it is. An
 edge's interval spans what its records observed: a weekly series' attendance runs from the first occurrence to the
@@ -53,8 +54,8 @@ POINT_IN_TIME_TYPES = frozenset({"SENT", "RECEIVED", "IN_THREAD", "REPLIES_TO", 
 # deleted record's trigger leaves these to the spine (migration 0012 names them too).
 RECORD_EXTRACTORS = ("spine", "contacts", "github", "linkedin")
 SPINE_EXTRACTORS = (*RECORD_EXTRACTORS, quoted.EXTRACTOR, "spine-inferred")
-# Node types only the spine builds, each of which is its records: nothing but a record (or an edge of yours) holds one
-# (`node_held` in migration 0012 names them too). People and organizations are built by other stages too (an
+# Node types only the spine builds, each of which is its records: nothing but a record holds one (`node_held` in
+# migrations 0012 and 0013 names them too). People and organizations are built by other stages too (an
 # extracted mention, a resume's employer), so one of those stays while another stage's edge with a record behind it
 # uses it.
 SPINE_TYPES = ("Message", "Thread", "Event", "File", "Folder", "Place")

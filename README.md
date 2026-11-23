@@ -263,15 +263,17 @@ cd api && uv run igneous sync imessage && uv run igneous pipeline
   that writes the result, never by a timestamp (a sync can commit records stamped before the last run). See
   `rag/chunking.py`: it reads records whose `chunked_hash` differs from `content_hash` and writes back the hash it read.
   A derived stage runs inside the publishing transaction: it never commits, rolls back or bumps the graph version,
-  rebuilds only the rows it owns (its extractor), stores paid model results with `llm.cache_store` as they arrive, and
-  leaves corrections to the last step. `igneous pipeline --stage NAME` runs it alone, then publishes. The spine's edges
-  (`spine`, `contacts`, `github`, `linkedin`) list their records in `spine_edge_support`. One rule says what keeps a
-  node (`node_held`, migration 0012): the owner, a record that supports it, an edge of yours, and, for anything but a
-  message, thread, event, file, folder or place, an edge with a record behind it (its `source_item_id`, its
-  `edge_evidence`, or the spine's support). So set `source_item_id` or `edge_evidence` on what your stage writes from a
-  record: when the record is deleted, its edges that no other record backs go, and so do the nodes that pointed at it
-  or that only those edges held (a commitment it states, a topic only it is about). On a node the spine built, write
-  only props it doesn't own (`SPINE_PROPS` in `graph/spine.py`): it recomputes its own from the records that remain.
+  rebuilds only the rows it owns (its extractor) and writes them through the Writer in `api/igneous/graph/derived.py`
+  (which never links a pair you said is wrong and keeps a name you gave a Project), stores paid model results with
+  `llm.cache_store` as they arrive, and leaves corrections to the last step. `igneous pipeline --stage NAME` runs it
+  alone, then publishes. The spine's edges (`spine`, `contacts`, `github`, `linkedin`) list their records in
+  `spine_edge_support`. One rule says what keeps a node (`node_held`, migrations 0012 and 0013): the owner, a record
+  that supports it, and, for anything but a message, thread, event, file, folder or place, an edge of yours or an edge
+  with a record behind it (its `source_item_id`, its `edge_evidence`, or the spine's support). So set `source_item_id`
+  or `edge_evidence` on what your stage writes from a record: when the record is deleted, its edges that no other
+  record backs go, and so do the nodes that pointed at it or that only those edges held (a commitment it states, a
+  topic only it is about). On a node the spine built, write only props it doesn't own (`SPINE_PROPS` in
+  `graph/spine.py`): it recomputes its own from the records that remain.
 
 ## Known gaps in the baseline
 

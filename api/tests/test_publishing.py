@@ -1,5 +1,8 @@
 """The derived stages publish in one transaction: a reader keeps the previous graph until the new one is committed,
-a failed rebuild publishes nothing but keeps what the model was paid for, and corrections never interleave with it."""
+a failed rebuild publishes nothing but keeps what the model was paid for, and a correction made while it runs is
+recorded at once and lands in what it publishes, without ever waiting long or being refused."""
+import threading
+
 import pytest
 from fastapi.testclient import TestClient
 from pipeline_data import card, day, event, local_models, mail  # noqa: F401
@@ -137,26 +140,101 @@ def test_the_last_step_applies_every_correction_committed_before_it(committed_db
     assert live == 0
 
 
-def test_a_correction_waits_for_a_publishing_rebuild(committed_db, monkeypatch):
+class Rebuild:
+    """A rebuild in a thread of its own, on its own connection, paused at `where` (a stage function or the final step)
+    until released."""
+
+    def __init__(self, monkeypatch, module, name: str):
+        self.reached, self.release, self.error = threading.Event(), threading.Event(), None
+        real = getattr(module, name)
+        rebuild = self
+
+        def paused(*args, **kwargs):
+            if threading.current_thread() is rebuild.thread:
+                rebuild.reached.set()
+                assert rebuild.release.wait(30)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, paused)
+        self.thread = threading.Thread(target=self._run)
+
+    def _run(self):
+        from igneous.db import SessionLocal
+
+        try:
+            with SessionLocal() as s:
+                pipeline.run(s)
+        except Exception as e:  # reported by finish()
+            self.error = e
+
+    def __enter__(self):
+        self.thread.start()
+        assert self.reached.wait(30)
+        return self
+
+    def finish(self):
+        self.release.set()
+        self.thread.join(30)
+        assert self.error is None and not self.thread.is_alive()
+
+    def __exit__(self, *exc):
+        self.release.set()
+        self.thread.join(30)
+
+
+def published(name_of: int) -> str:
+    with engine.connect() as reader:
+        return reader.execute(text("SELECT name FROM nodes WHERE id = :p"), {"p": name_of}).scalar()
+
+
+def test_a_correction_made_while_a_rebuild_derives_is_saved_at_once_and_lands_in_what_it_publishes(
+        committed_db, monkeypatch):
+    """Two connections: a rebuild deriving (paused in a stage), and a rename made meanwhile. The rename's intent is
+    committed at once, it changes nothing the rebuild is deriving, the answer says it applies when the rebuild
+    publishes, and it does."""
     from igneous.main import app
 
     s = committed_db
     first_build(s)
     project = s.execute(text("SELECT id FROM nodes WHERE type = 'Project' AND name = 'Gloomhaven Night'")).scalar()
-    monkeypatch.setattr(pipeline, "CORRECTION_WAIT_MS", 200)
     client = TestClient(app)
-    with engine.connect() as rebuild:
-        rebuild.execute(text("SELECT pg_advisory_xact_lock(hashtext('igneous:publish'))"))  # publishing now
-        busy = client.post(f"/graph/entity/{project}/rename", json={"name": "Game Night"})
-        assert busy.status_code == 503 and "being rebuilt" in busy.json()["detail"]
-        rebuild.rollback()  # published
-    assert client.post(f"/graph/entity/{project}/rename", json={"name": "Game Night"}).status_code == 200
-    assert s.execute(text("SELECT name FROM nodes WHERE id = :p"), {"p": project}).scalar() == "Game Night"
+    with Rebuild(monkeypatch, organizations, "run") as rebuild:
+        answer = client.post(f"/graph/entity/{project}/rename", json={"name": "Game Night"})
+        assert answer.status_code == 200 and answer.json()["applied"] == "on_publish"
+        with engine.connect() as reader:
+            assert reader.execute(text("SELECT op, value FROM overrides")).one() == ("rename", "Game Night")
+        assert published(project) == "Gloomhaven Night"
+        rebuild.finish()
+    assert published(project) == "Game Night"
 
 
-def test_undoing_a_merge_publishes_with_the_undo_or_changes_nothing(committed_db, monkeypatch):
-    """The folded project comes back through an entities run of its own, which waits for a publishing rebuild only
-    as long as a correction may; meanwhile the merge stays as it was."""
+def test_a_correction_made_during_the_final_step_waits_for_it_then_applies_now(committed_db, monkeypatch):
+    """The final step holds the publish lock until its commit: a correction recorded meanwhile waits (it would be
+    missed otherwise), then applies in place to the graph the rebuild published."""
+    from igneous.graph import corrections
+    from igneous.main import app
+
+    s = committed_db
+    first_build(s)
+    project = s.execute(text("SELECT id FROM nodes WHERE type = 'Project' AND name = 'Gloomhaven Night'")).scalar()
+    client, answers = TestClient(app), []
+    with Rebuild(monkeypatch, corrections, "apply_all") as rebuild:
+        correction = threading.Thread(target=lambda: answers.append(
+            client.post(f"/graph/entity/{project}/rename", json={"name": "Game Night"})))
+        correction.start()
+        correction.join(1.0)
+        assert correction.is_alive()  # waiting for the final step
+        with engine.connect() as reader:
+            assert reader.execute(text("SELECT count(*) FROM overrides")).scalar() == 0
+        rebuild.finish()
+        correction.join(30)
+    assert answers[0].status_code == 200 and answers[0].json()["applied"] == "now"
+    assert published(project) == "Game Night"
+
+
+def test_undoing_a_merge_during_a_rebuild_brings_the_folded_project_back_when_it_publishes(committed_db, monkeypatch):
+    """Undo is an intent too: recorded at once, completed by the final step (the folded project comes back with
+    what moved from it). Merging and undoing with no rebuild running apply now."""
     from igneous.main import app
 
     s = committed_db
@@ -166,16 +244,32 @@ def test_undoing_a_merge_publishes_with_the_undo_or_changes_nothing(committed_db
     project = {n: i for i, n in s.execute(text("SELECT id, name FROM nodes WHERE type = 'Project'"))}
     client = TestClient(app)
     merge = client.post(f"/graph/entity/{project['Gloomhaven Night']}/merge", json={"other": project["Book Club"]})
-    undo = f"/overrides/{merge.json()['override_id']}"
+    assert merge.json()["applied"] == "now"
     names = lambda: sorted(s.execute(text("SELECT name FROM nodes WHERE type = 'Project'")).scalars())  # noqa: E731
     assert names() == ["Gloomhaven Night"]
-    monkeypatch.setattr(pipeline, "CORRECTION_WAIT_MS", 200)
-    with engine.connect() as rebuild:
-        rebuild.execute(text("SELECT pg_advisory_xact_lock(hashtext('igneous:publish'))"))  # publishing now
-        busy = client.delete(undo)
-        assert busy.status_code == 503 and "being rebuilt" in busy.json()["detail"]
-        rebuild.rollback()
-    assert names() == ["Gloomhaven Night"]
-    assert s.execute(text("SELECT count(*) FROM overrides WHERE op = 'merge'")).scalar() == 1
-    assert client.delete(undo).status_code == 200
+    with Rebuild(monkeypatch, organizations, "run") as rebuild:
+        undo = client.delete(f"/overrides/{merge.json()['override_id']}")
+        assert undo.status_code == 200 and undo.json()["applied"] == "on_publish"
+        assert names() == ["Gloomhaven Night"]
+        rebuild.finish()
     assert names() == ["Book Club", "Gloomhaven Night"]
+    assert s.execute(text("SELECT count(*) FROM overrides")).scalar() == 0
+    assert client.delete(f"/overrides/{merge.json()['override_id']}").status_code == 404
+
+
+def test_a_correction_gives_up_a_lock_wait_rather_than_wait_out_another_writer(committed_db):
+    """A correction applying in place never waits as long as the deadlock detector would: when another transaction
+    holds a row it must change, it gives up (its intent stays recorded) and says when it applies."""
+    from igneous.main import app
+
+    s = committed_db
+    first_build(s)
+    project = s.execute(text("SELECT id FROM nodes WHERE type = 'Project' AND name = 'Gloomhaven Night'")).scalar()
+    with engine.connect() as other:
+        other.execute(text("SELECT 1 FROM nodes WHERE id = :p FOR UPDATE"), {"p": project})
+        answer = TestClient(app).post(f"/graph/entity/{project}/rename", json={"name": "Game Night"}).json()
+        assert answer["applied"] == "on_publish"
+        other.rollback()
+    assert published(project) == "Gloomhaven Night"
+    pipeline.run(s)
+    assert published(project) == "Game Night"

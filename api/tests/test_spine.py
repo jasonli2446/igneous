@@ -515,8 +515,9 @@ def test_what_extraction_made_from_a_record_goes_with_it_unless_something_else_h
 def test_one_rule_says_what_holds_a_node_and_which_edges_a_record_takes(db):
     """`node_held` (the database's rule, which the spine's garbage collection and a deleted record's trigger share)
     knows the spine's types: a message, thread, event, file, folder or place is its records, so another stage's edge
-    holds it no more than an inference does; a person is held by an edge with a record behind it. Your edge holds
-    either. Deleting a record leaves the spine's edges to its provenance and takes another stage's."""
+    holds it no more than an inference does, nor does yours (an intent, made again when the record comes back); a
+    person is held by an edge with a record behind it, or by yours. Deleting a record leaves the spine's edges to its
+    provenance and takes another stage's."""
     record = mail(db, 1, "ann@x.test", ["bo@x.test"], "Plans")
     other = mail(db, 2, "bo@x.test", ["ann@x.test"], "Lunch")
     spine.run(db)
@@ -530,7 +531,8 @@ def test_one_rule_says_what_holds_a_node_and_which_edges_a_record_takes(db):
         assert held is (type_ not in spine.SPINE_TYPES), type_
         db.execute(text("INSERT INTO edges (src, dst, type, extractor) SELECT id, :n, 'RELATED_TO', 'user' "
                         "FROM nodes WHERE key = 'ann@x.test'"), {"n": node})
-        assert db.execute(text("SELECT node_held(:n, NULL)"), {"n": node}).scalar_one(), type_
+        assert db.execute(text("SELECT node_held(:n, NULL)"), {"n": node}).scalar_one() is (
+            type_ not in spine.SPINE_TYPES), type_
         db.execute(text("DELETE FROM nodes WHERE id = :n"), {"n": node})
     a, b = db.execute(text("SELECT id FROM nodes WHERE key IN ('ann@x.test', 'bo@x.test') ORDER BY key")).scalars()
     for extractor in (*spine.SPINE_EXTRACTORS, "user", "entities"):

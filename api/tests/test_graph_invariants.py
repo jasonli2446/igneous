@@ -146,14 +146,18 @@ def test_canonical_must_be_the_clusters_same_as_forms(db):
         person("taylor@x.test", "T Taylor")
     jo, jo2 = person("jo@x.test", "Jo Park"), person("jpark@x.test", "Jo Park")
     ann, ann2 = person("ann@x.test", "Ann Lee"), person("ann@y.test", "Ann Lee")
-    db.execute(text("""INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, source)
-                       VALUES ('Person:ann@x.test', 'Person:ann@y.test', 'SAME_AS', 'er', '', 'drop', 'user')"""))
+    sam = person("sam@x.test", "Sam Self")
+    db.execute(text("""INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, confidence,
+                                                  source)
+                       VALUES ('Person:ann@x.test', 'Person:ann@y.test', 'SAME_AS', 'er', '', 'drop', 0.95, 'model'),
+                              ('Person:me', 'Person:sam@x.test', 'SAME_AS', 'self', '', 'drop', 1.0, 'user')"""))
     link(me, mine, "self")
     link(liz, taylor, "er")
     link(jo, jo2, "user")
     refused = [link(larry, taylor, "er"),  # would put Liz and Larry in one cluster
                link(mine, mo, "er"),       # scoring never adds anyone to your own cluster
-               link(ann, ann2, "er")]      # you said they are two people
+               link(ann, ann2, "er"),      # the verifier is sure they are two people
+               link(me, sam, "self")]      # you said that address isn't you: no link joins them, a trusted one included
     resolve.refresh_canonical(db)
     assert _codes(db) == []                # canonical is exactly what SAME_AS forms, refusals included
 
@@ -162,7 +166,7 @@ def test_canonical_must_be_the_clusters_same_as_forms(db):
     assert ("canonical_split", trusted) in _codes(db)  # a link you stated, kept apart
     assert not {("canonical_split", r) for r in refused} & set(_codes(db))
     db.execute(text("DELETE FROM edge_verdicts"))
-    assert ("canonical_split", refused[2]) in _codes(db)  # without your verdict, scoring would have joined them
+    assert {("canonical_split", refused[2]), ("canonical_split", refused[3])} <= set(_codes(db))  # else one person
 
 
 def test_replies_thread_violations_include_edge_endpoints():
