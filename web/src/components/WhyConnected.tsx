@@ -8,30 +8,14 @@ import { api, type WhyEdge } from "@/lib/api";
 import { formatDay, formatDayRange } from "@/lib/dates";
 import { useRequest } from "@/lib/hooks";
 
-// Where a link came from, in plain words (instead of internal stage names).
-const ORIGIN: Record<string, string> = {
-  spine: "Straight from your data (who sent and received it, or the conversation it's in).",
-  contacts: "From your contacts.",
-  threads: "Suggested automatically from shared words and timing; not checked yet.",
-  hierarchy: "Suggested automatically from the names; not checked yet.",
-  "thread-resolution": "Suggested automatically; not checked yet.",
-  er: "Matched automatically by name and contacts; not checked yet.",
-  organizations: "Suggested from email domains and work history; not checked yet.",
-  backbone: "Placed under your school or workplace from its emails and dates; not checked yet.",
-  profile: "From your resume or LinkedIn.",
-  user: "You added this.",
-  self: "These are your own addresses and numbers.",
-};
-
 const REL: Record<string, string> = {
   CORRESPONDS: "corresponds with", PART_OF: "is part of", INVOLVED_IN: "is involved in", RELATED_TO: "is related to",
   ATTENDED: "attended", MENTIONS: "mentions", ABOUT: "is about", INTRODUCED: "introduced", MEMBER_OF: "is a member of",
   SENT: "sent", RECEIVED: "received", IN_THREAD: "is in", REPLIES_TO: "replied to", AUTHORED: "authored", SAME_AS: "is the same as",
 };
 
-const STATED = new Set(["spine", "user", "profile", "contacts", "self", "github", "linkedin"]);
-
-/** One link: who and how, the verifier's reason when it has judged it, and the items it came from. */
+/** One link: who and how, where it came from (the API says, in plain words), the verifier's reason when it has
+ *  judged it, and the items it came from. Only an inferred link can be called wrong. */
 function EdgeCard({ e, terms, onWrong, busy }: { e: WhyEdge; terms: string[]; onWrong?: (e: WhyEdge) => void; busy?: boolean }) {
   return (
     <li className="rounded-md border border-line p-2.5">
@@ -45,10 +29,10 @@ function EdgeCard({ e, terms, onWrong, busy }: { e: WhyEdge; terms: string[]; on
         ? <p className="mt-1 text-xs leading-relaxed text-soft">{e.reason}</p>
         : <p className="mt-1 text-xs text-muted">
             {e.why && <span className="text-soft">{e.why[0].toUpperCase() + e.why.slice(1)}. </span>}
-            {ORIGIN[e.extractor] ?? "Inferred automatically; not checked yet."}
+            {e.how}
           </p>}
       {e.evidence.length > 0 && <div className="mt-2"><SourceRows items={e.evidence} highlight={terms} /></div>}
-      {!STATED.has(e.extractor) && onWrong && (
+      {!e.stated && onWrong && (
         <button type="button" disabled={busy} onClick={() => onWrong(e)}
           className="mt-2 text-xs text-muted hover:text-danger hover:underline disabled:opacity-50">
           This is wrong
@@ -69,7 +53,7 @@ export default function WhyConnected({ a, b, revision, onCloseAction, onOpenActi
   /** An earlier rejection was undone here: the page shows the link again. */
   onRestoredAction: () => void;
 }) {
-  const { data: r, error: loadError, retry } = useRequest(`${a}-${b}`, () => api.explain(a, b), revision);
+  const { data: r, error: loadError, retry } = useRequest(`${a}-${b}`, (signal) => api.explain(a, b, signal), revision);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -171,10 +155,12 @@ export default function WhyConnected({ a, b, revision, onCloseAction, onOpenActi
               <h3 className="mb-2 text-xs font-medium text-muted">Conversations</h3>
               <ul className="space-y-2">
                 {r.conversations.map((c) => (
-                  <li key={c.thread_id} className="rounded-md border border-line p-2.5">
-                    <button type="button" onClick={() => onOpenAction(c.thread_id)} className="text-left font-medium hover:underline">
-                      {c.thread || "Untitled conversation"}
-                    </button>
+                  <li key={c.thread_id ?? `${c.thread}-${c.first}`} className="rounded-md border border-line p-2.5">
+                    {c.thread_id !== null ? (
+                      <button type="button" onClick={() => onOpenAction(c.thread_id!)} className="text-left font-medium hover:underline">
+                        {c.thread || "Untitled conversation"}
+                      </button>
+                    ) : <span className="font-medium">{c.thread || "Untitled conversation"}</span>}
                     <div className="mt-0.5 text-xs text-muted">
                       {c.messages} together{c.people > 2 ? `, ${c.people} people in it` : ""} ·{" "}
                       {formatDayRange(c.first, c.last)} · {c.source === "imessage" ? "Messages" : c.source === "gmail" ? "Gmail" : "Email"}

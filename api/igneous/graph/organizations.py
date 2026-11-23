@@ -42,6 +42,9 @@ PERSONAL_DOMAINS = frozenset({
     "aol.com", "gmail.com", "hotmail.com", "icloud.com", "live.com", "me.com",
     "msn.com", "outlook.com", "proton.me", "protonmail.com", "yahoo.com",
 })
+# The WORKED_AT edges from you that make an organization yours: your resume or LinkedIn profile (graph/profile.py),
+# what you said, and what this stage finds from your own mail.
+YOUR_ORGS = ("profile", "user", EXTRACTOR)
 
 
 def domain_of(value: str | None) -> str | None:

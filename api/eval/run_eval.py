@@ -4,9 +4,13 @@
     uv run python eval/run_eval.py              # + Ask for each config (hosted model calls; see eval/README.md)
     uv run python eval/run_eval.py --configs full,graph,baseline   # also the graph without the cross-encoder
     uv run python eval/run_eval.py --score eval/results/2026-10-18-answers.jsonl   # rescore saved answers only
+    uv run python eval/run_eval.py --no-qa --pools 8,16,32     # what Ask would show the model, per pool size
 
 Retrieval: recall@10 is the share of answerable questions with a gold record among the top 10 passages, per search
-mode, with no question filters and no opt-in (the index alone). Ask, per config: cited_gold is the share of
+mode, with no question filters and no opt-in (the index alone). Evidence, per config (and per reranker pool size for
+the configs that use the graph): the share of answerable questions with a gold record among the passages Ask would
+show the model (`qa.gather`), and how long finding them took; it needs the corpus opted in and calls no model (a
+question-filter reading the cheap model gave earlier is reused, no new one is made). Ask, per config: cited_gold is the share of
 answerable questions answered (answerable: true) with a citation of a gold record, so an abstention never counts;
 abstention is the share of unanswerable questions answered with answerable: false; p50/p95 is the latency of the
 whole answer.
@@ -121,6 +125,49 @@ def reranker(on: bool):
         settings.reranker_enabled = saved
 
 
+@contextmanager
+def pool(size: int):
+    saved = settings.reranker_pool_size
+    settings.reranker_pool_size = size
+    try:
+        yield
+    finally:
+        settings.reranker_pool_size = saved
+
+
+@contextmanager
+def no_model_calls():
+    saved = settings.llm_enabled
+    settings.llm_enabled = False
+    try:
+        yield
+    finally:
+        settings.llm_enabled = saved
+
+
+def evidence(s, questions: list[dict], golds: dict[str, set[int]], configs: list[str], pools: list[int]) -> dict:
+    """Per config, and per pool size for the configs that use the graph: evidence_recall, the share of `questions`
+    with a gold record among the passages Ask would show the model, and the p50/p95 seconds finding them took."""
+    out = {}
+    for name in configs:
+        config = CONFIGS[name]
+        for size in pools if config["use_graph"] else [settings.reranker_pool_size]:
+            label = f"{name}@{size}" if config["use_graph"] else name
+            found, seconds = 0, []
+            with reranker(config["reranker"]), pool(size), no_model_calls():
+                if questions:  # loads the models and warms the caches, so the timings are of answering alone
+                    qa.gather(s, questions[0]["question"], use_graph=config["use_graph"], mode=config["mode"])
+                for q in questions:
+                    ev = qa.gather(s, q["question"], use_graph=config["use_graph"], mode=config["mode"])
+                    seconds.append(ev.retrieve_s)
+                    found += bool({p["source_item_id"] for p in ev.passages} & golds[q["id"]])
+            out[label] = {"evidence_recall": round(found / max(1, len(questions)), 3),
+                          "p50_s": round(statistics.median(seconds), 2) if seconds else 0.0,
+                          "p95_s": round(pct(seconds, 0.95), 2)}
+            print("evidence", label, out[label])
+    return out
+
+
 def ask_all(s, questions: list[dict], configs: list[str]) -> list[dict]:
     rows = []
     for name in configs:
@@ -142,7 +189,7 @@ def ask_all(s, questions: list[dict], configs: list[str]) -> list[dict]:
     return rows
 
 
-def main(run_qa: bool, configs: list[str], limit: int | None, score: Path | None):
+def main(run_qa: bool, configs: list[str], limit: int | None, score: Path | None, pools: list[int]):
     questions = gold.load()[:limit]
     if score:
         rows = [json.loads(line) for line in score.read_text().splitlines() if line.strip()]
@@ -170,6 +217,10 @@ def main(run_qa: bool, configs: list[str], limit: int | None, score: Path | None
         multi = [q for q in scored if q["kind"].startswith("multihop")]
         report["recall@10_multihop"] = {m: recall(s, multi, golds, m) for m in ("hybrid", "dense")}
         print("recall@10", report["recall@10"], "multihop", report["recall@10_multihop"])
+        if llm.allowed_sources():
+            report["evidence"] = evidence(s, scored, golds, list(CONFIGS), pools)
+        else:
+            print("evidence: skipped, nothing is opted in (set IGNEOUS_LLM_SOURCES=email for the Enron corpus)")
         if run_qa:
             asked = scored + [q for q in questions if not q["answerable"]]
             rows = ask_all(s, asked, configs)
@@ -191,8 +242,16 @@ if __name__ == "__main__":
     ap.add_argument("--configs", default=",".join(DEFAULT_CONFIGS), help=f"Ask configs to run, of {', '.join(CONFIGS)}")
     ap.add_argument("--limit", type=int, help="only the first N questions")
     ap.add_argument("--score", type=Path, help="rescore a saved answers file against the gold set and exit")
+    ap.add_argument("--pools", default=str(settings.reranker_pool_size),
+                    help="reranker pool sizes to measure the evidence at, comma-separated")
     a = ap.parse_args()
     chosen = [c.strip() for c in a.configs.split(",") if c.strip()]
     if unknown := sorted(set(chosen) - set(CONFIGS)):
         ap.error(f"unknown config {', '.join(unknown)}; choose from {', '.join(CONFIGS)}")
-    main(not a.no_qa, chosen, a.limit, a.score)
+    try:
+        sizes = sorted({int(x) for x in a.pools.split(",") if x.strip()})
+    except ValueError:
+        ap.error("--pools takes whole numbers, comma-separated")
+    if not sizes or min(sizes) < 1:
+        ap.error("--pools needs at least one size of 1 or more")
+    main(not a.no_qa, chosen, a.limit, a.score, sizes)
