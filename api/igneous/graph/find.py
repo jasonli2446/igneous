@@ -11,11 +11,14 @@ import re
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous.graph.identity import self_id
 from igneous.graph.traversal import CATEGORY, _canon_head, handle_names, pretty_thread
+from igneous.graph.visibility import not_service, visible
 
 TYPES = ("Person", "Project", "Thread", "Event", "Organization", "Place", "Folder", "Repo", "File", "Course")
 LIMIT = 8
 CANDIDATES = 150
+FUZZY = 0.35  # trigram similarity a near spelling needs
 GENERIC_THREADS = ("(no subject)", "")
 REPOSITORY_NAME = r"^[[:alnum:]_.-]+/[[:alnum:]_.-]+$"
 
@@ -75,10 +78,6 @@ def match_quality(q: str, name: str) -> float:
     return 0.5 if q in name else 0.0
 
 
-def _has_trgm(s: Session) -> bool:
-    return bool(s.execute(text("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')")).scalar())
-
-
 def _closeness(s: Session, seed_ids: list[int], heads: list[int]) -> dict[int, tuple[int, int]]:
     """Per candidate person: (messages shared with the seed, of which in the last 30 days)."""
     if not heads or not seed_ids:
@@ -106,20 +105,17 @@ def find(s: Session, q: str, seed: int | None = None, limit: int = LIMIT) -> lis
     q = " ".join(q.split())
     if len(q) < 2:
         return []
-    trgm = _has_trgm(s)
-    sim = "similarity(lower(n.name), lower(:q))" if trgm else "0.0"
+    # Near spellings: `%` is pg_trgm's similarity test, served by the trigram index on nodes.name (migration 0008).
+    s.execute(text("SELECT set_config('pg_trgm.similarity_threshold', :t, true)"), {"t": str(FUZZY)})
     rows = s.execute(text(f"""
         SELECT n.id AS alias, n.type, n.name AS alias_name, n.key, h.id AS head, h.name AS head_name, h.key AS head_key,
-               h.props AS head_props,
-               {sim} AS sim
+               h.props AS head_props, similarity(n.name, :q) AS sim
         FROM nodes n LEFT JOIN canonical c ON c.node_id = n.id JOIN nodes h ON h.id = COALESCE(c.canonical_id, n.id)
-        WHERE n.type = ANY(:types)
-          AND NOT COALESCE((n.props->>'hidden')::bool, false) AND NOT COALESCE((h.props->>'hidden')::bool, false)
-          AND COALESCE(n.props->>'kind', '') <> 'service' AND COALESCE(h.props->>'kind', '') <> 'service'
+        WHERE n.type = ANY(:types) AND {visible("n")} AND {visible("h")} AND {not_service("n")} AND {not_service("h")}
           AND NOT (n.type = 'Person' AND (n.name ~ :repo OR h.name ~ :repo
                    OR n.key ~ :repo_key OR h.key ~ :repo_key))
           AND NOT (n.type = 'Thread' AND n.name = ANY(:generic))
-          AND (n.name ILIKE :like OR (n.type = 'Person' AND n.key ILIKE :like) {"OR " + sim + " > 0.35" if trgm else ""})
+          AND (n.name ILIKE :like OR (n.type = 'Person' AND n.key ILIKE :like) OR n.name % :q)
         ORDER BY (lower(n.name) = lower(:q)) DESC, (n.name ILIKE :prefix) DESC, length(n.name), n.id
         LIMIT :cands
     """), {"types": list(TYPES), "generic": list(GENERIC_THREADS), "q": q, "like": f"%{q}%", "prefix": f"{q}%",
@@ -148,7 +144,7 @@ def find(s: Session, q: str, seed: int | None = None, limit: int = LIMIT) -> lis
     ids = [c["id"] for c in cands]
     seed_ids = []
     if seed is None:
-        seed = s.execute(text("SELECT id FROM nodes WHERE type = 'Person' AND props->>'self' = 'true' LIMIT 1")).scalar()
+        seed = self_id(s)
     if seed is not None:
         head = _canon_head(s, seed)
         seed_ids = [head, *s.execute(text("SELECT node_id FROM canonical WHERE canonical_id = :h"), {"h": head}).scalars()]

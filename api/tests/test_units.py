@@ -1331,55 +1331,35 @@ def test_entity_names_normalize_and_drop_generic():
     assert _usable("acme robotics")
 
 
-def test_entity_screening_caches_verdicts_in_database(monkeypatch):
+def test_entity_screening_caches_model_verdicts(db, monkeypatch):
     import hashlib
-    import json
 
     from igneous.graph import entities
+    from igneous.llm import cache_lookup, cache_store
 
-    class Result:
-        def __init__(self, value=None):
-            self.value = value
-
-        def scalar(self):
-            return self.value
-
-    class Session:
-        def __init__(self):
-            self.cache, self.calls = {}, []
-
-        def execute(self, statement, params):
-            sql = str(statement)
-            self.calls.append((sql, params))
-            if "SELECT response FROM llm_cache" in sql:
-                return Result(self.cache.get(params["key"]))
-            if "INSERT INTO llm_cache" in sql:
-                self.cache[params["key"]] = json.loads(params["response"])
-            return Result()
-
-    session = Session()
     calls = []
     monkeypatch.setattr(entities.settings, "llm_enabled", True)
     monkeypatch.setattr(entities, "_screen", lambda names: calls.append(names) or set(names))
-    assert entities._screened(session, ["igneous"], {"igneous"}) == {"igneous"}
-    assert entities._screened(session, ["igneous"], {"igneous"}) == {"igneous"}
+    assert entities._screened(["igneous"], {"igneous"}) == {"igneous"}
+    assert entities._screened(["igneous"], {"igneous"}) == {"igneous"}
     assert calls == [["igneous"]]
-    assert any("llm_cache" in sql for sql, _ in session.calls)
+    key = "entities-screen:v1:" + hashlib.sha256(b"igneous").hexdigest()
+    assert cache_lookup(key) == {"keep": True, "name": "igneous", "by": "model"}
 
     # A name whose anchors appear only in sources the model may not read is kept without asking, and that
     # fallback is not cached as a verdict: once the name may be shown, the model is asked.
     calls.clear()
-    assert entities._screened(session, ["lunch club"], set()) == {"lunch club"}
-    assert calls == [] and not any("lunch club" in json.dumps(v) for v in session.cache.values())
+    assert entities._screened(["lunch club"], set()) == {"lunch club"}
+    assert calls == [] and cache_lookup("entities-screen:v1:" + hashlib.sha256(b"lunch club").hexdigest()) is None
     monkeypatch.setattr(entities, "_screen", lambda names: calls.append(names) or set())
-    assert entities._screened(session, ["lunch club"], {"lunch club"}) == set()
+    assert entities._screened(["lunch club"], {"lunch club"}) == set()
     assert calls == [["lunch club"]]
 
-    # A keep cached before verdicts were marked may be an old fallback: asked again once it may be shown.
-    key = "entities-screen:v1:" + hashlib.sha256(b"old name").hexdigest()
-    session.cache[key] = {"keep": True, "name": "old name"}
-    assert entities._screened(session, ["old name"], {"old name"}) == set()
-    assert session.cache[key]["by"] == "model"
+    # A cached keep that no model made is asked again once the name may be shown, and the verdict replaces it.
+    key = "entities-screen:v1:" + hashlib.sha256(b"plain name").hexdigest()
+    cache_store(key, {"keep": True, "name": "plain name"})
+    assert entities._screened(["plain name"], {"plain name"}) == set()
+    assert cache_lookup(key)["by"] == "model"
 
 
 def test_project_merge_requires_two_shared_people():

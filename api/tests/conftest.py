@@ -58,11 +58,12 @@ def _alive(pid: int) -> bool:
 
 
 def _drop_abandoned(c) -> None:
-    """Drop test databases whose run is no longer alive on this machine."""
+    """Drop test databases (igneous_test_<pid>, and scratch ones named igneous_test_<pid>_<purpose>) whose run is
+    no longer alive on this machine."""
     for (name,) in c.execute(text("SELECT datname FROM pg_database WHERE datname LIKE :p"),
                              {"p": TEST_DB_PREFIX + "%"}):
-        suffix = name.removeprefix(TEST_DB_PREFIX)
-        if suffix.isdigit() and int(suffix) != os.getpid() and not _alive(int(suffix)):
+        pid = name.removeprefix(TEST_DB_PREFIX).split("_", 1)[0]
+        if pid.isdigit() and int(pid) != os.getpid() and not _alive(int(pid)):
             c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
 
 

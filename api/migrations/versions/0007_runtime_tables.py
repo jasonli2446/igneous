@@ -1,8 +1,8 @@
-"""Tables the app used to create on first use (#181): jobs, tokens, dirty markers, overrides, the thread registry,
-edge verdicts.
+"""Runtime state: jobs, encrypted tokens, dirty markers, the graph version, overrides, the thread registry and its
+parents, edge verdicts and dropped edges.
 
-Every statement is idempotent: on a database where the app already created these tables, they are kept with their
-data and only brought up to date (the registry's later columns and status values).
+Every statement is idempotent, so on a database that already holds these tables they keep their data and are
+brought to this definition (the registry's anchor columns and status values).
 
 Revision ID: 0007
 Revises: 0006
@@ -63,7 +63,7 @@ def upgrade():
             confidence real,
             created_at timestamptz NOT NULL DEFAULT now(),
             updated_at timestamptz NOT NULL DEFAULT now());
-        -- Registries the app created before these existed.
+        -- Bring an existing registry to this definition.
         ALTER TABLE thread_registry ADD COLUMN IF NOT EXISTS merged_into text;
         ALTER TABLE thread_registry ADD COLUMN IF NOT EXISTS anchor text;       -- series | repo | chat | course
         ALTER TABLE thread_registry ADD COLUMN IF NOT EXISTS anchor_name text;  -- the seed's own name
@@ -92,6 +92,9 @@ def upgrade():
 
 
 def downgrade():
-    # These tables predate this migration (the app created them at runtime) and hold user data: tokens,
-    # corrections, verdicts. Downgrading leaves them in place.
-    pass
+    # Like every earlier downgrade, this drops what the upgrade created, data included (tokens, corrections,
+    # verdicts): a downgrade followed by an upgrade gives the same schema as a fresh database.
+    op.execute("""
+        DROP TABLE IF EXISTS edges_dropped, edge_verdicts, thread_parents, thread_registry, overrides,
+                             graph_version, dirty_rebuild, dirty_nodes, oauth_tokens, jobs;
+    """)

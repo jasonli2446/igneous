@@ -67,7 +67,7 @@ Export formats are sources too: add the entry to `SOURCES` and an inline form in
 - Changing a connector's `external_id` format duplicates existing rows on resync. Ship a migration with it
   (see PR #83 for the gcal case).
 - Tables and columns come only from Alembic migrations (`api/migrations/versions/`), never `CREATE`/`ALTER` in app
-  code (#181). The API refuses to start on a schema behind head.
+  code. The API, the CLI and the MCP server refuse to run on any schema but head (`db.schema_status`).
 
 ## Checks before any PR
 

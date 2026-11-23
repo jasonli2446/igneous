@@ -7,7 +7,6 @@ types/counts, dates, and short subject-line snippets, and only for sources opted
 model off, unconfigured, or failing, a deterministic summary built from the same facts is returned instead.
 """
 import hashlib
-import json
 import logging
 from datetime import datetime
 
@@ -317,23 +316,23 @@ def summarize(s: Session, node_id: int, model=_model_summary) -> dict | None:
     body = {"summary": "", "highlights": highlights, "sources": [], "generated_by": "fallback"}
     use_model = settings.llm_enabled and any(_allowed(c, sources) for c in facts["connections"])
     if use_model:
+        from igneous.llm import cache_lookup, cache_store
+
         user, used = prompt_for(facts, sources, snippets(s, node_id, sources))
         key = f"node-summary:{PROMPT_VERSION}:{node_id}:" + hashlib.sha256((SYSTEM + user).encode()).hexdigest()
         try:
-            cached = s.execute(text("SELECT response FROM llm_cache WHERE cache_key = :k"), {"k": key}).scalar()
+            cached = cache_lookup(key)
             if cached is None:
-                answer = model(SYSTEM, user)
-                if answer:
-                    s.execute(text("INSERT INTO llm_cache (cache_key, response) VALUES (:k, CAST(:r AS jsonb)) "
-                                   "ON CONFLICT (cache_key) DO NOTHING"),
-                              {"k": key, "r": json.dumps({"summary": answer, "sources": used})})
-                    s.commit()
-                cached = {"summary": answer, "sources": used}
+                cached = {"summary": model(SYSTEM, user), "sources": used}
+                if cached["summary"]:
+                    try:
+                        cache_store(key, cached)
+                    except Exception as e:  # an answer we can't cache is still the answer
+                        log.info("summary for node %s not cached: %s", node_id, type(e).__name__)
             if cached.get("summary"):
                 return {**body, "summary": cached["summary"], "sources": cached.get("sources", []),
                         "generated_by": "model"}
         except Exception as e:  # LLMDisabled, provider errors, cache problems: never break the inspector
             log.info("summary for node %s fell back: %s: %s", node_id, type(e).__name__, str(e)[:120])
-            s.rollback()
     body["summary"] = fallback(facts)
     return body

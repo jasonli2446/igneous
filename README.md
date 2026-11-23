@@ -8,7 +8,7 @@ provenance-tracked graph in Postgres + pgvector, then search and explore it. Bac
 ### 1. Prerequisites
 
 - **Docker**: runs Postgres 16 with pgvector (`pgvector/pgvector:pg16`, see `docker-compose.yml`). If you bring your
-  own Postgres it must be 16+ with the `vector` extension available; the first migration runs `CREATE EXTENSION vector`.
+  own Postgres it must be 16+ with the `vector` and `pg_trgm` extensions available; the migrations create both.
 - **[uv](https://docs.astral.sh/uv/)**: installs Python 3.12 and the API dependencies.
 - **Node 20+** and npm for the web app.
 - Optional: an AWS Bedrock API key for Ask and AI extraction (step 3). Search and the graph work without it.
@@ -27,8 +27,9 @@ uv run alembic upgrade head              # create the schema (or `make migrate` 
 
 The default connection is `postgresql+psycopg://igneous:igneous@localhost:5432/igneous` (`api/igneous/config.py`).
 
-Every table comes from a migration. After pulling, run `uv run alembic upgrade head` again (once per database); the
-API refuses to start on an older schema and prints that command.
+Every table comes from a migration. After pulling, run `uv run alembic upgrade head` again (once per database). The
+API, the CLI and the MCP server check the schema first and refuse to run on any other, with the reason and the fix:
+a database behind the code, one migrated by newer code, no schema yet, or Postgres not reachable.
 
 Tests (`make test`) never use that database or your personal one, nor your `api/.env` or model credentials: each
 run creates, migrates and finally drops its own `igneous_test_<pid>` database on the same server
@@ -37,7 +38,7 @@ run creates, migrates and finally drops its own `igneous_test_<pid>` database on
 ### 3. Configuration (`api/.env`)
 
 Every API setting is an environment variable with the prefix `IGNEOUS_`; you can put them in `api/.env`
-(git-ignored, read when you run commands from `api/`). A minimal file:
+(git-ignored; read wherever a command starts, and an environment variable overrides it). A minimal file:
 
 ```bash
 # Which database to use. Omit for the Enron demo DB "igneous". Use a separate DB for your own data (see below).
@@ -51,7 +52,7 @@ IGNEOUS_LLM_SOURCES=
 # IGNEOUS_LLM_ENABLED=false             # turn off every hosted model call
 # IGNEOUS_FILESYSTEM_ROOTS=~/Documents/notes,~/Desktop   # folders for the "Local files" source
 # IGNEOUS_WEB_URL=http://localhost:3000 # where Google sign-in sends you back
-# IGNEOUS_DATA_DIR=../data              # OAuth client, encrypted tokens, Enron mailboxes
+# IGNEOUS_DATA_DIR=../data              # OAuth client, token encryption key, Enron mailboxes (relative to api/)
 ```
 
 The Bedrock credentials are read from the process environment, not from `api/.env`, so export them in the shell that
@@ -247,9 +248,9 @@ claude mcp add igneous -e AWS_REGION=us-east-1 -e AWS_BEARER_TOKEN_BEDROCK=$AWS_
   -- uv run --directory "$(pwd)/api" igneous mcp
 ```
 
-The model credentials only matter for `ask`, which reads only the sources in `IGNEOUS_LLM_SOURCES` (`api/.env`, since
-the server runs from `api/`). MCP clients don't pass your shell's environment through, so set the credentials with
-`-e` as above (other tools work without them). Postgres must be running (`make db`).
+The model credentials only matter for `ask`, which reads only the sources in `IGNEOUS_LLM_SOURCES` (`api/.env`).
+MCP clients don't pass your shell's environment through, so set the credentials with `-e` as above (other tools work
+without them). Postgres must be running (`make db`).
 
 ## Google (Gmail, Drive, Calendar, Contacts)
 
@@ -261,6 +262,7 @@ the server runs from `api/`). MCP clients don't pass your shell's environment th
    then uses the Changes API; Google Docs, Sheets, and Slides export to parser-friendly text formats.
 
 Gmail skips Promotions/Social/Forums by default (`--all-mail` to include them); in a real inbox they were 94% of mail.
-**Quota:** this Testing-mode project measured about 730 units/min, so roughly 120 messages/min, far below Google's
-published default. The connector paces itself (`IGNEOUS_GMAIL_UNITS_PER_MIN`, default 600), so a large inbox
-takes a while but won't error out. Resuming continues mid-page.
+**Quota:** a Google Cloud project in Testing mode is cut off near 730 Gmail units/min (about 120 messages/min), far
+below Google's published 15,000. The connector paces itself to `IGNEOUS_GMAIL_UNITS_PER_MIN` (default 600; raise it in
+`api/.env` if your project's quota page allows more), so a large inbox takes a while but won't error out. Resuming
+continues mid-page.

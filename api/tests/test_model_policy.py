@@ -74,7 +74,7 @@ def graph(test_db):
     with SessionLocal() as s:
         _wipe(s)
         g: dict = {"items": {}}
-        g["me"] = _node(s, "Person", "email:me@shared.test", "Me Myself", {"self": True})
+        g["me"] = _node(s, "Person", "me", "Me Myself", {"self": True})  # the owner, as spine and self create it
         g["sam"] = _node(s, "Person", "email:sam@shared.test", "Sam Shared")
         g["sam2"] = _node(s, "Person", "email:sam.shared@other.test", "Sam Shared")
         g["pat"] = _node(s, "Person", "phone:+15550001111", "Pat Private")

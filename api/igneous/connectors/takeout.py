@@ -39,13 +39,13 @@ from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import ijson
 
+from igneous import source_catalog
 from igneous.connectors.ai_chats import _ts
 from igneous.connectors.ai_exports import export_items, gemini_conversations
 from igneous.connectors.base import Checkpoint, SourceItem
 from igneous.connectors.redact import redact
 
-TAKEOUT_SOURCES = ("takeout_activity", "takeout_chrome", "takeout_maps", "takeout_tasks", "takeout_meet",
-                   "takeout_chat")
+TAKEOUT_SOURCES = source_catalog.of_connector("takeout")
 # My Activity products that are advertising/analytics telemetry, not things you did.
 SKIP_PRODUCTS = {"ads", "google analytics", "takeout"}
 MAX_LINES = 1000  # per item; a day with more than this is almost certainly a script, not you

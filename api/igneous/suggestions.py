@@ -2,6 +2,7 @@
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous.graph.identity import self_id
 from igneous.graph.traversal import relationships
 
 MAX_SUGGESTIONS = 5
@@ -31,7 +32,7 @@ def build(people: list[str], projects: list[dict]) -> list[str]:
 
 
 def suggestions(s: Session) -> list[str]:
-    seed = s.execute(text("SELECT id FROM nodes WHERE type = 'Person' AND props->>'self' = 'true' LIMIT 1")).scalar()
+    seed = self_id(s)
     if seed is None:
         return []
     ids = [p for p, _, _ in relationships(s, seed, PEOPLE)]

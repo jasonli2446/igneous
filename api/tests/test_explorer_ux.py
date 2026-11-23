@@ -53,58 +53,35 @@ def test_fallback_is_plain_language_with_names_not_ids():
     assert "no messages" in summary.fallback(empty)
 
 
-class FakeSession:
-    """Just enough Session for summarize(): an in-memory llm_cache and a canned set of facts."""
-
-    def __init__(self):
-        self.cache: dict[str, dict] = {}
-
-    def execute(self, stmt, params=None):
-        sql, params = str(stmt), params or {}
-        outer = self
-
-        class R:
-            def scalar(self_):
-                return outer.cache.get(params["k"]) if "SELECT response" in sql else None
-
-        if "INSERT INTO llm_cache" in sql:
-            import json
-            self.cache[params["k"]] = json.loads(params["r"])
-        return R()
-
-    def commit(self): ...
-    def rollback(self): ...
-
-
-def run(monkeypatch, *, enabled, sources, model):
+def run(db, monkeypatch, *, enabled, sources, model):
     monkeypatch.setattr(summary, "gather", lambda s, n: facts())
     monkeypatch.setattr(summary, "snippets", lambda s, n, src: [])
     monkeypatch.setattr(summary.settings, "llm_enabled", enabled)
     monkeypatch.setattr(summary.settings, "llm_sources", sources)
-    return summary.summarize(FakeSession(), 1, model=model)
+    return summary.summarize(db, 1, model=model)
 
 
-def test_summary_falls_back_when_model_disabled_or_source_not_opted_in(monkeypatch):
+def test_summary_falls_back_when_model_disabled_or_source_not_opted_in(db, monkeypatch):
     def boom(*a):
         raise AssertionError("model must not be called")
 
-    off = run(monkeypatch, enabled=False, sources="email", model=boom)
+    off = run(db, monkeypatch, enabled=False, sources="email", model=boom)
     assert off["generated_by"] == "fallback" and "Ada Example" in off["summary"]
-    unopted = run(monkeypatch, enabled=True, sources="", model=boom)
+    unopted = run(db, monkeypatch, enabled=True, sources="", model=boom)
     assert unopted["generated_by"] == "fallback"
     assert [h["name"] for h in unopted["highlights"]] == ["Bo Sample", "Secret Chat"]
     assert set(unopted["highlights"][0]) == {"id", "name", "type", "category", "why"}
 
 
-def test_summary_falls_back_when_model_errors(monkeypatch):
+def test_summary_falls_back_when_model_errors(db, monkeypatch):
     def fail(*a):
         raise RuntimeError("bedrock down")
 
-    out = run(monkeypatch, enabled=True, sources="email", model=fail)
+    out = run(db, monkeypatch, enabled=True, sources="email", model=fail)
     assert out["generated_by"] == "fallback" and out["summary"]
 
 
-def test_summary_uses_model_and_caches_it(monkeypatch):
+def test_summary_uses_model_and_caches_it(db, monkeypatch):
     calls = []
 
     def model(system, user):
@@ -115,9 +92,8 @@ def test_summary_uses_model_and_caches_it(monkeypatch):
     monkeypatch.setattr(summary, "snippets", lambda s, n, src: [])
     monkeypatch.setattr(summary.settings, "llm_enabled", True)
     monkeypatch.setattr(summary.settings, "llm_sources", "email")
-    session = FakeSession()
-    first = summary.summarize(session, 1, model=model)
-    second = summary.summarize(session, 1, model=model)
+    first = summary.summarize(db, 1, model=model)
+    second = summary.summarize(db, 1, model=model)
     assert first["generated_by"] == second["generated_by"] == "model"
     assert first["summary"] == "Ada talks mostly with Bo Sample." and len(calls) == 1
 

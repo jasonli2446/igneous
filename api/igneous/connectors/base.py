@@ -19,7 +19,6 @@ class SourceItem:
     occurred_at: datetime | None = None
     mime: str | None = None
     raw_meta: dict = field(default_factory=dict)
-    parent_external_id: str | None = None  # attachments point at their message
     content_hash: str = ""
 
     def __post_init__(self):
@@ -66,15 +65,12 @@ class Connector(Protocol):
 
 
 UPSERT = text("""
-INSERT INTO source_items (source, external_id, parent_id, content_hash, mime, title, body_text,
-                          raw_meta, occurred_at)
-VALUES (:source, :external_id,
-        (SELECT id FROM source_items WHERE source = :source AND external_id = :parent_external_id),
-        :content_hash, :mime, :title, :body_text, CAST(:raw_meta AS jsonb), :occurred_at)
+INSERT INTO source_items (source, external_id, content_hash, mime, title, body_text, raw_meta, occurred_at)
+VALUES (:source, :external_id, :content_hash, :mime, :title, :body_text, CAST(:raw_meta AS jsonb), :occurred_at)
 ON CONFLICT (source, external_id) DO UPDATE SET
     content_hash = EXCLUDED.content_hash, mime = EXCLUDED.mime, title = EXCLUDED.title,
     body_text = EXCLUDED.body_text, raw_meta = EXCLUDED.raw_meta, occurred_at = EXCLUDED.occurred_at,
-    parent_id = EXCLUDED.parent_id, item_class = NULL, updated_at = now()
+    item_class = NULL, updated_at = now()
 WHERE source_items.content_hash <> EXCLUDED.content_hash
 RETURNING (xmax = 0) AS inserted
 """)
@@ -148,8 +144,7 @@ def run_sync(s: Session, connector: Connector, account: str = "default", limit: 
                 break
             continue
         row = s.execute(UPSERT, {
-            "source": obj.source, "external_id": obj.external_id,
-            "parent_external_id": obj.parent_external_id, "content_hash": obj.content_hash,
+            "source": obj.source, "external_id": obj.external_id, "content_hash": obj.content_hash,
             # Postgres text can't hold NUL; some PDFs and Office files extract with them.
             "mime": obj.mime, "title": _no_nul(obj.title), "body_text": _no_nul(obj.body_text),
             "raw_meta": json.dumps(obj.raw_meta, default=str).replace("\\u0000", ""), "occurred_at": obj.occurred_at,

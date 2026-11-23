@@ -1,4 +1,5 @@
 """macOS LaunchAgent for paced, serialized incremental syncs."""
+import os
 import platform
 import plistlib
 import subprocess
@@ -8,6 +9,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from igneous import jobs, sources
+from igneous.config import API_DIR
 from igneous.db import SessionLocal
 
 LABEL = "com.igneous.sync"
@@ -27,20 +29,24 @@ def install(command: list[str]) -> Path:
     _require_macos()
     path = plist_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"Label": LABEL, "ProgramArguments": [*command, "schedule", "run"],
+    # Settings resolve against the api folder from anywhere; starting there too makes every relative path the
+    # same as a command typed in api/.
+    payload = {"Label": LABEL, "ProgramArguments": [*command, "schedule", "run"], "WorkingDirectory": str(API_DIR),
                "StartInterval": INTERVAL, "RunAtLoad": True,
                "StandardOutPath": str(Path.home() / "Library/Logs/igneous.log"),
                "StandardErrorPath": str(Path.home() / "Library/Logs/igneous.log")}
     with path.open("wb") as out:
         plistlib.dump(payload, out, sort_keys=True)
-    subprocess.run(["launchctl", "bootstrap", f"gui/{__import__('os').getuid()}", str(path)], check=False)
+    # Replace a running agent: bootstrap fails while an older one is loaded.
+    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(path)], check=False, capture_output=True)
+    subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(path)], check=False)
     return path
 
 
 def uninstall() -> bool:
     _require_macos()
     path = plist_path()
-    subprocess.run(["launchctl", "bootout", f"gui/{__import__('os').getuid()}", str(path)], check=False)
+    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(path)], check=False)
     existed = path.exists()
     path.unlink(missing_ok=True)
     return existed

@@ -14,7 +14,9 @@ from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 from sqlalchemy import text
 
+from igneous import source_catalog
 from igneous.db import SessionLocal
+from igneous.graph import identity
 
 # The model client, search and embedding stacks load on first use, not at import: an MCP client connects only
 # once the server answers `initialize`, and a slow start makes the first tool call race the connection.
@@ -42,8 +44,7 @@ def _clip(t: str | None, n: int = 600) -> str:
 
 
 # What you wrote and talked about, not what you browsed: page visits and search history only on request.
-CONTENT_SOURCES = ("gmail", "email", "imessage", "gcal", "drive", "fs", "notes", "ai_chats", "github",
-                   "takeout_chat", "takeout_tasks", "takeout_meet", "linkedin")
+CONTENT_SOURCES = source_catalog.CONTENT
 
 
 @server.tool()
@@ -124,8 +125,6 @@ def neighbors(node_id: int, edge_type: str | None = None, limit: int = 25) -> li
 def evidence(node_id: int, limit: int = 10) -> list[dict]:
     """Model-derived facts about a node (mentions, topics), each with the exact quoted source span: the
     answer to "why does the graph believe this"."""
-    from igneous.main import cluster  # same cluster expansion the web inspector uses
-
     with SessionLocal() as s:
         rows = s.execute(text("""
             SELECT e.type, e.confidence, e.props->>'quote' AS quote, e.props->>'role' AS role,
@@ -134,7 +133,7 @@ def evidence(node_id: int, limit: int = 10) -> list[dict]:
             FROM edges e JOIN source_items si ON si.id = e.source_item_id
             WHERE (e.src = ANY(:ids) OR e.dst = ANY(:ids)) AND e.extractor <> 'spine' AND e.span_start IS NOT NULL
             ORDER BY si.occurred_at DESC NULLS LAST LIMIT :lim
-        """), {"ids": cluster(s, node_id), "lim": min(limit, 50)}).mappings().all()
+        """), {"ids": identity.members(s, node_id), "lim": min(limit, 50)}).mappings().all()
     return [{**dict(r), "date": r["occurred_at"].isoformat() if r["occurred_at"] else None} for r in rows]
 
 
@@ -193,7 +192,7 @@ def me() -> dict:
     same view the explorer opens on. Start here."""
     from igneous.graph.traversal import view
     with SessionLocal() as s:
-        seed = s.execute(text("SELECT id FROM nodes WHERE type = 'Person' AND props->>'self' = 'true' LIMIT 1")).scalar()
+        seed = identity.self_id(s)
         if seed is None:
             return {"error": "no owner identified yet: run the pipeline"}
         from igneous.graph import dirty
@@ -224,7 +223,7 @@ def find(name: str) -> list[dict]:
     trips, classes, organizations, group chats, events and files. Ranked by match and by closeness to the user."""
     from igneous.graph.find import find as _find
     with SessionLocal() as s:
-        seed = s.execute(text("SELECT id FROM nodes WHERE type = 'Person' AND props->>'self' = 'true' LIMIT 1")).scalar()
+        seed = identity.self_id(s)
         hits = _find(s, name, seed)
         return [{"node_id": h["id"], "type": h["type"], "name": h["name"], "context": h.get("context")}
                 for h in hits[:12]]
@@ -238,7 +237,7 @@ def open_node(node_id: int) -> dict:
     from igneous.graph.summary import summarize
     from igneous.graph.traversal import expand
     with SessionLocal() as s:
-        seed = s.execute(text("SELECT id FROM nodes WHERE type = 'Person' AND props->>'self' = 'true' LIMIT 1")).scalar()
+        seed = identity.self_id(s)
         n = s.execute(text("SELECT id, type, name FROM nodes WHERE id = :i"), {"i": node_id}).mappings().first()
         if not n:
             return {"error": f"no node {node_id}"}
@@ -336,8 +335,15 @@ def read_item(item_id: int) -> dict:
 
 
 def main():
-    # Warm the big picture in the background so the first `me` doesn't wait on ranking every relationship.
+    import sys
     import threading
+
+    from igneous.db import schema_status
+
+    if problem := schema_status():
+        print(f"igneous mcp: {problem}", file=sys.stderr)  # stdout is the protocol channel
+        raise SystemExit(2)
+    # Warm the big picture in the background so the first `me` doesn't wait on ranking every relationship.
     threading.Thread(target=lambda: _safe(me), daemon=True).start()
     server.run("stdio")
 
