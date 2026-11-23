@@ -146,8 +146,10 @@ Adding "two records is enough" to prompt 4 keeps it short; without it the agent 
 - **Trust:** an AI checker reviews each derived link against its evidence and keeps what it read; your
   corrections are permanent, undoable and teach it; high-volume checks run on a cheap model, merges and
   naming on a stronger one.
-- **Eval (Enron, Oct 18):** hybrid recall@10 0.81 vs 0.41 lexical; cited the gold source 90% (baseline
-  77%); abstained on 12/12 unanswerable; p50 2.2 s. Entity resolution P 0.93 / R 0.96.
+- **Eval (Enron, `api/eval/README.md`):** measured 2026-10-18 at commit `3478204`: hybrid recall@10 0.81 vs 0.41
+  lexical; answered citing the gold source 87% (baseline 74%), counting only questions it answered; abstained on
+  12/12 unanswerable; p50 2.2 s. Entity resolution, deployed clusters on AI-reviewed labels (2026-11-23, fresh
+  build): P 0.94 / R 0.96.
 - **Privacy:** local, read-only, per-source opt-in before any model sees content, secrets encrypted or
   git-ignored. The MCP server is read-only.
 

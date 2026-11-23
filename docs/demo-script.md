@@ -54,8 +54,9 @@ Ask page:
    guessing.
 3. Toggle graph expansion off and re-ask 1: baseline mode.
 
-Numbers slide (from `api/eval/README.md`, the 2026-10-18 run): 82-question gold set; abstains 100% on unanswerable;
-cites the gold email 90% vs. 77% baseline (100% vs. 93% on multi-hop, 5/5 vs. 0/5 on hard multi-hop); p95 3.1 s.
+Numbers slide (from `api/eval/README.md`: measured 2026-10-18 at commit `3478204`, counting a gold citation only when
+Ask answered): 82-question gold set; abstains 100% on unanswerable; answers citing the gold email 87% vs. 74% baseline
+(100% vs. 93% on multi-hop, 5/5 vs. 0/5 on hard multi-hop); p95 3.1 s.
 
 ## 6. The creation layer: other engines read our graph (1.5 min) — criterion 5
 

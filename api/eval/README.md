@@ -1,71 +1,133 @@
 # Evaluation
 
-`questions.jsonl` is the gold set (82 questions): 50 single-email, 20 multi-hop (asked in terms of email A,
-answered only by a reply B in the same thread; 5 of them hard), 12 unanswerable. Generated from the corpus by
-`make_gold.py` and filtered so every answer quote appears verbatim in its gold email. **Spot-check by hand
-before the final report** — generated questions can be oddly specific.
+Two measurements, both on the six-mailbox Enron baseline and both reproducible on a fresh build of it: Ask against a
+gold question set (criterion 4), and entity resolution against labeled pairs (criterion 3). The gold records and the
+labeled pairs are keyed by stable ids, never by database row ids, so they score the same on any build.
+
+## The corpus
 
 ```bash
-uv run python eval/run_eval.py --no-qa   # retrieval only, free, ~15 s
-uv run python eval/run_eval.py           # + Q&A for both configs, ~150 model calls, ~6 min
+make enron                      # download the mailboxes into data/ (once)
+make baseline EXTRACT=0         # sync lay-k skilling-j allen-p arnold-j delainey-d lavorato-j, then the pipeline
 ```
 
-Q&A, `make_gold.py` and `er_labels.py draft|review` send records to the model, so they run only when every
-source in the database is opted in: `IGNEOUS_LLM_SOURCES=email` on the Enron database. Otherwise they stop
-and say which sources aren't.
+That is 26,259 emails (13,902 messages after duplicate copies merge). The sync takes about a minute and a half and
+the spine about two minutes; embedding takes most of the time (about 45 minutes on CPU). `EXTRACT=0` makes no model
+calls.
 
-Results land in `results/<date>.json`; `results/<date>-answers.jsonl` has both configs' answers side by side
-for the blind A/B grading in criterion 4.
+## Ask (criterion 4)
 
-## Results (2026-10-18, 6 mailboxes, 13.9k messages)
+`questions.jsonl` holds 82 questions: 50 single-email, 15 multi-hop (asked in terms of email A, answered only by a
+reply B in the same thread), 5 hard multi-hop and 12 unanswerable. A hard multi-hop question comes from a verified
+reply pair (REPLIES_TO from quoted headers) and is kept only if dense search finds the parent email but not the reply
+that holds the answer, so answering it requires following the graph edge. `make_gold.py` generated the set from the
+corpus and kept a question only if its answer quote appears verbatim in its gold email. **Spot-check by hand before
+the final report**: generated questions can be oddly specific.
 
-82 questions: 50 single-email, 15 multi-hop, **5 hard multi-hop**, 12 unanswerable. "Hard" questions come from
-verified reply pairs (REPLIES_TO from quoted headers) and are kept only if dense search finds the parent email
-but **not** the reply holding the answer. Answering them requires following the graph edge.
+Each answerable question names its gold email (and, for multi-hop, its bridge email A) by key: the source, the
+external id (the maildir path) and the content fingerprint (`gold.py`). At run time a key resolves to every copy of
+that email in the database, since Enron files one message in several folders. Every key in the set resolves on a
+fresh build, and each answer quote is in its gold email there.
+
+```bash
+uv run python eval/run_eval.py --no-qa                    # retrieval only: free, no model calls
+IGNEOUS_LLM_SOURCES=email uv run python eval/run_eval.py  # + Ask, full and baseline configs
+uv run python eval/run_eval.py --configs full,graph,baseline   # + the graph without the cross-encoder
+uv run python eval/run_eval.py --score eval/results/2026-10-18-answers.jsonl   # rescore saved answers
+```
+
+What each number means:
+
+- **recall@10**: the share of answerable questions with a gold email among the top 10 passages, per search mode, with
+  no question filters (the index alone).
+- **cited_gold**: the share of answerable questions that Ask answered (`answerable: true`) citing a gold email. An
+  abstention never counts, even if the model listed a gold email.
+- **abstention**: the share of unanswerable questions Ask declined (`answerable: false`).
+- **p50 / p95**: latency of the whole answer, retrieval and model call.
+
+The configs: **full** is Ask as it ships (hybrid retrieval, graph expansion, the cross-encoder keeps the best 8
+passages); **graph** is the same without the cross-encoder (retrieval order, 3 of the 8 places held for graph
+neighbours); **baseline** is dense retrieval only, 8 passages, no graph.
+
+Cost: Ask makes one call on the main model per question and config, 164 for full and baseline (246 with all three).
+Reading filters out of the questions takes at most one cheap-model call per question the first time, cached after.
+Ask, `make_gold.py` and `er_labels.py draft|review` send records to the model, so they run only when every source in
+the database is opted in (`IGNEOUS_LLM_SOURCES=email` on the Enron database); otherwise they stop and say which aren't.
+
+`results/<date>.json` records the numbers and what produced them: the commit, the database and its corpus, the
+models, and the settings. `results/<date>-answers.jsonl` holds every config's answer to each question, its citations
+as keys, for the blind A/B grading criterion 4 calls for and for `--score`.
+
+### Results
+
+Measured 2026-10-18 at commit `3478204` on the baseline (`results/2026-10-18.json`), scored with the metric above.
+Ask at that commit gave the full config 12 passages (8 hits plus up to 4 graph neighbours ranked by embedding
+similarity to the question) and the baseline 8, with no cross-encoder and no question filters; Ask as it ships now
+has not been measured, which needs a Bedrock key (#190).
 
 | | full (hybrid + graph) | baseline (dense, no graph) |
 |---|---|---|
-| answer cites gold email, all answerable | **0.900** | 0.771 (**+16.7% rel.**) |
-| ... single-email | 0.86 | 0.80 |
-| ... multi-hop | 1.00 | 0.93 |
-| ... **hard multi-hop** | **5/5** | **0/5** |
-| abstains on unanswerable | 1.00 | 1.00 |
+| answered citing a gold email, all answerable (70) | **0.871** | 0.743 (**+17% rel.**) |
+| ... single-email (50) | 0.82 | 0.76 |
+| ... multi-hop (15) | 1.00 | 0.93 |
+| ... **hard multi-hop** (5) | **5/5** | **0/5** |
+| abstains on unanswerable (12) | 1.00 | 1.00 |
 | p50 / p95 latency | 2.2 s / 3.1 s | 1.8 s / 2.5 s |
+| recall@10 of its search mode | 0.814 (hybrid) | 0.786 (dense) |
 
-How to read it: the graph wins exactly where it should (answers only reachable through a reply link) and
-helps a little elsewhere. But only 5 corpus questions passed the "needs the hop" filter, so on this corpus most
-questions don't need the graph, and n=5 is small. Model answers also vary run to run (the baseline moved
-0.77-0.85 across runs on the same questions), so treat differences under ~5 points as noise. Criterion 4's
-blind A/B grading of answer quality is still to do; `results/<date>-answers.jsonl` has the pairs.
+Lexical recall@10 was 0.414 on the same run. How to read it: the graph wins exactly where it should, on answers only
+reachable through a reply link, and helps a little elsewhere. Only 5 questions passed the "needs the hop" filter, so
+n=5 is small, and model answers vary by several points from run to run on the same questions, so treat differences
+under about 5 points as noise. The blind A/B grading of answer quality is still to do;
+`results/2026-10-18-answers.jsonl` has the pairs.
 
 ## Entity resolution (criterion 3)
 
-`er_pairs.csv`: 240 Person pairs sampled across the resolver's score range (¼ low, ½ middle, ¼ high).
+`er_pairs.csv`: 240 Person pairs sampled across the resolver's score range (¼ low, ½ middle, ¼ high), each named by
+the two identities' keys (an email address, or `name:<slug>` for a person model extraction found).
 
 **Labels, two passes:**
 1. *Draft*: Claude Sonnet 5.5, shown each identity's 3 most recent sent emails (`draft_label`).
-2. *Review*: Claude Opus 5.5, a different and stronger model, shown more evidence (6 sent + 3 received emails
-   and top correspondents) and **not shown the draft label or rationale** (`label`, `reviewer`,
-   `review_rationale`). It changed 17 of 235 labels: 16 drafted "different" were the same person
-   (Steve/Stephen Swain, Jeff/Jeffery McMahon, Ken/Kenneth Rice), 1 the reverse. It marked 46 pairs "unsure".
+2. *Review*: Claude Opus 5.5, a different and stronger model, shown more evidence (6 sent and 3 received emails and
+   top correspondents) and **not shown the draft label or rationale** (`label`, `reviewer`, `review_rationale`). It
+   changed 17 of 235 labels: 16 drafted "different" were the same person (Steve/Stephen Swain, Jeff/Jeffery McMahon,
+   Ken/Kenneth Rice), 1 the reverse. It marked 46 pairs "unsure".
 
-Five mailing-list pairs are `label=n/a` (lists aren't people). `reviewed=1` is reserved for human review;
-none is done yet. **These are model labels, not hand labels**, so report them as such.
+Five mailing-list pairs are `label=n/a` (lists aren't people). `reviewed=1` is reserved for human review; none is done
+yet. **These are model labels, not hand labels**, so report them as such.
 
 ```bash
+uv run python eval/er_labels.py score --sweep   # P/R/F1 of the resolver on this database; no model calls
 uv run python eval/er_labels.py review          # independent second pass (resumable; skips reviewed rows)
-uv run python eval/er_labels.py score --sweep   # P/R/F1 per threshold, rescoring with the current resolver
 ```
 
-| Threshold | Labels | Pairs | Precision | Recall | F1 |
-|---|---|---|---|---|---|
-| **0.5 + rare exact names (current, #127)** | AI-reviewed | 235 | 0.934 | 0.963 | **0.948** |
-| 0.5 (before #127) | AI-reviewed | 235 | 0.938 | 0.944 | 0.941 |
-| 0.5 (before #127) | AI-reviewed, reviewer confident | 189 | 0.971 | 0.957 | 0.964 |
-| 0.6 (previous) | AI-reviewed | 235 | 0.969 | 0.770 | 0.858 |
-| 0.6 | draft only | 235 | 0.914 | 0.801 | 0.854 |
+`score` judges the resolver's real decisions: the **deployed clusters**, the identities the graph shows as one person
+after the resolve stage, and the **pairwise decision** at a threshold (`resolve.candidates()`, which adds the rule
+that an exact full name carried by only two or three identities merges on the name). Measured 2026-11-23 on a fresh
+baseline (sync, then the spine, self and resolve stages) with the resolver at commit `3a03ed6`. 7 of the 235
+AI-reviewed pairs name a `name:` identity that only model extraction creates, so they are left out:
 
-Since #127 an exact full name carried by only 2-3 identities merges on the name alone, which trades a little
-precision for recall. The draft labels undercounted true duplicates, which made recall look worse than it is. Re-labeling moved the
-best threshold from 0.6 to 0.5 at almost no precision cost. Structural guards still hold at 0.5: Larry Taylor
-stays separate from Liz Taylor, and Kenneth Lay resolves to one node (12 identities).
+| Decision | Labels | Pairs | Precision | Recall | F1 |
+|---|---|---|---|---|---|
+| **Deployed clusters** | AI-reviewed | 228 | 0.938 | 0.962 | **0.950** |
+| Pairwise, threshold 0.5 | AI-reviewed | 228 | 0.933 | 0.962 | 0.947 |
+| Pairwise, threshold 0.6 | AI-reviewed | 228 | 0.961 | 0.785 | 0.864 |
+| Deployed clusters | AI-reviewed, reviewer confident | 186 | 0.971 | 0.971 | 0.971 |
+
+The threshold is 0.5 because raising it buys little precision for much recall. Structural guards hold at 0.5: Larry
+Taylor stays separate from Liz Taylor, and Kenneth Lay is one node (10 email identities on a build without extraction).
+
+## Life threads and projects
+
+`threads_eval.py` scores the derived projects and life threads against a personal gold file kept in git-ignored
+`data/eval/threads_gold.json` (it names a person's projects and people, so it never belongs in the repo); its
+docstring gives the format. It runs on your own database and makes no model calls:
+
+```bash
+IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous_personal \
+  uv run python eval/threads_eval.py
+```
+
+## LightRAG on Igneous's graph (criterion 5)
+
+`lightrag_demo.py` loads `igneous export lightrag` into LightRAG and answers a question from it; see its docstring.
