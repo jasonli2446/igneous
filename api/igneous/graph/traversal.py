@@ -427,13 +427,23 @@ def explain(s: Session, a: int, b: int, limit: int = 8, named: dict[str, str] | 
         "thread_id": c["thread_id"] if c["shown"] else None, "thread": label(c["thread"], "Thread", named),
         "messages": c["messages"], "people": people.get(c["thread_id"], 0), "first": c["first"], "last": c["last"],
         "source": c["source"], "excerpt": name_handles(c["excerpt"], named)} for c in convo]
-    links = connection(s, ids_a, ids_b, named, allow_path=total == 0 and not events, alias={**alias_a, **alias_b})
+    alias = {**alias_a, **alias_b}
+    links = connection(s, ids_a, ids_b, named, allow_path=total == 0 and not events, alias=alias)
     from igneous.graph.corrections import for_pair
+    # Your corrections to the pair, each end as drawn: a placement you rejected under an organization's own thread is
+    # one between the thread and the organization.
+    shown = {na["id"]: na["name"], nb["id"]: nb["name"]}
+    corrected = for_pair(s, ids_a, ids_b)
+    for c in corrected:
+        for end in ("src", "dst"):
+            if c[end] in alias:
+                c[end] = alias[c[end]]
+                c[f"{end}_name"] = shown[c[end]]
     return {"a": {"id": na["id"], "name": label(na["name"], na["type"], named)},
             "b": {"id": nb["id"], "name": label(nb["name"], nb["type"], named)},
             "messages": total, "conversations": conversations, "events": [dict(e) for e in events],
             "shared": shared_items(s, ids_a, ids_b, named) if total else [],
-            "corrections": for_pair(s, ids_a, ids_b), **links}
+            "corrections": corrected, **links}
 
 
 def shortest_path(adj: dict[int, list[tuple[int, int]]], start: set[int], goal: set[int],

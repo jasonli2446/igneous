@@ -217,15 +217,20 @@ def remove_link(s: Session, edge_id: int) -> dict:
 
 
 def outcome(s: Session, pairs) -> list[dict]:
-    """For each node pair a correction touched: whether any link still joins the two now (either direction), so a view
-    removes or restores exactly those pairs."""
-    pairs = sorted({tuple(sorted(p)) for p in pairs})
+    """For each node pair a correction touched, as the explorer draws it: whether any link still joins the two now
+    (either direction), so a view removes or restores exactly those pairs. An organization's own thread
+    (graph/backbone.py) is drawn as the organization, so a placement under it is a pair with the organization."""
+    ends = sorted({x for p in pairs for x in p})
+    drawn = dict(s.execute(text("""SELECT id, (props->>'org')::bigint FROM nodes
+                                   WHERE id = ANY(:i) AND type = 'Project' AND props ? 'org'"""), {"i": ends}).all())
+    pairs = sorted({(a, b) for a, b in (sorted((drawn.get(x, x), drawn.get(y, y))) for x, y in pairs) if a != b})
+    members = {org: {org, thread} for thread, org in drawn.items()}
     linked = {tuple(r) for r in s.execute(text("""
-        SELECT LEAST(e.src, e.dst), GREATEST(e.src, e.dst) FROM edges e
-        JOIN jsonb_to_recordset(CAST(:p AS jsonb)) AS q(a bigint, b bigint)
-          ON (e.src = q.a AND e.dst = q.b) OR (e.src = q.b AND e.dst = q.a)
+        SELECT q.a, q.b FROM jsonb_to_recordset(CAST(:p AS jsonb)) AS q(a bigint, b bigint, x bigint, y bigint)
+        JOIN edges e ON (e.src = q.x AND e.dst = q.y) OR (e.src = q.y AND e.dst = q.x)
         WHERE COALESCE(e.props->>'verdict', '') <> 'drop'
-    """), {"p": json.dumps([{"a": a, "b": b} for a, b in pairs])})}
+    """), {"p": json.dumps([{"a": a, "b": b, "x": x, "y": y} for a, b in pairs
+                            for x in members.get(a, {a}) for y in members.get(b, {b})])})}
     return [{"a": a, "b": b, "still_linked": (a, b) in linked} for a, b in pairs]
 
 

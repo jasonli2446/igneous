@@ -264,7 +264,7 @@ def test_only_what_an_org_holds_goes_under_it_by_its_domain(db):
     assert why["Beacon rollout"] == "a work project; 100% of its conversations involve acme.test"
 
 
-def test_why_shows_a_placement_by_its_own_link_and_this_is_wrong_keeps_it_out(db):
+def test_why_shows_a_placement_by_its_own_link_and_this_is_wrong_keeps_it_out(db, monkeypatch):
     """The explorer draws a class the backbone placed under State University as linked to the university, which
     stands for its own thread. Why shows the placement itself (its reason and its records), drawn between the two;
     "This is wrong" on it takes it out, and the next build doesn't place the class there again."""
@@ -287,10 +287,32 @@ def test_why_shows_a_placement_by_its_own_link_and_this_is_wrong_keeps_it_out(db
     assert sorted(card["title"] for card in link["evidence"]) == ["CS 401 homework 1", "CS 401 homework 2",
                                                                   "CS 401 midterm"]
     assert not link["stated"] and why["path"] is None
-    assert client.post("/graph/edge/wrong", json={"edge": link["id"]}).status_code == 200
-    assert client.get("/graph/explain", params={"a": school, "b": course}).json()["direct"] == []
+    # What it is part of, to an MCP client too, is the university, not its thread.
+    monkeypatch.setattr(llm.settings, "llm_sources", "gmail,linkedin")  # what names them: the client may see them
+    assert [p["node_id"] for p in mcp_call("open_node", node_id=course)["part_of"]] == [school]
+    wrong = client.post("/graph/edge/wrong", json={"edge": link["id"]}).json()
+    # The pair it reports is the one drawn (the university and the class), no longer linked; so is the correction the
+    # Why panel lists.
+    assert [(p["a"], p["b"], p["still_linked"]) for p in wrong["pairs"]] == [(*sorted((school, course)), False)]
+    after = client.get("/graph/explain", params={"a": school, "b": course}).json()
+    assert after["direct"] == []
+    assert [(c["src"], c["dst"], c["src_name"], c["dst_name"]) for c in after["corrections"]] == [
+        (course, school, "CS 401 · Sep-Oct 2024", "State University")]
     backbone.run(db, log=None)  # the next build: the class is still one, and still mostly the school's mail
     assert "CS 401 · Sep-Oct 2024" not in parents(db)
+    # An organization and its own thread are one thing drawn: asking why they are connected is asking about one.
+    thread = db.execute(text("SELECT (props->>'thread')::bigint FROM nodes WHERE id = :o"), {"o": school}).scalar()
+    assert client.get("/graph/explain", params={"a": school, "b": thread}).status_code == 422
+
+
+def mcp_call(tool: str, **args) -> dict:
+    import asyncio
+
+    from igneous import mcp_server
+
+    result = asyncio.run(mcp_server.server.call_tool(tool, args))
+    assert not result.is_error, result.content[0].text
+    return json.loads(result.content[0].text)
 
 
 def school_and_job(s) -> None:

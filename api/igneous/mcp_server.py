@@ -182,11 +182,14 @@ def open_node(node_id: NodeId) -> dict:
     with _reading() as (s, d):
         n = identity.node(s, node_id)
         opened = expand(s, identity.self_id(s), n["id"], [], k=8)
+        # What it is part of, as the explorer draws it: an organization's own thread (graph/backbone.py) is the
+        # organization.
         parents = s.execute(text("""
-            SELECT p.id FROM edges e JOIN nodes p ON p.id = e.dst
+            SELECT DISTINCT CASE WHEN p.type = 'Project' AND p.props ? 'org' THEN (p.props->>'org')::bigint ELSE p.id END
+            FROM edges e JOIN nodes p ON p.id = e.dst
             WHERE e.src = :i AND e.type = 'PART_OF' AND p.type IN ('Project', 'Organization')
               AND COALESCE(e.props->>'verdict', '') <> 'drop'
-            ORDER BY p.id"""), {"i": n["id"]}).scalars().all()
+            ORDER BY 1"""), {"i": n["id"]}).scalars().all()
         stats = gather(s, n["id"])["stats"]
         facts = _facts(s, [n["id"]]).get(n["id"], {})
         return d.report({"node_id": n["id"], "name": d.name(n["id"]), **facts,
