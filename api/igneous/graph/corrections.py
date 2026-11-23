@@ -89,8 +89,8 @@ def _edge(s: Session, edge_id: int):
 
 def reject(s: Session, edge_id: int) -> dict:
     """Record "this link is wrong" for the pair edge `edge_id` joins (as published now). Raises LookupError for no
-    such link and ValueError for a stated one. Returns {removed, also_removed, edges, override_id}: `edges` are the
-    links it removes, the pair's every derived link."""
+    such link and ValueError for a stated one. Returns {removed, also_removed, edges, override_id, pairs}: `edges` are
+    the links it removes (the pairs' every derived link), `pairs` the node pairs it rejects."""
     root = _edge(s, edge_id)
     if root is None:
         raise LookupError("No such link")
@@ -105,12 +105,24 @@ def reject(s: Session, edge_id: int) -> dict:
         JOIN nodes n ON n.id = it2.src AND n.props->>'source' IN ('gmail', 'email')
         JOIN edges x ON x.src = n.id AND x.dst = :dst AND x.type = :type
         WHERE it.src = :src AND it.type = 'IN_THREAD' AND x.extractor <> ALL(:stated)
+        ORDER BY 1
     """), {"src": root["src"], "dst": root["dst"], "type": root["type"], "b": root["b"],
            "stated": list(STATED)}).mappings().all()
     roots = {tuple(r[k] for k in ("a", "b", "type", "extractor")): dict(r) for r in [root, *siblings]}
+    oid, snapshots = _reject(s, roots, "you said this connection is wrong")
+    if not snapshots:
+        raise LookupError("No such link")
+    ids = [e["id"] for e in snapshots]
+    return {"removed": edge_id, "also_removed": len(ids) - 1, "edges": ids, "override_id": oid,
+            "pairs": sorted({tuple(sorted((r["src"], r["dst"]))) for r in roots.values()})}
+
+
+def _reject(s: Session, roots: dict[tuple, dict], reason: str, data: dict | None = None) -> tuple[int, list]:
+    """Record your 'drop' on each root (natural keys (a, b, type, extractor) -> its node ids {src, dst}): one override
+    'unlink' holding exact copies of every derived link between each pair (with the evidence a delete cascades away)
+    and the verdicts the roots had, for undo. Returns (override id, those copies)."""
     pairs = json.dumps([{"a": a, "b": b} for a, b in sorted({tuple(sorted((r["src"], r["dst"])))
                                                              for r in roots.values()})])
-    # Exact copies of every derived link between each pair, with the evidence a delete cascades away.
     snapshots = s.execute(text("""
         SELECT to_jsonb(e) || jsonb_build_object('src_key', a.type || ':' || a.key,
             'dst_key', b.type || ':' || b.key, 'evidence', COALESCE((
@@ -121,9 +133,8 @@ def reject(s: Session, edge_id: int) -> dict:
         WHERE e.extractor <> ALL(:stated)
         ORDER BY e.id
     """), {"pairs": pairs, "stated": list(STATED)}).scalars().all()
-    if not snapshots:
-        raise LookupError("No such link")
-    oid = overrides.add(s, "unlink", [root["b"], root["a"]])
+    first = next(iter(roots))
+    oid = overrides.add(s, "unlink", [first[1], first[0]])
     verdicts = []
     for a, b, kind, extractor in roots:
         previous = s.execute(text("""
@@ -131,12 +142,76 @@ def reject(s: Session, edge_id: int) -> dict:
             WHERE src_key=:a AND dst_key=:b AND type=:t AND extractor=:x FOR UPDATE
         """), {"a": a, "b": b, "t": kind, "x": extractor}).scalar()
         verdicts.append({"a": a, "b": b, "type": kind, "extractor": extractor, "previous": previous})
-        verify.record_correction(s, a, b, kind, extractor, "drop", "you said this connection is wrong", oid)
-    data = {"pair_correction": True, "edges": snapshots, "verdicts": verdicts}
-    s.execute(text("UPDATE overrides SET data=CAST(:data AS jsonb) WHERE id=:i"),
-              {"i": oid, "data": json.dumps(data)})
-    ids = [e["id"] for e in snapshots]
-    return {"removed": edge_id, "also_removed": len(ids) - 1, "edges": ids, "override_id": oid}
+        verify.record_correction(s, a, b, kind, extractor, "drop", reason, oid)
+    s.execute(text("UPDATE overrides SET data=CAST(:data AS jsonb) WHERE id=:i"), {"i": oid, "data": json.dumps(
+        {"pair_correction": True, "edges": snapshots, "verdicts": verdicts, **(data or {})})})
+    return oid, snapshots
+
+
+def split(s: Session, a: int, b: int) -> dict:
+    """Record "these are not the same person" for two Person nodes: your 'drop' on their SAME_AS, which keeps them
+    in separate identities from then on whatever links them (a contact card, a merge you made; graph/resolve.py),
+    and takes out any 'same person' link you added between the two. Undo puts it all back. Raises LookupError unless
+    both are people."""
+    ends = {r.id: r for r in s.execute(text(
+        "SELECT id, type, type || ':' || key AS k FROM nodes WHERE id = ANY(:i)"), {"i": [a, b]})}
+    if a == b or any(ends.get(i) is None or ends[i].type != "Person" for i in (a, b)):
+        raise LookupError("Both must be people, and two of them")
+    a, b = sorted((a, b))
+    keys = sorted((ends[a].k, ends[b].k))
+    links = [dict(r) for r in s.execute(text("""
+        DELETE FROM overrides WHERE op = 'link' AND value = 'SAME_AS' AND undone_at IS NULL
+            AND node_keys @> CAST(:k AS text[]) AND cardinality(node_keys) = 2
+        RETURNING op, node_keys, value, data"""), {"k": keys}).mappings()]
+    oid, _snapshots = _reject(s, {(*keys, "SAME_AS", "user"): {"src": a, "dst": b}},
+                              "you said they are not the same person", {"links": links})
+    return {"split": [a, b], "override_id": oid, "pairs": [(a, b)]}
+
+
+def remove_link(s: Session, edge_id: int) -> dict:
+    """Record "take out this link I added": the intents behind link `edge_id` (extractor 'user') go, kept in an
+    override 'unlink' (data.user_link) whose undo puts them back. Raises LookupError for no such link and ValueError
+    for a link you didn't add."""
+    from igneous.graph.derived import follow, merges
+
+    edge = _edge(s, edge_id)
+    if edge is None:
+        raise LookupError("No such link")
+    if edge["extractor"] != "user":
+        raise ValueError("Only a link you added can be taken out this way; say an inferred one is wrong instead")
+    folded = merges(s)
+    ends = {edge["a"], edge["b"]}
+    links = [dict(r) for r in s.execute(text("""
+        SELECT id, op, node_keys, value, data FROM overrides
+        WHERE op = 'link' AND undone_at IS NULL AND value = :t ORDER BY id"""), {"t": edge["type"]}).mappings()
+        if (follow(folded, r["node_keys"][0]), follow(folded, r["node_keys"][1])) in ((edge["a"], edge["b"]),
+                                                                                  (edge["b"], edge["a"]))]
+    parents = [list(r) for r in s.execute(text("""
+        SELECT child_key, parent_key, origin FROM thread_parents ORDER BY child_key, parent_key""")).all()
+        if edge["type"] == "PART_OF" and (follow(folded, f"Project:{r[0]}"), follow(folded, f"Project:{r[1]}"))
+        == (edge["a"], edge["b"])]
+    if links:
+        s.execute(text("DELETE FROM overrides WHERE id = ANY(:i)"), {"i": [r["id"] for r in links]})
+    for child, parent, _origin in parents:
+        s.execute(text("DELETE FROM thread_parents WHERE child_key = :c AND parent_key = :p"), {"c": child, "p": parent})
+    oid = overrides.add(s, "unlink", sorted(ends) if edge["type"] == "SAME_AS" else [edge["b"], edge["a"]], edge["type"],
+                        {"user_link": True, "src_key": edge["a"], "dst_key": edge["b"],
+                         "links": [{k: r[k] for k in ("op", "node_keys", "value", "data")} for r in links],
+                         "parents": parents})
+    return {"removed": edge_id, "override_id": oid, "pairs": [tuple(sorted((edge["src"], edge["dst"])))]}
+
+
+def outcome(s: Session, pairs) -> list[dict]:
+    """For each node pair a correction touched: whether any link still joins the two now (either direction), so a view
+    removes or restores exactly those pairs."""
+    pairs = sorted({tuple(sorted(p)) for p in pairs})
+    linked = {tuple(r) for r in s.execute(text("""
+        SELECT LEAST(e.src, e.dst), GREATEST(e.src, e.dst) FROM edges e
+        JOIN jsonb_to_recordset(CAST(:p AS jsonb)) AS q(a bigint, b bigint)
+          ON (e.src = q.a AND e.dst = q.b) OR (e.src = q.b AND e.dst = q.a)
+        WHERE COALESCE(e.props->>'verdict', '') <> 'drop'
+    """), {"p": json.dumps([{"a": a, "b": b} for a, b in pairs])})}
+    return [{"a": a, "b": b, "still_linked": (a, b) in linked} for a, b in pairs]
 
 
 def restore(s: Session, row: dict) -> list[int]:
@@ -191,7 +266,11 @@ def restore(s: Session, row: dict) -> list[int]:
                 WHERE ev.source_item_id IS NULL OR EXISTS (SELECT 1 FROM source_items WHERE id=ev.source_item_id)
                 ON CONFLICT DO NOTHING
             """), {"ev": json.dumps(ev)})
-    if any(e["type"] == "SAME_AS" for e in data.get("edges", [])):
+    # A 'same person' link you added that "not the same person" took out comes back.
+    for link in data.get("links", []):
+        overrides.add(s, link["op"], link["node_keys"], link["value"], link["data"])
+    if any(e["type"] == "SAME_AS" for e in data.get("edges", [])) or any(
+            v["type"] == "SAME_AS" for v in data.get("verdicts", [])):
         from igneous.graph.resolve import refresh_canonical
         refresh_canonical(s)
     return restored
@@ -211,7 +290,7 @@ def undo(s: Session, override_id: int) -> dict:
 def restore_links(s: Session, edge_ids: list[int]) -> dict:
     """Record "bring these links back": the rejections of yours that removed them are undone, and a link the
     verifier dropped gets your 'keep' (a label it learns from), which brings it back from edges_dropped. Returns
-    {undone: [override ids], kept: n, edges: every link id they bring back}."""
+    {undone: [override ids], kept: n, edges: every link id they bring back, pairs: their node pairs by natural key}."""
     groups = s.execute(text("""
         SELECT id FROM overrides WHERE op = 'unlink' AND undone_at IS NULL AND data->>'pair_correction' = 'true'
             AND EXISTS (SELECT 1 FROM jsonb_array_elements(data->'edges') e WHERE (e->>'id')::bigint = ANY(:i))
@@ -227,7 +306,10 @@ def restore_links(s: Session, edge_ids: list[int]) -> dict:
     """), {"i": [i for i in edge_ids if i not in grouped]}).all()
     for a, b, kind, extractor in dropped:
         verify.record_correction(s, a, b, kind, extractor, "keep", "you said this connection is right")
-    return {"undone": list(groups), "kept": len(dropped), "edges": sorted(grouped | set(edge_ids))}
+    keys = {(e["src_key"], e["dst_key"]) for (e,) in s.execute(text("""
+        SELECT e FROM overrides o, jsonb_array_elements(o.data->'edges') e WHERE o.id = ANY(:g)"""), {"g": list(groups)})}
+    return {"undone": list(groups), "kept": len(dropped), "edges": sorted(grouped | set(edge_ids)),
+            "pairs": sorted(keys | {(a, b) for a, b, _t, _x in dropped})}
 
 
 def confirm(s: Session, edge_id: int) -> dict:

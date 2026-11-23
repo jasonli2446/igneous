@@ -1,13 +1,16 @@
 """HTTP surface for derived entities (Projects) and corrections: the inspector's read model, and every correction.
 
-Reads: GET /graph/entity/{id}, GET /graph/suggestions (links the verifier was unsure about). Corrections: rename,
-hide, merge and unlink a Project (POST /graph/entity/{id}/...), "This is wrong" and "This is right" on any derived
-link (POST /graph/edge/wrong, /graph/edge/confirm), bring removed links back (POST /graph/edge/restore), "same
-person" (POST /graph/person/{id}/merge), a connection you add (POST /graph/link), and undo (DELETE /overrides/{id}).
+Reads: GET /graph/entity/{id} (with the corrections that shape it, for undo), GET /graph/suggestions (links the
+verifier was unsure about). Corrections: rename, hide, merge and unlink a Project (POST /graph/entity/{id}/...), "This
+is wrong" and "This is right" on any derived link (POST /graph/edge/wrong, /graph/edge/confirm), bring removed links
+back (POST /graph/edge/restore), "same person" and "not the same person" (POST /graph/person/{id}/merge, /split), a
+connection you add or take out again (POST /graph/link, DELETE /graph/link/{id}), and undo (DELETE /overrides/{id}).
 
 Each correction is an intent (graph/corrections.py): recorded at once by natural keys, then applied to the published
 graph in place, or by the final step of a rebuild that is running. Every answer says which: {"applied": "now"}, or
-{"applied": "on_publish", "note": ...}. No correction is refused because a rebuild is running.
+{"applied": "on_publish", "note": ...}, and carries the override id that undoes it. Those that remove or bring back
+links say, per node pair they touched, whether a link still joins the two (`pairs`: [{a, b, still_linked}]). No
+correction is refused because a rebuild is running.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -77,10 +80,16 @@ def entity(node_id: int, items: int = Query(30, ge=1, le=200), s: Session = Depe
     events.sort(key=lambda x: (x["date"] is None, str(x["date"])), reverse=False)
     rows.sort(key=lambda x: str(x["date"] or ""), reverse=True)
     props = p["props"] or {}
+    # The corrections that shape it (your rename, your hide, what you merged into it), each undone by its id.
+    shaped = [dict(r) for r in s.execute(text("""
+        SELECT id AS override_id, op, value, created_at FROM overrides
+        WHERE undone_at IS NULL AND op IN ('rename', 'hide', 'merge') AND node_keys[1] = :k ORDER BY id
+    """), {"k": f"Project:{p['key']}"}).mappings()]
     return {"id": p["id"], "name": p["name"], "key": p["key"], "aliases": _aliases(props, p["name"]),
             "anchors": props.get("anchors", []), "hidden": bool(props.get("hidden")),
             "people": people, "groups": groups, "events": events, "items": rows[:items],
-            "counts": {"people": len(people), "groups": len(groups), "events": len(events), "items": len(rows)}}
+            "counts": {"people": len(people), "groups": len(groups), "events": len(events), "items": len(rows)},
+            "corrections": shaped}
 
 
 class RenameBody(BaseModel):
@@ -142,7 +151,7 @@ def unlink(node_id: int, body: UnlinkBody, s: Session = Depends(get_session)):
         if eid is None:
             raise HTTPException(404, "That isn't linked to this entity")
         result = corrections.reject(s, eid)
-    return {**result, "op": "unlink", "id": node_id, **apply_now(s)}
+    return {**_settled(s, result), "op": "unlink", "id": node_id}
 
 
 @router.delete("/overrides/{override_id}")
@@ -161,6 +170,15 @@ class EdgeBody(BaseModel):
     edge: int
 
 
+def _settled(s: Session, result: dict) -> dict:
+    """Apply a recorded correction now if it can be, and answer with it: when it applies, and per node pair it
+    touched whether a link still joins the two."""
+    applied = apply_now(s)
+    pairs = corrections.outcome(s, result.pop("pairs", []))
+    s.rollback()
+    return {**result, "pairs": pairs, **applied}
+
+
 @router.post("/graph/edge/wrong")
 def edge_is_wrong(body: EdgeBody, s: Session = Depends(get_session)):
     """'This is wrong' on any derived link: recorded as your verdict on the pair (it stays gone on every rebuild, for
@@ -173,7 +191,7 @@ def edge_is_wrong(body: EdgeBody, s: Session = Depends(get_session)):
             raise HTTPException(404, str(e)) from e
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
-    return {**result, **apply_now(s)}
+    return _settled(s, result)
 
 
 @router.post("/graph/edge/confirm")
@@ -234,6 +252,19 @@ def merge_people(node_id: int, body: SamePersonBody, s: Session = Depends(get_se
     return {"merged": [a, b], "person": head, "override_id": oid, **applied}
 
 
+@router.post("/graph/person/{node_id}/split")
+def split_people(node_id: int, body: SamePersonBody, s: Session = Depends(get_session)):
+    """"These are not the same person": your verdict, which keeps the two in separate identities on every rebuild
+    whatever joins them (a contact card, an address match, a 'same person' you said before, which it takes out).
+    Undo (DELETE /overrides/{override_id}) joins them again."""
+    with recording(s):
+        try:
+            result = corrections.split(s, node_id, body.other)
+        except LookupError as e:
+            raise HTTPException(400, str(e)) from e
+    return _settled(s, result)
+
+
 class RestoreBody(BaseModel):
     edges: list[int]
 
@@ -247,8 +278,11 @@ def restore_edges(body: RestoreBody, s: Session = Depends(get_session)):
     applied = apply_now(s)
     restored = list(s.execute(text("SELECT id FROM edges WHERE id = ANY(:i) ORDER BY id"),
                               {"i": result.pop("edges")}).scalars())
+    ids = dict(s.execute(text("SELECT type || ':' || key, id FROM nodes WHERE type || ':' || key = ANY(:k)"),
+                         {"k": sorted({k for pair in result["pairs"] for k in pair})}).all())
+    pairs = corrections.outcome(s, [(ids[a], ids[b]) for a, b in result.pop("pairs") if a in ids and b in ids])
     s.rollback()
-    return {"restored": restored, **result, **applied}
+    return {"restored": restored, **result, "pairs": pairs, **applied}
 
 
 # How two kinds of thing can be connected, in plain words (the add-a-connection menu), and the edge each means.
@@ -305,3 +339,17 @@ def add_link(body: LinkBody, s: Session = Depends(get_session)):
                     {"a": a, "b": b, "t": body.type}).scalar()
     s.rollback()
     return {"id": eid, "src": body.src, "dst": body.dst, "type": body.type, "override_id": oid, **applied}
+
+
+@router.delete("/graph/link/{edge_id}")
+def remove_link(edge_id: int, s: Session = Depends(get_session)):
+    """Take out a link you added (extractor 'user'): it stays out on every rebuild until you add it again, and undo
+    (DELETE /overrides/{override_id}) brings it back."""
+    with recording(s):
+        try:
+            result = corrections.remove_link(s, edge_id)
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+    return _settled(s, result)

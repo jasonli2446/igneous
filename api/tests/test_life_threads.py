@@ -11,28 +11,20 @@ from types import SimpleNamespace
 import life_threads
 import pytest
 from conftest import API
+from life_threads import life  # noqa: F401
 from pipeline_data import local_models  # noqa: F401
 from sqlalchemy import text
 
-from igneous import llm, pipeline
+from igneous import pipeline
 from igneous.graph import threads
 
-pytestmark = pytest.mark.usefixtures("local_models")
+pytestmark = pytest.mark.usefixtures("life")
 
 
-@pytest.fixture
-def life(db, monkeypatch):
-    monkeypatch.setattr(llm, "structured", life_threads.model)
-    monkeypatch.setattr(llm.settings, "llm_sources", "gmail,gcal,imessage,drive,fs,github")
-    monkeypatch.setattr(llm.settings, "local_sources_model_enabled", True)
-    life_threads.build(db)
-    return db
-
-
-def test_every_gold_thread_is_found_once_under_its_parent(life):
+def test_every_gold_thread_is_found_once_under_its_parent(db):
     from eval.threads_eval import score
 
-    pipeline.run(life)
+    pipeline.run(db)
     out = score(life_threads.GOLD)
     assert out["summary"] == {"found": 8, "of": 8, "duplicated": 0, "leaks": 0, "hierarchy_ok": 4,
                               "hierarchy_of": 4, "participant_errors": 0}, json.dumps(out, indent=1, default=str)
@@ -63,12 +55,12 @@ def snapshot(s) -> dict:
     }
 
 
-def test_two_rebuilds_with_no_new_data_change_nothing(life):
-    pipeline.run(life)
-    first = snapshot(life)
+def test_two_rebuilds_with_no_new_data_change_nothing(db):
+    pipeline.run(db)
+    first = snapshot(db)
     assert first["registry"] and first["verdicts"]
-    pipeline.run(life)
-    second = snapshot(life)
+    pipeline.run(db)
+    second = snapshot(db)
     for part in first:
         assert second[part] == first[part], part
 
@@ -88,8 +80,8 @@ def _candidates(items) -> list:
     return [[threads.thread_key(c), c["terms"], sorted(c["items"])] for c in threads.burst_candidates(items, set())]
 
 
-def test_candidates_are_the_same_whatever_the_hash_seed_or_record_order(life, tmp_path):
-    rows = [dict(r._mapping) for r in threads._items(life)]
+def test_candidates_are_the_same_whatever_the_hash_seed_or_record_order(db, tmp_path):
+    rows = [dict(r._mapping) for r in threads._items(db)]
     items = [SimpleNamespace(**r) for r in rows]
     expected = _candidates(items)
     assert {"Portland", "Lisbon", "Kiosk Prototype"} <= {terms[0] for _key, terms, _items in expected}

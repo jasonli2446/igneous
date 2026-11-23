@@ -471,7 +471,15 @@ def apply_verdicts(s: Session) -> int:
             WHERE (v.src_key, v.dst_key, v.type, v.extractor) = (d.src_key, d.dst_key, d.type, d.extractor)
               AND v.verdict = 'drop' AND v.source = 'model' AND (d.type <> 'SAME_AS' OR v.confidence >= 0.8))
     """))
-    if "SAME_AS" in [*removed, *moved, *back]:
+    # Identities you said are not one person, still in one cluster (a trusted link joins them): split them now.
+    together = s.execute(text("""
+        SELECT EXISTS (SELECT 1 FROM edge_verdicts v
+            JOIN nodes a ON a.type || ':' || a.key = v.src_key JOIN nodes b ON b.type || ':' || b.key = v.dst_key
+            WHERE v.type = 'SAME_AS' AND v.verdict = 'drop' AND v.source = 'user' AND a.id <> b.id
+              AND COALESCE((SELECT canonical_id FROM canonical WHERE node_id = a.id), a.id)
+                  = COALESCE((SELECT canonical_id FROM canonical WHERE node_id = b.id), b.id))
+    """)).scalar()
+    if together or "SAME_AS" in [*removed, *moved, *back]:
         from igneous.graph.resolve import refresh_canonical
         refresh_canonical(s)
     return len(removed) + len(moved) + len(back) + s.execute(text("""

@@ -8,11 +8,12 @@ address and place is invented.
 
 `build(s)` writes the records; `GOLD` is what the threads pipeline should find (the format of eval/threads_eval.py);
 `model` answers every hosted call the pipeline makes, deterministically and from the prompt alone, the way a careful
-model would.
+model would. The `life` fixture is a test database holding it, with that model in place of the hosted one.
 """
 import re
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from pipeline_data import put
 
 ME = "mo@self.test"
@@ -224,3 +225,15 @@ def model(system: str, user: str, schema: dict, **_options):
         return {"keep": [line[2:] for line in user.splitlines() if line.startswith("- ")]}, {}
     return {k: {"array": [], "boolean": False, "number": 0, "integer": 0}.get(v.get("type"), "")
             for k, v in props.items()}, {}
+
+
+@pytest.fixture
+def life(db, local_models, monkeypatch):
+    """The synthetic life in the test database, every source opted in, `model` answering hosted calls."""
+    from igneous import llm
+
+    monkeypatch.setattr(llm, "structured", model)
+    monkeypatch.setattr(llm.settings, "llm_sources", "gmail,gcal,imessage,drive,fs,github")
+    monkeypatch.setattr(llm.settings, "local_sources_model_enabled", True)
+    build(db)
+    return db

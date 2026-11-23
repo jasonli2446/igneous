@@ -178,4 +178,6 @@ def check_graph(s: Session) -> list[Violation]:
     violations = endpoint_violations(s.execute(_ENDPOINT_ROWS).mappings())
     violations.extend(message_cardinality_violations(s.execute(_MESSAGE_CARDINALITIES).mappings()))
     violations.extend(replies_thread_violations(s.execute(_REPLIES_OUTSIDE_THREAD).mappings()))
+    from igneous.graph import derived_invariants  # corrections and the thread registry hold
+    violations.extend(derived_invariants.check(s))
     return violations

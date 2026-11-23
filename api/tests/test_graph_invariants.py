@@ -107,7 +107,11 @@ def test_replies_thread_violations_include_edge_endpoints():
     assert violation.details == {"src": 11, "dst": 12}
 
 
-def test_check_graph_runs_all_read_only_checks():
+def test_check_graph_runs_all_read_only_checks(monkeypatch):
+    from igneous.graph import derived_invariants
+
+    monkeypatch.setattr(derived_invariants, "check", lambda s: [])
+
     class Result:
         def __init__(self, rows):
             self.rows = rows

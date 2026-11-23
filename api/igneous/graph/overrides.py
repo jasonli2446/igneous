@@ -11,7 +11,8 @@ change on every rebuild:
                                         the threads stage builds its records into the kept one. data.node: fold as
                                         it was, for undo
   unlink  node_keys=[b, a]             a pair rejection (graph/corrections.py): your 'drop' verdicts on the pair, and
-                                        exact copies of the links it removed, for undo
+                                        exact copies of the links it removed, for undo; or, with data.user_link, a
+                                        link you added and took out again (value=its type), holding its intents
   link    node_keys=[src, dst]         value=the edge type: a connection you added (extractor 'user'); data.props
                                         are its props
 
@@ -38,6 +39,7 @@ class Plan:
     hidden: set[str] = field(default_factory=set)
     merges: dict[str, str] = field(default_factory=dict)          # folded key -> surviving key
     links: list[tuple[str, str, str, dict]] = field(default_factory=list)  # (src key, dst key, edge type, props)
+    removed: list[tuple[str, str, str]] = field(default_factory=list)       # links you added, taken out
 
 
 def plan(rows: list[dict]) -> Plan:
@@ -64,6 +66,8 @@ def plan(rows: list[dict]) -> Plan:
                 p.merges = {f: (keep if k == fold else k) for f, k in p.merges.items()}  # keep chains one deep
         elif r["op"] == "link" and len(keys) == 2 and r.get("value"):
             p.links.append((keys[0], keys[1], r["value"], (r.get("data") or {}).get("props") or {}))
+        elif r["op"] == "unlink" and (r.get("data") or {}).get("user_link"):
+            p.removed.append((r["data"]["src_key"], r["data"]["dst_key"], r["value"]))
 
     p.renames = {survivor(k): v for k, v in p.renames.items()}
     p.hidden = {survivor(k) for k in p.hidden}
@@ -202,7 +206,14 @@ def _reverse(s: Session, r: dict) -> None:
     """Undo one correction on the graph as it is now."""
     from igneous.graph import corrections
 
-    if r["op"] == "unlink":
+    data = r.get("data") or {}
+    if r["op"] == "unlink" and data.get("user_link"):
+        for link in data.get("links", []):  # the intents it took out come back
+            add(s, link["op"], link["node_keys"], link["value"], link["data"])
+        for child, parent, origin in data.get("parents", []):
+            s.execute(text("""INSERT INTO thread_parents (child_key, parent_key, origin) VALUES (:c, :p, :o)
+                              ON CONFLICT DO NOTHING"""), {"c": child, "p": parent, "o": origin})
+    elif r["op"] == "unlink":
         corrections.restore(s, r)
     elif r["op"] == "merge" and len(r["node_keys"]) == 2:
         _unmerge(s, r)
@@ -257,10 +268,22 @@ def stated_parents(s: Session) -> list[tuple[str, str]]:
 
 def _links(s: Session, p: Plan, folded: dict[str, str]) -> int:
     """The connections you added, as edges with extractor 'user', on whatever each end is now (a Project you folded
-    away: the one it went into). Identity clusters are rebuilt when a 'same person' link is new."""
+    away: the one it went into); a link you took out is gone unless you added it again. Identity clusters are rebuilt
+    when a 'same person' link comes or goes."""
     links = [*p.links, *((c, q, "PART_OF", {"why": "you said so"}) for c, q in stated_parents(s))]
-    ids = _ids(s, [follow(folded, k) for a, b, _t, _p in links for k in (a, b)])
+    ids = _ids(s, [follow(folded, k) for a, b, _t, _p in links for k in (a, b)]
+               + [follow(folded, k) for a, b, _t in p.removed for k in (a, b)])
     written, same_as = 0, False
+    wanted = {(follow(folded, a), follow(folded, b), t) for a, b, t, _p in links}
+    for a_key, b_key, type_ in p.removed:
+        a, b = follow(folded, a_key), follow(folded, b_key)
+        if (a, b, type_) in wanted or (type_ == "SAME_AS" and (b, a, type_) in wanted) or a not in ids or b not in ids:
+            continue
+        x, y = sorted((ids[a], ids[b])) if type_ == "SAME_AS" else (ids[a], ids[b])
+        if s.execute(text("""DELETE FROM edges WHERE src = :a AND dst = :b AND type = :t AND extractor = 'user'
+                             RETURNING id"""), {"a": x, "b": y, "t": type_}).first():
+            written += 1
+            same_as |= type_ == "SAME_AS"
     for a_key, b_key, type_, props in links:
         a, b = ids.get(follow(folded, a_key)), ids.get(follow(folded, b_key))
         if a is None or b is None or a == b:
