@@ -1,7 +1,10 @@
 """Credentials never reach storage: the patterns (connectors/redact.py) and the sync runner that applies them to
 every item it stores."""
+import base64
 import importlib.util
 import json
+import random
+import time
 
 from conftest import API
 from sqlalchemy import text
@@ -84,7 +87,12 @@ def test_credentials_in_headers_and_urls_are_matched_and_prose_is_not():
             ("Authorization: Basic dXNlcjpwYXNzd29yZDEyMzQ=", "Authorization: Basic "),
             (f"Proxy-Authorization: token {opaque}", "Proxy-Authorization: token "),
             (f'-H "x-api-key: {opaque}"', '-H "x-api-key: '),
-            (f"AccountKey={opaque}", "AccountKey=")):
+            (f"AccountKey={opaque}", "AccountKey="),
+            (f'req.Header.Set("Authorization", "Bearer {opaque}")', 'req.Header.Set("Authorization", "Bearer '),
+            (f"xhr.setRequestHeader('Authorization','Basic {opaque}')", "xhr.setRequestHeader('Authorization','Basic "),
+            (f'headers.set("X-Api-Key", "{opaque}")', 'headers.set("X-Api-Key", "'),
+            (f"X-Auth-Token: {opaque}", "X-Auth-Token: "),
+            (f"token-{'eyJ' + 'a' * 12 + '.eyJ' + 'b' * 12 + '.' + opaque}", "token-")):
         out, counts = redact(text_)
         assert opaque not in out and "dXNlcjpwYXNz" not in out and out.startswith(kept), out
         assert sum(counts.values()) == 1, (text_, counts)
@@ -92,12 +100,66 @@ def test_credentials_in_headers_and_urls_are_matched_and_prose_is_not():
     assert out == ("postgres://[REDACTED:url_credentials]@db:5432/x and "
                    "mongodb+srv://[REDACTED:url_credentials]@cluster0.example.net/db")
     for prose in ("Bearer bonds and other bearer instruments were discussed.", "the authorization: pending review",
-                  "See https://medium.com/@someone/post and email me@example.com", "basic responsibilities apply"):
+                  "See https://medium.com/@someone/post and email me@example.com", "basic responsibilities apply",
+                  # Headers whose name holds a secret's word but whose value is no secret, and an author's name.
+                  "Co-Authored-By: someone@example.com", "Authentication-Results: mx.example.com; dkim=pass",
+                  "token-endpoint: https://oauth2.example.com/token", "author-name: JaneDoe1234",
+                  "secret-santa: Bartholomew", "password-protected: definitely", '"author": "johnsmith123"'):
         assert redact(prose) == (prose, {}), prose
+
+
+def test_a_key_cut_short_is_removed_up_to_the_next_one():
+    """A key pasted twice, the first copy cut short: both copies go, and so does nothing after the second."""
+    out, counts = redact("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIB (cut)\n-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n"
+                         "-----END RSA PRIVATE KEY-----\nThanks")
+    assert out == "[REDACTED:private_key][REDACTED:private_key]\nThanks" and counts == {"private_key": 2}
+
+
+def _hard_texts(size: int) -> dict[str, str]:
+    """Texts that make a pattern rescan one run from every position in it, unless it is built not to: long runs of
+    a pattern's own characters and literal starts, and names and separators with no value after them."""
+    def run(piece: str) -> str:
+        return (piece * (size // len(piece) + 1))[:size]
+
+    pieces = ["ab-", "TOKEN-", "TOKEN_", "TOKEN", "AUTH", "eyJ-", "eyJ", "eyJ" + "a" * 12 + ".", "eyJ" + "a-" * 8,
+              "-----BEGIN RSA PRIVATE KEY-----\n", "-----END RSA PRIVATE KEY-----", "-----BEGIN AAAA", "://u:",
+              "://u:p@", "Authorization: Bearer ", 'authorization", "', "x-api-key-", "x-api-key: ", '"token", "',
+              "token=", "TOKEN \t", "hooks.slack.com/services/T", "ghp_", "github_pat_", "sk-", "sk-ant-", "sk_live_",
+              "ya29.", "1//", "SG.", "hf_", "npm_", "xoxb-", "ABSK", "AIza", "AKIA", "glpat-"]
+    texts = {f"a run of {piece!r}": run(piece) for piece in pieces}
+    return texts | {
+        "base64url": base64.urlsafe_b64encode(random.Random(0).randbytes(size)).decode()[:size],
+        "TOKEN, then spaces": "TOKEN" + " " * size, "TOKEN:, then spaces": "TOKEN:" + " " * size + "x",
+        '"TOKEN", then spaces': '"TOKEN"' + " " * size + ",", "tokens ending in é": run("ghp_" + "a" * 40 + "é ")}
+
+
+def _cpu_seconds(pattern, text_: str) -> float:
+    start = time.thread_time()
+    for _ in pattern.finditer(text_):
+        pass
+    return time.thread_time() - start
+
+
+def test_every_pattern_runs_in_time_linear_in_the_text():
+    """Every item a sync stores, and every item a rebuild re-checks, is redacted: no text may make a pattern slower
+    than linear. Each pattern reads each hard text of 1, 8 and 64 KB within a budget proportional to its length (the
+    slowest pattern needs about a tenth of it), measured in this thread's CPU time so a busy machine doesn't fail it.
+    A pattern that rescans a run from each start in it misses the budget by 64 KB, or at once if worse than
+    quadratic."""
+    for size in (1024, 8 * 1024, 64 * 1024):
+        budget = 0.002 + size * 4e-6
+        for name, text_ in _hard_texts(size).items():
+            for kind, pattern in PATTERNS:
+                spent = _cpu_seconds(pattern, text_)
+                if spent > budget:  # a pause of the thread itself (a page fault, a collection): measure again
+                    spent = min(spent, *(_cpu_seconds(pattern, text_) for _ in range(2)))
+                assert spent <= budget, f"{kind} took {spent:.3f}s of CPU on {size} characters of {name}"
 
 
 def test_a_remote_loses_its_user_name_and_token():
     assert url_without_credentials("https://jane:" + GH + "@github.com/a/b.git") == "https://github.com/a/b.git"
+    assert url_without_credentials("https://jane:p@ss@github.com/a/b.git") == "https://github.com/a/b.git"  # an @ in it
+    assert url_without_credentials("https://example.com?from=a@b.com") == "https://example.com?from=a@b.com"
     assert url_without_credentials(" https://oauth2:abc123secret@gitlab.com/a/b.git") == "https://gitlab.com/a/b.git"
     assert url_without_credentials("git@github.com:a/b.git") == "git@github.com:a/b.git"  # scp-style: no secret
     assert url_without_credentials("https://github.com/a/b.git?token=" + GH) == \
