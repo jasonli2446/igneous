@@ -78,7 +78,7 @@ make web    # terminal 2: cd web && npm install && npm run dev                 (
 
 Always run the API with `--reload`; otherwise you test stale code. Both Make targets already do. The web app talks to
 `http://localhost:8000` unless `NEXT_PUBLIC_API_URL` is set. `docker compose up` runs the API and web in containers
-instead (against the `igneous` database).
+instead, against the `igneous` database; the API container reads `api/.env` for its other settings.
 
 ### 5. Open the Sources page and follow it
 
