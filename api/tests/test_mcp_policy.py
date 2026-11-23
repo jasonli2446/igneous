@@ -11,7 +11,7 @@ import sys
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
-from mixed_sources import PRIVATE, T0, _edge, _item, _named, _node, build, wipe
+from mixed_sources import PRIVATE, T0, _edge, _item, _named, _node, build, chat_only_name, wipe
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
@@ -107,6 +107,22 @@ def test_a_name_only_a_record_outside_the_opt_in_gave_stays_withheld(graph):
     found = call("find", name="Ella")
     assert found["results"] == [] and found["withheld"]["nodes"] == {"Person": 1}
     assert "Ella Novak" not in said("open_node", node_id=ella)
+
+
+def test_a_name_only_google_chat_gave_stays_withheld(committed_db, tmp_path, monkeypatch):
+    """Ella, named only by a Google Chat space (Takeout not opted in), in opted-in mail by her address alone: no tool
+    names her until Takeout is opted in."""
+    monkeypatch.setattr(settings, "llm_sources", "gmail")
+    try:
+        ella = chat_only_name(committed_db, tmp_path)
+        committed_db.commit()
+        found = call("find", name="Ella")
+        assert found["results"] == [] and found["withheld"]["nodes"] == {"Person": 1}
+        assert "Ella Novak" not in said("open_node", node_id=ella)
+        monkeypatch.setattr(settings, "llm_sources", "gmail,takeout")
+        assert [r["name"] for r in call("find", name="Ella")["results"]] == ["Ella Novak"]
+    finally:
+        wipe()
 
 
 def test_what_is_opted_in_is_shared_and_the_rest_is_counted(graph):

@@ -8,7 +8,7 @@ import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from mixed_sources import T0, Recorder, _edge, _item, _named, _node, build, wipe
+from mixed_sources import T0, Recorder, _edge, _item, _named, _node, build, chat_only_name, wipe
 from sqlalchemy import text
 
 from igneous import llm
@@ -82,6 +82,15 @@ def test_a_name_only_a_record_outside_the_opt_in_gave_is_never_named(db):
     reply = _node(db, "Message", "gmail:m2", "Re: Notes", item=thanks)
     _edge(db, reply, ella, "RECEIVED", item=thanks)
     assert llm.nameable(db, [ella], frozenset({"gmail"})) == {ella: "Ella Novak"}
+
+
+def test_a_name_only_google_chat_gave_reaches_no_prompt_until_takeout_is_opted_in(db, tmp_path):
+    """Ella is a member of a Google Chat space who never writes there, and one opted-in message reaches her by her
+    address alone. The graph shows her as Chat names her; a prompt names her only once Takeout is opted in."""
+    ella = chat_only_name(db, tmp_path)
+    assert db.execute(text("SELECT name FROM nodes WHERE id = :i"), {"i": ella}).scalar_one() == "Ella Novak"
+    assert llm.nameable(db, [ella], frozenset({"gmail"})) == {}
+    assert llm.nameable(db, [ella], llm.allowed_sources("gmail,takeout")) == {ella: "Ella Novak"}
 
 
 def test_a_person_is_named_from_any_identitys_records_when_they_hold_the_name(db):
