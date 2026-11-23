@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from mcp.server.mcpserver.exceptions import ToolError
 from sqlalchemy import text
 
 from igneous import llm
@@ -208,7 +209,8 @@ def test_the_mcp_ask_tool_cites_items_and_nodes_and_reports_failures(mailbox, mo
         raise ProviderError("the model declined to answer")
 
     monkeypatch.setattr(llm, "chat", refuse)
-    assert "declined" in mcp_server.ask(QUESTION)["error"]
+    with pytest.raises(ToolError, match="declined"):
+        mcp_server.ask(QUESTION)
 
 
 def test_ask_route_maps_provider_failures_and_validates_its_body(mailbox, model, monkeypatch):

@@ -48,6 +48,7 @@ def graph(db, monkeypatch):
     def forbidden(*_args, **_kwargs):
         raise AssertionError("history tools must never call a model")
 
+    monkeypatch.setattr(llm.settings, "llm_sources", "gmail")  # what the fixture's records are: the tools may share them
     monkeypatch.setattr(llm, "chat", forbidden)
     monkeypatch.setattr(providers, "chat", forbidden)
     monkeypatch.setattr(llm, "structured", forbidden)
@@ -72,12 +73,18 @@ def graph(db, monkeypatch):
     _, unrelated, _ = promise(s, "an unrelated task", 2026)
     other = node(s, "Project", "Other project")
     edge(s, unrelated, other, "PART_OF")
-    s.execute(text("""
+    offer = s.execute(text("""
+        INSERT INTO source_items (source,external_id,content_hash,title,body_text,occurred_at)
+        VALUES ('gmail','offer','offer','Your offer','Welcome to Example University, Sam.','2023-01-01') RETURNING id
+    """)).scalar_one()
+    worked = s.execute(text("""
         INSERT INTO edges (src,dst,type,extractor,source_item_id,valid_from,valid_to)
-        VALUES (:sam,:org,'WORKED_AT','organizations',:sid,'2023-01-01','2024-01-01')
-    """), {"sam": alias, "org": org, "sid": sid})
+        VALUES (:sam,:org,'WORKED_AT','organizations',:sid,'2023-01-01','2024-01-01') RETURNING id
+    """), {"sam": alias, "org": org, "sid": sid}).scalar_one()
+    s.execute(text("INSERT INTO edge_evidence (edge_id,source_item_id,kind,detail) VALUES (:e,:i,'offer','{}')"),
+              {"e": worked, "i": offer})  # the record that names the organization
     yield SimpleNamespace(s=s, sam=sam, alias=alias, project=project, thread=thread, org=org, empty=empty,
-                          sid=sid, msg=msg, claim=claim, resolved=resolved)
+                          sid=sid, msg=msg, claim=claim, resolved=resolved, offer=offer)
 
 
 def call(name, **args):
@@ -88,13 +95,14 @@ def call(name, **args):
 
 def test_timeline_protocol_resolves_aliases_and_keeps_source_text_out(graph):
     result = call("timeline", node_id=graph.alias, other_node_id=graph.org)
-    assert result["a"] == {"id": graph.sam, "type": "Person"}
+    assert {k: result["a"][k] for k in ("id", "type")} == {"id": graph.sam, "type": "Person"}
     assert result["mode"] == "relationship" and len(result["edges"]) == 1
     link = result["edges"][0]
     assert link["type"] == "WORKED_AT" and link["direction"] == "outgoing"
+    assert link["counterpart"]["name"] == "Example University"
     assert link["interval"]["from"].startswith("2023-01-01")
     assert link["provenance"]["evidence"]["source_item_id"] == graph.sid
-    for private in ("PRIVATE_TITLE", "PRIVATE_TOKEN", "I will send"):
+    for private in ("PRIVATE_TITLE", "PRIVATE_TOKEN", "I will send", "Your offer", "Welcome to"):
         assert private not in json.dumps(result)
 
 
@@ -134,9 +142,12 @@ def test_commitment_scope_uses_edge_evidence_and_ignores_rejected_links(graph):
 
 
 def test_unknown_nodes_are_distinct_from_empty_results(graph):
-    assert call("timeline", node_id=9999) == {"error": "no node 9999"}
-    assert call("timeline", node_id=graph.sam, other_node_id=9999) == {"error": "no node 9999"}
-    assert call("commitments", node_id=9999) == {"error": "no node 9999"}
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    for name, args in (("timeline", {"node_id": 9999}), ("timeline", {"node_id": graph.sam, "other_node_id": 9999}),
+                       ("commitments", {"node_id": 9999})):
+        with pytest.raises(ToolError, match="no node 9999"):
+            asyncio.run(mcp_server.server.call_tool(name, args))
     assert call("timeline", node_id=graph.empty)["edges"] == []
 
 
@@ -156,6 +167,6 @@ def test_mcp_rejects_invalid_history_arguments_before_opening_a_session(monkeypa
     def forbidden():
         raise AssertionError("invalid arguments must not reach the database")
 
-    monkeypatch.setattr(mcp_server, "SessionLocal", forbidden)
+    monkeypatch.setattr(mcp_server, "read_only_session", forbidden)
     with pytest.raises(ToolError):
         asyncio.run(mcp_server.server.call_tool(name, args))

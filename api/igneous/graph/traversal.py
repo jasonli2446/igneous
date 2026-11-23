@@ -349,16 +349,17 @@ def _shared(s: Session, focus: Iterable[int], people: Iterable[int]) -> dict[tup
 # Why two things are linked.
 # ---------------------------------------------------------------------------------------------------------------
 
-def explain(s: Session, a: int, b: int, limit: int = 8) -> dict:
+def explain(s: Session, a: int, b: int, limit: int = 8, named: dict[str, str] | None = None) -> dict:
     """Why two nodes are connected: the conversations they share (message counts, dates, the latest excerpt), the
     events they both attended, their latest shared messages, the links between them (each with where it came from, its
     reason and evidence), or the shortest path when there are none, and the corrections you made to the pair. A person
-    is all of their identities. Raises identity.NotFound, and ValueError when a and b are one identity."""
+    is all of their identities; a phone number reads as its contact (`named`, `names` by default). Raises
+    identity.NotFound, and ValueError when a and b are one identity."""
     na, nb = identity.node(s, a), identity.node(s, b)
     if na["id"] == nb["id"]:
         raise ValueError("Those are the same node: pick two different things.")
     ids_a, ids_b = identity.members(s, na["id"]), identity.members(s, nb["id"])
-    named = names(s)
+    named = names(s) if named is None else named
     convo = s.execute(text(f"""
         WITH a AS (SELECT e.dst AS m FROM edges e WHERE e.src = ANY(:a) AND e.type = 'SENT'
                    UNION SELECT e.src FROM edges e WHERE e.dst = ANY(:a) AND e.type = 'RECEIVED'),
