@@ -712,14 +712,24 @@ def _event_key(source: str, external_id: str, meta: dict) -> str:
     return meta.get("event_key") or f"{source}:{meta.get('series_key') or external_id}"
 
 
+def calendar_ids(external_id: str, meta: dict) -> set[str]:
+    """The Google Calendar ids a calendar record answers to: its own event id (the end of its external id
+    "<account>/<calendar>/<event id>", an occurrence's "<event id>_<start>"), and its repeating event's (the end of its
+    series_key)."""
+    return {x.rsplit("/", 1)[-1] for x in (external_id, meta.get("series_key") or "") if x}
+
+
 def event_keys(s: Session, event_ids: list[str]) -> dict[str, str]:
-    """Calendar event id -> the Event node key of the calendar record for it (gcal external ids end in the event id)."""
+    """Calendar event id -> the Event node key of a calendar record for it (`calendar_ids`): a Meet record names the
+    event it was joined from by an occurrence's id or by its repeating event's, and finds the one Event either way."""
     if not event_ids:
         return {}
     out: dict[str, str] = {}
     for eid, external_id, meta in s.execute(text("""
-        SELECT regexp_replace(external_id, '^.*/', ''), external_id, raw_meta FROM source_items
-        WHERE source = 'gcal' AND regexp_replace(external_id, '^.*/', '') = ANY(:e) ORDER BY id
+        SELECT x.eid, si.external_id, si.raw_meta FROM source_items si
+        CROSS JOIN LATERAL (VALUES (regexp_replace(si.external_id, '^.*/', '')),
+                                   (regexp_replace(COALESCE(si.raw_meta->>'series_key', ''), '^.*/', ''))) AS x(eid)
+        WHERE si.source = 'gcal' AND x.eid = ANY(:e) ORDER BY si.id
     """), {"e": event_ids}):
         out.setdefault(eid, _event_key("gcal", external_id, meta))
     return out
@@ -991,7 +1001,7 @@ def build_takeout(b: Builder, item) -> None:
                  {"source": item.source, "kind": meta.get("kind") or meta.get("product", "activity")}, record=True,
                  fallback=item.external_id)
     if item.source == "takeout_meet" and (event := b.ctx.events.get(meta.get("event_id"))):
-        # Meet records the Calendar event id; gcal external ids end in it ("<account>/<calendar>/<event id>").
+        # Meet records the Calendar event it was joined from (`event_keys`).
         b.edge(fid, b.ref("Event", event), "RELATED_TO", item.occurred_at, until=item.occurred_at, record=True)
     if item.source != "takeout_maps":
         return
@@ -1100,7 +1110,7 @@ def _link_late_parents(s: Session, rows, batch: list[int], cards: dict) -> set[i
     now, and Meet records naming an event built now. Their links become part of their own contribution. Returns
     the replies' Message nodes."""
     mids = sorted({r.raw_meta["message_id"] for r in rows if r.source in MAIL and r.raw_meta.get("message_id")})
-    eids = sorted({r.external_id.rsplit("/", 1)[-1] for r in rows if r.source == "gcal"})
+    eids = sorted({eid for r in rows if r.source == "gcal" for eid in calendar_ids(r.external_id, r.raw_meta)})
     late = []
     if mids:
         late += s.execute(text("""
