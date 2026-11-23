@@ -1,4 +1,8 @@
-"""Hybrid search: lexical (tsvector) + dense (pgvector), merged with reciprocal rank fusion."""
+"""Hybrid search: lexical (tsvector) + dense (pgvector), merged with reciprocal rank fusion.
+
+Every ranking is total, so two builds of the same records give the same results: equal scores go in chunk id order
+(a build numbers chunks in the order it stores them, which a rebuild of the same data repeats), and dense search is
+exact, comparing the query with every vector instead of walking an approximate index (eval/README.md)."""
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -83,7 +87,8 @@ def _negations(q: str) -> tuple[str, str, dict]:
 def lexical(s: Session, q: str, f: Filters, n: int = POOL) -> list[int]:
     """Full-text search. websearch_to_tsquery ANDs every term, which a question in plain words rarely satisfies, so
     the terms are ORed and ts_rank_cd ranks passages that match more of them higher; quoted phrases keep their word
-    order. A negated word or phrase ("-prices") excludes every passage that contains it."""
+    order. A negated word or phrase ("-prices") excludes every passage that contains it. Equal ranks go in chunk id
+    order."""
     positive, negation, negation_params = _negations(q)
     if not positive.strip():
         return []
@@ -93,32 +98,35 @@ def lexical(s: Session, q: str, f: Filters, n: int = POOL) -> list[int]:
                                AS tsquery) AS tq)
         SELECT c.id FROM chunks c JOIN source_items si ON si.id = c.source_item_id, q
         WHERE c.tsv @@ q.tq {negation} {where}
-        ORDER BY ts_rank_cd(c.tsv, q.tq, 32) DESC LIMIT :n
+        ORDER BY ts_rank_cd(c.tsv, q.tq, 32) DESC, c.id LIMIT :n
     """), {"q": positive, "n": n, **negation_params, **params}).scalars())
 
 
 def dense(s: Session, q: str, f: Filters, n: int = POOL) -> list[int]:
-    """Nearest passages to the query's embedding, among vectors from the same model (IGNEOUS_EMBEDDING_MODEL; others
-    wait for the embed stage); a negated word or phrase excludes the passages that contain it."""
+    """The passages nearest the query's embedding, among vectors from the same model (IGNEOUS_EMBEDDING_MODEL; others
+    wait for the embed stage); a negated word or phrase excludes the passages that contain it. Exact: the query is
+    compared with every vector the filters let through, nearest first and equal distances in chunk id order, so a
+    filter never leaves out a passage nearer than the ones returned."""
     positive, negation, negation_params = _negations(q)
     if not positive.strip():
         return []
     where, params = _where(f)
-    s.execute(text("SET LOCAL hnsw.ef_search = 100"))
     return list(s.execute(text(f"""
         SELECT c.id FROM chunks c JOIN source_items si ON si.id = c.source_item_id
         WHERE c.embedding_model = :embedding_model {negation} {where}
-        ORDER BY c.embedding <=> CAST(:v AS vector) LIMIT :n
+        ORDER BY c.embedding <=> CAST(:v AS vector), c.id LIMIT :n
     """), {"v": str(embed_query(positive)), "embedding_model": settings.embedding_model, "n": n,
            **negation_params, **params}).scalars())
 
 
 def rrf(*rankings: list[int]) -> list[tuple[int, float]]:
+    """Reciprocal rank fusion of rankings of chunk ids: (chunk id, score), best first, equal scores in chunk id
+    order."""
     scores: dict[int, float] = {}
     for ranking in rankings:
         for rank, cid in enumerate(ranking):
             scores[cid] = scores.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
-    return sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    return sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
 def hybrid(s: Session, q: str, f: Filters | None = None, k: int = 10, mode: str = "hybrid") -> list[dict]:

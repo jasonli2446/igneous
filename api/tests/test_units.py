@@ -322,6 +322,15 @@ def test_cross_encoder_reranks_full_pool_then_limits(monkeypatch):
     ]
 
 
+def test_cross_encoder_keeps_the_pools_order_for_equal_scores(monkeypatch):
+    from igneous.rag import rerank
+
+    monkeypatch.setattr(rerank, "score_documents", lambda _q, documents: [2.0 if d == "b" else 1.0 for d in documents])
+    monkeypatch.setattr(rerank, "_load_failure", None)
+    items = [{"text": text} for text in ("d", "a", "b", "c")]
+    assert [item["text"] for item in rerank.rerank("question", items, keep=3)] == ["b", "d", "a"]
+
+
 def test_cross_encoder_turned_off_leaves_the_order_to_its_caller(monkeypatch):
     from igneous.rag import rerank
 
