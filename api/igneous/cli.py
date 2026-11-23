@@ -224,6 +224,7 @@ def pipeline(stage: list[str] = typer.Option(None, help="spine, chunk, embed, ex
         for name in stage or stages:
             t = time.time()
             n = stages[name](s)
+            s.commit()  # derived stages leave the commit to their caller
             # Stages return a count or a stats dict; print either.
             shown = n if isinstance(n, int) else json.dumps(n, default=str)
             print(f"{name:7s} {shown:>8} items  {time.time() - t:6.1f}s")

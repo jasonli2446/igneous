@@ -33,7 +33,8 @@ export default function Explorer() {
   const [trail, setTrail] = useState<GNode[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The API answers 404 until a self node exists, i.e. until a source is connected and the graph is built.
+  // The API answers 404 while no source says which person is you: nothing is connected and built yet, or nothing
+  // connected is yours (an archive of several people's mail).
   const [nothingConnected, setNothingConnected] = useState(false);
 
   const [active, setActive] = useState(0);
@@ -350,9 +351,9 @@ export default function Explorer() {
 
       {data.nodes.length === 0 && !loading && !error && nothingConnected && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center text-sm text-muted">
-          <p className="text-base text-ink">Your graph is empty</p>
-          <p className="max-w-sm">Connect a source, then build the graph. Setup takes a few minutes and everything stays on this computer.</p>
-          <Link href="/settings" className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-bg hover:opacity-90">Connect your first source</Link>
+          <p className="text-base text-ink">Nobody to start from yet</p>
+          <p className="max-w-sm">No source says which person is you. Connect one of your own accounts and build the graph, or press / to search for someone to start from. Everything stays on this computer.</p>
+          <Link href="/settings" className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-bg hover:opacity-90">Open Sources</Link>
         </div>
       )}
 

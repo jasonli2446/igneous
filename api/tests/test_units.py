@@ -1794,17 +1794,6 @@ def test_thread_terms_match_whole_words_and_course_codes_are_whole():
     assert pat.search("the atlas platform demo") and not pat.search("fatlas testing") and not pat.search("atlases")
 
 
-def test_one_way_bulk_senders_are_services_but_colleagues_are_not():
-    from igneous.graph import self_identity
-
-    sql = str(self_identity.ONE_WAY_SENDERS)
-    assert "NOT IN (SELECT p FROM i_wrote)" in sql            # you never wrote to them
-    assert "named_by' IS DISTINCT FROM 'contacts'" in sql      # not a saved contact
-    assert "NOT IN (SELECT d FROM my_domains)" in sql          # not at a domain you write to (school, employer)
-    assert "bulk >= 0.8 * sent.n" in sql                       # what they send is mostly notifications/marketing
-
-
-
 def test_links_you_stated_are_never_judged_by_the_model():
     from igneous.graph import verify
 

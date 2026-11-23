@@ -569,15 +569,18 @@ def build_github(b: Builder, item) -> None:
 
 
 def build_linkedin(b: Builder, item) -> None:
-    """A LinkedIn connection names one human, keyed by the connection's email when the export has one (so it merges
-    with mail identities by key), else by `linkedin:<profile slug>`; either way named by LinkedIn
+    """Your LinkedIn export. The profile item is you: it names the owner node, and graph/profile.py reads its
+    positions and schools. A connection names one human, keyed by the connection's email when the export has one
+    (so it merges with mail identities by key), else by `linkedin:<profile slug>`; either way named by LinkedIn
     (props.named_by='linkedin') and MEMBER_OF its company, keyed by the company's own name (`org:<slug>`, as your
     resume's employers are), never by the connection's address. With an email, the profile identity
-    `linkedin:<slug>` is joined to the address by a trusted SAME_AS. The profile item (kind 'profile') is read by
-    graph/profile.py, not here."""
+    `linkedin:<slug>` is joined to the address by a trusted SAME_AS."""
     from igneous.connectors.linkedin import profile_slug
 
     meta = item.raw_meta
+    if meta.get("kind") == "profile":
+        b.node("Person", OWNER_KEY, meta.get("person_name") or None, {"self": True}, fallback="Me")
+        return
     if meta.get("kind") != "connection" or not meta.get("name"):
         return
     name, email = meta["name"], (meta.get("email") or "").lower() or None

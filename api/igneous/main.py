@@ -453,7 +453,8 @@ def graph_view(seed: int | None = None, per: int = Query(6, le=20), s: Session =
     if seed is None:
         seed = identity.self_id(s)
         if seed is None:
-            raise HTTPException(404, "No self node yet: run `igneous pipeline --stage self`.")
+            raise HTTPException(404, "No owner: no source says which person is you yet (your Google account, your "
+                                     "Messages, a mail archive with one owner, your LinkedIn export). Pass a seed.")
     # Ranking every relationship takes seconds on a large mailbox; the result only changes when the graph does,
     # so cache it per (seed, per) and graph version (bumped by every pipeline stage that changes the graph).
     from igneous.graph import dirty
