@@ -35,8 +35,8 @@ a database behind the code, one migrated by newer code, no schema yet, or Postgr
 Tests (`make test`) never use that database or your personal one, nor your `api/.env` or model credentials: each
 run creates, migrates and finally drops its own `igneous_test_<pid>` database on the same server
 (`api/tests/conftest.py`), so two runs can share a server.
-`make check` runs the checks every pull request must pass: ruff and the tests for the API, then `next typegen`, `tsc`
-and the production build for the web app. CI runs them too, and audits the locked dependencies (`make audit`).
+`make check` runs the checks every pull request must pass: ruff and the tests for the API, then `next typegen`, `tsc`,
+ESLint and the production build for the web app. CI runs them too, and audits the locked dependencies (`make audit`).
 
 ### 3. Configuration (`api/.env`)
 
