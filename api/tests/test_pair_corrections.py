@@ -23,18 +23,26 @@ def graph(db, monkeypatch):
     yield db, TestClient(app)
 
 
-def node(s, kind, key, name=None):
-    return s.execute(text("INSERT INTO nodes (type,key,name) VALUES (:t,:k,:n) RETURNING id"),
-                     {"t": kind, "k": key, "n": name or key}).scalar_one()
+def node(s, kind, key, name=None, props=None):
+    return s.execute(text("INSERT INTO nodes (type,key,name,props) VALUES (:t,:k,:n,CAST(:p AS jsonb)) RETURNING id"),
+                     {"t": kind, "k": key, "n": name or key, "p": json.dumps(props or {})}).scalar_one()
 
 
 def edge(s, a, b, kind="RELATED_TO", extractor="threads", props=None, item=None):
+    """An edge; one you added (extractor 'user') with its intent, as POST /graph/link records it."""
+    props = props or ({"why": "you added this"} if extractor == "user" else {})
+    if extractor == "user":
+        s.execute(text("""INSERT INTO overrides (op, node_keys, value, data)
+                          SELECT 'link', ARRAY[x.type || ':' || x.key, y.type || ':' || y.key], :t,
+                                 jsonb_build_object('props', CAST(:p AS jsonb))
+                          FROM nodes x, nodes y WHERE x.id = :a AND y.id = :b"""),
+                  {"a": a, "b": b, "t": kind, "p": json.dumps(props)})
     return s.execute(text("""
         INSERT INTO edges (src,dst,type,extractor,extractor_version,props,source_item_id,confidence,model,
                            valid_from,valid_to,span_start,span_end)
         VALUES (:a,:b,:t,:x,'2',CAST(:p AS jsonb),:i,.73,'fixture-model',
                 '2025-01-01','2025-01-02',0,5) RETURNING id
-    """), {"a": a, "b": b, "t": kind, "x": extractor, "p": json.dumps(props or {}), "i": item}).scalar_one()
+    """), {"a": a, "b": b, "t": kind, "x": extractor, "p": json.dumps(props), "i": item}).scalar_one()
 
 
 def item(s, key="record"):
@@ -79,7 +87,7 @@ def test_stated_facts_cannot_be_rejected(graph, extractor):
     a, b = node(s, "Person", "A"), node(s, "Project", "B")
     eid = edge(s, a, b, extractor=extractor)
     assert client.post("/graph/edge/wrong", json={"edge": eid}).status_code == 400
-    assert s.execute(text("SELECT 1 FROM overrides")).first() is None
+    assert s.execute(text("SELECT 1 FROM overrides WHERE op <> 'link'")).first() is None  # nothing recorded
     assert s.execute(text("SELECT 1 FROM edges WHERE id=:i"), {"i": eid}).first()
 
 
@@ -127,8 +135,8 @@ def test_why_panel_and_mcp_report_the_earlier_correction(graph):
 def test_conversation_removal_and_entity_unlink_restore_every_original_extractor(graph):
     s, client = graph
     project = node(s, "Project", "Widget")
-    thread = node(s, "Thread", "Chat")
-    messages = [node(s, "Message", f"M{i}") for i in range(2)]
+    thread = node(s, "Thread", "Mail thread")
+    messages = [node(s, "Message", f"M{i}", props={"source": "gmail"}) for i in range(2)]
     links = []
     for msg in messages:
         edge(s, msg, thread, "IN_THREAD", "spine")
@@ -143,6 +151,21 @@ def test_conversation_removal_and_entity_unlink_restore_every_original_extractor
     assert client.delete(f"/overrides/{result['override_id']}").status_code == 200
     assert set(links) <= {r["id"] for r in rows(s, "edges")}
     assert client.delete(f"/overrides/{result['override_id']}").status_code == 404
+
+
+def test_removing_one_day_of_a_chat_leaves_its_other_days(graph):
+    """A chat's days are separate conversations (an iMessage chat is years of them): only the one goes."""
+    s, client = graph
+    project = node(s, "Project", "Trip")
+    chat = node(s, "Thread", "Trip chat")
+    days = [node(s, "Message", f"D{i}", props={"source": "imessage"}) for i in range(2)]
+    links = []
+    for day in days:
+        edge(s, day, chat, "IN_THREAD", "spine")
+        links.append(edge(s, day, project, "PART_OF", "threads"))
+    result = client.post(f"/graph/entity/{project}/unlink", json={"node": days[0]}).json()
+    assert result["edges"] == [links[0]] and result["applied"] == "now"
+    assert {r["id"] for r in rows(s, "edges") if r["type"] == "PART_OF"} == {links[1]}
 
 
 def test_undo_does_not_remove_a_later_independent_correction(graph):
@@ -187,10 +210,10 @@ def test_rejecting_and_restoring_identity_link_refreshes_canonical_state(graph, 
 
     monkeypatch.setattr(Session, "commit", commit)
     result = client.post("/graph/edge/wrong", json={"edge": eid}).json()
-    assert len(commits) == 1  # the verdict, snapshot and identity change commit atomically in the route
+    assert len(commits) == 2 and result["applied"] == "now"  # the intent (verdict and snapshot), then the change
     assert s.execute(text("SELECT count(*) FROM canonical")).scalar() == 0
     assert client.post("/graph/edge/restore", json={"edges": result["edges"]}).json()["restored"] == [eid]
-    assert len(commits) == 2
+    assert len(commits) == 4
     assert s.execute(text("SELECT count(*) FROM canonical")).scalar() == 2
 
 

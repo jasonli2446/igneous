@@ -130,7 +130,7 @@ def test_two_cards_writing_one_name_in_either_order_name_one_person(db):
 # --- upgrading a database built with surname-first names -----------------------------------------------------------
 
 def test_a_database_built_with_surname_first_names_reads_them_first_name_first_after_one_run(test_db, monkeypatch):
-    """Migration 0013: the records whose stored contribution names a person with a comma are pending for the spine
+    """Migration 0014: the records whose stored contribution names a person with a comma are pending for the spine
     again, and the next run builds them, and only them, with the names they give now."""
     from alembic import command
     from alembic.config import Config
@@ -152,7 +152,7 @@ def test_a_database_built_with_surname_first_names_reads_them_first_name_first_a
         with admin.connect() as c:
             c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
             c.execute(text(f'CREATE DATABASE "{name}"'))
-        command.upgrade(config, "0012")
+        command.upgrade(config, "0013")
         with Session(engine) as s:   # the spine as it was: names as the records write them
             monkeypatch.setattr(spine, "natural_name", lambda name: name)
             put(s, "email", "allen-p/inbox/1", {

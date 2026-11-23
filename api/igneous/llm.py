@@ -1,8 +1,9 @@
 """Hosted model calls, their result cache, and the one rule for what a hosted model may read.
 
 Every hosted call follows the same policy: a prompt carries text only from records in opted-in sources
-(`allowed_sources`), names only of people and things that appear in such records (`visible_nodes`), and counts
-for everything else. A cached model result may be reused whatever the policy says now: it discloses nothing new.
+(`allowed_sources`), names only of people and things that appear in such records under a name grounded in them
+(`nameable`, `visible_nodes`), and counts for everything else. A cached model result may be reused whatever the
+policy says now: it discloses nothing new.
 """
 import json
 import os
@@ -15,7 +16,7 @@ from igneous.config import settings
 from igneous.providers import LLMDisabled, ProviderError, ProviderUnavailable, chat
 
 __all__ = ["LLMDisabled", "ProviderError", "ProviderUnavailable", "allowed_sources", "cache_lookup", "cache_store",
-           "complete", "model_status", "require_whole_corpus", "structured", "visible_nodes"]
+           "complete", "model_status", "nameable", "require_whole_corpus", "structured", "visible_nodes"]
 
 LOCAL_SOURCES = source_catalog.LOCAL_TEXT  # also need IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED
 
@@ -84,26 +85,86 @@ def allowed_sources(value: str | None = None) -> frozenset[str]:
 
 
 def visible_nodes(s: Session, ids, sources: frozenset[str] | None = None) -> set[int]:
-    """The nodes among `ids` a prompt may name: a record from an allowed source is the node itself, the node at
-    the other end of one of its edges, or that edge's own evidence."""
+    """The nodes among `ids` a prompt may name (`nameable`)."""
+    return set(nameable(s, ids, sources))
+
+
+# The records a node appears in (the node's own record, an edge's record or the record of the node at its other end,
+# an edge's evidence), from allowed sources, as EXISTS clauses over `m`; `{match}` narrows the record `si`.
+_APPEARS = """(
+    EXISTS (SELECT 1 FROM nodes x JOIN source_items si ON si.id = x.source_item_id
+            WHERE x.id = m AND si.source = ANY(CAST(:src AS text[])) {match})
+    OR EXISTS (SELECT 1 FROM edges e JOIN source_items si ON si.id = e.source_item_id
+               WHERE e.src = m AND si.source = ANY(CAST(:src AS text[])) {match})
+    OR EXISTS (SELECT 1 FROM edges e JOIN source_items si ON si.id = e.source_item_id
+               WHERE e.dst = m AND si.source = ANY(CAST(:src AS text[])) {match})
+    OR EXISTS (SELECT 1 FROM edges e JOIN nodes o ON o.id = e.dst JOIN source_items si ON si.id = o.source_item_id
+               WHERE e.src = m AND si.source = ANY(CAST(:src AS text[])) {match})
+    OR EXISTS (SELECT 1 FROM edges e JOIN nodes o ON o.id = e.src JOIN source_items si ON si.id = o.source_item_id
+               WHERE e.dst = m AND si.source = ANY(CAST(:src AS text[])) {match})
+    OR EXISTS (SELECT 1 FROM edges e JOIN edge_evidence ev ON ev.edge_id = e.id
+               JOIN source_items si ON si.id = ev.source_item_id
+               WHERE (e.src = m OR e.dst = m) AND si.source = ANY(CAST(:src AS text[])) {match}))"""
+# ...whose text holds the name being checked (:name per row, lowercase).
+_HOLDS = ("AND strpos(lower(coalesce(si.title, '') || ' ' || coalesce(si.body_text, '') || ' ' || "
+          "CAST(si.raw_meta AS text)), {name}) > 0")
+
+
+def _named_elsewhere(type_: str, props: dict, own_record_allowed: bool) -> bool:
+    """Whether a node's name came from outside the records it appears in, so the name itself must be found there:
+    a contact card's, LinkedIn's or your resume's name for a person or another identity's name shown for them; any
+    organization's (contact cards, LinkedIn, your resume, a domain's signatures); a Project named by your resume or
+    by you; a chat or folder (named by its own source, which may not be allowed)."""
+    if type_ == "Person":
+        return props.get("named_by") in ("contacts", "linkedin", "profile") or "shown_name" in props
+    if type_ == "Project":
+        return bool(props.get("renamed")) or props.get("named_from") in ("profile", "you")
+    if type_ == "Organization":
+        return True
+    return not own_record_allowed
+
+
+def nameable(s: Session, ids, sources: frozenset[str] | None = None) -> dict[int, str]:
+    """The nodes among `ids` a prompt may name, each with the name it may use. A node qualifies when it appears in a
+    record from an allowed source (the record is the node itself, the node at the other end of one of its edges, or
+    that edge's evidence) and its name is grounded in such records: read from them (a sender's display name, a
+    calendar title, a term found in them) or given by a model that read only them (a judged thread). A name that
+    came from elsewhere (`_named_elsewhere`) must itself appear in one of them, in any identity's records for a
+    person; failing that, a Project you renamed is named as it was derived."""
     ids = sorted({int(i) for i in ids if i is not None})
     allowed = sorted(allowed_sources() if sources is None else sources)
     if not ids or not allowed:
-        return set()
-    return set(s.execute(text("""
-        SELECT n.id FROM nodes n WHERE n.id = ANY(CAST(:ids AS bigint[])) AND (
-            EXISTS (SELECT 1 FROM source_items si
-                    WHERE si.id = n.source_item_id AND si.source = ANY(CAST(:src AS text[])))
-            OR EXISTS (SELECT 1 FROM edges e JOIN nodes m ON m.id = e.dst
-                       JOIN source_items si ON si.id IN (e.source_item_id, m.source_item_id)
-                       WHERE e.src = n.id AND si.source = ANY(CAST(:src AS text[])))
-            OR EXISTS (SELECT 1 FROM edges e JOIN nodes m ON m.id = e.src
-                       JOIN source_items si ON si.id IN (e.source_item_id, m.source_item_id)
-                       WHERE e.dst = n.id AND si.source = ANY(CAST(:src AS text[])))
-            OR EXISTS (SELECT 1 FROM edges e JOIN edge_evidence ev ON ev.edge_id = e.id
-                       JOIN source_items si ON si.id = ev.source_item_id
-                       WHERE (e.src = n.id OR e.dst = n.id) AND si.source = ANY(CAST(:src AS text[]))))
-    """), {"ids": ids, "src": allowed}).scalars())
+        return {}
+    rows = s.execute(text(f"""
+        SELECT n.id, n.type, n.name, n.props, COALESCE(own.source = ANY(CAST(:src AS text[])), false) AS own
+        FROM nodes n LEFT JOIN source_items own ON own.id = n.source_item_id
+        WHERE n.id = ANY(CAST(:ids AS bigint[])) AND EXISTS (
+            SELECT 1 FROM (SELECT n.id AS m) q WHERE {_APPEARS.format(match='')})
+    """), {"ids": ids, "src": allowed}).all()
+    out = {r.id: r.name for r in rows if not _named_elsewhere(r.type, r.props or {}, r.own)}
+    check = {r.id: r for r in rows if r.id not in out}
+    if not check:
+        return out
+    # Names from elsewhere: kept where one of the records (any identity's, for a person) holds the name.
+    candidates = [{"id": r.id, "name": r.name.lower()} for r in check.values()]
+    candidates += [{"id": r.id, "name": (r.props or {})["original_name"].lower()} for r in check.values()
+                   if r.type == "Project" and (r.props or {}).get("original_name")
+                   and not _named_elsewhere("Project", {**r.props, "renamed": False}, r.own)]
+    held = s.execute(text(f"""
+        WITH c AS (SELECT * FROM jsonb_to_recordset(CAST(:c AS jsonb)) AS c(id bigint, name text)),
+        ident AS (SELECT c.id, c.name, COALESCE((SELECT canonical_id FROM canonical WHERE node_id = c.id), c.id) AS head
+                  FROM c),
+        mem AS (SELECT id, name, head AS m FROM ident UNION SELECT id, name, id FROM ident
+                UNION SELECT i.id, i.name, k.node_id FROM ident i JOIN canonical k ON k.canonical_id = i.head)
+        SELECT DISTINCT id, name FROM mem WHERE {_APPEARS.format(match=_HOLDS.format(name='mem.name'))}
+    """), {"c": json.dumps(candidates), "src": allowed}).all()
+    for nid, name in held:
+        r = check[nid]
+        if name == r.name.lower():
+            out[nid] = r.name
+        elif nid not in out:
+            out[nid] = r.props["original_name"]
+    return out
 
 
 def require_whole_corpus(s: Session) -> None:

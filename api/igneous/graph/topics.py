@@ -100,6 +100,9 @@ def _merge(s: Session, survivor: int, duplicate: int, reason: dict) -> None:
 
 
 def _related(s: Session, minimum: int) -> int:
+    """RELATED_TO between topics that share `minimum` messages, except pairs you rejected (graph/derived.py)."""
+    from igneous.graph.derived import rejections
+
     s.execute(text("DELETE FROM edges WHERE type = 'RELATED_TO' AND extractor = :ex"), {"ex": EXTRACTOR})
     result = s.execute(text("""
         WITH pairs AS (
@@ -111,10 +114,10 @@ def _related(s: Session, minimum: int) -> int:
         )
         INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence)
         SELECT src, dst, 'RELATED_TO', jsonb_build_object('cooccurrences', cooccurrences), :ex, :version, 1.0
-        FROM pairs
+        FROM pairs WHERE NOT (CAST(src AS text) || '>' || CAST(dst AS text) = ANY(CAST(:blocked AS text[])))
         ON CONFLICT (src, dst, type, extractor) DO UPDATE
           SET props = EXCLUDED.props, confidence = EXCLUDED.confidence
-    """), {"minimum": minimum, "ex": EXTRACTOR, "version": VERSION})
+    """), {"minimum": minimum, "ex": EXTRACTOR, "version": VERSION, "blocked": rejections(s).id_pairs()})
     return result.rowcount
 
 

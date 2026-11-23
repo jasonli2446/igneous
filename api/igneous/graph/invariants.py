@@ -171,14 +171,16 @@ def same_as_violations(rows: Iterable[Mapping[str, Any]]) -> list[Violation]:
 
 def canonical_violations(links: Iterable[Mapping[str, Any]], canonical: Mapping[int, int],
                          firsts: Mapping[int, str], me: int | None = None,
-                         rejected: Iterable[frozenset[int]] = ()) -> list[Violation]:
+                         rejected: Iterable[frozenset[int]] = (),
+                         yours: Iterable[frozenset[int]] = ()) -> list[Violation]:
     """`canonical` holds the identity clusters SAME_AS forms (graph/resolve.py refresh_canonical). Rows: every SAME_AS
     link between two Person nodes (id, src, dst, extractor) and every canonical row (node -> head; a node in no
     cluster has none); `firsts`: each Person's own first name ('' when unknown, and for you); `me`: your node;
-    `rejected`: pairs of nodes said not to be one person. Every cluster is connected by the links within it and has a
-    head that maps to itself. A trusted link (resolve.TRUSTED) never spans two clusters, and a scored one does only
-    where resolution refuses it: the two clusters carry first names that can't be one person's, one of them is yours,
-    or they hold a pair said not to be one person."""
+    `rejected`: pairs of nodes said not to be one person, and `yours`: those of them you said. Every cluster is
+    connected by the links within it and has a head that maps to itself. No link spans two clusters except where
+    resolution refuses it: any link, trusted (resolve.TRUSTED) or not, when the two clusters hold a pair you said is
+    not one person; and a scored one also when they carry first names that can't be one person's, one of them is
+    yours, or they hold a pair said not to be one person."""
     from igneous.graph.resolve import TRUSTED, same_first
 
     out = []
@@ -216,12 +218,13 @@ def canonical_violations(links: Iterable[Mapping[str, Any]], canonical: Mapping[
     def named(c: set[int]) -> set[str]:
         return {f for f in (firsts.get(n, "") for n in c) if len(f) > 1}  # an initial says nothing
 
+    apart = {frozenset(p) for p in yours}
     for link in between:
         ca, cb = cluster(link["src"]), cluster(link["dst"])
-        refused = link["extractor"] not in TRUSTED and (
+        refused = any(frozenset((x, y)) in apart for x in ca for y in cb) or (link["extractor"] not in TRUSTED and (
             any(not same_first(x, y) for x in named(ca) for y in named(cb))
             or me in ca or me in cb
-            or any(frozenset((x, y)) in never for x in ca for y in cb))
+            or any(frozenset((x, y)) in never for x in ca for y in cb)))
         if not refused:
             out.append(Violation(code="canonical_split", edge_id=link["id"],
                                  message="SAME_AS links two identities that canonical keeps apart",
@@ -310,7 +313,8 @@ def check_graph(s: Session) -> list[Violation]:
     ids = sorted({*canonical, *(link["src"] for link in links), *(link["dst"] for link in links)})
     firsts = {r.id: "" if r.id == me else resolve.split_name(resolve.own_name(r.name, r.props), "")[0]
               for r in s.execute(text("SELECT id, name, props FROM nodes WHERE id = ANY(:ids)"), {"ids": ids})}
-    violations.extend(canonical_violations(links, canonical, firsts, me, resolve.rejected(s)))
+    violations.extend(canonical_violations(links, canonical, firsts, me, resolve.rejected(s),
+                                           resolve.rejected(s, yours=True)))
     violations.extend(Violation(code="phantom_message", node_id=r.id, details={"key": r.key},
                                 message="Message is built from no record")
                       for r in s.execute(_PHANTOM_MESSAGES))
@@ -328,4 +332,6 @@ def check_graph(s: Session) -> list[Violation]:
         if source not in BY_VALUE:
             violations.append(Violation(code="unknown_source", message=f"source_items.source {source!r} is not in "
                                         "source_catalog", details={"source": source}))
+    from igneous.graph import derived_invariants  # corrections and the thread registry hold
+    violations.extend(derived_invariants.check(s))
     return violations

@@ -282,18 +282,17 @@ def _only_bearer(x: P, y: P, holders: dict[int, set[int]]) -> bool:
     return len(others) == 1 and y.id in holders[next(iter(others))]
 
 
-def rejected(s: Session) -> set[frozenset[int]]:
-    """Identity pairs said not to be one person: by you (a 'drop' on their SAME_AS link, whatever proposed it) or
-    confidently by the verifier, matched by natural key so they hold when nodes are rebuilt."""
+def rejected(s: Session, yours: bool = False) -> set[frozenset[int]]:
+    """Identity pairs said not to be one person: by you (a 'drop' on their SAME_AS link, whatever proposed it, or
+    "not the same person") or, unless `yours`, confidently by the verifier; matched by natural key so they hold when
+    nodes are rebuilt."""
     rows = s.execute(text("""
         SELECT a.id, b.id FROM edge_verdicts v
-        JOIN nodes a ON a.type = split_part(v.src_key, ':', 1)
-                    AND a.key = substr(v.src_key, length(split_part(v.src_key, ':', 1)) + 2)
-        JOIN nodes b ON b.type = split_part(v.dst_key, ':', 1)
-                    AND b.key = substr(v.dst_key, length(split_part(v.dst_key, ':', 1)) + 2)
-        WHERE v.type = 'SAME_AS' AND v.verdict = 'drop' AND (v.source = 'user' OR v.confidence >= :sure)
+        JOIN nodes a ON a.type || ':' || a.key = v.src_key JOIN nodes b ON b.type || ':' || b.key = v.dst_key
+        WHERE v.type = 'SAME_AS' AND v.verdict = 'drop'
+          AND (v.source = 'user' OR (NOT :yours AND v.confidence >= :sure))
           AND a.type = 'Person' AND b.type = 'Person' AND a.id <> b.id
-    """), {"sure": DROP_CONFIDENCE}).all()
+    """), {"sure": DROP_CONFIDENCE, "yours": yours}).all()
     return {frozenset(r) for r in rows}
 
 
@@ -333,10 +332,13 @@ def run(s: Session, threshold: float = THRESHOLD, rescore: bool = False) -> dict
     """), {"ex": EXTRACTOR, "v": VERSION}).scalar()
     rescored = bool(changes or stale or rescore)
     if rescored:
+        from igneous.graph.derived import rejections
+
         s.execute(text("DELETE FROM edges WHERE type = 'SAME_AS' AND extractor = :ex"), {"ex": EXTRACTOR})
         refresh_canonical(s)  # who you are and who is known to be one person, which scoring reads
+        blocked = rejections(s)  # a pair you said is wrong, on any link, is never one person by score
         links = [{"a": min(a.id, b.id), "b": max(a.id, b.id), "p": json.dumps(f), "c": sc}  # one edge per pair
-                 for a, b, sc, f in candidates(s) if sc >= threshold]
+                 for a, b, sc, f in candidates(s) if sc >= threshold and not blocked.blocks(a.id, b.id)]
         if links:
             s.execute(text("""
                 INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence)
@@ -370,13 +372,14 @@ def refresh_canonical(s: Session) -> int:
     """Rebuild identity clusters (`canonical`: every member of a 2+ cluster -> its head) from every Person SAME_AS
     link, and return how many there are.
 
-    Trusted links (TRUSTED) are unioned first and always hold. A scored link is refused when it would put two
-    different first names in one cluster (else a surname-only address like taylor@ bridges Liz and Larry Taylor), add
-    anyone to your own cluster, or join two identities said not to be one person (`rejected`), directly or through
-    others. Each cluster's head is you for your own, else its best-connected member (so the explorer shows "Kenneth
-    Lay" with all his addresses folded in), and the head shows the cluster's best human name. The head's own name is
-    kept in props.own_name meanwhile and comes back once it no longer heads a cluster named otherwise. Links are taken,
-    and ties broken, by natural keys, never by row ids: the same graph forms the same clusters however it was built."""
+    Trusted links (TRUSTED) are unioned first and hold, except that no link of any kind joins two identities you said
+    are not one person, directly or through others. A scored link is also refused when it would put two different
+    first names in one cluster (else a surname-only address like taylor@ bridges Liz and Larry Taylor), add anyone to
+    your own cluster, or join two identities the verifier confidently said are not one person (`rejected`). Each
+    cluster's head is you for your own, else its best-connected member (so the explorer shows "Kenneth Lay" with all
+    his addresses folded in), and the head shows the cluster's best human name. The head's own name is kept in
+    props.own_name meanwhile and comes back once it no longer heads a cluster named otherwise. Links are taken, and
+    ties broken, by natural keys, never by row ids: the same graph forms the same clusters however it was built."""
     edges = s.execute(text("""
         SELECT e.src, e.dst, e.confidence, e.extractor, e.id FROM edges e
         JOIN nodes a ON a.id = e.src AND a.type = 'Person' JOIN nodes b ON b.id = e.dst AND b.type = 'Person'
@@ -385,10 +388,12 @@ def refresh_canonical(s: Session) -> int:
     meta = {r.id: r for r in s.execute(text("SELECT id, key, name, props FROM nodes WHERE type = 'Person'"))}
     own = {n: own_name(m.name, m.props) for n, m in meta.items()}
     me = identity.self_id(s)
-    forbid: dict[int, set[int]] = defaultdict(set)
-    for a, b in map(tuple, rejected(s)):
-        forbid[a].add(b)
-        forbid[b].add(a)
+    forbid: dict[int, set[int]] = defaultdict(set)   # said not to be one person
+    yours: dict[int, set[int]] = defaultdict(set)    # ...by you: no link joins them, a trusted one included
+    for pairs, apart in ((rejected(s), forbid), (rejected(s, yours=True), yours)):
+        for a, b in map(tuple, pairs):
+            apart[a].add(b)
+            apart[b].add(a)
 
     parent: dict[int, int] = {}
     members: dict[int, set[int]] = {}
@@ -409,7 +414,7 @@ def refresh_canonical(s: Session) -> int:
                        sorted((meta[e.src].key, meta[e.dst].key)), e.extractor)
     for a, b, _conf, ex, _id in sorted(edges, key=order):
         ra, rb = find(a), find(b)
-        if ra == rb:
+        if ra == rb or any(yours[x] & members[rb] for x in members[ra] if x in yours):
             continue
         if ex not in TRUSTED and (any(not same_first(x, y) for x in firsts[ra] for y in firsts[rb])
                                   or me in members[ra] or me in members[rb]

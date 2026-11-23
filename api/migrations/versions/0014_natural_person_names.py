@@ -8,13 +8,13 @@ comma is pending for the spine once more, and the next pipeline run builds it wi
 resolution and everything after it then read the new names. A name the spine still leaves as it is ("Smith, Jr.") is
 built again unchanged.
 
-Revision ID: 0013
-Revises: 0012
+Revision ID: 0014
+Revises: 0013
 """
 from alembic import op
 
-revision = "0013"
-down_revision = "0012"
+revision = "0014"
+down_revision = "0013"
 
 
 def upgrade():
