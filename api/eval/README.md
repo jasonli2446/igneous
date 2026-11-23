@@ -57,15 +57,24 @@ uv run python eval/er_labels.py review          # independent second pass (resum
 uv run python eval/er_labels.py score --sweep   # P/R/F1 per threshold, rescoring with the current resolver
 ```
 
-| Threshold | Labels | Pairs | Precision | Recall | F1 |
+| Resolver, threshold | Labels | Pairs | Precision | Recall | F1 |
 |---|---|---|---|---|---|
-| **0.5 + rare exact names (current, #127)** | AI-reviewed | 235 | 0.934 | 0.963 | **0.948** |
-| 0.5 (before #127) | AI-reviewed | 235 | 0.938 | 0.944 | 0.941 |
-| 0.5 (before #127) | AI-reviewed, reviewer confident | 189 | 0.971 | 0.957 | 0.964 |
-| 0.6 (previous) | AI-reviewed | 235 | 0.969 | 0.770 | 0.858 |
-| 0.6 | draft only | 235 | 0.914 | 0.801 | 0.854 |
+| **current, 0.5: final clusters** | AI-reviewed, matched by address on a rebuilt six-mailbox database | 235 | 0.949 | 0.925 | **0.937** |
+| current, 0.5: pairwise scores | same | 235 | 0.943 | 0.925 | 0.934 |
+| with name-only merges, 0.5: final clusters | same | 235 | 0.938 | 0.944 | 0.941 |
+| with name-only merges, 0.5 | AI-reviewed, matched by node id on the labeling database | 235 | 0.934 | 0.963 | 0.948 |
+| without them, 0.5 | same | 235 | 0.938 | 0.944 | 0.941 |
+| without them, 0.5 | AI-reviewed, reviewer confident | 189 | 0.971 | 0.957 | 0.964 |
+| without them, 0.6 | AI-reviewed | 235 | 0.969 | 0.770 | 0.858 |
+| without them, 0.6 | draft only | 235 | 0.914 | 0.801 | 0.854 |
 
-Since #127 an exact full name carried by only 2-3 identities merges on the name alone, which trades a little
-precision for recall. The draft labels undercounted true duplicates, which made recall look worse than it is. Re-labeling moved the
-best threshold from 0.6 to 0.5 at almost no precision cost. Structural guards still hold at 0.5: Larry Taylor
-stays separate from Liz Taylor, and Kenneth Lay resolves to one node (12 identities).
+Two addresses merge only on corroboration: correspondents they share (counted on merged identities, each weighted by
+how few people it corresponds with, never you or an automated sender), the same organizational domain, or the same
+local part. An exact full name alone never merges two addresses, because in personal mail every namesake shares you:
+here that keeps one false pair apart (Donna Jones at Enron and at Williams) and three true ones too (Katherine Brown,
+Ed Robinson and Adam Bayer, each at Enron and at another domain, with no correspondent in common). A phone or a name
+extracted from text still joins on its exact name when no other bearer has it, and automated senders are never
+candidates (two "Customer Service" mailboxes). On the whole baseline that is 557 scored links instead of 574; Larry
+Taylor stays separate from Liz Taylor, and Kenneth Lay resolves to one node (10 identities). The draft labels
+undercounted true duplicates, which made recall look worse than it is; re-labeling moved the best threshold from 0.6
+to 0.5 at almost no precision cost.
