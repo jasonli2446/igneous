@@ -1,8 +1,8 @@
 """Create a small, deterministic cross-source fixture corpus.
 
-The corpus deliberately contains invented content only. It uses public Enron demo
-persona addresses so future file and calendar importers can exercise cross-source
-identity and participant links without handling personal data.
+The corpus deliberately contains invented content only. It uses public Enron demo persona addresses, so its
+documents, read by the Local files source, link to the demo's people without handling personal data. Its calendar
+file is ICS, which no source reads.
 """
 import hashlib
 import json
@@ -129,9 +129,9 @@ five invented document-style files and two invented calendar events. Persona ema
 addresses align with the public Enron demo mailboxes used by Igneous, but no real
 email text, customer data, credentials, or personal data is included.
 
-The files are intentionally plain Markdown, CSV, and slide-outline text so a future
-filesystem importer can exercise common document paths. `calendar.ics` is an RFC
-5545-style iCalendar fixture for a future ICS importer. This generator does not
+The files are plain Markdown, CSV, and slide-outline text, which the Local files source
+reads (`igneous sync fs --path <output-directory>`). `calendar.ics` is an RFC
+5545-style iCalendar fixture, which no source reads. This generator does not
 import anything or require a database, network connection, model, or credentials.
 
 Regenerate with `uv run igneous synthetic-corpus <output-directory>`. Verify an

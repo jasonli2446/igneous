@@ -1,4 +1,5 @@
-"""Read Apple Notes' local SQLite store without modifying it."""
+"""Read Apple Notes' local SQLite store without modifying it. Titles and bodies are redacted where every item is,
+in the sync runner."""
 from __future__ import annotations
 
 import gzip
@@ -9,10 +10,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem
-from igneous.connectors.redact import redact
 
 DEFAULT_DB = Path.home() / "Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=UTC)
+LOCK_FLAGS = ("ZISPASSWORDPROTECTED", "ZISLOCKED", "ZISENCRYPTED")
 
 
 def apple_time(value: object) -> datetime | None:
@@ -107,7 +108,12 @@ def _note_query(connection: sqlite3.Connection) -> tuple[str, str, str, str, tup
         return None
     identifier = next((c for c in ("ZIDENTIFIER", "ZUNIQUEIDENTIFIER") if c in note_columns), "Z_PK")
     modified = next((c for c in ("ZMODIFICATIONDATE", "ZCREATIONDATE") if c in note_columns), "Z_PK")
-    locked = next((c for c in note_columns if "PASSWORD" in c or "LOCKED" in c or "ENCRYPT" in c), None)
+    # The flag that marks a note locked. Several columns mention passwords (ZPASSWORDHINT is text, set on unlocked
+    # notes too): take the known flags first, then any other lock flag in name order, never a hint.
+    flags = [c for c in LOCK_FLAGS if c in note_columns]
+    flags += sorted(c for c in note_columns - set(LOCK_FLAGS)
+                    if any(w in c for w in ("PASSWORDPROTECTED", "LOCKED", "ENCRYPTED")) and "HINT" not in c)
+    locked = flags[0] if flags else None
     return objects, data_table, title, blob, (identifier, modified, data_join, object_join, locked)
 
 
@@ -139,19 +145,18 @@ class AppleNotesConnector:
                     continue
                 external_id = str(identity if identity is not None else primary_key)
                 observed.add(external_id)
-                fingerprint = hashlib.sha256(bytes(blob_value or b"")).hexdigest()
+                # The title lives beside the body, not in it: a renamed note must read as changed too.
+                fingerprint = hashlib.sha256(bytes(blob_value or b"") + b"\0" + str(title_value).encode()).hexdigest()
                 current[external_id] = fingerprint
                 if previous.get(external_id) == fingerprint:
                     continue
                 body = decode_body(blob_value)
                 if not body:
                     continue
-                body, redactions = redact(body)
                 yield SourceItem(source=self.name, external_id=external_id, title=str(title_value), body_text=body,
                                  occurred_at=apple_time(modified_value), mime="text/plain",
                                  raw_meta={"path": f"notes/{external_id}", "folders": ["notes"],
-                                           "parser": "apple-notes", "redactions": redactions,
-                                           "model_opt_in": False}, content_hash=fingerprint)
+                                           "parser": "apple-notes", "model_opt_in": False})
         finally:
             connection.close()
         yield CompletedScan({"notes": current}, self.name, frozenset(observed))

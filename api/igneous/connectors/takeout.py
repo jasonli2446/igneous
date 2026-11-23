@@ -1,4 +1,4 @@
-"""Google Takeout (My Activity incl. Gemini, Chrome, Maps) as day-items, places, and visits (#109).
+"""Google Takeout (My Activity incl. Gemini, Chrome, Maps) as day-items, places, and visits.
 
 Input: one or several Takeout .zip files (a split export), an extracted folder, or a loose JSON file. Big JSON
 members are streamed with ijson, so a multi-GB zip is never read into memory; only the compact per-day
@@ -6,8 +6,8 @@ aggregates are. Pass every zip of an export in one run: a day's items are rebuil
 importing the parts one at a time would overwrite a day with its partial view.
 
 What is read (names are matched case-insensitively and tolerate a missing "Takeout/" prefix):
-  My Activity/<Product>/MyActivity.json   one item per product per day. Gemini Apps entries go to the existing
-                                          ai_chats gemini path (same external ids as /import/ai-export).
+  My Activity/<Product>/MyActivity.json   one item per product per day. Gemini Apps entries become ai_chats
+                                          gemini items (the external ids /import/ai-export gives them).
                                           The HTML variant is NOT read; the importer says so.
   Chrome/History.json | BrowserHistory.json   one item per day, repeat visits to a URL collapsed
   Chrome/Bookmarks.html                       one item, grouped by folder
@@ -390,6 +390,7 @@ class _Import:
         self.chrome_secrets: dict[str, int] = defaultdict(int)
         self.bookmarks: list[tuple[str, str, str]] = []
         self.visits: dict[str, dict[tuple[str, str], dict]] = defaultdict(dict)  # day -> (key, start) -> visit
+        self.visit_secrets: dict[str, int] = defaultdict(int)
         self.lists: dict[tuple[str, str], list[dict]] = defaultdict(list)  # (kind, list name) -> places
         self.list_secrets: dict[tuple[str, str], int] = defaultdict(int)
         self.reading: list[tuple[str, str, str]] = []
@@ -523,13 +524,17 @@ class _Import:
         self.bookmarks += [m_ for m_ in p.marks if m_[2].startswith(("http://", "https://"))]
 
     # -- maps
-    def add_visit(self, start, end, name, address, lat, lng, place_id, red):
+    def add_visit(self, start, end, name, address, lat, lng, place_id):
         key = place_key(place_id, name, lat, lng)
         if not key or not start:
             return
+        red = [0]
         v = _place(key, name, address, lat, lng, place_id, red)
         v.update(start=start.isoformat(), end=end.isoformat() if end else None)
-        self.visits[start.date().isoformat()].setdefault((key, v["start"]), v)
+        day = start.date().isoformat()
+        if (key, v["start"]) not in self.visits[day]:
+            self.visits[day][(key, v["start"])] = v
+            self.visit_secrets[day] += red[0]
 
     def read_semantic(self, m: Member):
         def go():
@@ -542,9 +547,8 @@ class _Import:
                 lng = loc.get("longitudeE7") / 1e7 if isinstance(loc.get("longitudeE7"), int | float) else None
                 start = _any_ts(dur.get("startTimestamp") or dur.get("startTimestampMs"))
                 end = _any_ts(dur.get("endTimestamp") or dur.get("endTimestampMs"))
-                red = [0]
                 self.add_visit(start, end, loc.get("name") or loc.get("address"), loc.get("address"), lat, lng,
-                               loc.get("placeId"), red)
+                               loc.get("placeId"))
                 self.counts["place_visits"] += 1
         self._safe(m, go)
 
@@ -562,7 +566,7 @@ class _Import:
                 lat, lng = _latlng((cand.get("placeLocation") or {}).get("latLng"))
                 name = cand.get("name") or labels.get(str(cand.get("semanticType") or "").removeprefix("TYPE_"))
                 self.add_visit(_any_ts(seg.get("startTime")), _any_ts(seg.get("endTime")), name, None, lat, lng,
-                               cand.get("placeId"), [0])
+                               cand.get("placeId"))
                 self.counts["place_visits"] += 1
         self._safe(m, go)
 
@@ -620,7 +624,7 @@ class _Import:
             yield SourceItem(source="takeout_maps", external_id=f"maps/visits/{day}", title=f"Places visited, {day}",
                              body_text="\n".join(lines[:MAX_LINES]), occurred_at=_utc(_ts(vl[0]["start"])),
                              mime="text/plain", raw_meta={"kind": "visits", "product": "Maps", "day": day,
-                                                          "visits": vl, "redactions": 0})
+                                                          "visits": vl, "redactions": self.visit_secrets[day]})
         for (kind, stem), places in sorted(self.lists.items()):
             uniq = list({p["key"]: p for p in places}.values())
             lines = []
@@ -757,8 +761,8 @@ def parse(paths: list[Path], progress: Callable[[dict], None] | None = None) -> 
         if imp.counts.get("skipped_noise"):
             imp.note(f"{imp.counts['skipped_noise']} Ads / Google Analytics / Takeout activity entries were skipped.")
         if not any(c and c[0] in ("timeline", "semantic") for _, c in todo):
-            imp.note("No Timeline / Location History data in this export (Timeline now lives on your phone). "
-                     "Place visits come from Maps (your places) if present.")
+            imp.note("No Timeline / Location History data in this export (Google Maps keeps Timeline on your phone; "
+                     "export it from the Maps app). Place visits come from Maps (your places) if present.")
         if html:
             imp.note(f"{len(html)} My Activity file(s) are in HTML format and were skipped. Re-export My Activity "
                      "with Multiple formats set to JSON.")
@@ -800,7 +804,7 @@ def run_import(s, paths: list[Path], progress: Callable[..., None] | None = None
 
     conn = TakeoutConnector(paths, progress)
     stats = run_sync(s, conn, account="default")
-    return {**stats, **conn.report}
+    return {**conn.report, **stats}  # the stored items' redaction count, which includes the parser's
 
 
 # ---- locating input ----

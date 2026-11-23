@@ -1,8 +1,9 @@
 """Stage one: the graph read from record metadata (headers, card fields, attendees, file paths). Deterministic, no
 model calls.
 
-Which records. A record is pending while `spined_hash` differs from its `content_hash`; a sync that changes a record
-clears the marker (migration 0010). `run` builds pending records in id order, one batch per transaction, and writes
+Which records. A record is pending while `spined_hash` differs from its `content_hash`; whatever changes a record's
+content hash clears the marker (the trigger `source_items_content_changed`), a sync or the redact stage alike. `run`
+builds pending records in id order, one batch per transaction, and writes
 back the hash it read: a record that changes while it runs stays pending, and a run that stops leaves every record it
 didn't commit pending.
 

@@ -1,0 +1,50 @@
+"""Redaction rules versioned per item; git remotes without credentials; jobs that record their owner.
+
+`source_items.redaction_version` is the version of the credential rules (connectors/redact.py VERSION) an item's
+title and text were stored under. Every item stored before it existed is version 0, so the pipeline's first step
+(connectors/base.py `redact_stored`) applies the current rules to it, and does so again after each change of rules.
+The index makes "is anything out of date" one lookup.
+
+A remote such as https://user:token@github.com/me/repo.git was stored with its user name and token in the Local
+files repo item (`source_items.raw_meta.remote`) and copied to the repository's node (`nodes.props.remote`). The
+user info is removed from both, as the connector removes it before storing a remote. The scrub can't be undone: a
+downgrade leaves the remotes as they are.
+
+A job (kind sync, import or pipeline; source a Sources page id or 'pipeline') records the host and process that run
+it, so a process starting up fails only the running jobs whose process died, never one another process still runs.
+
+Revision ID: 0010
+Revises: 0009
+"""
+from alembic import op
+
+revision = "0010"
+down_revision = "0009"
+
+# scheme://anything-without-a-slash@ at the start of the URL; scp-style remotes (git@host:path) have no scheme.
+USERINFO = r"^([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]*@"
+SCRUB = rf"""
+    UPDATE source_items
+    SET raw_meta = jsonb_set(raw_meta, '{{remote}}', to_jsonb(regexp_replace(raw_meta->>'remote', '{USERINFO}', '\1')))
+    WHERE raw_meta->>'remote' ~ '{USERINFO}';
+    UPDATE nodes
+    SET props = jsonb_set(props, '{{remote}}', to_jsonb(regexp_replace(props->>'remote', '{USERINFO}', '\1')))
+    WHERE props->>'remote' ~ '{USERINFO}';
+"""
+
+
+def upgrade():
+    op.execute("""
+        ALTER TABLE source_items ADD COLUMN redaction_version smallint NOT NULL DEFAULT 0;
+        CREATE INDEX source_items_redaction_version_idx ON source_items (redaction_version);
+    """)
+    op.execute(SCRUB)
+    op.execute("ALTER TABLE jobs ADD COLUMN owner_host text, ADD COLUMN owner_pid integer")
+
+
+def downgrade():
+    op.execute("ALTER TABLE jobs DROP COLUMN owner_pid, DROP COLUMN owner_host")
+    op.execute("""
+        DROP INDEX source_items_redaction_version_idx;
+        ALTER TABLE source_items DROP COLUMN redaction_version;
+    """)

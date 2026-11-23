@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import ImportForm from "@/components/ImportForms";
 import { InlineError, Skeleton } from "@/components/ui";
-import { api, Job, ModelStatus, SourceInfo } from "@/lib/api";
+import { API, api, Job, ModelStatus, SourceInfo } from "@/lib/api";
 
 const STATUS: Record<SourceInfo["status"], { label: string; dot: string; text: string }> = {
   not_set_up: { label: "Not set up", dot: "bg-muted", text: "text-muted" },
@@ -14,6 +14,9 @@ const STATUS: Record<SourceInfo["status"], { label: string; dot: string; text: s
 };
 
 const nf = new Intl.NumberFormat();
+
+// An id from a group name ("Connected accounts"): ids can't hold spaces, or aria-labelledby can't find them.
+const groupId = (group: string) => `group-${group.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
 
 function when(date: string | null) {
   if (!date) return "Never";
@@ -39,14 +42,14 @@ const secondary = `${button} border border-line bg-panel text-soft hover:bg-hove
 
 function GithubToken({ onSaved }: { onSaved: () => void }) {
   const [token, setToken] = useState("");
-  const [state, setState] = useState<{ busy: boolean; error?: string; done?: boolean }>({ busy: false });
+  const [state, setState] = useState<{ busy: boolean; error?: string; saved?: string }>({ busy: false });
   async function save(e: React.FormEvent) {
     e.preventDefault();
     setState({ busy: true });
     try {
-      await api.saveGithubToken(token);
+      const { account } = await api.saveGithubToken(token);
       setToken("");
-      setState({ busy: false, done: true });
+      setState({ busy: false, saved: account });
       onSaved();
     } catch (cause) {
       setState({ busy: false, error: cause instanceof Error ? cause.message : String(cause) });
@@ -60,9 +63,42 @@ function GithubToken({ onSaved }: { onSaved: () => void }) {
       <button type="submit" disabled={state.busy || token.trim().length < 20} className={secondary}>
         {state.busy ? "Saving..." : "Save token"}
       </button>
-      {state.done && <span className="text-xs text-accent" role="status">Saved, encrypted.</span>}
+      {state.saved && <span className="text-xs text-accent" role="status">Saved for {state.saved}, encrypted.</span>}
       {state.error && <InlineError message={state.error} />}
     </form>
+  );
+}
+
+/** Forget a connected account's token, after a second press. What it synced stays. */
+function Disconnect({ provider, account, onDone }: { provider: "google" | "github"; account: string; onDone: () => void }) {
+  const [state, setState] = useState<"idle" | "confirm" | "busy">("idle");
+  const [error, setError] = useState<string | null>(null);
+  async function confirm() {
+    setState("busy");
+    try {
+      await api.disconnect(provider, account);
+      onDone();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      setState("idle");
+    }
+  }
+  const link = "text-xs text-muted underline underline-offset-4 hover:text-ink disabled:opacity-50";
+  return (
+    <span className="ml-2 inline-flex items-center gap-2 font-sans">
+      {state === "idle" ? (
+        <button type="button" className={link} onClick={() => setState("confirm")}>Disconnect</button>
+      ) : (
+        <>
+          <span className="text-xs text-soft">Stop syncing {account}? What it synced stays.</span>
+          <button type="button" className={`${link} text-danger`} disabled={state === "busy"} onClick={() => void confirm()}>
+            Disconnect
+          </button>
+          <button type="button" className={link} disabled={state === "busy"} onClick={() => setState("idle")}>Keep</button>
+        </>
+      )}
+      {error && <InlineError message={error} />}
+    </span>
   );
 }
 
@@ -79,16 +115,25 @@ function SourceCard({ source, busy, onSync, onRefresh }: {
   const isGoogle = source.kind === "google";
   const isGithub = source.id === "github";
   const needsGoogle = isGoogle && source.accounts.length === 0;
+  const [newToken, setNewToken] = useState(false);
 
   let action: React.ReactNode = null;
   if (isGithub && source.accounts.length === 0) {
     action = <GithubToken onSaved={onRefresh} />;
   } else if (needsGoogle) {
-    action = <a href={api.googleConnectUrl()} className={primary}>Connect a Google account</a>;
+    // Without the OAuth client file Google can't be asked; the message says how to add it.
+    action = source.requirements_ok
+      ? <a href={api.googleConnectUrl()} className={primary}>Connect a Google account</a>
+      : <button type="button" onClick={onRefresh} className={secondary}>Check again</button>;
   } else if (source.can_sync) {
     action = (
       <div className="flex gap-2">
         {isGoogle && <a href={api.googleConnectUrl()} className={secondary}>Add another account</a>}
+        {isGithub && (
+          <button type="button" onClick={() => setNewToken(!newToken)} aria-expanded={newToken} className={secondary}>
+            Replace or add a token
+          </button>
+        )}
         <button type="button" onClick={() => onSync(source.id)} disabled={running || busy} className={primary}>
           {running ? "Syncing..." : "Sync now"}
         </button>
@@ -106,11 +151,11 @@ function SourceCard({ source, busy, onSync, onRefresh }: {
             <h3 className="font-medium text-ink">{source.name}</h3>
             <span className={`inline-flex items-center gap-1.5 text-xs ${st.text}`}>
               <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${st.dot}`} />
-              {source.coming_soon ? "Coming soon" : st.label}
+              {st.label}
             </span>
           </div>
           <p className="mt-1 max-w-xl text-sm leading-6 text-muted">{source.reads}</p>
-          {source.kind !== "import" && !source.coming_soon && (
+          {source.kind !== "import" && (
             <p className="mt-1 text-xs text-muted tabular-nums">
               {nf.format(source.items)} items, last synced {when(source.last_sync)}
             </p>
@@ -148,11 +193,19 @@ function SourceCard({ source, busy, onSync, onRefresh }: {
         </p>
       )}
 
+      {isGithub && newToken && source.accounts.length > 0 && (
+        <GithubToken onSaved={() => { setNewToken(false); onRefresh(); }} />
+      )}
+
       {source.accounts.length > 0 && (
         <ul className="mt-3 space-y-1" aria-label={`${source.name} accounts`}>
           {source.accounts.map((a) => (
             <li key={a.account} className="font-mono text-xs text-soft">
               {a.account}{a.last_sync && <span className="text-muted"> · synced {when(a.last_sync)}</span>}
+              {/* The four Google services share one sign-in: disconnect it once, under Gmail. */}
+              {(isGithub || source.id === "gmail") && (
+                <Disconnect provider={isGithub ? "github" : "google"} account={a.account} onDone={onRefresh} />
+              )}
             </li>
           ))}
         </ul>
@@ -186,9 +239,10 @@ function ModelPanel({ model }: { model: ModelStatus }) {
     state = "No Bedrock key is set (AWS_BEARER_TOKEN_BEDROCK in the API's environment), so no model is called. "
       + "Search and the graph work without it.";
   } else {
-    state = "Ask, AI extraction, summaries and the checks on each connection send text to a model on Amazon Bedrock. "
-      + "They read only the sources opted in here; everything else stays on this computer and reaches the model only "
-      + "as a count. Search may also send your question, never your records, to pick out names and dates.";
+    state = "Ask, AI extraction, summaries, naming your life threads and projects, reading your resume, and the "
+      + "checks on each connection send text to a model on Amazon Bedrock. They read only the sources opted in here; "
+      + "everything else stays on this computer and reaches the model only as a count. Search may also send your "
+      + "question, never your records, to pick out names and dates.";
   }
   return (
     <section id="model" className="mt-8 rounded-md border border-line bg-panel px-5 py-4" aria-labelledby="model-heading">
@@ -202,7 +256,8 @@ function ModelPanel({ model }: { model: ModelStatus }) {
       </p>
       <p className="mt-2 max-w-xl text-xs leading-5 text-muted">
         To opt a source in, add the id its entry shows to IGNEOUS_LLM_SOURCES in api/.env (comma-separated) and
-        restart the API. Local files and Apple Notes also need IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true.
+        restart the API. Local files and Apple Notes also need IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true. The MCP
+        server (igneous mcp) is separate: what its tools return goes to the model of the AI client you connect it to.
       </p>
     </section>
   );
@@ -280,7 +335,7 @@ export default function SourcesPage() {
       setPipeline(j.jobs.find((x) => x.source === "pipeline") ?? null);
       setError(null);
     } catch (cause) {
-      if (!ctl.signal.aborted) setError(`Could not reach the Igneous API. Is it running on ${new URL(api.googleConnectUrl()).origin}? (${String(cause)})`);
+      if (!ctl.signal.aborted) setError(`Could not reach the Igneous API. Is it running on ${API}? (${String(cause)})`);
     }
   }, []);
 
@@ -314,7 +369,8 @@ export default function SourcesPage() {
   }
 
   const groups = sources ? [...new Set(sources.map((s) => s.group))] : [];
-  const total = sources?.filter((s) => s.kind !== "import").reduce((n, s) => n + s.items, 0) ?? 0;
+  // Every source counts, exports included: one imported export is enough to build a graph from.
+  const total = sources?.reduce((n, s) => n + s.items, 0) ?? 0;
 
   return (
     <main className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6">
@@ -343,8 +399,8 @@ export default function SourcesPage() {
       ) : (
         <>
           {groups.map((g) => (
-            <section key={g} className="mt-6" aria-labelledby={`g-${g}`}>
-              <h2 id={`g-${g}`} className="mb-2 text-[11px] font-medium uppercase tracking-[0.12em] text-muted">{g}</h2>
+            <section key={g} className="mt-6" aria-labelledby={groupId(g)}>
+              <h2 id={groupId(g)} className="mb-2 text-[11px] font-medium uppercase tracking-[0.12em] text-muted">{g}</h2>
               <ul className="rounded-md border border-line bg-panel">
                 {sources.filter((s) => s.group === g).map((s) => (
                   <SourceCard key={s.id} source={s} busy={starting}

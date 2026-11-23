@@ -8,12 +8,8 @@ from dataclasses import dataclass
 from pathlib import PurePath
 from typing import Literal
 
-from docx import Document
-from openpyxl import load_workbook
-from pptx import Presentation
-from pypdf import PdfReader
-
 ParseStatus = Literal["ok", "unsupported", "binary", "corrupt"]
+# The PDF and Office libraries load when a document of their kind is first parsed: importing this module stays cheap.
 
 
 @dataclass(frozen=True)
@@ -71,13 +67,20 @@ _FORMATS = {
     ".toml": ("application/toml", "text"),
     ".ini": ("text/plain", "text"),
 }
+# By MIME type, only the formats above: the legacy binary Office types (application/msword, vnd.ms-excel,
+# vnd.ms-powerpoint) are not OOXML, and the .docx/.xlsx/.pptx readers can't open them.
 _MIME_FORMATS = {mime: parser for mime, parser in _FORMATS.values()}
-_MIME_FORMATS.update({
-    "application/vnd.ms-excel": "xlsx",
-    "application/vnd.ms-powerpoint": "pptx",
-    "application/msword": "docx",
-})
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$", re.MULTILINE)
+# A larger document is kept as metadata only: parsing holds it whole in memory, and its text would swamp search.
+MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
+
+
+def supported(filename: str | None, mime: str | None = None) -> bool:
+    """Whether parse_document reads this kind of file, judged by name and MIME type alone: checked before a file is
+    read or downloaded. (A PDF without its extension or type is not recognised this way.)"""
+    extension = PurePath(filename).suffix.lower() if filename else ""
+    supplied = mime.lower().split(";", 1)[0].strip() if mime else ""
+    return extension in _FORMATS or supplied in _MIME_FORMATS or supplied.startswith("text/")
 
 
 def parse_document(data: bytes, filename: str | None = None, mime: str | None = None) -> ParsedDocument:
@@ -139,6 +142,8 @@ def _parse_text(data: bytes, mime: str | None) -> ParsedDocument:
 
 
 def _parse_pdf(data: bytes) -> tuple[str, list[dict[str, int | str]]]:
+    from pypdf import PdfReader
+
     parts, boundaries, offset = [], [], 0
     for index, page in enumerate(PdfReader(io.BytesIO(data)).pages, start=1):
         content = _normalize(page.extract_text() or "")
@@ -151,6 +156,8 @@ def _parse_pdf(data: bytes) -> tuple[str, list[dict[str, int | str]]]:
 
 
 def _parse_docx(data: bytes) -> tuple[str, list[dict[str, int | str]]]:
+    from docx import Document
+
     document, parts, boundaries, offset = Document(io.BytesIO(data)), [], [], 0
     for paragraph in document.paragraphs:
         content = _normalize(paragraph.text)
@@ -178,6 +185,8 @@ def _parse_docx(data: bytes) -> tuple[str, list[dict[str, int | str]]]:
 
 
 def _parse_xlsx(data: bytes) -> tuple[str, list[dict[str, int | str]]]:
+    from openpyxl import load_workbook
+
     workbook, parts, boundaries, offset = load_workbook(io.BytesIO(data), read_only=True, data_only=True), [], [], 0
     try:
         for index, sheet in enumerate(workbook.worksheets, start=1):
@@ -198,6 +207,8 @@ def _parse_xlsx(data: bytes) -> tuple[str, list[dict[str, int | str]]]:
 
 
 def _parse_pptx(data: bytes) -> tuple[str, list[dict[str, int | str]]]:
+    from pptx import Presentation
+
     presentation, parts, boundaries, offset = Presentation(io.BytesIO(data)), [], [], 0
     for index, slide in enumerate(presentation.slides, start=1):
         content = "\n".join(_normalize(shape.text) for shape in slide.shapes if hasattr(shape, "text") and shape.text)

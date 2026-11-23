@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import text
 
-from igneous.connectors.base import UPSERT, SourceItem
+from igneous.connectors.base import SourceItem, store
 from igneous.db import SessionLocal
 from igneous.graph import invariants, quoted, spine
 from igneous.rag import chunking
@@ -16,11 +16,9 @@ T0 = datetime(2025, 1, 6, 9, tzinfo=UTC)
 
 
 def put(s, source, external_id, meta, title="x", when=T0, body="body"):
-    """Write a record exactly as a connector's sync does (connectors/base.py)."""
-    item = SourceItem(source=source, external_id=external_id, title=title, body_text=body, occurred_at=when,
-                      raw_meta=meta)
-    s.execute(UPSERT, {"source": source, "external_id": external_id, "content_hash": item.content_hash, "mime": None,
-                       "title": title, "body_text": body, "raw_meta": json.dumps(meta), "occurred_at": when})
+    """Write a record exactly as a connector's sync does (connectors/base.py `store`)."""
+    store(s, SourceItem(source=source, external_id=external_id, title=title, body_text=body, occurred_at=when,
+                        raw_meta=meta))
     return s.execute(text("SELECT id FROM source_items WHERE source = :s AND external_id = :e"),
                      {"s": source, "e": external_id}).scalar_one()
 
@@ -457,6 +455,45 @@ def test_a_deleted_record_takes_what_other_stages_hung_off_it_alone(db):
         both: (second, [second]), beyond: (None, [None]), yours: (None, [None])}
     assert only not in (both, beyond, yours)
     spine.run(db)
+    legal(db)
+
+
+def test_a_record_redacted_again_is_built_and_chunked_again_without_the_secret(db):
+    """A message stored before today's redaction rules, with a key in its subject, a header name and a quoted
+    header, was built and chunked. The pipeline's first step redacts it, which changes its content hash, so the spine
+    and the chunker read it again, and no copy of the key is left in the graph, its provenance or the chunks."""
+    from igneous import pipeline
+    from igneous.connectors.base import redact_stored
+
+    key = "AKIAABCDEFGHIJKLMNOP"
+    meta = {"from": [{"email": "ops@x.test", "name": f"Ops {key}"}], "to": [{"email": "ann@x.test"}],
+            "fingerprint": "fp-keys"}
+    body = (f"Rotate {key} today.\n-----Original Message-----\nFrom: Ann Ames\n"
+            f"Sent: Monday, January 6, 2025 8:00 AM\nSubject: {key}\n\nold key")
+    record = db.execute(text("""
+        INSERT INTO source_items (source, external_id, content_hash, title, body_text, raw_meta, occurred_at)
+        VALUES ('email', 'box/inbox/keys', 'stored-before-the-rules', :t, :b, CAST(:m AS jsonb), :w) RETURNING id
+    """), {"t": f"Re: {key}", "b": body, "m": json.dumps(meta), "w": T0}).scalar_one()
+    spine.run(db)
+    chunking.run(db)
+    places = {"source_items": "title || body_text || raw_meta::text", "nodes": "name || props::text",
+              "edges": "props::text", "chunks": "text", "spine_node_support": "COALESCE(name, '') || props::text",
+              "spine_quotes": "sender || subject"}
+
+    def holding() -> set[str]:
+        return {table for table, where in places.items()
+                if db.execute(text(f"SELECT count(*) FROM {table} WHERE {where} LIKE :k"), {"k": f"%{key}%"}).scalar()}
+
+    assert holding() == set(places) - {"edges"}
+    assert redact_stored(db) == {"checked": 1, "redacted": 1}
+    marks = db.execute(text("SELECT content_hash, spined_hash, chunked_hash FROM source_items WHERE id = :i"),
+                       {"i": record}).one()
+    assert marks.content_hash != "stored-before-the-rules" and marks.spined_hash is None and marks.chunked_hash is None
+    db.commit()
+    results = pipeline.run(db, ["spine", "chunk"])
+    assert results["spine"]["result"] == 1 and results["chunk"]["result"] == 1
+    assert holding() == set()
+    assert db.execute(text("SELECT name FROM nodes WHERE key = 'ops@x.test'")).scalar() == "Ops [REDACTED:aws_access_key]"
     legal(db)
 
 

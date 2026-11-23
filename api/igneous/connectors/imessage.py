@@ -1,8 +1,9 @@
 """macOS Messages (iMessage / SMS) connector. Reads ~/Library/Messages/chat.db read-only (CO-2).
 
 One SourceItem per conversation per day: single texts are too short to search or extract from, and a day's
-exchange is the natural unit people remember ("what did Sam and I decide on Tuesday"). The cursor is the
-newest message date seen, so re-syncs only re-emit the days that changed.
+exchange is the natural unit people remember ("what did Sam and I decide on Tuesday"). The first sync reads
+`since_days` back; the cursor is then the highest message ROWID read, so a re-sync re-emits the days of every row
+added since, including older messages that reach this Mac late from another device.
 
 Needs Full Disk Access for the process reading chat.db (System Settings -> Privacy & Security). Most text is
 in `attributedBody` (an NSAttributedString typedstream), not `text`; decode_attributed handles it.
@@ -14,7 +15,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from igneous.connectors.base import Checkpoint, SourceItem
+from igneous.connectors.base import Checkpoint, Every, SourceItem
 
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=UTC)
 DEFAULT_DB = Path(os.path.expanduser("~/Library/Messages/chat.db"))
@@ -63,18 +64,26 @@ class MessagesConnector:
 
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint]:
         db = self._connect()
-        after = cursor.get("last_date", 0)
-        if not after and self.since_days:
-            after = int((datetime.now(UTC) - timedelta(days=self.since_days) - APPLE_EPOCH).total_seconds() * 1e9)
-
-        # Days touched since the cursor; each is re-emitted whole so the item stays complete.
-        changed = db.execute("""
+        # Everything up to this row is read now; a row that arrives meanwhile is read next time.
+        top = db.execute("SELECT COALESCE(max(ROWID), 0) FROM message").fetchone()[0]
+        if "last_rowid" in cursor:
+            # Rows added since, whatever their date: an older message that reaches this Mac late (from another
+            # device, or a restored backup) is caught too.
+            since, value = "m.ROWID > ?", cursor["last_rowid"]
+        else:
+            # A first sync reads by date (`last_date` is where a cursor of dates stopped).
+            after = cursor.get("last_date", 0)
+            if not after and self.since_days:
+                after = int((datetime.now(UTC) - timedelta(days=self.since_days) - APPLE_EPOCH).total_seconds() * 1e9)
+            since, value = "m.date > ?", after
+        # Days touched; each is re-emitted whole so the item stays complete.
+        changed = db.execute(f"""
             SELECT DISTINCT cmj.chat_id, date(m.date / 1000000000 + 978307200, 'unixepoch')
             FROM message m JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-            WHERE m.date > ? AND m.item_type = 0 AND m.associated_message_type = 0
-        """, (after,)).fetchall()
+            WHERE {since} AND m.ROWID <= ? AND m.item_type = 0 AND m.associated_message_type = 0
+        """, (value, top)).fetchall()
         if not changed:
-            yield Checkpoint({"last_date": after})
+            yield Checkpoint({"last_rowid": top})
             return
 
         chats = {r[0]: r for r in db.execute(
@@ -84,16 +93,18 @@ class MessagesConnector:
                 "SELECT chj.chat_id, h.id FROM chat_handle_join chj JOIN handle h ON h.ROWID = chj.handle_id"):
             members[chat_id].append(handle)
 
-        newest = after
+        due = Every()
         for chat_id, day in sorted(changed, key=lambda r: r[1]):
+            # The day's range of dates (nanoseconds since 2001), which the date index can serve.
+            start = int((datetime.fromisoformat(day).replace(tzinfo=UTC) - APPLE_EPOCH).total_seconds()) * 10**9
             rows = db.execute("""
                 SELECT m.date, m.is_from_me, m.text, m.attributedBody, h.id, m.cache_has_attachments
                 FROM message m JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
                 LEFT JOIN handle h ON h.ROWID = m.handle_id
-                WHERE cmj.chat_id = ? AND date(m.date / 1000000000 + 978307200, 'unixepoch') = ?
+                WHERE cmj.chat_id = ? AND m.date >= ? AND m.date < ?
                   AND m.item_type = 0 AND m.associated_message_type = 0  -- skip tapbacks/system rows
                 ORDER BY m.date
-            """, (chat_id, day)).fetchall()
+            """, (chat_id, start, start + 86400 * 10**9)).fetchall()
             lines, senders = [], set()
             for date, from_me, txt, attributed, handle, has_att in rows:
                 body = txt or decode_attributed(attributed) or ("[attachment]" if has_att else None)
@@ -103,7 +114,8 @@ class MessagesConnector:
                 senders.add(who)
                 t = apple_time(date)
                 lines.append(f"[{t:%H:%M}] {who}: {body}" if t else f"{who}: {body}")
-                newest = max(newest, date or 0)
+            if due():
+                yield Checkpoint(cursor)  # commits the days so far; the cursor moves when every day is read
             if not lines:
                 continue
             c = chats.get(chat_id)
@@ -115,4 +127,4 @@ class MessagesConnector:
                 body_text="\n".join(lines), occurred_at=apple_time(rows[0][0]), mime="text/plain",
                 raw_meta={"chat": identifier, "service": service, "group": style == 43, "day": day,
                           "participants": people, "senders": sorted(senders), "messages": len(lines)})
-        yield Checkpoint({"last_date": newest})
+        yield Checkpoint({"last_rowid": top})
