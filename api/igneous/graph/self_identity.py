@@ -1,4 +1,4 @@
-"""Work out who the owner of the graph is, from identity signals only (never from a name).
+"""Work out who the owner of the graph is, from identity signals only (never from a name alone).
 
 The owner is the Person `me`. Sources that are yours by nature create it (Messages, AI chats, Maps visits, your
 LinkedIn profile: graph/spine.py), and this stage links it to every identity that is provably the same human, with
@@ -8,6 +8,14 @@ one SAME_AS edge per signal (extractor 'self', which resolve.refresh_canonical t
   gmail_sent       the From address on Gmail messages labeled SENT (send-as aliases included)
   archive_sent     a mail archive's owner: the address that sent most of each mailbox's sent folders, when every
                    mailbox in the archive has the same one (one person's mail, not several people's)
+  archive_alias    another address that sent from those sent folders under the owner's name, by the name evidence
+                   entity resolution requires (resolve.same_name); an assistant sending for the owner has their own
+  archive_received an address that mail in the archive's other folders went to under exactly the owner's first name
+                   and surname, on mail that reached none of the owner's addresses above (so not a relative or
+                   namesake copied with the owner); or one no header names, the only recipient of mail there, whose
+                   local part is the owner's first initial or first name and surname at the domain of one of those
+                   addresses (pallen@ for phillip.allen@enron.com; never another domain, where that local part can
+                   be someone else's)
   imessage_handle  the phone numbers / Apple IDs the user's own iMessages went out from
   me_card          every number and email on the Contacts card macOS marks as the owner's
 
@@ -117,6 +125,91 @@ def archive_owner(s: Session) -> str | None:
     return None if is_service_address(owner) else owner
 
 
+ARCHIVE_SENDERS = text("""
+SELECT DISTINCT lower(raw_meta->'from'->0->>'email') AS address FROM source_items
+WHERE source = 'email' AND split_part(external_id, '/', 2) ~* :sent_folder AND raw_meta->'from'->0->>'email' IS NOT NULL
+""")
+# The mail the archive's owner received: what its other folders hold from anyone but `:mine` (the owner's addresses
+# known so far). Per recipient address, counting each once per message: the messages it alone was addressed to
+# (never a sender's to its own address, which is how bulk mail is copied to everyone blind) and the messages that
+# reached none of `:mine`.
+ARCHIVE_RECIPIENTS = text("""
+WITH mail AS MATERIALIZED (
+    SELECT lower(si.raw_meta->'from'->0->>'email') AS sender,
+           ARRAY(SELECT DISTINCT lower(a->>'email')
+                 FROM jsonb_array_elements(COALESCE(si.raw_meta->'to', '[]') || COALESCE(si.raw_meta->'cc', '[]')
+                                           || COALESCE(si.raw_meta->'bcc', '[]')) a
+                 WHERE a->>'email' IS NOT NULL) AS rcpt
+    FROM source_items si
+    WHERE si.source = 'email' AND split_part(si.external_id, '/', 2) !~* :sent_folder)
+SELECT r.address,
+       count(*) FILTER (WHERE cardinality(m.rcpt) = 1 AND m.sender IS DISTINCT FROM r.address) AS alone,
+       count(*) FILTER (WHERE NOT m.rcpt && CAST(:mine AS text[])) AS unclaimed
+FROM mail m CROSS JOIN LATERAL unnest(m.rcpt) AS r(address)
+WHERE COALESCE(m.sender, '') <> ALL(CAST(:mine AS text[])) AND r.address <> ALL(CAST(:mine AS text[]))
+GROUP BY r.address
+""")
+
+
+def _letters(value: str) -> str:
+    return re.sub(r"[\W_]", "", value.split("@")[0]).lower()
+
+
+def _local_name(name: str, key: str) -> bool:
+    """Nothing names the address but its local part: 'Pallen' for pallen@, as the spine names an address no header
+    names."""
+    return _letters(name) == _letters(key)
+
+
+def _spells(key: str, name: tuple[str, str]) -> bool:
+    """The address's local part is the first initial or first name and the surname of `name` and nothing else:
+    pallen@, phillipallen@ or p.allen@ for Phillip Allen, never pallen70@."""
+    first, last = name
+    return re.sub(r"[._-]", "", key.split("@")[0]) in (first[:1] + last, first + last)
+
+
+def _at_your_domain(key: str, yours: set[str]) -> bool:
+    """The address is at the domain of one of your addresses (`yours`), where it names one mailbox, and that is no
+    personal mail domain. A subdomain is another mail system, where the same local part can be someone else's: Enron
+    filed mail for Jennifer Arnold at jarnold@ees.enron.com in John Arnold's mailbox."""
+    domain = key.split("@")[1]
+    return domain in yours and domain not in PERSONAL_DOMAINS
+
+
+def archive_aliases(s: Session, owner: str) -> list[tuple[str, str]]:
+    """The archive owner's other addresses, as (signal, key) pairs: archive_alias, then archive_received (the module
+    says when each holds). Empty while the owner's address has no first name and surname to match."""
+    from igneous.graph.resolve import own_name, same_name, split_name  # resolve reads this module at import
+
+    def people(keys) -> dict[str, tuple[str, tuple[str, str]]]:
+        """{key: (its own name, (first, last))} for the people keyed by `keys`, never an automated sender or a product
+        relaying someone else's name."""
+        out = {}
+        for r in s.execute(text("SELECT key, name, props FROM nodes WHERE type = 'Person' AND key = ANY(:k)"),
+                           {"k": sorted(set(keys))}):
+            name = own_name(r.name, r.props)
+            if not is_service_address(r.key) and not is_relay_name(name):
+                out[r.key] = (name, split_name(name, r.key))
+        return out
+
+    you = people([owner]).get(owner, ("", ("", "")))[1]
+    if not all(you):
+        return []
+    senders = [a for (a,) in s.execute(ARCHIVE_SENDERS, {"sent_folder": SENT_FOLDER}) if a != owner]
+    found = [("archive_alias", key) for key, (_name, theirs) in sorted(people(senders).items())
+             if same_name(you, theirs)]
+    mine = [owner, *(key for _signal, key in found)]
+    domains = {key.split("@")[1] for key in mine}
+    received = {r.address: r for r in s.execute(ARCHIVE_RECIPIENTS, {"sent_folder": SENT_FOLDER, "mine": mine})}
+    for key, (name, theirs) in sorted(people(received).items()):
+        r = received[key]
+        by_name = theirs == you and len(you[0]) > 1 and r.unclaimed
+        by_address = r.alone and _local_name(name, key) and _spells(key, you) and _at_your_domain(key, domains)
+        if by_name or by_address:
+            found.append(("archive_received", key))
+    return found
+
+
 def _signals(s: Session) -> list[tuple[str, str]]:
     """(signal, identity key) pairs. Keys match how spine keys Person nodes."""
     out: list[tuple[str, str]] = [("google_account", acct.lower()) for (acct,) in s.execute(text(
@@ -128,7 +221,7 @@ def _signals(s: Session) -> list[tuple[str, str]]:
         if addr:
             out.append(("gmail_sent", addr))
     if owner := archive_owner(s):
-        out.append(("archive_sent", owner))
+        out += [("archive_sent", owner), *archive_aliases(s, owner)]
     if os.path.exists(CHAT_DB):
         try:
             db = sqlite3.connect(f"file:{CHAT_DB}?mode=ro", uri=True)

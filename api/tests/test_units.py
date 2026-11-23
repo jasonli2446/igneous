@@ -281,6 +281,21 @@ def test_er_names_and_scoring():
     assert unresolvable(p(3, ".john@enron.com", "e-mail")) and unresolvable(p(4, "dl-ga-all@enron.com", "DL GA All"))
 
 
+def test_same_name_is_the_name_evidence_scoring_requires_either_way_round():
+    from igneous.graph.resolve import same_name, split_name
+
+    allen = split_name("Phillip K Allen", "phillip.allen@enron.com")
+    for name, key in [("Allen, Phillip K.", "k..allen@enron.com"), ("Phil Allen", "phil@a.test"),
+                      ("", "phillip.allen@b.test")]:
+        theirs = split_name(name, key)
+        assert same_name(allen, theirs) and same_name(theirs, allen), name or key
+    for name, key in [("Rangel, Ina", "ina.rangel@enron.com"), ("Allen, Diana", "diana.allen@enron.com"),
+                      ("Pam Allen", "pam@a.test"), ("P Allen", "p.allen@a.test"), ("Phillip", "pallen2@a.test"),
+                      ("Pallen", "pallen@enron.com"), ("Phillip Allenby", "pa@a.test")]:
+        theirs = split_name(name, key)
+        assert not same_name(allen, theirs) and not same_name(theirs, allen), name
+
+
 def test_er_rejects_mailing_lists():
     from igneous.graph.resolve import P, split_name, unresolvable
 
