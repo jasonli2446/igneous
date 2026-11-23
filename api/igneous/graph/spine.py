@@ -789,8 +789,9 @@ def build_file(b: Builder, item) -> None:
 
 def build_takeout_chat(b: Builder, item) -> None:
     """A Google Chat conversation-day, shaped like an iMessage one: a Message in a Thread per conversation, called
-    what the conversation is (a space's name, or the people in a direct message), People keyed by email. A space is
-    a group, as is any conversation of more than two. Whoever spoke SENT the day; everyone in it RECEIVED it."""
+    what the conversation is (a space's name, or the people in a direct message), People keyed by email and named as
+    Chat names them (below a mail header's or a card's name for the same address). A space is a group, as is any
+    conversation of more than two. Whoever spoke SENT the day; everyone in it RECEIVED it."""
     meta = item.raw_meta
     mid = b.node("Message", f"takeout_chat:{item.external_id}", item.title, {"source": "takeout_chat"}, record=True,
                  fallback="(chat)")
@@ -798,9 +799,9 @@ def build_takeout_chat(b: Builder, item) -> None:
                  {"source": "takeout_chat", "group": bool(meta.get("space")) or len(meta.get("participants", [])) > 2},
                  fallback="Google Chat")
     b.edge(mid, tid, "IN_THREAD", item.occurred_at, record=True)
-    senders = set(meta.get("senders", []))
+    senders, names = set(meta.get("senders", [])), meta.get("names") or {}
     for email in meta.get("participants", []):
-        pid = b.node("Person", email, None, {"email": email})
+        pid = b.node("Person", email, names.get(email), {"email": email})
         b.edge(mid, pid, "RECEIVED", item.occurred_at, record=True)
         if email in senders:
             b.edge(pid, mid, "SENT", item.occurred_at, record=True)

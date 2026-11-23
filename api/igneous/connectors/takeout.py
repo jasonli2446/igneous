@@ -19,7 +19,8 @@ What is read (names are matched case-insensitively and tolerate a missing "Takeo
   Records.json (raw location points) is skipped: huge and low value.
   Google Chat/Groups/<space or DM>/           one item per conversation per day, called by the space's name
                                               (group_info.json), a direct message by the people in it besides you
-                                              (Google Chat/Users/*/user_info.json names you)
+                                              (Google Chat/Users/*/user_info.json names you); every member by
+                                              address and the name Chat gives them, writing or not
   Tasks/Tasks.json                            one item per list
   Google Meet/ConferenceHistory/conference_history_records.csv   one item per call
   Calendar/<calendar>.ics                     one Google Calendar record per occurrence, keyed as a Google Calendar
@@ -749,6 +750,7 @@ class _Import:
                                  mime="text/plain",
                                  raw_meta={"product": "Google Chat", "group": group, "day": day, "conversation": name,
                                            "space": bool(g["name"]), "participants": sorted(members),
+                                           "names": {e: n for e, n in sorted(members.items()) if n and n != e},
                                            "senders": sorted({m_[1] for m_ in msgs}), "turns": len(msgs),
                                            "redactions": red[0]})
         if self.calendars:

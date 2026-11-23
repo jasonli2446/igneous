@@ -353,7 +353,8 @@ LEE = {"name": "Lee Park", "email": "lee@example.com", "user_type": "Human"}
 SPACE_MSGS = {"messages": [
     {"creator": LEE, "created_date": "Tuesday, May 6, 2025 at 7:00:00\u202fPM UTC", "text": "rules recap tonight?",
      "topic_id": "t", "message_id": "s1"}]}
-SPACE_INFO = {"name": "Gloomhaven Night", "members": [CHAT_GROUP["members"][0], CHAT_GROUP["members"][1], LEE]}
+ELLA = {"name": "Ella Novak", "email": "ella@example.com", "user_type": "Human"}  # a member who never writes
+SPACE_INFO = {"name": "Gloomhaven Night", "members": [CHAT_GROUP["members"][0], CHAT_GROUP["members"][1], LEE, ELLA]}
 CALENDAR = "\r\n".join([
     "BEGIN:VCALENDAR", "PRODID:-//Google Inc//Google Calendar 70.9054//EN", "VERSION:2.0", "X-WR-CALNAME:me@example.com",
     "X-WR-TIMEZONE:America/New_York",
@@ -385,6 +386,9 @@ def test_spaces_are_called_by_their_names_and_direct_messages_by_who_is_in_them(
     assert space.title == "Gloomhaven Night, 2025-05-06" and space.raw_meta["space"] is True
     assert dm.title == "Sam Lee, 2025-05-06" and dm.raw_meta["conversation"] == "Sam Lee"  # you aren't named
     assert dm.raw_meta["space"] is False and "Lee Park: rules recap tonight?" in space.body_text
+    # Every member by address and the name Chat gives them, whether or not they wrote that day.
+    assert space.raw_meta["names"] == {"ella@example.com": "Ella Novak", "lee@example.com": "Lee Park",
+                                       "me@example.com": "Me", "sam@example.com": "Sam Lee"}
     events = sorted(i.external_id for i in items if i.source == "gcal")
     assert events == ["me@example.com/me@example.com/EVT123"] + [
         f"me@example.com/me@example.com/gloom_202505{d}T230000Z" for d in ("05", "12", "19", "26")]
@@ -414,6 +418,31 @@ def test_takeout_calendar_and_chat_build_one_event_per_series_and_named_threads(
         assert attended == 1  # one edge for the series, spanning its occurrences
         counts = {row["id"]: row["items"] for row in sources.describe(s)}
         assert counts["takeout"] == 7 and counts["gcal"] == 0  # the export's events count for the export
+        # People known from the chat are named as Chat names them: the member who never wrote too.
+        named = dict(s.execute(text("SELECT key, name FROM nodes WHERE type = 'Person' AND key LIKE '%@example.com'")).all())
+        assert (named["ella@example.com"], named["lee@example.com"], named["sam@example.com"]) == (
+            "Ella Novak", "Lee Park", "Sam Lee")
+
+
+def test_a_chat_name_gives_way_to_a_mail_headers(db, chat_and_calendar):
+    from igneous.connectors.base import SourceItem, run_sync
+    from igneous.graph import spine
+
+    class Mail:
+        name = "takeouttest"
+
+        def sync(self, cursor):
+            yield SourceItem(source="email", external_id="inbox/1", title="Game night", body_text="See you there.",
+                             occurred_at=datetime(2025, 5, 7, tzinfo=UTC),
+                             raw_meta={"from": [{"email": "sam@example.com", "name": "Samuel Lee"}],
+                                       "to": [{"email": "me@example.com", "name": ""}], "fingerprint": "fp-1"})
+
+    with SessionLocal() as s:
+        takeout.run_import(s, [chat_and_calendar])
+        run_sync(s, Mail())
+        spine.run(s)
+        name = s.execute(text("SELECT name FROM nodes WHERE type = 'Person' AND key = 'sam@example.com'")).scalar_one()
+        assert name == "Samuel Lee"
 
 
 def test_a_calendar_sync_takes_over_an_exported_event_and_the_export_leaves_it(db, chat_and_calendar):
