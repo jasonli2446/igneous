@@ -40,6 +40,12 @@ Upgrading to migration 0014 (people's names in the order they are read, "Ina Ran
 next Rebuild or `igneous pipeline` reads again the records that gave someone a name with a comma (3.9k of the baseline's
 26k records, about 15 seconds), and everything that shows a person's name follows.
 
+Upgrading to migration 0016 (people named by the display names in Enron's X-From and X-To, quoted ones too: "Mark
+Skilling" for `"Mark Skilling" <markskilling@hotmail.com>`, not "Markskilling"): the next Rebuild or `igneous pipeline`
+reads again every mail record with an X-From (all 26k of the baseline's records, about two minutes). A mailbox
+synced before this migration has no X-To, X-cc or X-bcc stored, so someone only those headers name (a correspondent who
+never wrote back) keeps the name their address spells until the mailbox is synced into a new database.
+
 Tests (`make test`) never use that database or your personal one, nor your `api/.env` or model credentials: each
 run creates, migrates and finally drops its own `igneous_test_<pid>` database on the same server
 (`api/tests/conftest.py`), so two runs can share a server.

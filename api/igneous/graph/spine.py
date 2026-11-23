@@ -36,6 +36,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from email.utils import parseaddr
 from itertools import pairwise
 
 from sqlalchemy import text
@@ -98,8 +99,8 @@ CREATION_PROPS = {"Person": ("self",), "Organization": ("kind",)}
 RANK_CARD = 6      # your contact card's name for the identifier
 RANK_LINKEDIN = 5  # a LinkedIn connection's name
 RANK_STATED = 4    # what a record calls itself (the message or file it is) or states (a Drive folder's own name)
-RANK_HEADER = 3    # a display name mail headers give an address ("Jordan Lee")
-RANK_NAMED = 2     # any other name: a subject, a handle, an event title, X-From, an address's local part
+RANK_HEADER = 3    # a display name mail headers give an address ("Jordan Lee"), in Enron's X-headers too
+RANK_NAMED = 2     # any other name: a subject, a handle, an event title, an address's local part
 RANK_FALLBACK = 1  # a placeholder until a record names it: "(no subject)", "Me", "Drive folder"
 NAMED_BY = {RANK_CARD: "contacts", RANK_LINKEDIN: "linkedin"}
 
@@ -489,13 +490,11 @@ def span(s: Session, edge_ids: list[int]) -> None:
 
 # --- what each kind of record builds ------------------------------------------------------------------------------
 
-def _name_from(addr: dict, x_from: str | None) -> str:
+def _name_from(addr: dict) -> str:
+    """The name a record gives an address: its display name unless that is an address, else what the address's local
+    part spells ("tim.belden@" reads "Tim Belden")."""
     if addr.get("name") and "@" not in addr["name"]:
         return addr["name"]
-    if x_from:
-        clean = re.sub(r"<.*?>|\(.*?\)|\".*?\"", "", x_from).strip(" ,")
-        if clean and "@" not in clean:
-            return clean
     local = addr["email"].split("@")[0]
     return " ".join(w.capitalize() for w in re.split(r"[._]", local) if w)
 
@@ -503,14 +502,65 @@ def _name_from(addr: dict, x_from: str | None) -> str:
 TWO_WORDS = re.compile(r"[^\W\d_] [^\W\d_]")  # a letter, a space, a letter: "Jordan Lee", not "jlee" or "J."
 
 
-def _header_name(addr: dict, x_from: str | None = None) -> tuple[str, int]:
-    """The name a mail header gives an address and its rank: the display name when it reads as a person's (two
-    words, no address; "Rangel, Ina" as "Ina Rangel"), else a weaker one (`_name_from`: a one-word name, X-From, the
-    address's local part)."""
+def _header_name(addr: dict, x_name: str | None = None) -> tuple[str, int]:
+    """The name a mail header gives an address and its rank. Its display name, or else the one Enron's X-headers give
+    it (`x_name`, from `x_names`), is a header name when it reads as a person's (two words, no address; "Rangel, Ina"
+    as "Ina Rangel"); any other name is a weaker one (`_name_from`: a one-word name, the address's local part)."""
+    if x_name and not (addr.get("name") and "@" not in addr["name"]):
+        addr = {**addr, "name": x_name}
     shown = natural_name((addr.get("name") or "").strip(' "'))
     if shown and "@" not in shown and TWO_WORDS.search(shown):
         return shown, RANK_HEADER
-    return _name_from(addr, x_from), RANK_NAMED
+    return _name_from(addr), RANK_NAMED
+
+
+# Enron's mail keeps the display names of its From, To, Cc and Bcc in X-From, X-To, X-cc and X-bcc, each entry as the
+# mail system wrote it: an RFC 5322 address ("Mark Skilling" <markskilling@hotmail.com>, Rob Bradley <iertx@hern.org>),
+# Exchange's name surname first, unquoted, with its X.500 address (Faircloth, Linda </O=ENRON/OU=NA/CN=RECIPIENTS/...>),
+# a name alone (Rosalee Fleming), or an address with what Lotus Notes' gateway added after it (<a@b.org>@ENRON).
+X_ENTRY = re.compile(r'(?:"(?:\\.|[^"\\])*"?|<[^<>]*>?|[^,"<])+')      # a list's entries: commas outside "" and <>
+X_NAME_ADDR = re.compile(r'((?:"(?:\\.|[^"\\])*"|[^"<])*)<([^<>]*)>')  # an entry's name and its first <address>
+
+
+def _x_entry(entry: str) -> tuple[str, str, bool]:
+    """One X-header entry: its name as the standard address parser reads it, a quoted one with its escapes (or, where
+    the parser reads none, as written: an unquoted name with a comma), its <address> lowercased, and whether the name
+    is quoted. An entry without an <address> is all name."""
+    m = X_NAME_ADDR.match(entry)
+    if m is None:
+        return entry, "", False
+    name, address = parseaddr(m.group(0))
+    return name or m.group(1), (address or m.group(2)).strip().lower(), m.group(1).lstrip().startswith('"')
+
+
+def _x_name(name: str, address: str) -> str | None:
+    """`name` as the person an X-header entry names: what comes before an address in it, without a comment
+    ("(E-mail)") or the quotes around it, one space between words. None if it names no one: an address, the address's
+    own local part ("ccox" <ccox@...>), or nothing with a letter."""
+    name = " ".join(re.sub(r"\(.*?\)", " ", name.split("<", 1)[0]).split()).strip(" ,'\"\\")
+    if not name or re.search(r"[@>]", name) or not re.search(r"[^\W\d_]", name):
+        return None
+    return None if name.lower() == address.split("@")[0].lower() else name
+
+
+def x_names(meta: dict) -> dict[str, str]:
+    """Address -> the name Enron's X-headers give it: the sender's in X-From, and a recipient's in its own entry of
+    X-To, X-cc or X-bcc, matched by address (an X.500 address matches none). A list's comma can be inside an unquoted
+    name ("Zuver, Christina <...>"), so an entry of X-To, X-cc or X-bcc names its address only when its name is quoted
+    or the entry before it ended with an address."""
+    out: dict[str, str] = {}
+    for sender in meta.get("from", [])[:1]:
+        if name := _x_name(_x_entry(meta.get("x_from") or "")[0], sender["email"]):
+            out[sender["email"]] = name
+    recipients = {a["email"] for field_ in ("to", "cc", "bcc") for a in meta.get(field_, [])}
+    for header in ("x_to", "x_cc", "x_bcc"):
+        after_address = True
+        for entry in X_ENTRY.findall(meta.get(header) or ""):
+            name, address, quoted = _x_entry(entry)
+            if address in recipients and (quoted or after_address) and (name := _x_name(name, address)):
+                out.setdefault(address, name)
+            after_address = bool(address) or "@" in entry
+    return out
 
 
 REPLY_PREFIX = re.compile(r"^\s*((re|fw|fwd)\s*:\s*)+", re.I)
@@ -729,13 +779,14 @@ def build_email(b: Builder, item) -> None:
     meta = item.raw_meta
     key = message_key(meta, item.id)
     mid = b.node("Message", key, item.title, {"source": item.source}, record=True, fallback="(no subject)")
+    named = x_names(meta)
     for addr in meta.get("from", [])[:1]:
-        name, rank = _header_name(addr, meta.get("x_from"))
+        name, rank = _header_name(addr, named.get(addr["email"]))
         sender = b.node("Person", addr["email"], name, {"email": addr["email"]}, rank=rank)
         b.edge(sender, mid, "SENT", item.occurred_at, record=True)
     for field_ in ("to", "cc", "bcc"):
         for addr in meta.get(field_, []):
-            name, rank = _header_name(addr)
+            name, rank = _header_name(addr, named.get(addr["email"]))
             recipient = b.node("Person", addr["email"], name, {"email": addr["email"]}, rank=rank)
             b.edge(mid, recipient, "RECEIVED", item.occurred_at, record=True)
     tid = b.node("Thread", b.ctx.thread(item), REPLY_PREFIX.sub("", item.title or "").strip() or None,
@@ -806,7 +857,7 @@ def build_event(b: Builder, item) -> None:
     for a in people:
         if a.get("response") == "declined" or "@" not in a.get("email", ""):
             continue
-        pid = b.node("Person", a["email"], _name_from(a, None), {"email": a["email"]})
+        pid = b.node("Person", a["email"], _name_from(a), {"email": a["email"]})
         b.edge(pid, eid, "ATTENDED", item.occurred_at, record=True)
 
 

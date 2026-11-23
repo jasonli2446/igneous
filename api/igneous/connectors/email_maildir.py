@@ -56,10 +56,15 @@ def parse_message(raw: bytes, external_id: str) -> SourceItem:
         "to": _addrs(msg, "to"),
         "cc": _addrs(msg, "cc"),
         "bcc": _addrs(msg, "bcc"),
-        # Enron's X-From/X-To carry the human-readable names the address headers lack.
+        # Enron's X-From, X-To, X-cc and X-bcc carry the display names its address headers lack (graph/spine.py,
+        # `x_names`).
         "x_from": str(msg.get("x-from", "")) or None,
         "folder": str(msg.get("x-folder", "")) or None,
     }
+    # The recipients' names, stored only when present so other mail keeps its content hash.
+    for header in ("x-to", "x-cc", "x-bcc"):
+        if value := str(msg.get(header, "")).strip():
+            meta[header.replace("-", "_")] = value
     # Bulk-mail markers, stored only when present so ordinary messages keep their content hash.
     if msg.get("list-unsubscribe"):
         meta["list_unsubscribe"] = True

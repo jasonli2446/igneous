@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from igneous.connectors.email_maildir import parse_message
-from igneous.graph.spine import _name_from, _thread_key
+from igneous.graph.spine import _name_from, _thread_key, x_names
 from igneous.rag.chunking import split, strip_quoted
 from igneous.rag.search import rrf
 
@@ -61,8 +61,8 @@ def test_split_long_text_overlaps_and_covers():
 
 
 def test_names_and_threads():
-    assert _name_from({"name": "", "email": "phillip.allen@enron.com"}, "Phillip K Allen") == "Phillip K Allen"
-    assert _name_from({"name": "", "email": "tim.belden@enron.com"}, None) == "Tim Belden"
+    assert x_names(parse_message(RAW, "a").raw_meta) == {"phillip.allen@enron.com": "Phillip K Allen"}
+    assert _name_from({"name": "", "email": "tim.belden@enron.com"}) == "Tim Belden"
     assert _thread_key({"references": ["<a>", "<b>"]}, "x") == "<a>"
     assert _thread_key({"from": [{"email": "a@x"}], "to": [{"email": "b@x"}]}, "RE: FW: Forecast") == "subject:forecast|a@x,b@x"
 
