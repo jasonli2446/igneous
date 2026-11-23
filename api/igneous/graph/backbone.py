@@ -1,8 +1,9 @@
 """Hang your life's threads on its backbone: the organizations and schools you worked at or studied at.
 
-Your resume (graph/profile.py) says where you were; the threads stage (graph/threads.py) finds what you did. Neither
-knows the other, which left "the Lab" as both an organization and a thread, and State University with no classes under
-it. This stage joins them, from evidence only, for every org in your backbone:
+Your resume (graph/profile.py) and your own mail (graph/organizations.py) say where you were; the threads stage
+(graph/threads.py) finds what you did. Neither knows the other, which left "the Lab" as both an organization and a
+thread, and State University with no classes under it. This stage joins them, from evidence only, for every org in your
+backbone:
 
   1. Same thing: a thread named exactly like the org (or a name it's also known by) IS the org. It becomes the
      org's own thread: its sub-projects, records and people show under the org, and the duplicate leaves the view.
@@ -34,16 +35,19 @@ def _norm(name: str) -> str:
 
 
 def _orgs(s: Session) -> list[dict]:
-    """Your backbone orgs: what your resume (or you) said you worked at / studied at, most specific first."""
+    """Your backbone orgs: where you worked or studied (organizations.YOUR_ORGS: your resume, what you said, and what
+    your own mail shows), most specific first."""
+    from igneous.graph.organizations import YOUR_ORGS
+
     rows = s.execute(text("""
         SELECT DISTINCT ON (o.id) o.id, o.name, o.key, o.props, (e.props->>'school') IS NOT NULL AS school,
                e.valid_from, e.valid_to,
                (SELECT p.dst FROM edges p WHERE p.src = o.id AND p.type = 'PART_OF' LIMIT 1) AS parent
         FROM edges e JOIN nodes o ON o.id = e.dst
         JOIN nodes me ON me.id = e.src AND COALESCE((me.props->>'self')::bool, false)
-        WHERE e.type = 'WORKED_AT' AND e.extractor IN ('profile', 'user') AND o.type = 'Organization'
+        WHERE e.type = 'WORKED_AT' AND e.extractor = ANY(:yours) AND o.type = 'Organization'
         ORDER BY o.id, (e.props->>'school') IS NULL
-    """)).mappings().all()
+    """), {"yours": list(YOUR_ORGS)}).mappings().all()
     orgs = [dict(r) for r in rows]
     parents = {o["parent"] for o in orgs if o["parent"]}
     # Children before parents: a lab claims its threads before the university does.
