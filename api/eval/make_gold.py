@@ -1,10 +1,12 @@
 """Draft the evaluation gold set from the corpus itself, then keep only questions we can verify.
 
 Each answerable question is generated from ONE source email and must quote its answer verbatim from that
-email (checked here); the gold evidence is that email's id. Unanswerable questions are about plausible
-corpus subjects with facts the corpus doesn't contain. Review eval/questions.jsonl by hand before trusting it.
+email (checked here); the gold evidence is that email's key (source, external id and fingerprint, see gold.py),
+so the set scores the same on any build of the corpus. Unanswerable questions are about plausible corpus subjects
+with facts the corpus doesn't contain. Review eval/questions.jsonl by hand before trusting it.
 
-    uv run python eval/make_gold.py --n 60
+    uv run python eval/make_gold.py --n 50 --multihop 15 --unanswerable 12   # replaces questions.jsonl
+    uv run python eval/make_gold.py --hard --multihop 5 --append            # adds hard multi-hop questions
 """
 import argparse
 import json
@@ -77,11 +79,18 @@ def norm(t: str) -> str:
     return re.sub(r"\s+", " ", t).strip().lower()
 
 
+def key(source: str, external_id: str, fingerprint: str | None) -> dict:
+    """A gold record by the ids that survive a rebuild (gold.py)."""
+    return {"source": source, "external_id": external_id, "fingerprint": fingerprint}
+
+
 def main(n: int, n_unanswerable: int, n_multihop: int, seed: int, hard: bool = False, append: bool = False):
     with SessionLocal() as s:
         llm.require_whole_corpus(s)  # it sends sampled records to the model
         rows = s.execute(text("""
-            SELECT si.id, si.title, si.body_text FROM nodes n JOIN source_items si ON si.id = n.source_item_id
+            SELECT si.id, si.source, si.external_id, si.raw_meta->>'fingerprint' AS fingerprint, si.title,
+                   si.body_text
+            FROM nodes n JOIN source_items si ON si.id = n.source_item_id
             WHERE n.type = 'Message' AND length(si.body_text) BETWEEN 400 AND 4000
               AND si.title !~* '^(re|fw|fwd):' AND si.title <> ''
               AND si.title !~* 'demand ken lay donate'      -- 1,100 near-identical petitions: one is plenty
@@ -106,12 +115,16 @@ def main(n: int, n_unanswerable: int, n_multihop: int, seed: int, hard: bool = F
         if not g["usable"] or norm(g["answer_quote"]) not in norm(body) or len(g["answer_quote"]) < 3:
             continue
         out.append({"id": f"q{len(out) + 1:03d}", "question": g["question"], "kind": g["kind"],
-                    "answerable": True, "gold_source_items": [r.id], "answer_quote": g["answer_quote"]})
+                    "answerable": True, "gold": [key(r.source, r.external_id, r.fingerprint)],
+                    "answer_quote": g["answer_quote"]})
         print(f"{len(out):3d}/{n}  {g['question'][:90]}")
 
     with SessionLocal() as s:
         pairs = s.execute(text("""
-            SELECT pa.id AS a_id, pa.title AS a_title, pa.body_text AS a_body, ch.id AS b_id, ch.body_text AS b_body
+            SELECT pa.id AS a_id, pa.source AS a_source, pa.external_id AS a_external_id,
+                   pa.raw_meta->>'fingerprint' AS a_fingerprint, pa.title AS a_title, pa.body_text AS a_body,
+                   ch.id AS b_id, ch.source AS b_source, ch.external_id AS b_external_id,
+                   ch.raw_meta->>'fingerprint' AS b_fingerprint, ch.body_text AS b_body
             FROM edges r
             JOIN nodes c ON c.id = r.src JOIN source_items ch ON ch.id = c.source_item_id
             JOIN nodes p ON p.id = r.dst JOIN source_items pa ON pa.id = p.source_item_id
@@ -119,12 +132,15 @@ def main(n: int, n_unanswerable: int, n_multihop: int, seed: int, hard: bool = F
               AND length(pa.body_text) > 250 AND length(ch.body_text) > 250
         """)).all() if hard else s.execute(text("""
             WITH m AS (
-                SELECT e.dst AS thread, si.id, si.title, si.body_text, si.occurred_at, snd.src AS sender
+                SELECT e.dst AS thread, si.id, si.source, si.external_id, si.raw_meta->>'fingerprint' AS fingerprint,
+                       si.title, si.body_text, si.occurred_at, snd.src AS sender
                 FROM edges e JOIN nodes n ON n.id = e.src JOIN source_items si ON si.id = n.source_item_id
                 JOIN edges snd ON snd.dst = n.id AND snd.type = 'SENT'
                 WHERE e.type = 'IN_THREAD' AND length(si.body_text) > 250)
-            SELECT DISTINCT ON (a.thread) a.id AS a_id, a.title AS a_title, a.body_text AS a_body,
-                   b.id AS b_id, b.body_text AS b_body
+            SELECT DISTINCT ON (a.thread) a.id AS a_id, a.source AS a_source, a.external_id AS a_external_id,
+                   a.fingerprint AS a_fingerprint, a.title AS a_title, a.body_text AS a_body,
+                   b.id AS b_id, b.source AS b_source, b.external_id AS b_external_id,
+                   b.fingerprint AS b_fingerprint, b.body_text AS b_body
             FROM m a JOIN m b ON a.thread = b.thread AND b.occurred_at > a.occurred_at AND b.sender <> a.sender
             ORDER BY a.thread, b.occurred_at
         """)).all()
@@ -145,8 +161,8 @@ def main(n: int, n_unanswerable: int, n_multihop: int, seed: int, hard: bool = F
         n_multi += 1
         out.append({"id": f"q{len(existing) + len(out) + 1:03d}", "question": g["question"],
                     "kind": "multihop-hard" if hard else "multihop",
-                    "answerable": True, "gold_source_items": [p.b_id], "bridge_source_items": [p.a_id],
-                    "answer_quote": g["answer_quote"]})
+                    "answerable": True, "gold": [key(p.b_source, p.b_external_id, p.b_fingerprint)],
+                    "bridge": [key(p.a_source, p.a_external_id, p.a_fingerprint)], "answer_quote": g["answer_quote"]})
         print(f"  multihop {n_multi}/{n_multihop}  {g['question'][:90]}")
 
     if append:
@@ -157,7 +173,7 @@ def main(n: int, n_unanswerable: int, n_multihop: int, seed: int, hard: bool = F
                            names=", ".join(names)), UN_SCHEMA, max_tokens=2000)
     for q in un["questions"][:n_unanswerable]:
         out.append({"id": f"q{len(out) + 1:03d}", "question": q, "kind": "unanswerable", "answerable": False,
-                    "gold_source_items": [], "answer_quote": None})
+                    "gold": [], "answer_quote": None})
 
     OUT.write_text("".join(json.dumps(q) + "\n" for q in out))
     print(f"wrote {len(out)} questions ({len(out) - n_unanswerable} answerable incl. {n_multi} multihop) -> {OUT}")

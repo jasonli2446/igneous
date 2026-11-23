@@ -201,7 +201,7 @@ def _relate(user: str) -> dict:
         return {**out, "relation": "same", "shared_identity": a, "reason": f"both are {a}"}
     larger = ("class", "job", "organization")
     named = b.lower() in a_records.lower() or a.lower() in b_records.lower()
-    for small, small_kind, big, big_kind in ((a, a_kind, b, b_kind), (b, b_kind, a, a_kind)):
+    for small_kind, big, big_kind in ((a_kind, b, b_kind), (b_kind, a, a_kind)):
         if small_kind == "project" and big_kind in larger and named:
             return {**out, "relation": "part_of", "container": big, "label": f"done for {big}"}
     return {**out, "relation": "related" if named else "distinct", "label": "named together"}

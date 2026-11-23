@@ -1,22 +1,38 @@
-"""The Sources registry behind the guided setup page (#101): every connector, in plain language.
+"""The Sources registry: every connector and export format in plain language, and how to build each connector.
 
-Adding a connector or import format? Add an entry to SOURCES here and update web/src/app/settings (CLAUDE.md,
-"Setup lives in the UI"). Static text lives in SOURCES; `describe()` adds live status; `build()` constructs the
-connector exactly as `igneous sync <id>` does. `model_use()` says whether a hosted model may read each source
-(#179): the same rule every model call follows (igneous/llm.py).
+The Sources page (web/src/app/settings) shows `describe()`. `igneous sync`, POST /sources/{id}/sync and the
+scheduled sync all run `sync()`, which builds a source's connectors with its entry's `build`, so the three can't
+construct a source differently. Adding a connector or import format? Add an entry to SOURCES and update the page
+(CLAUDE.md, "Setup lives in the UI"). `model_use()` says whether a hosted model may read each source: the rule every
+model call follows (igneous/llm.py).
+
+This module stays light (the CLI imports it to list the sources): Google, the model client and the job runner load
+inside the functions that use them.
 """
 import glob
 import os
 import sqlite3
+import sys
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from igneous import jobs, llm
+from igneous import source_catalog
 from igneous.config import settings
-from igneous.connectors import ai_chats, apple_notes, github, google_auth, imessage, mac_contacts, secrets
+from igneous.connectors import ai_chats, apple_notes, imessage, mac_contacts
+from igneous.connectors.base import Connector
+from igneous.parsers import MAX_DOCUMENT_BYTES
+
+Progress = Callable[..., None]  # progress(dict, force=False), as jobs.Progress
+
+# The Enron demo: the mailbox `make demo`, `igneous sync email` and the Sources page's Sync now read by default.
+DEMO_MAILBOXES = ("allen-p",)
+# How far back a source's first sync reads when it isn't told: about a quarter of Messages, Gmail and Calendar.
+FIRST_SYNC_DAYS = {"imessage": 90, "gmail": 90, "gcal": 365}
 
 FDA_STEPS = [
     "Open System Settings, then Privacy & Security, then Full Disk Access.",
@@ -25,41 +41,155 @@ FDA_STEPS = [
 ]
 GOOGLE_STEPS = [
     "One-time: create a Google OAuth client of type Desktop app and save its JSON as data/google/client_secret.json "
-    "(README: Google). The page will say when it finds the file.",
+    "(the README's Google section walks through it). This page says when it finds the file.",
     "Press Connect a Google account and pick the account in the Google window. Igneous only asks for read-only access.",
-    "Come back here. The account appears below; add more accounts the same way.",
+    "Come back here. The account appears below; add more accounts the same way, and disconnect one to stop syncing it "
+    "(what it synced stays).",
 ]
-GOOGLE_NOTE = ("Sign-in returns to this computer at /sources/google/callback on the API. Desktop-type OAuth "
-               "clients allow that automatically (any http://localhost address); a Web-type client would need "
-               "that exact redirect URI added.")
+MAC_ONLY = "macOS only."
 
-# kind: google | local | remote | import | planned. cli: equivalent command shown in muted text.
+
+@dataclass(frozen=True)
+class SyncOptions:
+    """What a sync can be asked for beyond its defaults. Each source accepts only the options its entry lists."""
+    path: Path | None = None             # fs: one folder; imessage, notes: another database; email: another maildir
+    mailboxes: tuple[str, ...] = ()      # email: these mailboxes instead of the demo one
+    since_days: int | None = None        # first sync only: how far back (gmail, gcal, imessage)
+    all_mail: bool | None = None         # gmail: include Promotions/Social/Forums; None keeps the account's choice
+
+
+class SetupNeeded(RuntimeError):
+    """A source can't sync until something is set up; the message says what."""
+
+
+class SyncFailed(RuntimeError):
+    """Some accounts of a source failed. `result` holds the stats of the accounts that synced."""
+
+    def __init__(self, message: str, result: dict):
+        super().__init__(message)
+        self.result = result
+
+
+# ---- building connectors ----
+# A builder lists a source's accounts, each with a function that makes its connector when its turn comes: making one
+# can fail (an expired Google token) without stopping the others.
+
+Builder = Callable[[Session, str | None, SyncOptions], list[tuple[str, Callable[[], Connector]]]]
+
+
+def _google(make: Callable[..., Connector]) -> Builder:
+    """One connector per connected Google account (or the one asked for), with fresh credentials."""
+    def build(s: Session, account: str | None, opts: SyncOptions) -> list[tuple[str, Callable[[], Connector]]]:
+        from igneous.connectors import google_auth, secrets
+
+        names = [account] if account else secrets.accounts(s, "google")
+        if not names:
+            raise SetupNeeded("No Google account connected yet: press Connect a Google account on the Sources page "
+                              "or run `igneous connect google`.")
+
+        def connector(name: str) -> Connector:
+            name, creds = google_auth.load(s, name)
+            return make(creds, name, opts)
+        return [(name, lambda name=name: connector(name)) for name in names]
+    return build
+
+
+def _gmail(creds, account: str, opts: SyncOptions) -> Connector:
+    from igneous.connectors.gmail import GmailConnector
+    return GmailConnector(creds, account, since_days=opts.since_days or FIRST_SYNC_DAYS["gmail"],
+                          all_mail=opts.all_mail)
+
+
+def _gcal(creds, account: str, opts: SyncOptions) -> Connector:
+    from igneous.connectors.gcal import CalendarConnector
+    return CalendarConnector(creds, account, since_days=opts.since_days or FIRST_SYNC_DAYS["gcal"])
+
+
+def _gcontacts(creds, account: str, opts: SyncOptions) -> Connector:
+    from igneous.connectors.gcal import ContactsConnector
+    return ContactsConnector(creds, account)
+
+
+def _drive(creds, account: str, opts: SyncOptions) -> Connector:
+    from igneous.connectors.drive import DriveConnector
+    return DriveConnector(creds, account)
+
+
+def _github(s: Session, account: str | None, opts: SyncOptions) -> list[tuple[str, Callable[[], Connector]]]:
+    from igneous.connectors import secrets
+    from igneous.connectors.github import GithubConnector
+
+    names = [account] if account else secrets.accounts(s, "github")
+    if not names:
+        raise SetupNeeded("No GitHub token saved yet: paste one on the Sources page or run `igneous connect github`.")
+
+    def connector(name: str) -> Connector:
+        name, token = secrets.load(s, "github", name)
+        return GithubConnector(token, name)
+    return [(name, lambda name=name: connector(name)) for name in names]
+
+
+def _local(make: Callable[[SyncOptions], Connector]) -> Builder:
+    """A source on this computer: one connector, under the account "default"."""
+    def build(s: Session, account: str | None, opts: SyncOptions) -> list[tuple[str, Callable[[], Connector]]]:
+        return [("default", lambda: make(opts))]
+    return build
+
+
+def _fs(opts: SyncOptions) -> Connector:
+    from igneous.connectors.filesystem import FilesystemConnector
+
+    configured = fs_roots()
+    roots = [opts.path] if opts.path else configured
+    if not roots:
+        raise SetupNeeded("No folders to read: set IGNEOUS_FILESYSTEM_ROOTS, or pass --path.")
+    return FilesystemConnector(roots, anchors=configured)
+
+
+def _email(opts: SyncOptions) -> Connector:
+    from igneous.connectors.email_maildir import MaildirConnector
+    return MaildirConnector(opts.path or Path(settings.data_dir) / "maildir", list(opts.mailboxes or DEMO_MAILBOXES))
+
+
+# kind: google | local | remote | import. cli: the equivalent command, shown in muted text. build: how `sync()`
+# makes the source's connectors; options: the SyncOptions fields it accepts.
 SOURCES: list[dict] = [
     {"id": "gmail", "kind": "google", "name": "Gmail", "group": "Connected accounts",
-     "reads": "Your email: senders, recipients, subjects, bodies, and threads. Promotions, Social and Forums are skipped.",
-     "steps": GOOGLE_STEPS, "cli": "igneous connect google && igneous sync gmail"},
+     "reads": "Your email: senders, recipients, subjects, bodies, and threads, from the last "
+              f"{FIRST_SYNC_DAYS['gmail']} days on. Spam, drafts, Promotions, Social and Forums are skipped "
+              "(igneous sync gmail --all-mail keeps Promotions, Social and Forums for that account).",
+     "steps": GOOGLE_STEPS, "cli": "igneous connect google && igneous sync gmail",
+     "build": _google(_gmail), "options": {"since_days", "all_mail"}},
     {"id": "gcal", "kind": "google", "name": "Google Calendar", "group": "Connected accounts",
-     "reads": "Your events: titles, times, attendees, and places.",
-     "steps": GOOGLE_STEPS, "cli": "igneous sync gcal"},
+     "reads": f"Your events from the last {FIRST_SYNC_DAYS['gcal']} days on, in every calendar on your list: titles, "
+              "times, attendees, and places.",
+     "steps": GOOGLE_STEPS, "cli": "igneous sync gcal", "build": _google(_gcal), "options": {"since_days"}},
     {"id": "gcontacts", "kind": "google", "name": "Google Contacts", "group": "Connected accounts",
      "reads": "Names, emails, phone numbers, and organizations on your contact cards. Helps merge duplicate people.",
-     "steps": GOOGLE_STEPS, "cli": "igneous sync gcontacts"},
+     "steps": GOOGLE_STEPS, "cli": "igneous sync gcontacts", "build": _google(_gcontacts), "options": set()},
     {"id": "drive", "kind": "google", "name": "Google Drive", "group": "Connected accounts",
-     "reads": "The text of your Docs, Sheets, Slides, PDFs, and other readable files.",
-     "steps": GOOGLE_STEPS, "cli": "igneous sync drive"},
+     "reads": "The text of your Docs, Sheets (every sheet), Slides, PDFs, and other readable files up to "
+              f"{MAX_DOCUMENT_BYTES // 2**20} MB. Anything else is never downloaded.",
+     "steps": GOOGLE_STEPS, "cli": "igneous sync drive", "build": _google(_drive), "options": set()},
     {"id": "github", "kind": "remote", "name": "GitHub", "group": "Connected accounts",
      "reads": "Your repositories, README files, issues, pull requests, comments, and daily commit activity (read-only).",
      "steps": ["On github.com open Settings, Developer settings, Fine-grained tokens, and generate a token.",
                "Give it read-only access (Contents, Issues, Pull requests: Read) to the repositories you want.",
-               "Paste it below. It is stored encrypted on this computer and never shown again."]},
+               "Paste it below. It is stored encrypted on this computer and never shown again. When it expires, "
+               "paste a new one the same way: a token for the same account replaces the old one."],
+     "cli": "igneous connect github && igneous sync github", "build": _github, "options": set()},
     {"id": "chatgpt", "kind": "import", "name": "ChatGPT export", "group": "Exports you upload",
-     "reads": "Your ChatGPT conversation history from OpenAI's data export.",
+     "reads": "Your ChatGPT conversation history from OpenAI's data export: your messages and ChatGPT's written "
+              "replies (images, code runs and tool output are skipped).",
      "steps": ["Request the export in ChatGPT settings (Data controls, Export data).",
-               "Upload the .zip you receive by email in the box below."]},
+               "Upload the .zip you receive by email in the box below, or give its path."],
+     "cli": "igneous import ai-export ~/Downloads/chatgpt-export.zip"},
     {"id": "claude_ai", "kind": "import", "name": "Claude.ai export", "group": "Exports you upload",
-     "reads": "Your claude.ai conversation history from Anthropic's data export.",
+     "reads": "Your claude.ai conversation history from Anthropic's data export: your messages and Claude's written "
+              "replies.",
      "steps": ["Request the export in claude.ai settings (Privacy, Export data).",
-               "Upload the .zip you receive by email in the box below."]},
+               "Upload the .zip you receive by email in the box below, or give its path."],
+     "cli": "igneous import ai-export ~/Downloads/claude-export.zip"},
     {"id": "linkedin", "kind": "import", "name": "LinkedIn", "group": "Exports you upload",
      "reads": "Your LinkedIn profile (positions, education, projects, skills) and your connections with their company, "
               "position and connection date. Positions and education become your employers and schools; connections "
@@ -82,48 +212,68 @@ SOURCES: list[dict] = [
                "Download every zip. In the box below choose Scan Downloads for takeout-*.zip, give a path, or upload them."],
      "cli": "igneous import takeout ~/Downloads/takeout-*.zip"},
     {"id": "imessage", "kind": "local", "name": "Messages", "group": "On this computer",
-     "reads": "iMessage and SMS conversations on this Mac, grouped into one entry per conversation per day.",
+     "reads": "iMessage and SMS conversations on this Mac, grouped into one entry per conversation per day. "
+              + MAC_ONLY,
      "steps": ["Messages must be signed in on this Mac so the history is on disk.", *FDA_STEPS,
-               "Press Sync now. The first sync reads the last 90 days."],
-     "cli": "igneous sync imessage --since-days 90"},
+               f"Press Sync now. The first sync reads the last {FIRST_SYNC_DAYS['imessage']} days; later ones read "
+               "what is new, including older messages that arrive late from your other devices."],
+     "cli": "igneous sync imessage",
+     "build": _local(lambda o: imessage.MessagesConnector(o.path or imessage.DEFAULT_DB,
+                                                          since_days=o.since_days or FIRST_SYNC_DAYS["imessage"])),
+     "options": {"path", "since_days"}},
     {"id": "maccontacts", "kind": "local", "name": "Contacts", "group": "On this computer",
      "reads": "Contacts.app cards (where iPhone contacts sync): names, phone numbers, and emails. "
-              "Lets Messages show names instead of numbers.",
-     "steps": [*FDA_STEPS, "Press Sync now."], "cli": "igneous sync maccontacts"},
+              "Lets Messages show names instead of numbers. " + MAC_ONLY,
+     "steps": [*FDA_STEPS, "Press Sync now. A card you delete in Contacts goes at the next sync."],
+     "cli": "igneous sync maccontacts",
+     "build": _local(lambda o: mac_contacts.MacContactsConnector()), "options": set()},
     {"id": "ai_chats", "kind": "local", "name": "Claude Code and Codex chats", "group": "On this computer",
      "reads": "Your prompts and the assistant's written replies from coding sessions on this Mac. Tool output and "
               "file contents are skipped, and secrets are redacted.",
      "steps": ["Nothing to set up: it reads ~/.claude/projects and ~/.codex/sessions if you use those tools.",
                "Press Sync now."],
-     "cli": "igneous sync ai_chats"},
+     "cli": "igneous sync ai_chats", "build": _local(lambda o: ai_chats.AIChatConnector()), "options": set()},
     {"id": "fs", "kind": "local", "name": "Local files", "group": "On this computer",
-     "reads": "Metadata for every non-secret file in the folders you choose, plus text from readable documents. "
-              "Secrets are skipped and document text is redacted.",
+     "reads": "Name, folder and size of every file in the folders you choose, the text of documents (PDF, .docx, "
+              f".xlsx, .pptx, text and code, up to {MAX_DOCUMENT_BYTES // 2**20} MB), and each git checkout. Key "
+              "and .env files are never read, and credentials in text are redacted. Search indexes the text on this "
+              "computer; a hosted model reads it only if you opt it in (below).",
      "steps": ["Set IGNEOUS_FILESYSTEM_ROOTS to a comma-separated list of folders (in api/.env or the API's "
                "environment), then restart the API. With no setting, existing Documents, Desktop, Downloads, and "
                "iCloud Drive folders are used.",
-               "Press Sync now. Each sync reconciles deletions without reopening unchanged file bodies."],
-     "cli": "igneous sync fs --path ~/Documents/notes"},
+               "On macOS, let the app that runs the API read those folders: System Settings, Privacy & Security, "
+               "Files and Folders (or Full Disk Access), then turn on its Documents, Desktop and Downloads "
+               "folders. Restart that app and the API. A folder it can't read is skipped and keeps what an earlier "
+               "sync stored.",
+               "Press Sync now. Each sync notices added, changed and deleted files in those folders without "
+               "reopening unchanged ones."],
+     "cli": "igneous sync fs (or --path FOLDER for one folder, leaving the others as they are)",
+     "build": _local(_fs), "options": {"path"}},
     {"id": "notes", "kind": "local", "name": "Apple Notes", "group": "On this computer",
-     "reads": "Unlocked Notes.app titles and bodies from the local database. Bodies are redacted.",
-     "steps": [*FDA_STEPS, "Press Sync now. Locked notes are skipped."], "cli": "igneous sync notes"},
+     "reads": "Unlocked Notes.app titles and bodies from the local database, with credentials redacted. Search "
+              "indexes them on this computer; a hosted model reads them only if you opt them in (below). " + MAC_ONLY,
+     "steps": [*FDA_STEPS, "Press Sync now. Locked notes are skipped."], "cli": "igneous sync notes",
+     "build": _local(lambda o: apple_notes.AppleNotesConnector(o.path or apple_notes.DEFAULT_DB)),
+     "options": {"path"}},
     {"id": "email", "kind": "local", "name": "Enron demo mailbox", "group": "Demo",
-     "reads": "The public Enron email corpus. For demos and evaluation only; never mix it with your own data.",
-     "steps": ["Run make enron once to download the mailboxes into data/maildir.", "Press Sync now."],
-     "cli": "igneous sync email --mailbox allen-p"},
+     "reads": f"The public Enron email corpus: the {', '.join(DEMO_MAILBOXES)} mailbox (about 3,000 emails). For "
+              "demos and evaluation only; never mix it with your own data.",
+     "steps": ["Run make enron once to download the mailboxes into data/maildir.",
+               f"Press Sync now to read {', '.join(DEMO_MAILBOXES)}. Other mailboxes are read from the command line "
+               "(igneous sync email --mailbox lay-k)."],
+     "cli": "igneous sync email", "build": _local(_email), "options": {"path", "mailboxes"}},
 ]
 BY_ID = {s["id"]: s for s in SOURCES}
-SYNCABLE = {s["id"] for s in SOURCES if s["kind"] in ("google", "local", "remote")}
+SYNCABLE = tuple(s["id"] for s in SOURCES if "build" in s)  # in page order
 IMPORT_TOOL = {"chatgpt", "gemini", "claude_ai"}  # raw_meta.tool values stored under source 'ai_chats'
 MODEL_ID = {"chatgpt": "ai_chats", "claude_ai": "ai_chats"}  # the IGNEOUS_LLM_SOURCES id that covers an export
+_OPTION_FLAG = {"path": "--path", "mailboxes": "--mailbox", "since_days": "--since-days", "all_mail": "--all-mail"}
 
 
 def model_use(sid: str, allowed: frozenset[str]) -> dict:
     """Whether a hosted model may read this source (yes | partly | no), and how to change that."""
-    from igneous.connectors.takeout import TAKEOUT_SOURCES
-
     mid = MODEL_ID.get(sid, sid)
-    stored = TAKEOUT_SOURCES if mid == "takeout" else (mid,)
+    stored = source_catalog.of_connector(mid) or (mid,)
     n = sum(v in allowed for v in stored)
     state = "yes" if n == len(stored) else "partly" if n else "no"
     if state == "yes":
@@ -135,7 +285,7 @@ def model_use(sid: str, allowed: frozenset[str]) -> dict:
                 f"sources. To opt the cards in, add {mid} to IGNEOUS_LLM_SOURCES.")
     else:
         note = (f"Never sent to a hosted model. To allow it, add {mid} to IGNEOUS_LLM_SOURCES"
-                + (" and set IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true" if mid in llm.LOCAL_SOURCES else "")
+                + (" and set IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true" if mid in source_catalog.LOCAL_TEXT else "")
                 + (" (that covers all AI chat history)" if mid != sid else "") + ", then restart the API.")
     if sid == "takeout":  # stored with the other AI chats, not under a takeout_* source
         note += " Its Gemini chats count as AI chats (ai_chats)."
@@ -165,6 +315,8 @@ def check_requirements(source_id: str) -> tuple[bool, str | None]:
     if kind == "google":
         if not (Path(settings.data_dir) / "google" / "client_secret.json").exists():
             return False, "No Google OAuth client found. Save its JSON as data/google/client_secret.json (step 1)."
+    elif source_id in ("imessage", "maccontacts", "notes") and sys.platform != "darwin":
+        return False, f"{BY_ID[source_id]['name']} is read on macOS only."
     elif source_id == "imessage":
         problem = _sqlite_readable(str(imessage.DEFAULT_DB))
         return (problem is None), problem
@@ -181,7 +333,7 @@ def check_requirements(source_id: str) -> tuple[bool, str | None]:
         if not (os.path.isdir(ai_chats.CLAUDE_ROOT) or os.path.isdir(ai_chats.CODEX_ROOT)):
             return False, "No Claude Code or Codex sessions found on this Mac."
     elif source_id == "fs":
-        roots = _fs_roots()
+        roots = fs_roots()
         if not roots:
             return False, "No folders configured. Set IGNEOUS_FILESYSTEM_ROOTS (step 1) and restart the API."
         if missing := [r for r in roots if not r.is_dir()]:
@@ -192,7 +344,9 @@ def check_requirements(source_id: str) -> tuple[bool, str | None]:
     return True, None
 
 
-def _fs_roots() -> list[Path]:
+def fs_roots() -> list[Path]:
+    """The Local files folders: IGNEOUS_FILESYSTEM_ROOTS, or else the Documents, Desktop, Downloads and iCloud
+    Drive folders that exist."""
     configured = [Path(r.strip()).expanduser() for r in settings.filesystem_roots.split(",") if r.strip()]
     if configured:
         return configured
@@ -204,6 +358,9 @@ def _fs_roots() -> list[Path]:
 # ---- live description ----
 
 def describe(s: Session) -> list[dict]:
+    from igneous import jobs, llm
+    from igneous.connectors import secrets
+
     counts = dict(s.execute(text("SELECT source, count(*) FROM source_items GROUP BY 1")).all())
     export_counts = dict(s.execute(text("""
         SELECT raw_meta->>'tool', count(*) FROM source_items WHERE source = 'ai_chats' GROUP BY 1""")).all())
@@ -214,8 +371,8 @@ def describe(s: Session) -> list[dict]:
     for connector, account, updated in s.execute(text("SELECT connector, account, updated_at FROM sync_state")):
         states.setdefault(connector, []).append((account, updated))
     latest = jobs.latest_by_source(s)
-    google_accounts = google_auth.accounts(s)
-    github_accounts = google_auth.accounts(s, "github")
+    google_accounts = secrets.accounts(s, "google")
+    github_accounts = secrets.accounts(s, "github")
     ai_local = sum(n for tool, n in export_counts.items() if tool not in IMPORT_TOOL)
     allowed = llm.allowed_sources()
 
@@ -249,9 +406,7 @@ def describe(s: Session) -> list[dict]:
             accounts = [{"account": a, "last_sync": by_account.get(a)} for a in github_accounts]
         job = latest.get(sid)
         status = "ready"
-        if kind == "planned":
-            status, message = "not_set_up", "Coming soon."
-        elif sid == "github" and not github_accounts:
+        if sid == "github" and not github_accounts:
             status, message = "not_set_up", "Save a read-only GitHub token to connect."
         elif kind == "import":
             status = "ready" if count else "not_set_up"
@@ -268,8 +423,7 @@ def describe(s: Session) -> list[dict]:
         row.update(status=status, message=message, items=count, last_sync=last, accounts=accounts,
                    requirements_ok=ok, can_sync=sid in SYNCABLE and ok and (kind != "google" or bool(google_accounts))
                    and (sid != "github" or bool(github_accounts)),
-                   coming_soon=kind == "planned", job=job_view(job) if job else None,
-                   model=model_use(sid, allowed))
+                   job=job_view(job) if job else None, model=model_use(sid, allowed))
         out.append(row)
     return out
 
@@ -279,59 +433,58 @@ def job_view(j: dict) -> dict:
                               "progress", "error", "result")}
 
 
-# ---- running ----
+# ---- syncing ----
 
-def build(source_id: str, s: Session, account: str | None, progress: Callable[..., None]) -> dict:
-    """Run `igneous sync <source_id>` (same construction as cli.sync) and return summed run_sync stats."""
-    from igneous.cli import _google_connector
-
-    if source_id in ("gmail", "gcal", "gcontacts", "drive"):
-        targets = [account] if account else google_auth.accounts(s)
-        if not targets:
-            raise google_auth.ReauthRequired("No Google account connected yet. Press Connect a Google account.")
-        total = {"inserted": 0, "updated": 0, "unchanged": 0, "deleted": 0}
-        done = 0
-        for acct in targets:
-            acct, creds = google_auth.load(s, acct)
-            conn = _google_connector(source_id, creds, acct, None, False)
-            stats = jobs.run_connector(s, conn, acct, lambda p, d=done: progress({"items": d + p["items"]}))
-            for k in total:
-                total[k] += stats[k]
-            done += stats["inserted"] + stats["updated"] + stats["unchanged"]
-        return total
-    if source_id == "github":
-        targets = [account] if account else secrets.accounts(s, "github")
-        if not targets:
-            raise RuntimeError("No GitHub token connected. Save a read-only token first.")
-        total = {"inserted": 0, "updated": 0, "unchanged": 0, "deleted": 0}
-        for acct in targets:
-            _, token = secrets.load(s, "github", acct)
-            stats = jobs.run_connector(s, github.GithubConnector(token, acct), acct, progress)
-            for key in total:
-                total[key] += stats[key]
-        return total
-    if source_id == "imessage":
-        conn, acct = imessage.MessagesConnector(imessage.DEFAULT_DB), "default"
-    elif source_id == "maccontacts":
-        conn, acct = mac_contacts.MacContactsConnector(), "default"
-    elif source_id == "notes":
-        conn, acct = apple_notes.AppleNotesConnector(), "default"
-    elif source_id == "ai_chats":
-        conn, acct = ai_chats.AIChatConnector(), "default"
-    elif source_id == "fs":
-        from igneous.connectors.filesystem import FilesystemConnector
-
-        conn, acct = FilesystemConnector(_fs_roots()), "default"
-    elif source_id == "email":
-        from igneous.connectors.email_maildir import MaildirConnector
-
-        conn, acct = MaildirConnector(Path(settings.data_dir) / "maildir"), "default"
-    else:
-        raise ValueError(f"{source_id} cannot be synced")
-    return jobs.run_connector(s, conn, acct, progress)
+def check_options(source_id: str, opts: SyncOptions, account: str | None = None) -> None:
+    """ValueError naming the option a source doesn't take."""
+    entry = BY_ID.get(source_id)
+    if entry is None or "build" not in entry:
+        raise ValueError(f"{source_id!r} is not a source you can sync; choose one of {', '.join(SYNCABLE)}.")
+    for name, flag in _OPTION_FLAG.items():
+        if getattr(opts, name) not in (None, ()) and name not in entry["options"]:
+            raise ValueError(f"{flag} doesn't apply to {source_id}.")
+    if account and entry["kind"] not in ("google", "remote"):
+        raise ValueError(f"{source_id} has no accounts: it reads this computer.")
 
 
-def run_pipeline(s: Session, progress: Callable[..., None]) -> dict:
+def sync(source_id: str, s: Session, account: str | None = None, opts: SyncOptions | None = None,
+         progress: Progress | None = None, limit: int | None = None) -> dict:
+    """Sync one source: each of its accounts (or `account`) in turn, continuing past one that fails. Returns the
+    summed run_sync stats, with each account's under "accounts". Raises SetupNeeded when there is nothing to sync
+    from, and SyncFailed (carrying the stats) naming every account that failed."""
+    from igneous import jobs
+
+    opts = opts or SyncOptions()
+    check_options(source_id, opts, account)
+    total = {"inserted": 0, "updated": 0, "unchanged": 0, "deleted": 0, "redactions": 0}
+    per_account: dict[str, dict] = {}
+    failed: dict[str, Exception] = {}
+    done = 0
+    report = progress or (lambda p, force=False: None)
+    for name, make in BY_ID[source_id]["build"](s, account, opts):
+        t = time.time()
+        try:
+            stats = jobs.run_connector(s, make(), name, lambda p, d=done, a=name: report(
+                {"items": d + p["items"], "account": a}), limit)
+        except Exception as e:  # one account's failure is reported, and the others still sync
+            s.rollback()  # what the last checkpoint committed stays
+            failed[name] = e
+            continue
+        per_account[name] = {**stats, "seconds": round(time.time() - t, 1)}
+        for key in total:
+            total[key] += stats[key]
+        done += stats["inserted"] + stats["updated"] + stats["unchanged"]
+    result = {**total, "accounts": per_account}
+    if failed:
+        reasons = {name: str(e) or type(e).__name__ for name, e in failed.items()}
+        # A source on this computer has one account, "default": its reason needs no name.
+        message = reasons["default"] if list(reasons) == ["default"] else \
+            "; ".join(f"{name}: {why}" for name, why in reasons.items())
+        raise SyncFailed(message, result) from next(iter(failed.values()))
+    return result
+
+
+def run_pipeline(s: Session, progress: Progress) -> dict:
     """Rebuild: what `igneous pipeline` runs, every stage but extract (it costs money), published at the end
     (igneous/pipeline.py). Progress names each stage as it starts and counts within long ones."""
     from igneous import pipeline
@@ -349,6 +502,8 @@ def google_authorization_url(redirect_uri: str) -> str:
     loopback rule), so the API's own callback works without registering it."""
     from google_auth_oauthlib.flow import Flow
 
+    from igneous.connectors import google_auth
+
     flow = Flow.from_client_secrets_file(str(google_auth.client_secret_path()), google_auth.SCOPES,
                                          redirect_uri=redirect_uri)
     url, state = flow.authorization_url(prompt="consent select_account", access_type="offline")
@@ -360,6 +515,8 @@ def google_finish(s: Session, state: str, code: str) -> str:
     """Exchange the callback code for tokens, store them encrypted, return the account email."""
     from google_auth_oauthlib.flow import Flow
     from googleapiclient.discovery import build
+
+    from igneous.connectors import google_auth
 
     if state not in _PENDING:
         raise ValueError("This sign-in link expired or was already used. Press Connect again.")

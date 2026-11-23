@@ -14,13 +14,13 @@
   node never loses them: a Project under a Project goes to `thread_parents` (origin 'user'), anything else to an
   override 'link'.
 
-Revision ID: 0010
-Revises: 0009
+Revision ID: 0012
+Revises: 0011
 """
 from alembic import op
 
-revision = "0010"
-down_revision = "0009"
+revision = "0012"
+down_revision = "0011"
 
 
 def upgrade():

@@ -4,7 +4,8 @@ Each card becomes a `gcontacts`-style item: one human, their name, and every pho
 card. The spine turns that into SAME_AS ground truth and names the matching Person nodes, so a Messages
 handle like "+16145551234" shows as the contact's name and joins the same person's email identity.
 
-Needs Full Disk Access for the terminal, same as the Messages connector.
+Every sync reads every card (there are hundreds, not millions) and ends with a CompletedScan, so a card deleted in
+Contacts is removed. Needs Full Disk Access for the terminal, same as the Messages connector.
 """
 import glob
 import os
@@ -12,7 +13,7 @@ import re
 import sqlite3
 from collections.abc import Iterator
 
-from igneous.connectors.base import Checkpoint, SourceItem
+from igneous.connectors.base import CompletedScan, SourceItem
 
 SOURCES = os.path.expanduser("~/Library/Application Support/AddressBook/Sources/*/AddressBook-v22.abcddb")
 
@@ -33,9 +34,15 @@ class MacContactsConnector:
     def __init__(self, pattern: str = SOURCES):
         self.pattern = pattern
 
-    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint]:
-        # Small (hundreds of cards): a full pass each time; content hashing makes unchanged cards free.
-        for path in sorted(glob.glob(self.pattern)):
+    def sync(self, cursor: dict) -> Iterator[SourceItem | CompletedScan]:
+        paths = sorted(glob.glob(self.pattern))
+        if not paths:
+            # macOS hides the folder from an app without Full Disk Access, so "no cards" can't be told apart from
+            # "not allowed": say so instead of finishing with nothing (and never remove the cards stored).
+            raise PermissionError("No Contacts database found under ~/Library/Application Support/AddressBook. "
+                                  "Grant Full Disk Access to the app that runs Igneous and sync again.")
+        observed: set[str] = set()
+        for path in paths:
             try:
                 db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
             except sqlite3.OperationalError as e:
@@ -53,9 +60,12 @@ class MacContactsConnector:
                 name = " ".join(x for x in (first, last) if x) or org
                 if not name or not (phones.get(pk) or emails.get(pk)):
                     continue
+                external_id = f"{source_id}/{uid or pk}"
+                observed.add(external_id)
                 yield SourceItem(
-                    source="maccontacts", external_id=f"{source_id}/{uid or pk}", title=name, body_text="",
+                    source="maccontacts", external_id=external_id, title=name, body_text="",
                     mime="text/vcard",
                     raw_meta={"emails": sorted(set(emails.get(pk, []))), "phones": sorted(set(phones.get(pk, []))),
                               "orgs": [org] if org else []})
-        yield Checkpoint({})
+            db.close()
+        yield CompletedScan({}, self.name, frozenset(observed))

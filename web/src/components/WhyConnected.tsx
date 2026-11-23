@@ -1,9 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import type { Corrected } from "@/components/Inspector";
 import { SourceRows } from "@/components/SourceList";
 import { InlineError, Skeleton } from "@/components/ui";
-import { api, Explanation, WhyEdge } from "@/lib/api";
+import { api, type WhyEdge } from "@/lib/api";
+import { formatDay, formatDayRange } from "@/lib/dates";
+import { useRequest } from "@/lib/hooks";
 
 // Where a link came from, in plain words (instead of internal stage names).
 const ORIGIN: Record<string, string> = {
@@ -46,7 +49,8 @@ function EdgeCard({ e, terms, onWrong, busy }: { e: WhyEdge; terms: string[]; on
           </p>}
       {e.evidence.length > 0 && <div className="mt-2"><SourceRows items={e.evidence} highlight={terms} /></div>}
       {!STATED.has(e.extractor) && onWrong && (
-        <button disabled={busy} onClick={() => onWrong(e)} className="mt-2 text-xs text-muted hover:text-danger hover:underline disabled:opacity-50">
+        <button type="button" disabled={busy} onClick={() => onWrong(e)}
+          className="mt-2 text-xs text-muted hover:text-danger hover:underline disabled:opacity-50">
           This is wrong
         </button>
       )}
@@ -54,50 +58,41 @@ function EdgeCard({ e, terms, onWrong, busy }: { e: WhyEdge; terms: string[]; on
   );
 }
 
-function range(a: string | null, b: string | null) {
-  if (!a) return "";
-  const f = (d: string) => new Date(d).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-  return a.slice(0, 10) === b?.slice(0, 10) ? f(a) : `${f(a)} – ${f(b!)}`;
-}
-
 /** The evidence behind a link: what two people actually share. */
-export default function WhyConnected({ a, b, revision = 0, onCloseAction, onOpenAction, onChangedAction, onRestoredAction }: {
-  a: number; b: number; onCloseAction: () => void; onOpenAction: (id: number) => void;
-  revision?: number; onRestoredAction?: () => void;
-  /** A link was removed: the page drops it (and anything only it was holding) from what's on screen. */
-  onChangedAction?: (removed: { src: number; dst: number; edges: number[]; text: string }) => void;
+export default function WhyConnected({ a, b, revision, onCloseAction, onOpenAction, onCorrectedAction, onRestoredAction }: {
+  a: number; b: number;
+  /** Bumped after every correction: the panel loads again to show its result. */
+  revision: number;
+  onCloseAction: () => void; onOpenAction: (id: number) => void;
+  /** A link was rejected: the page says so, offers Undo and shows the graph without it. */
+  onCorrectedAction: (c: Corrected) => void;
+  /** An earlier rejection was undone here: the page shows the link again. */
+  onRestoredAction: () => void;
 }) {
-  const [r, setR] = useState<Explanation | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [attempt, setAttempt] = useState(0);
+  const { data: r, error: loadError, retry } = useRequest(`${a}-${b}`, () => api.explain(a, b), revision);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
   // "This is wrong": your verdict removes the link now and keeps it gone on every rebuild.
   const wrong = (edge: WhyEdge) => {
     if (saving) return;
     setSaving(true);
-    api.edgeIsWrong(edge.id).then((r) => {
-      setAttempt((n) => n + 1);
-      onChangedAction?.({ src: edge.src, dst: edge.dst, edges: r.edges,
-                          text: `Removed ${r.edges.length} inferred connection${r.edges.length === 1 ? "" : "s"}.` });
-    }).catch((e) => setErr(String(e))).finally(() => setSaving(false));
+    setError(null);
+    api.edgeIsWrong(edge.id).then((res) => {
+      onCorrectedAction({
+        text: `Removed ${res.edges.length} inferred connection${res.edges.length === 1 ? "" : "s"}.`,
+        undo: () => api.restoreEdges(res.edges),
+      });
+    }).catch((e) => setError(`Couldn't remove it. (${String(e)})`)).finally(() => setSaving(false));
   };
 
-  const undo = (id: number) => {
+  const undo = (overrideId: number) => {
     if (saving) return;
     setSaving(true);
-    api.undoCorrection(id).then(() => {
-      setAttempt((n) => n + 1);
-      onRestoredAction?.();
-    }).catch((e) => setErr(String(e))).finally(() => setSaving(false));
+    setError(null);
+    api.undoCorrection(overrideId).then(onRestoredAction)
+      .catch((e) => setError(`Couldn't undo the removal. (${String(e)})`)).finally(() => setSaving(false));
   };
-
-  useEffect(() => {
-    let live = true;
-    setR(null);
-    setErr(null);
-    api.explain(a, b).then((x) => live && setR(x)).catch((e) => live && setErr(String(e)));
-    return () => { live = false; };
-  }, [a, b, attempt, revision]);
 
   return (
     <div className="space-y-4 p-4 text-sm">
@@ -105,12 +100,12 @@ export default function WhyConnected({ a, b, revision = 0, onCloseAction, onOpen
         <h2 className="text-base font-semibold leading-snug">
           {r ? <>Why {r.a.name} and {r.b.name} are connected</> : "Why they're connected"}
         </h2>
-        <button onClick={onCloseAction} aria-label="Close"
-          className="ml-auto rounded px-1.5 text-lg leading-none text-muted hover:bg-hover">×</button>
+        <button type="button" onClick={onCloseAction} aria-label="Close" className="btn-close ml-auto">×</button>
       </div>
 
-      {err && <InlineError message={`Couldn't load the connection: ${err}`} onRetry={() => setAttempt((n) => n + 1)} />}
-      {!r && !err && (
+      {loadError !== undefined && !r && <InlineError message={`Couldn't load the connection. (${String(loadError)})`} onRetry={retry} />}
+      {error && <InlineError message={error} />}
+      {!r && loadError === undefined && (
         <div className="space-y-2" role="status" aria-label="Loading connection">
           <Skeleton className="h-4 w-full" /><Skeleton className="h-16 w-full" /><Skeleton className="h-16 w-full" />
         </div>
@@ -134,12 +129,11 @@ export default function WhyConnected({ a, b, revision = 0, onCloseAction, onOpen
                   <li key={c.override_id ?? `${c.src}-${c.dst}`} className="rounded-md border border-line p-2.5">
                     <p className="text-xs leading-relaxed text-soft">
                       You rejected inferred connections between {c.src_name} and {c.dst_name} on{" "}
-                      {new Date(c.updated_at).toLocaleDateString()}. This also blocks later inferred links between them.
+                      {formatDay(c.updated_at)}. This also blocks later inferred links between them.
                     </p>
                     {c.reason && <p className="mt-1 text-xs text-muted">{c.reason}</p>}
                     {c.override_id !== null && (
-                      <button disabled={saving} onClick={() => undo(c.override_id!)}
-                        className="mt-2 text-xs text-accent hover:underline disabled:opacity-50">
+                      <button type="button" disabled={saving} onClick={() => undo(c.override_id!)} className="btn-link mt-2">
                         Undo removal
                       </button>
                     )}
@@ -173,17 +167,17 @@ export default function WhyConnected({ a, b, revision = 0, onCloseAction, onOpen
           )}
 
           {r.conversations.length > 0 && (
-            <section>
+            <section aria-label="Conversations">
               <h3 className="mb-2 text-xs font-medium text-muted">Conversations</h3>
               <ul className="space-y-2">
                 {r.conversations.map((c) => (
                   <li key={c.thread_id} className="rounded-md border border-line p-2.5">
-                    <button onClick={() => onOpenAction(c.thread_id)} className="text-left font-medium hover:underline">
+                    <button type="button" onClick={() => onOpenAction(c.thread_id)} className="text-left font-medium hover:underline">
                       {c.thread || "Untitled conversation"}
                     </button>
                     <div className="mt-0.5 text-xs text-muted">
                       {c.messages} together{c.people > 2 ? `, ${c.people} people in it` : ""} ·{" "}
-                      {range(c.first, c.last)} · {c.source === "imessage" ? "Messages" : c.source === "gmail" ? "Gmail" : "Email"}
+                      {formatDayRange(c.first, c.last)} · {c.source === "imessage" ? "Messages" : c.source === "gmail" ? "Gmail" : "Email"}
                     </div>
                     {c.excerpt && (
                       <p className="mt-1.5 line-clamp-3 whitespace-pre-wrap text-xs leading-relaxed text-soft">
@@ -197,15 +191,13 @@ export default function WhyConnected({ a, b, revision = 0, onCloseAction, onOpen
           )}
 
           {r.events.length > 0 && (
-            <section>
+            <section aria-label="Events together">
               <h3 className="mb-2 text-xs font-medium text-muted">Events together</h3>
               <ul className="space-y-1">
                 {r.events.map((e) => (
                   <li key={e.id} className="flex gap-2">
-                    <button onClick={() => onOpenAction(e.id)} className="truncate text-left hover:underline">{e.name}</button>
-                    <span className="ml-auto shrink-0 text-xs text-muted">
-                      {e.at ? new Date(e.at).toLocaleDateString() : ""}
-                    </span>
+                    <button type="button" onClick={() => onOpenAction(e.id)} className="truncate text-left hover:underline">{e.name}</button>
+                    <span className="ml-auto shrink-0 text-xs text-muted">{formatDay(e.at)}</span>
                   </li>
                 ))}
               </ul>

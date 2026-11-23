@@ -1,6 +1,5 @@
 """Source records for pipeline tests, written the way connectors write them, and local models that need no download."""
 import hashlib
-import json
 import random
 from datetime import UTC, datetime, timedelta
 
@@ -8,7 +7,7 @@ import pytest
 from sqlalchemy import text
 
 from igneous import providers
-from igneous.config import settings
+from igneous.rag.embed import DIM
 
 T0 = datetime(2025, 3, 3, 12, tzinfo=UTC)
 
@@ -19,12 +18,11 @@ def day(n: float) -> datetime:
 
 def put(s, source: str, external_id: str, title: str, meta: dict, when: datetime | None = None,
         body: str = "body") -> None:
-    """Upsert one source item exactly as connectors/base.run_sync does."""
-    from igneous.connectors.base import UPSERT
+    """Store one source item exactly as connectors/base.run_sync does."""
+    from igneous.connectors.base import SourceItem, store
 
-    digest = hashlib.sha256(json.dumps([title, body, meta], sort_keys=True, default=str).encode()).hexdigest()
-    s.execute(UPSERT, {"source": source, "external_id": external_id, "content_hash": digest, "mime": None,
-                       "title": title, "body_text": body, "raw_meta": json.dumps(meta), "occurred_at": when})
+    store(s, SourceItem(source=source, external_id=external_id, title=title, body_text=body, occurred_at=when,
+                        raw_meta=meta))
 
 
 def mail(s, ref: str, sender: str, to: list[str], subject: str, when: datetime, body: str = "Hello there.",
@@ -63,7 +61,7 @@ def linkedin_profile(s, name: str, positions: list[dict]) -> None:
 
 def vector(value: str) -> list[float]:
     rnd = random.Random(hashlib.sha256(value.encode()).digest())
-    v = [rnd.gauss(0, 1) for _ in range(settings.embedding_dim)]
+    v = [rnd.gauss(0, 1) for _ in range(DIM)]
     norm = sum(x * x for x in v) ** 0.5
     return [x / norm for x in v]
 
@@ -83,7 +81,9 @@ class LocalModels:
 
 @pytest.fixture
 def local_models(monkeypatch):
-    monkeypatch.setattr(providers, "get_provider", LocalModels)
+    models = LocalModels()
+    for factory in ("_embedder", "_reranker", "_chat_model"):
+        monkeypatch.setattr(providers, factory, lambda: models)
 
 
 def rows(s, sql: str, **params) -> list[tuple]:

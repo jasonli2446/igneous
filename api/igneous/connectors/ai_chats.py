@@ -8,7 +8,8 @@ What is kept, and what isn't:
   kept     your messages (including ones sent mid-turn) and the assistant's prose replies
   skipped  tool calls, tool results, file dumps, thinking, images, harness/system records, and subagent
            transcripts (the parent session already carries their outcome)
-Every kept string passes through redact() first: transcripts contain pasted tokens and connection strings.
+Each turn is redacted before it is shortened to MAX_TURN_CHARS (transcripts are full of pasted tokens and
+connection strings); the sync runner redacts titles and the rest, as it does for every item.
 
 One SourceItem per session per day (like iMessage conversation-days), so a session that runs for days
 doesn't become one blob, and a re-sync only re-emits the days that changed. The cursor is each file's
@@ -22,7 +23,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterator
 from datetime import datetime
 
-from igneous.connectors.base import Checkpoint, SourceItem
+from igneous.connectors.base import Checkpoint, Every, SourceItem
 from igneous.connectors.redact import redact
 
 CLAUDE_ROOT = os.path.expanduser("~/.claude/projects")
@@ -196,15 +197,15 @@ def day_items(tool: str, session: str, meta: dict, turns: list[dict]) -> Iterato
     for day, day_turns in sorted(by_day.items()):
         lines, secrets = [], 0
         for t in day_turns:
-            clean, found = redact(t["text"][:MAX_TURN_CHARS])
+            # Redact the whole turn before shortening it: a key cut in half no longer matches its pattern.
+            clean, found = redact(t["text"])
             secrets += sum(found.values())
-            lines.append(f"[{t['at']:%H:%M}] {t['role']}: {clean.strip()}")
+            lines.append(f"[{t['at']:%H:%M}] {t['role']}: {clean[:MAX_TURN_CHARS].strip()}")
         if not any(t["role"] == "me" for t in day_turns):
             continue  # a day with only assistant output (e.g. a resumed tail) has nothing of yours
-        title, _ = redact(meta["title"] or "")
         yield SourceItem(
             source="ai_chats", external_id=f"{tool}/{session}/{day}",
-            title=f"{title or 'AI session'} ({tool.replace('_', ' ')}, {day})",
+            title=f"{meta['title'] or 'AI session'} ({tool.replace('_', ' ')}, {day})",
             body_text="\n".join(lines), occurred_at=day_turns[0]["at"], mime="text/plain",
             raw_meta={"tool": tool, "session": session, "day": day, "cwd": meta["cwd"],
                       # The repo the session worked in (from the files it touched), not just where it was launched.
@@ -230,6 +231,7 @@ class AIChatConnector:
 
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint]:
         seen = dict(cursor.get("files", {}))
+        due = Every()  # the cursor names every session file: write it every so often, not after each file
         for tool, path in self._files():
             st = os.stat(path)
             sig = f"{int(st.st_mtime)}:{st.st_size}"
@@ -239,5 +241,6 @@ class AIChatConnector:
             session = meta["session_id"] or os.path.splitext(os.path.basename(path))[0]
             yield from day_items(tool, session, meta, turns)
             seen[path] = sig
-            yield Checkpoint({"files": seen})
+            if due():
+                yield Checkpoint({"files": seen})
         yield Checkpoint({"files": seen})

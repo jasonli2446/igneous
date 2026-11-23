@@ -1,4 +1,4 @@
-"""LinkedIn data export as a profile item plus one item per connection (#157).
+"""LinkedIn data export as a profile item plus one item per connection.
 
 Input: the zip LinkedIn emails you (Settings & Privacy > Data privacy > Get a copy of your data; either the
 "larger archive" or the fast "Connections" only), one or several such zips, an extracted folder, or a loose

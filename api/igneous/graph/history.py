@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous.config import settings
 from igneous.graph.extract import locate
 
 EXTRACTOR = "relationship-history"
@@ -71,7 +72,6 @@ def refresh_commitment_status(s: Session) -> int:
     first. A result the model gave earlier counts even with the model off; with none, or when the call fails, the
     commitment stays open and is checked again on the next run.
     """
-    from igneous.config import settings
     from igneous.llm import LLMDisabled, allowed_sources, cache_lookup, cache_store, structured
 
     sources = sorted(allowed_sources())
@@ -102,13 +102,15 @@ def refresh_commitment_status(s: Session) -> int:
             JOIN nodes later ON later.id = in_thread.src
             JOIN source_items later_item ON later_item.id = later.source_item_id
             LEFT JOIN chunks c ON c.source_item_id = later_item.id AND c.embedding IS NOT NULL
+                 AND c.embedding_model = :embedding_model
             WHERE original.source_item_id = :sid AND in_thread.type = 'IN_THREAD'
               AND later_item.occurred_at > origin_item.occurred_at
               AND later_item.source = ANY(CAST(:sources AS text[]))
             GROUP BY later.id, later_item.id
             ORDER BY CASE WHEN CAST(:vector AS text) IS NULL OR count(c.id) = 0 THEN 1 ELSE 0 END,
                      min(c.embedding <=> CAST(:vector AS vector)), later_item.occurred_at, later_item.id LIMIT 8
-        """), {"sid": row["source_item_id"], "sources": sources, "vector": vector}).scalars().all()
+        """), {"sid": row["source_item_id"], "sources": sources, "vector": vector,
+              "embedding_model": settings.embedding_model}).scalars().all()
         if not later:
             continue
         material = "\n---\n".join(later)

@@ -49,8 +49,9 @@ def save(s: Session, account: str, creds: Credentials) -> None:
     secrets.save(s, "google", account, creds.to_json())
 
 
-def accounts(s: Session, provider: str = "google") -> list[str]:
-    return secrets.accounts(s, provider)
+def accounts(s: Session) -> list[str]:
+    """The connected Google accounts (emails)."""
+    return secrets.accounts(s, "google")
 
 
 def load(s: Session, account: str | None = None) -> tuple[str, Credentials]:

@@ -1,4 +1,4 @@
-DEMO_BOXES := allen-p
+# The demo mailbox is the one `igneous sync email` reads by default (DEMO_MAILBOXES in api/igneous/sources.py).
 BASELINE_BOXES := lay-k skilling-j allen-p arnold-j delainey-d lavorato-j
 ALL_BOXES := $(BASELINE_BOXES) kaminski-v kean-s dasovich-j beck-s
 
@@ -28,7 +28,7 @@ migrate:  ## migrate the database IGNEOUS_DATABASE_URL names (Postgres must be r
 	cd api && uv sync && uv run alembic upgrade head
 
 demo: migrate  ## one mailbox (~3k emails), end to end in a few minutes
-	$(IGN) sync email $(addprefix --mailbox ,$(DEMO_BOXES))
+	$(IGN) sync email
 	$(IGN) pipeline --extract $(EXTRACT)
 
 baseline: migrate  ## six mailboxes (~26k emails); embedding takes ~45 min on CPU
@@ -46,7 +46,7 @@ test:
 
 check:  ## the checks CLAUDE.md requires before any PR (CI runs the same)
 	cd api && uv run ruff check . && uv run pytest -q
-	cd web && npx next typegen && npx tsc --noEmit && npm run build
+	cd web && npx next typegen && npx tsc --noEmit && npm run lint && npm run build
 
 audit:  ## fail on known advisories in the locked Python and npm dependencies, as CI does
 	cd api && bash -o pipefail -c 'uv export --frozen --no-hashes --no-emit-project | uvx pip-audit --strict --disable-pip --no-deps -r /dev/stdin'

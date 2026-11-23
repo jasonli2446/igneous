@@ -22,11 +22,11 @@ def owner_ids(s) -> set[int]:
 
 
 def test_the_stage_list_is_the_dependency_order():
-    assert pipeline.NAMES == ("spine", "chunk", "embed", "extract", "self", "resolve", "thread_flags", "introductions",
-                              "topics", "entities", "profile", "threads", "backbone", "organizations", "verify",
-                              "corrections")
+    assert pipeline.NAMES == ("redact", "spine", "chunk", "embed", "extract", "self", "resolve", "thread_flags",
+                              "introductions", "topics", "entities", "profile", "threads", "backbone", "organizations",
+                              "verify", "corrections")
     sources = [st.name for st in pipeline.STAGES if not st.derived]
-    assert sources == ["spine", "chunk", "embed", "extract"]  # everything after them publishes together
+    assert sources == ["redact", "spine", "chunk", "embed", "extract"]  # everything after them publishes together
     assert pipeline.GATED == {"resolve"}
     assert all(st.label and st.label[0].isupper() for st in pipeline.STAGES)
 
@@ -37,7 +37,10 @@ def test_a_plan_runs_named_stages_in_pipeline_order_and_always_ends_with_correct
     assert names(pipeline.plan(extract=5)) == list(pipeline.NAMES)
     assert names(pipeline.plan(["resolve", "self"])) == ["self", "resolve", "corrections"]
     assert names(pipeline.plan(["corrections"])) == ["corrections"]
-    with pytest.raises(ValueError, match="unknown stage 'spines'; the stages are spine, chunk"):
+    # A stage that reads source records never reads one stored under older credential rules.
+    assert names(pipeline.plan(["extract"], extract=5)) == ["redact", "extract", "corrections"]
+    assert names(pipeline.plan(["chunk", "self"])) == ["redact", "chunk", "self", "corrections"]
+    with pytest.raises(ValueError, match="unknown stage 'spines'; the stages are redact, spine, chunk"):
         pipeline.plan(["spines"])
     with pytest.raises(ValueError, match="--extract N"):
         pipeline.plan(["extract"])
@@ -81,7 +84,7 @@ def test_the_cli_prints_a_line_per_stage(db):
     db.commit()
     out = CliRunner().invoke(cli.app, ["pipeline", "--stage", "spine", "--stage", "self"])
     assert out.exit_code == 0, out.output
-    assert [line.split()[0] for line in out.output.splitlines()] == ["spine", "self", "corrections"]
+    assert [line.split()[0] for line in out.output.splitlines()] == ["redact", "spine", "self", "corrections"]
 
 
 def test_a_first_build_has_the_backbone_and_never_makes_you_a_member_of_your_projects(db):

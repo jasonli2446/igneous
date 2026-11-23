@@ -1,4 +1,5 @@
-"""Enron maildir importer — the offline stand-in for Gmail. Emits the same SourceItem shape Gmail will."""
+"""The Enron demo mailboxes (maildir). `parse_message` turns one RFC 822 message into a SourceItem; Gmail parses
+what it fetches with it too, so both sources share fingerprints, threading and quoted-reply recovery."""
 import email
 import email.policy
 import hashlib
@@ -69,31 +70,40 @@ def parse_message(raw: bytes, external_id: str) -> SourceItem:
 
 
 class MaildirConnector:
-    """Walks <root>/<mailbox>/... in sorted order; the cursor is the last path fully processed."""
+    """Walks <root>/<mailbox>/... with each mailbox's files in path order. The cursor holds, per mailbox, the last
+    path fully processed, so syncing another mailbox starts that one from its beginning."""
     name = "email"
 
     def __init__(self, root: Path, mailboxes: list[str] | None = None):
+        """`mailboxes` None reads every mailbox under `root`."""
         self.root = Path(root)
         self.mailboxes = mailboxes
 
-    def _files(self) -> Iterator[Path]:
-        boxes = sorted(p.name for p in self.root.iterdir() if p.is_dir())
-        for box in boxes:
-            if self.mailboxes and box not in self.mailboxes:
-                continue
-            yield from sorted(p for p in (self.root / box).rglob("*") if p.is_file())
+    def _boxes(self) -> list[str]:
+        found = sorted(p.name for p in self.root.iterdir() if p.is_dir())
+        if self.mailboxes is None:
+            return found
+        if missing := sorted(set(self.mailboxes) - set(found)):
+            raise ValueError(f"No mailbox {', '.join(missing)} in {self.root} (it has {len(found)}).")
+        return sorted(set(self.mailboxes))
+
+    def _paths(self, box: str) -> list[str]:
+        # Sorted as the strings the cursor compares, never as Path objects (which order "a/1" before "a-b/1").
+        return sorted(p.relative_to(self.root).as_posix() for p in (self.root / box).rglob("*") if p.is_file())
 
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint]:
-        after = cursor.get("last_path")
+        done = dict(cursor.get("mailboxes") or {})
+        if legacy := cursor.get("last_path"):  # one position shared by every mailbox: it holds for its own only
+            done.setdefault(legacy.split("/", 1)[0], legacy)
         n = 0
-        last = after
-        for path in self._files():
-            rel = str(path.relative_to(self.root))
-            if after and rel <= after:
-                continue
-            yield parse_message(path.read_bytes(), external_id=rel)
-            last = rel
-            n += 1
-            if n % CHECKPOINT_EVERY == 0:
-                yield Checkpoint({"last_path": last})
-        yield Checkpoint({"last_path": last})
+        for box in self._boxes():
+            after = done.get(box)
+            for rel in self._paths(box):
+                if after and rel <= after:
+                    continue
+                yield parse_message((self.root / rel).read_bytes(), external_id=rel)
+                done[box] = rel
+                n += 1
+                if n % CHECKPOINT_EVERY == 0:
+                    yield Checkpoint({"mailboxes": dict(done)})
+        yield Checkpoint({"mailboxes": done})

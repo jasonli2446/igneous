@@ -6,13 +6,13 @@ from pathlib import Path
 
 import typer
 
-from igneous.config import settings
+from igneous import sources
 from igneous.db import SessionLocal
 from igneous.pipeline import STAGES
 
 app = typer.Typer(no_args_is_help=True)
-schedule_app = typer.Typer(no_args_is_help=True, help="macOS: sync your connected sources and rebuild the graph "
-                                                      "every 30 minutes.")
+schedule_app = typer.Typer(no_args_is_help=True, help="macOS: sync the sources you have set up and rebuild the "
+                                                      "graph every 30 minutes.")
 app.add_typer(schedule_app, name="schedule")
 
 # Commands that never open the database (the schedule group checks in `schedule run`, the one that does).
@@ -37,7 +37,8 @@ def _require_schema() -> None:
 
 @schedule_app.command("install")
 def schedule_install():
-    """Install the 30-minute macOS incremental sync LaunchAgent."""
+    """Install the macOS LaunchAgent that, every 30 minutes, syncs each source you have set up (never the Enron demo)
+    and then rebuilds the graph if anything is new."""
     from igneous import schedule
     path = schedule.install([sys.executable, "-m", "igneous.cli"])
     print(f"installed {path}; logs: ~/Library/Logs/igneous.log")
@@ -59,103 +60,72 @@ def schedule_uninstall():
 
 @schedule_app.command("run", hidden=True)
 def schedule_run():
-    """LaunchAgent entry point; sources are serialized before one incremental pipeline rebuild."""
+    """The LaunchAgent's entry point: sync each set-up source in turn, then rebuild if anything is new. Prints each
+    source's outcome as JSON."""
     from igneous import schedule
 
     _require_schema()
     print(json.dumps(schedule.run_now(), default=str))
 
 
+def _counter(label: str = "items"):
+    """A progress callback that keeps one line on a terminal up to date, at most every half second."""
+    shown = [0.0]
+
+    def progress(p: dict, force: bool = False) -> None:
+        if sys.stderr.isatty() and (force or time.monotonic() - shown[0] >= 0.5) and "items" in p:
+            shown[0] = time.monotonic()
+            total = f" of {p['items_total']}" if p.get("items_total") else ""
+            print(f"\r  {p['items']}{total} {label}", end="", file=sys.stderr, flush=True)
+    return progress
+
+
+def _stats(stats: dict) -> str:
+    return (f"{stats['inserted']} new, {stats['updated']} updated, {stats['unchanged']} unchanged, "
+            f"{stats['deleted']} deleted, {stats['redactions']} secrets removed")
+
+
+SOURCE_HELP = f"One of: {', '.join(sources.SYNCABLE)}."
+MAILBOX_HELP = f"email: read these mailboxes (repeatable; default {', '.join(sources.DEMO_MAILBOXES)})"
+SINCE_HELP = ("first sync only: how many days back (default: "
+              + ", ".join(f"{k} {v}" for k, v in sources.FIRST_SYNC_DAYS.items()) + ")")
+
+
 @app.command()
-def sync(connector: str = typer.Argument(..., help="email | imessage | maccontacts | gmail | gcal | gcontacts | drive | fs "
-                                                   "| ai_chats | notes | github"),
-         path: Path = typer.Option(None, help="source path; fs defaults to IGNEOUS_FILESYSTEM_ROOTS"),
-         mailbox: list[str] = typer.Option(None, help="restrict to these mailboxes; repeatable"),
+def sync(source: str = typer.Argument(..., metavar="SOURCE", help=SOURCE_HELP),
+         path: Path = typer.Option(None, help="fs: this one folder instead of the configured ones "
+                                              "(IGNEOUS_FILESYSTEM_ROOTS); imessage, notes: another database; "
+                                              "email: another maildir folder"),
+         mailbox: list[str] = typer.Option(None, help=MAILBOX_HELP),
          limit: int = typer.Option(None, help="stop at the first checkpoint after this many items (resumable)"),
-         since_days: int = typer.Option(None, help="first sync only: how far back to go (imessage, gmail, gcal)"),
-         account: str = typer.Option(None, help="google: which connected account (default: every connected one)"),
-         all_mail: bool = typer.Option(False, help="gmail: include Promotions/Social/Forums (skipped by default)")):
-    """Pull items into source_items; fs deliberately performs a fresh complete scan."""
-    from igneous.connectors.base import run_sync
-
-    if connector == "email":
-        from igneous.connectors.email_maildir import MaildirConnector
-
-        conn = MaildirConnector(path or Path(settings.data_dir) / "maildir", mailbox or None)
-    elif connector == "imessage":
-        from igneous.connectors.imessage import DEFAULT_DB, MessagesConnector
-
-        conn = MessagesConnector(path or DEFAULT_DB, since_days=since_days)
-    elif connector == "ai_chats":
-        from igneous.connectors.ai_chats import AIChatConnector
-
-        conn = AIChatConnector()
-    elif connector == "maccontacts":
-        from igneous.connectors.mac_contacts import MacContactsConnector
-
-        conn = MacContactsConnector()
-    elif connector == "notes":
-        from igneous.connectors.apple_notes import AppleNotesConnector
-
-        conn = AppleNotesConnector(path) if path else AppleNotesConnector()
-    elif connector == "fs":
-        from igneous.connectors.filesystem import FilesystemConnector
-        from igneous.sources import _fs_roots
-
-        roots = [path] if path else _fs_roots()
-        if not roots:
-            raise typer.BadParameter("no default folders found; pass --path or set IGNEOUS_FILESYSTEM_ROOTS")
-        conn = FilesystemConnector(roots)
-    elif connector == "github":
-        from igneous.connectors import secrets
-        from igneous.connectors.github import GithubConnector
-
-        with SessionLocal() as s:
-            acct, token = secrets.load(s, "github", account)
-        conn = GithubConnector(token, acct)
-        with SessionLocal() as s:
-            print(run_sync(s, conn, account=acct, limit=limit), flush=True)
-        return
-    elif connector in ("gmail", "gcal", "gcontacts", "drive"):
-        from igneous.connectors import google_auth
-
-        # No --account: sync every connected Google account in turn (each keeps its own cursor).
-        with SessionLocal() as s:
-            targets = [account] if account else google_auth.accounts(s)
-        if not targets:
-            raise typer.BadParameter("no Google account connected: run `igneous connect google`")
-        for acct in targets:
-            with SessionLocal() as s:
-                acct, creds = google_auth.load(s, acct)
-            conn = _google_connector(connector, creds, acct, since_days, all_mail)
-            t = time.time()
-            with SessionLocal() as s:
-                print(acct, run_sync(s, conn, account=acct, limit=limit), f"in {time.time() - t:.1f}s", flush=True)
-        return
-    else:
-        raise typer.BadParameter("unknown connector")
-    t = time.time()
+         since_days: int = typer.Option(None, help=SINCE_HELP),
+         account: str = typer.Option(None, help="Google sources and github: only this connected account "
+                                                "(default: every one)"),
+         all_mail: bool = typer.Option(None, "--all-mail/--no-all-mail",
+                                       help="gmail: include Promotions/Social/Forums (skipped by default); the "
+                                            "account remembers the choice")):
+    """Sync a source into the database, as Sync now on the Sources page does. Each sync continues where the last
+    one stopped; run `igneous pipeline` afterwards to add what is new to the graph."""
+    opts = sources.SyncOptions(path=path, mailboxes=tuple(mailbox or ()), since_days=since_days, all_mail=all_mail)
+    try:
+        sources.check_options(source, opts, account)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
     with SessionLocal() as s:
-        print(run_sync(s, conn, account=account or "default", limit=limit), f"in {time.time() - t:.1f}s")
-
-
-def _google_connector(connector: str, creds, account: str, since_days: int | None, all_mail: bool):
-    if connector == "gmail":
-        from igneous.connectors.gmail import GmailConnector
-
-        return GmailConnector(creds, account, since_days=since_days or 90,
-                              query=None if all_mail else GmailConnector.DEFAULT_QUERY)
-    if connector == "drive":
-        from igneous.connectors.drive import DriveConnector
-
-        return DriveConnector(creds, account)
-    if connector == "gcal":
-        from igneous.connectors.gcal import CalendarConnector
-
-        return CalendarConnector(creds, account, since_days=since_days or 365)
-    from igneous.connectors.gcal import ContactsConnector
-
-    return ContactsConnector(creds, account)
+        try:
+            result = sources.sync(source, s, account, opts, progress=_counter(), limit=limit)
+        except sources.SetupNeeded as e:
+            typer.echo(f"igneous: {e}", err=True)
+            raise typer.Exit(code=2) from e
+        except sources.SyncFailed as e:
+            for name, stats in e.result["accounts"].items():
+                print(f"{name}: {_stats(stats)} in {stats['seconds']}s")
+            typer.echo(f"\nigneous: {source} sync failed: {e}", err=True)
+            raise typer.Exit(code=1) from e
+    if sys.stderr.isatty():
+        print(file=sys.stderr)
+    for name, stats in result["accounts"].items():
+        print(f"{'' if name == 'default' else name + ': '}{_stats(stats)} in {stats['seconds']}s")
 
 
 import_app = typer.Typer(no_args_is_help=True, help="Import exports you downloaded.")
@@ -201,17 +171,68 @@ def import_linkedin(paths: list[Path] = typer.Argument(..., help="LinkedIn expor
     print(result, f"in {time.time() - t:.1f}s")
 
 
+@import_app.command("ai-export")
+def import_ai_export(path: Path = typer.Argument(..., exists=True, dir_okay=False,
+                                                 help="the ChatGPT or Claude.ai export .zip as emailed, or the "
+                                                      "conversations.json inside it; a Gemini Apps MyActivity.json "
+                                                      "from Takeout works too"),
+                     provider: str = typer.Option(None, help="chatgpt, claude_ai or gemini (default: recognised "
+                                                             "from the file)")):
+    """ChatGPT and Claude.ai chat history: your messages and the assistant's prose, one item per conversation per day.
+    Re-running is a no-op."""
+    from igneous.connectors import ai_exports
+
+    t = time.time()
+    with SessionLocal() as s:
+        try:
+            result = ai_exports.run_import(s, path, provider)
+        except ai_exports.ExportError as e:
+            raise typer.BadParameter(str(e)) from e
+    print(f"{result['provider']}: {result['conversations']} conversations; {_stats(result)} in {time.time() - t:.1f}s")
+
+
 @app.command()
-def connect(provider: str = typer.Argument(..., help="google"),
-            browser: bool = typer.Option(True, help="open the browser; --no-browser just prints the URL")):
-    """Sign in once per Google account (opens a browser; run again to add another account). The token is stored
-    encrypted; Testing-mode tokens last 7 days."""
-    if provider != "google":
-        raise typer.BadParameter("only google")
-    from igneous.connectors import google_auth
+def connect(provider: str = typer.Argument(..., metavar="PROVIDER", help="google or github"),
+            browser: bool = typer.Option(True, help="google: open the browser; --no-browser just prints the URL")):
+    """Connect an account, read-only; tokens are stored encrypted.
+
+    google: sign in through the browser, once per account (run it again to add another). A Google project in Testing
+    mode issues tokens that last 7 days: connect again when a sync says the token expired.
+
+    github: a fine-grained token with Contents, Issues and Pull requests: Read, typed at the hidden prompt or given
+    on stdin (`igneous connect github < token.txt`). Saving a token for the same account replaces it."""
+    if provider == "google":
+        from igneous.connectors import google_auth
+
+        with SessionLocal() as s:
+            print("connected", google_auth.connect(s, open_browser=browser), flush=True)
+    elif provider == "github":
+        from igneous.connectors import github, secrets
+
+        token = typer.prompt("GitHub token", hide_input=True) if sys.stdin.isatty() else sys.stdin.read()
+        try:
+            login = github.account_for(token)
+        except github.GithubError as e:
+            raise typer.BadParameter(str(e)) from e
+        with SessionLocal() as s:
+            secrets.save(s, "github", login, token.strip())
+        print("connected", login)
+    else:
+        raise typer.BadParameter("connect google or github")
+
+
+@app.command()
+def disconnect(provider: str = typer.Argument(..., metavar="PROVIDER", help="google or github"),
+               account: str = typer.Argument(..., help="the account's email (google) or login (github)")):
+    """Forget an account's stored token, so nothing syncs it. What it synced stays; connecting it again resumes."""
+    if provider not in ("google", "github"):
+        raise typer.BadParameter("disconnect google or github")
+    from igneous.connectors import secrets
 
     with SessionLocal() as s:
-        print("connected", google_auth.connect(s, open_browser=browser), flush=True)
+        if not secrets.delete(s, provider, account):
+            raise typer.BadParameter(f"no {provider} account {account} is connected")
+    print("disconnected", account)
 
 
 StageName = Enum("StageName", [(st.name, st.name) for st in STAGES], type=str)
@@ -255,8 +276,9 @@ def _run_stages(names: list[str] | None, extract: int = 0) -> None:
 
 @app.command()
 def pipeline(stage: list[StageName] = typer.Option(
-                 None, help="run only this stage (repeatable); stages run in pipeline order and every run ends with "
-                            "corrections, which publishes. Default: every stage except extract"),
+                 None, help="run only this stage (repeatable); stages run in pipeline order, a run that reads your "
+                            "sources starts with redact, and every run ends with corrections, which publishes. "
+                            "Default: every stage except extract"),
              extract: int = typer.Option(0, min=0, help="also read up to N newest messages with the model for "
                                                         "people, topics and promises (costs money; 0 = skip)")):
     """Build the graph: read what is new in your sources, then recompute everything derived from it and publish it
@@ -348,12 +370,23 @@ def mcp():
 
 
 @app.command()
-def search(q: str, k: int = 5, mode: str = "hybrid"):
-    """Hybrid search from the terminal."""
+def search(q: str = typer.Argument(..., help="what to find; -word leaves a word out"),
+           k: int = typer.Option(5, min=1, max=50, help="how many passages"),
+           mode: str = typer.Option("hybrid", help="hybrid | lexical | dense")):
+    """Search from the terminal, as the Search page does: filters the query states ("from Jeff Skilling", "in my
+    calendar", "in May 2001") apply, and a line before the results says which."""
+    if mode not in ("hybrid", "lexical", "dense"):
+        raise typer.BadParameter("choose hybrid, lexical or dense", param_hint="--mode")
+    from igneous.rag.constraints import apply, describe
     from igneous.rag.search import hybrid
 
     with SessionLocal() as s:
-        for h in hybrid(s, q, k=k, mode=mode):
+        f = apply(s, q)
+        applied = describe(s, f)
+        if applied["from_question"]:
+            print("filters from the query:", json.dumps({name: applied[name] for name in applied["from_question"]},
+                                                        default=str))
+        for h in hybrid(s, q, f, k=k, mode=mode):
             print(f"{h['score']:.4f} {','.join(h['matched']):14s} {h['title']!r} [{h['external_id']}]")
 
 
