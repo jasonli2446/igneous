@@ -11,7 +11,7 @@
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from igneous.graph.derived import STATED, blocked_sql, follow, rejections
+from igneous.graph.derived import blocked_sql, follow, inferred, rejections
 from igneous.graph.invariants import Violation
 
 
@@ -24,8 +24,8 @@ def rejected_pair_violations(s: Session) -> list[Violation]:
                       message=f"{r.type} ({r.extractor}) joins a pair you said is wrong")
             for r in s.execute(text(f"""
                 SELECT e.id, e.src, e.dst, e.type, e.extractor FROM edges e
-                WHERE e.extractor <> ALL(:stated) AND {blocked_sql('e.src', 'e.dst')} ORDER BY e.id
-            """), {"stated": list(STATED), "blocked": blocked})]
+                WHERE {inferred('e.extractor')} AND {blocked_sql('e.src', 'e.dst')} ORDER BY e.id
+            """), {"blocked": blocked})]
 
 
 def registry_violations(s: Session) -> list[Violation]:

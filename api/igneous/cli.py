@@ -434,25 +434,30 @@ app.add_typer(mcp_app, name="mcp")
 DATABASE_HELP = "serve this database on the server api/.env names (its user and password too) instead of api/.env's"
 SOURCES_HELP = ("the sources whose records and names the tools may share, comma-separated ids, instead of "
                 "IGNEOUS_LLM_SOURCES")
+WRITE_HELP = ("--write serves `remember` and `link`, which add facts tagged with the agent's name (each undone in one "
+              "click); --read-only doesn't. Instead of IGNEOUS_MCP_WRITE")
 
 
 @mcp_app.callback(invoke_without_command=True)
 def mcp(ctx: typer.Context, database: str = typer.Option(None, help=DATABASE_HELP),
-        sources: str = typer.Option(None, help=SOURCES_HELP)):
+        sources: str = typer.Option(None, help=SOURCES_HELP),
+        write: bool = typer.Option(None, "--write/--read-only", help=WRITE_HELP)):
     """Serve the graph over stdio: the command an MCP client runs (`igneous mcp install` registers it with Claude
     Code). Its tools share text only from the sources opted in to hosted models, and names only of what those records
-    name; the rest are counts. Read-only, except that `ask` calls the hosted model."""
+    name; the rest are counts. Read-only, except that `ask` calls the hosted model, and that with writes on
+    (IGNEOUS_MCP_WRITE, --write) `remember` and `link` add facts you can undo."""
     if ctx.invoked_subcommand is None:
         from igneous.mcp_server import main as serve
 
-        serve(database, sources)
+        serve(database, sources, write)
 
 
 @mcp_app.command("install")
 def mcp_install(name: str = typer.Option("igneous", help="the name Claude Code lists the server under"),
                 database: str = typer.Option(None, help=DATABASE_HELP),
                 sources: str = typer.Option(None, help=SOURCES_HELP),
-                scope: str = typer.Option("user", help="user (every project), project or local")):
+                scope: str = typer.Option("user", help="user (every project), project or local"),
+                write: bool = typer.Option(None, "--write/--read-only", help=WRITE_HELP)):
     """Register this checkout's server with Claude Code (`claude mcp add`), replacing one registered under the same
     name. No credential goes into Claude Code's configuration: the server reads the database password from api/.env
     and the model key (only `ask` needs it) from AWS_BEARER_TOKEN_BEDROCK or `igneous connect bedrock`."""
@@ -464,7 +469,7 @@ def mcp_install(name: str = typer.Option("igneous", help="the name Claude Code l
         typer.echo(f"igneous: {problem}", err=True)
         raise typer.Exit(code=2)
     try:
-        registered = mcp_client.install(name, database, sources, scope)
+        registered = mcp_client.install(name, database, sources, scope, write)
     except RuntimeError as e:
         typer.echo(f"igneous: {e}", err=True)
         raise typer.Exit(code=1) from e
@@ -476,9 +481,10 @@ def mcp_install(name: str = typer.Option("igneous", help="the name Claude Code l
 def mcp_check(database: str = typer.Option(None, help=DATABASE_HELP),
               sources: str = typer.Option(None, help=SOURCES_HELP),
               query: str = typer.Option(None, help="a name for `find` and words for `search` (default: from `me`)"),
-              ask: bool = typer.Option(False, "--ask", help="also call `ask`, which calls the paid hosted model")):
+              ask: bool = typer.Option(False, "--ask", help="also call `ask`, which calls the paid hosted model"),
+              write: bool = typer.Option(None, "--write/--read-only", help=WRITE_HELP)):
     """Start the server as a client would, call each tool once, and report each call's time and outcome. Exits 1 if
-    a tool fails. Paid tools run only when asked for."""
+    a tool fails. Paid tools run only when asked for; the tools that write are listed, never called."""
     from igneous import db, mcp_client
 
     if database:
@@ -486,7 +492,7 @@ def mcp_check(database: str = typer.Option(None, help=DATABASE_HELP),
     if problem := db.schema_status():
         typer.echo(f"igneous: {problem}", err=True)
         raise typer.Exit(code=2)
-    calls = mcp_client.check(database=database, sources=sources, ask=ask, query=query)
+    calls = mcp_client.check(database=database, sources=sources, ask=ask, query=query, write=write)
     for c in calls:
         outcome = {True: "ok", False: "FAILED", None: "-"}[c.ok]
         print(f"{c.tool:15s} {c.seconds * 1000:8.0f} ms  {outcome:6s}  {c.note}")
@@ -494,9 +500,11 @@ def mcp_check(database: str = typer.Option(None, help=DATABASE_HELP),
     if failed:
         typer.echo(f"igneous: {len(failed)} of {len(calls)} tools failed: {', '.join(failed)}", err=True)
         raise typer.Exit(code=1)
-    answered = sum(1 for c in calls if c.ok)
-    print(f"{answered} of {len(calls)} tools answered, none failed"
-          + ("" if answered == len(calls) else "; opt a source in (--sources) to call the rest"))
+    readers = [c for c in calls if c.tool not in mcp_client.WRITES]
+    answered = sum(1 for c in readers if c.ok)
+    print(f"{answered} of {len(readers)} tools answered, none failed"
+          + ("" if answered == len(readers) else "; opt a source in (--sources) to call the rest")
+          + (f"; {len(calls) - len(readers)} write tools served, not called" if len(readers) < len(calls) else ""))
 
 
 @app.command()

@@ -4,7 +4,8 @@ Reads: GET /graph/entity/{id} (with the corrections that shape it, for undo), GE
 verifier was unsure about). Corrections: rename, hide, merge and unlink a Project (POST /graph/entity/{id}/...), "This
 is wrong" and "This is right" on any derived link (POST /graph/edge/wrong, /graph/edge/confirm), bring removed links
 back (POST /graph/edge/restore), "same person" and "not the same person" (POST /graph/person/{id}/merge, /split), a
-connection you add or take out again (POST /graph/link, DELETE /graph/link/{id}), and undo (DELETE /overrides/{id}).
+fact you or an agent add (POST /facts, graph/facts.py: a connection, to something new if need be) and a link someone
+added taken out again (DELETE /graph/link/{id}), and undo (DELETE /overrides/{id}).
 
 Each correction is an intent (graph/corrections.py): recorded at once by natural keys, then applied to the published
 graph in place, or by the final step of a rebuild that is running. Every answer says which: {"applied": "now"}, or
@@ -12,13 +13,15 @@ graph in place, or by the final step of a rebuild that is running. Every answer 
 links say, per node pair they touched, whether a link still joins the two (`pairs`: [{a, b, still_linked}]). No
 correction is refused because a rebuild is running.
 """
+from typing import Annotated, Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.db import get_session
-from igneous.graph import corrections, overrides
+from igneous.graph import corrections, facts, overrides
 from igneous.graph.corrections import apply_now, recording
 from igneous.graph.visibility import group_conversation, not_service
 
@@ -93,6 +96,7 @@ def entity(node_id: int = Path(ge=1), items: int = Query(30, ge=1, le=200), s: S
     """), {"k": f"Project:{p['key']}"}).mappings()]
     return {"id": p["id"], "name": p["name"], "key": p["key"], "aliases": _aliases(props, p["name"]),
             "anchors": props.get("anchors", []), "hidden": bool(props.get("hidden")),
+            "added_by": props.get("added_by"),  # a project a fact brought in: 'user' or 'agent:<name>'
             "people": people, "groups": groups, "events": events, "items": rows[:items],
             "counts": {"people": len(people), "groups": len(groups), "events": len(events), "items": len(rows)},
             "corrections": shaped}
@@ -146,14 +150,14 @@ def merge(node_id: int, body: MergeBody, s: Session = Depends(get_session)):
 @router.post("/graph/entity/{node_id}/unlink")
 def unlink(node_id: int, body: UnlinkBody, s: Session = Depends(get_session)):
     """Drop one item or person from this entity, and keep it dropped across rebuilds."""
-    from igneous.graph.derived import STATED
+    from igneous.graph.derived import inferred
 
     _project(s, node_id)
     with recording(s):
-        eid = s.execute(text("""
+        eid = s.execute(text(f"""
             SELECT id FROM edges WHERE src=:m AND dst=:p AND type IN ('PART_OF','INVOLVED_IN')
-                AND extractor <> ALL(:stated) ORDER BY id LIMIT 1
-        """), {"m": body.node, "p": node_id, "stated": list(STATED)}).scalar()
+                AND {inferred('extractor')} ORDER BY id LIMIT 1
+        """), {"m": body.node, "p": node_id}).scalar()
         if eid is None:
             raise HTTPException(404, "That isn't linked to this entity")
         result = corrections.reject(s, eid)
@@ -239,23 +243,21 @@ class SamePersonBody(BaseModel):
 
 @router.post("/graph/person/{node_id}/merge")
 def merge_people(node_id: int, body: SamePersonBody, s: Session = Depends(get_session)):
-    """"These are the same person": a trusted identity link (extractor 'user') that entity resolution always
-    honors, so the two become one person now and on every rebuild (e.g. a nickname contact and a school address).
-    `person`: who they are now (the identity head, once applied)."""
+    """"These are the same person": your fact (graph/facts.py), a trusted identity link (extractor 'user') that entity
+    resolution always honors, so the two become one person now and on every rebuild (e.g. a nickname contact and a
+    school address). `person`: who they are now (the identity head, once applied)."""
     a, b = sorted((node_id, body.other))
-    with recording(s):
-        ends = {r.id: r for r in s.execute(text(
-            "SELECT id, type, type || ':' || key AS k FROM nodes WHERE id = ANY(:i)"), {"i": [a, b]})}
-        if any(ends.get(i) is None or ends[i].type != "Person" for i in (a, b)):
-            raise HTTPException(400, "Both must be people")
-        if a == b:
-            raise HTTPException(400, "That's the same person already")
-        oid = corrections.link(s, ends[a].k, ends[b].k, "SAME_AS", {"why": "you said they are the same person"})
-    applied = apply_now(s)
+    types = dict(s.execute(text("SELECT id, type FROM nodes WHERE id = ANY(:i)"), {"i": [a, b]}).all())
+    if any(types.get(i) != "Person" for i in (a, b)):
+        raise HTTPException(400, "Both must be people")
+    if a == b:
+        raise HTTPException(400, "That's the same person already")
+    added = facts.add(s, a, "SAME_AS", b, note="you said they are the same person")
     head = s.execute(text("SELECT COALESCE((SELECT canonical_id FROM canonical WHERE node_id = :n), :n)"),
                      {"n": a}).scalar()
     s.rollback()
-    return {"merged": [a, b], "person": head, "override_id": oid, **applied}
+    return {"merged": [a, b], "person": head, "override_id": added["override_id"],
+            **{k: added[k] for k in ("applied", "note") if k in added}}
 
 
 @router.post("/graph/person/{node_id}/split")
@@ -291,66 +293,58 @@ def restore_edges(body: RestoreBody, s: Session = Depends(get_session)):
     return {"restored": restored, **result, "pairs": pairs, **applied}
 
 
-# How two kinds of thing can be connected, in plain words (the add-a-connection menu), and the edge each means.
-RELATIONS = {
-    ("Person", "Project"): [("went on it / took part", "INVOLVED_IN"), ("connected to it", "RELATED_TO")],
-    ("Project", "Project"): [("part of it", "PART_OF"), ("related to it", "RELATED_TO")],
-    ("Project", "Organization"): [("done at / for it", "PART_OF")],
-    ("Person", "Organization"): [("worked or studied there", "WORKED_AT"), ("is part of it", "MEMBER_OF")],
-    ("Thread", "Project"): [("this chat is about it", "PART_OF")],
-    ("Event", "Project"): [("part of it", "PART_OF")],
-    ("File", "Project"): [("part of it", "PART_OF")],
-    ("Message", "Project"): [("part of it", "PART_OF")],
-}
-
-
 @router.get("/graph/link/options")
 def link_options(a: int, b: int, s: Session = Depends(get_session)):
-    """The plain-language ways two things can be connected (either direction), for the add-connection menu."""
+    """The plain-language ways two things can be connected (either direction), for the add-connection menu: each a
+    `relation` POST /facts takes from `src` to `dst`."""
     ta, tb = (s.execute(text("SELECT type FROM nodes WHERE id = :i"), {"i": i}).scalar() for i in (a, b))
-    out = [{"label": lbl, "type": t, "src": a, "dst": b} for lbl, t in RELATIONS.get((ta, tb), [])]
-    out += [{"label": lbl, "type": t, "src": b, "dst": a} for lbl, t in RELATIONS.get((tb, ta), [])]
-    if ta == tb == "Person":
-        out.append({"label": "same person", "type": "SAME_AS", "src": min(a, b), "dst": max(a, b)})
-    return {"options": out or [{"label": "related", "type": "RELATED_TO", "src": a, "dst": b}]}
+    return {"options": [{"label": label, "type": t, "src": min(a, b) if t == "SAME_AS" else a if forward else b,
+                         "dst": max(a, b) if t == "SAME_AS" else b if forward else a}
+                        for label, t, forward in facts.options(ta, tb)]}
 
 
-class LinkBody(BaseModel):
-    src: int
-    dst: int
-    type: str
-    note: str | None = None
+class NewThing(BaseModel):
+    """Something the graph doesn't have yet, which the fact brings in."""
+    name: str = Field(min_length=1, max_length=facts.NAME_MAX)
+    type: Literal["Project", "Organization"] = "Project"
+    kind: str | None = Field(None, max_length=facts.KIND_MAX)  # a project's: hobby, trip, class, job, project...
 
 
-@router.post("/graph/link")
-def add_link(body: LinkBody, s: Session = Depends(get_session)):
-    """Add a connection you know about: stored as yours (extractor 'user'), never checked or dropped by the AI, kept
-    on every rebuild by natural keys (a Project under a Project is stated hierarchy, which the threads stage builds
-    on). A 'same person' link merges the two identities. `id`: the link in the graph, once applied."""
-    with recording(s):
-        ends = {r.id: r for r in s.execute(text(
-            "SELECT id, type, type || ':' || key AS k FROM nodes WHERE id = ANY(:i)"), {"i": [body.src, body.dst]})}
-        if body.src not in ends or body.dst not in ends:
-            raise HTTPException(404, "No such node")
-        ta, tb = ends[body.src].type, ends[body.dst].type
-        # Only what the menu offers for these two kinds of thing (#181): any other pair would be an illegal edge.
-        if not (body.type == "RELATED_TO" or (body.type == "SAME_AS" and ta == tb == "Person")
-                or body.type in {t for _l, t in RELATIONS.get((ta, tb), [])}):
-            raise HTTPException(400, f"A {ta} can't be connected to a {tb} that way")
-        props = {"why": body.note or "you added this", "reason": body.note or "You added this connection."}
-        oid = corrections.link(s, ends[body.src].k, ends[body.dst].k, body.type, props)
-    applied = apply_now(s)
-    a, b = sorted((body.src, body.dst)) if body.type == "SAME_AS" else (body.src, body.dst)
-    eid = s.execute(text("SELECT id FROM edges WHERE src = :a AND dst = :b AND type = :t AND extractor = 'user'"),
-                    {"a": a, "b": b, "t": body.type}).scalar()
-    s.rollback()
-    return {"id": eid, "src": body.src, "dst": body.dst, "type": body.type, "override_id": oid, **applied}
+class FactBody(BaseModel):
+    subject: Annotated[int, Field(ge=1)] | NewThing
+    relation: str = Field(min_length=1, max_length=40)  # an edge type GET /graph/link/options offers for the two
+    object: Annotated[int, Field(ge=1)] | NewThing
+    note: str | None = Field(None, max_length=facts.NOTE_MAX)
+    agent: str | None = Field(None, min_length=1, max_length=facts.AGENT_MAX)  # stated by this agent, not by you
+
+
+@router.post("/facts")
+def add_fact(body: FactBody, s: Session = Depends(get_session)):
+    """Add a fact: `subject relation object`, where each side is a node id or something new (a project or an
+    organization), and the relation one GET /graph/link/options offers for the two kinds of thing (RELATED_TO for any
+    two, SAME_AS for two people). Stated by you, or by `agent` (extractor 'agent:<agent>'); `note` says why. Kept on
+    every rebuild, never checked or dropped by the AI, and never written to a source. 404 for the id of nothing, 400
+    for a fact that can't be stated.
+
+    Answers like every correction (`applied`: now, or on_publish with a note) with `override_id`, which undoes it
+    (DELETE /overrides/{override_id}); `id`, `src` and `dst`: its link and ends in the graph, once applied; `nodes`:
+    the new things it brought in; `already`: the same fact was stated before, and that one stands."""
+    def end(x: int | NewThing) -> int | facts.New:
+        return x if isinstance(x, int) else facts.New(x.type, x.name, x.kind)
+
+    try:
+        return facts.add(s, end(body.subject), body.relation, end(body.object), body.note,
+                         facts.agent(body.agent) if body.agent is not None else "user")
+    except LookupError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @router.delete("/graph/link/{edge_id}")
 def remove_link(edge_id: int, s: Session = Depends(get_session)):
-    """Take out a link you added (extractor 'user'): it stays out on every rebuild until you add it again, and undo
-    (DELETE /overrides/{override_id}) brings it back."""
+    """Take out a link you or an agent added (extractor 'user' or 'agent:<name>'), and a new thing only it named: it
+    stays out on every rebuild until it is added again, and undo (DELETE /overrides/{override_id}) brings it back."""
     with recording(s):
         try:
             result = corrections.remove_link(s, edge_id)

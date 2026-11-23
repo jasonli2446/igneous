@@ -7,8 +7,9 @@ the server reads the database's password from api/.env and the model key from th
 
 `check` starts that same command as a client would, calls each tool once over the protocol with arguments it takes from
 the answers before (the owner from `me`, their closest node, a record of it), and reports each call's time and outcome.
-`ask` calls a paid model, so it runs only when asked for. The calls also bring what the tools read into the database's
-memory, so the first question of a demo doesn't wait on the disk.
+`ask` calls a paid model, so it runs only when asked for. The tools that add to the graph (`remember` and `link`, served
+with writes on) are listed, never called: a check changes nothing. The calls also bring what the tools read into the
+database's memory, so the first question of a demo doesn't wait on the disk.
 """
 import asyncio
 import json
@@ -19,25 +20,30 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+WRITES = frozenset({"remember", "link"})  # the tools that add to the graph (IGNEOUS_MCP_WRITE): `check` never calls
 
-def command(database: str | None = None, sources: str | None = None) -> list[str]:
+
+def command(database: str | None = None, sources: str | None = None, write: bool | None = None) -> list[str]:
     """The command an MCP client runs to start this checkout's server: the virtualenv's `igneous` script (it starts in
-    about two seconds, where `uv run` first syncs the environment), with the database and sources to serve."""
+    about two seconds, where `uv run` first syncs the environment), with the database and sources to serve, and
+    whether its agent may add facts (`write`; None: as IGNEOUS_MCP_WRITE says)."""
     exe = Path(sys.executable).with_name("igneous")
     args = [str(exe if exe.exists() else Path(sys.argv[0]).resolve()), "mcp"]
     if database:
         args += ["--database", database]
     if sources is not None:
         args += ["--sources", sources]
+    if write is not None:
+        args += ["--write" if write else "--read-only"]
     return args
 
 
 def install(name: str = "igneous", database: str | None = None, sources: str | None = None,
-            scope: str = "user") -> list[str]:
+            scope: str = "user", write: bool | None = None) -> list[str]:
     """Register the server with Claude Code under `name`, replacing a server registered under that name before.
     Returns the command registered. Raises RuntimeError when the `claude` command is missing or refuses."""
     claude = shutil.which("claude")
-    cmd = command(database, sources)
+    cmd = command(database, sources, write)
     if claude is None:
         raise RuntimeError("Claude Code's `claude` command isn't on your PATH. Install Claude Code, or register the "
                            f"server in your MCP client with this command: {' '.join(cmd)}")
@@ -111,16 +117,18 @@ async def _calls(target, ask: bool, query: str | None) -> list[Call]:
             await call("ask", question=query or "What happened most recently?")
         called = {c.tool for c in out}
         for tool in sorted(listed - called - ({"ask"} if not ask else set())):
-            out.append(Call(tool, {}, 0.0, None, "not called: no node or record is shared to call it with"))
+            out.append(Call(tool, {}, 0.0, None, "served; not called: it adds to the graph" if tool in WRITES
+                            else "not called: no node or record is shared to call it with"))
     return out
 
 
 def check(target=None, database: str | None = None, sources: str | None = None, ask: bool = False,
-          query: str | None = None) -> list[Call]:
-    """Call every tool once through `target` (an in-process server in tests), else the server `command` starts."""
+          query: str | None = None, write: bool | None = None) -> list[Call]:
+    """Call every tool once through `target` (an in-process server in tests), else the server `command` starts. The
+    tools that write are listed, never called."""
     if target is None:
         from mcp.client.stdio import StdioServerParameters
 
-        exe, *args = command(database, sources)
+        exe, *args = command(database, sources, write)
         target = StdioServerParameters(command=exe, args=args)
     return asyncio.run(_calls(target, ask, query))

@@ -11,7 +11,7 @@ from pipeline_data import day, event, local_models, mail  # noqa: F401
 from sqlalchemy import text
 
 from igneous import llm, pipeline
-from igneous.graph import backbone, corrections, threads
+from igneous.graph import backbone, corrections, overrides, threads
 from igneous.graph.derived import Writer
 from igneous.main import app
 
@@ -201,7 +201,7 @@ def test_a_message_you_linked_leaves_with_its_record_and_the_link_comes_back_wit
     message = db.execute(text("SELECT id FROM nodes WHERE type = 'Message'")).scalar_one()
     trip = db.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Project', 'project:trip', 'Trip') "
                            "RETURNING id")).scalar_one()
-    assert client.post("/graph/link", json={"src": message, "dst": trip, "type": "PART_OF"}).json()["id"]
+    assert client.post("/facts", json={"subject": message, "relation": "PART_OF", "object": trip}).json()["id"]
     db.execute(text("DELETE FROM source_items WHERE external_id = 'plans'"))  # a sync saw it deleted
     pipeline.run(db)
     assert db.execute(text("SELECT count(*) FROM nodes WHERE type = 'Message'")).scalar() == 0
@@ -297,10 +297,9 @@ def test_an_umbrella_is_upserted_and_a_link_you_drew_to_it_survives_rebuilds(db,
     assert lab and db.execute(text("SELECT count(*) FROM edges WHERE dst = :l AND extractor = 'hierarchy'"),
                               {"l": lab}).scalar() == 2
     side = Writer(db, "threads").project("thread:side", "Side project", {"derived": "threads"})
-    drawn = client.post("/graph/link", json={"src": side, "dst": lab, "type": "PART_OF"}).json()
-    assert drawn["applied"] == "now" and drawn["id"]
-    assert db.execute(text("SELECT child_key, parent_key, origin FROM thread_parents")).one() == \
-        ("thread:side", "umbrella:robotics lab", "user")
+    drawn = client.post("/facts", json={"subject": side, "relation": "PART_OF", "object": lab}).json()
+    assert drawn["applied"] == "now" and drawn["id"] and drawn["override_id"]
+    assert overrides.stated_parents(db) == [("Project:thread:side", "Project:umbrella:robotics lab")]
     threads.run(db, log=None)
     assert project(db, "Robotics Lab") == lab  # the same node: upserted, not recreated
     assert db.execute(text("SELECT count(*) FROM edges WHERE dst = :l AND extractor = 'user'"), {"l": lab}).scalar() == 0
@@ -344,7 +343,7 @@ def test_a_link_you_added_can_be_taken_out_kept_out_through_rebuilds_and_brought
     person, thread, _chat, derived, _only = _pair_graph(db)
     assert client.delete(f"/graph/link/{derived}").status_code == 400  # inferred: say it is wrong instead
     assert client.delete("/graph/link/999999").status_code == 404
-    added = client.post("/graph/link", json={"src": person, "dst": thread, "type": "INVOLVED_IN"}).json()
+    added = client.post("/facts", json={"subject": person, "relation": "INVOLVED_IN", "object": thread}).json()
     assert added["applied"] == "now" and added["id"] and added["override_id"]
     out = client.delete(f"/graph/link/{added['id']}").json()
     assert out["applied"] == "now" and out["override_id"]

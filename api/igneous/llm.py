@@ -113,12 +113,13 @@ _HOLDS = ("AND strpos(lower(coalesce(si.title, '') || ' ' || coalesce(si.body_te
 def _named_elsewhere(type_: str, props: dict, own_record_allowed: bool) -> bool:
     """Whether a node's name came from outside the records it appears in, so the name itself must be found there:
     a contact card's, LinkedIn's or your resume's name for a person or another identity's name shown for them; any
-    organization's (contact cards, LinkedIn, your resume, a domain's signatures); a Project named by your resume or
-    by you; a chat or folder (named by its own source, which may not be allowed)."""
+    organization's (contact cards, LinkedIn, your resume, a domain's signatures, a fact); a Project named by your
+    resume, by you or by an agent (a fact brought it in: graph/facts.py); a chat or folder (named by its own source,
+    which may not be allowed)."""
     if type_ == "Person":
         return props.get("named_by") in ("contacts", "linkedin", "profile") or "shown_name" in props
     if type_ == "Project":
-        return bool(props.get("renamed")) or props.get("named_from") in ("profile", "you")
+        return bool(props.get("renamed")) or props.get("named_from") in ("profile", "you") or "added_by" in props
     if type_ == "Organization":
         return True
     return not own_record_allowed

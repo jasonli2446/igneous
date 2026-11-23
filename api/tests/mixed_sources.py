@@ -42,7 +42,7 @@ class Recorder:
 
 
 def _wipe(s):
-    s.execute(text(f"TRUNCATE edge_verdicts, edges_dropped, thread_registry, thread_parents, overrides, "
+    s.execute(text(f"TRUNCATE edge_verdicts, edges_dropped, thread_registry, overrides, "
                    f"{', '.join(TABLES)} RESTART IDENTITY CASCADE"))
     s.commit()
 

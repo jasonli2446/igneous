@@ -14,9 +14,14 @@ const REL: Record<string, string> = {
   SENT: "sent", RECEIVED: "received", IN_THREAD: "is in", REPLIES_TO: "replied to", AUTHORED: "authored", SAME_AS: "is the same as",
 };
 
+/** A link you or an agent added ("agent:<name>"): taken out with Remove, not called wrong. */
+const added = (e: WhyEdge) => e.origin === "user" || e.origin.startsWith("agent:");
+
 /** One link: who and how, where it came from (the API says, in plain words), the verifier's reason when it has
- *  judged it, and the items it came from. Only an inferred link can be called wrong. */
-function EdgeCard({ e, terms, onWrong, busy }: { e: WhyEdge; terms: string[]; onWrong?: (e: WhyEdge) => void; busy?: boolean }) {
+ *  judged it, and the items it came from. Only an inferred link can be called wrong; one someone added is removed. */
+function EdgeCard({ e, terms, onWrong, onRemove, busy }: {
+  e: WhyEdge; terms: string[]; onWrong?: (e: WhyEdge) => void; onRemove?: (e: WhyEdge) => void; busy?: boolean;
+}) {
   return (
     <li className="rounded-md border border-line p-2.5">
       <div className="flex items-start gap-2">
@@ -36,6 +41,12 @@ function EdgeCard({ e, terms, onWrong, busy }: { e: WhyEdge; terms: string[]; on
         <button type="button" disabled={busy} onClick={() => onWrong(e)}
           className="mt-2 text-xs text-muted hover:text-danger hover:underline disabled:opacity-50">
           This is wrong
+        </button>
+      )}
+      {added(e) && e.id > 0 && onRemove && (
+        <button type="button" disabled={busy} onClick={() => onRemove(e)}
+          className="mt-2 text-xs text-muted hover:text-danger hover:underline disabled:opacity-50">
+          Remove
         </button>
       )}
     </li>
@@ -66,6 +77,20 @@ export default function WhyConnected({ a, b, revision, onCloseAction, onOpenActi
       onCorrectedAction({
         text: `Removed ${res.edges.length} inferred connection${res.edges.length === 1 ? "" : "s"}.`,
         undo: () => api.restoreEdges(res.edges),
+      });
+    }).catch((e) => setError(`Couldn't remove it. (${String(e)})`)).finally(() => setSaving(false));
+  };
+
+  // "Remove" on a link you or an agent added: it goes now and stays out on every rebuild, with Undo.
+  const remove = (edge: WhyEdge) => {
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+    api.removeLink(edge.id).then((res) => {
+      onCorrectedAction({
+        text: edge.origin === "user" ? "Removed the connection you added."
+          : `Removed the connection ${edge.origin.slice("agent:".length)} added.`,
+        undo: () => api.undoCorrection(res.override_id),
       });
     }).catch((e) => setError(`Couldn't remove it. (${String(e)})`)).finally(() => setSaving(false));
   };
@@ -130,7 +155,7 @@ export default function WhyConnected({ a, b, revision, onCloseAction, onOpenActi
           {r.direct.length > 0 && (
             <section aria-label="Why linked">
               <h3 className="mb-2 text-xs font-medium text-muted">Why they&apos;re linked</h3>
-              <ul className="space-y-2">{r.direct.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} onWrong={wrong} busy={saving} />)}</ul>
+              <ul className="space-y-2">{r.direct.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} onWrong={wrong} onRemove={remove} busy={saving} />)}</ul>
             </section>
           )}
 
@@ -139,7 +164,7 @@ export default function WhyConnected({ a, b, revision, onCloseAction, onOpenActi
               <h3 className="mb-2 text-xs font-medium text-muted">
                 {r.path.length <= 2 ? "How they're linked" : `Linked through ${r.path.length - 1} other thing${r.path.length === 2 ? "" : "s"}`}
               </h3>
-              <ul className="space-y-2">{r.path.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} onWrong={wrong} busy={saving} />)}</ul>
+              <ul className="space-y-2">{r.path.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} onWrong={wrong} onRemove={remove} busy={saving} />)}</ul>
             </section>
           )}
 

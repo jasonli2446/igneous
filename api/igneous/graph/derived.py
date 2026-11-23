@@ -21,11 +21,35 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 # Extractors that state a fact rather than infer it: read from your data, or added by you. Never rejected, never
-# judged by the verifier.
+# judged by the verifier. A fact an agent added for you states one too: its extractor is 'agent:<the agent's name>'
+# (graph/facts.py), so `stated` and `inferred` are the tests to use.
 STATED = ("spine", "user", "profile", "contacts", "self", "github", "linkedin")
+AGENT = "agent:"
 # A Project's props that the stage deriving it doesn't own: your corrections' (renamed, hidden: the last step sets
 # them again), and the backbone's marks on the threads it places (graph/backbone.py).
 OTHERS = ("renamed", "hidden", "org", "org_why", "same_as_org")
+
+
+def stated(extractor: str | None) -> bool:
+    """Whether a link made by `extractor` states a fact (read from your data, or added by you or an agent) rather
+    than infers one."""
+    return extractor in STATED or added(extractor)
+
+
+def added(extractor: str | None) -> bool:
+    """Whether a link made by `extractor` is a fact someone added: you ('user') or an agent ('agent:<name>')."""
+    return extractor == "user" or (extractor or "").startswith(AGENT)
+
+
+def inferred(column: str) -> str:
+    """SQL: the link whose extractor is `column` was inferred by a rule or a model, not stated (what a rejection
+    removes and the verifier judges)."""
+    return f"({column} NOT IN ({', '.join(repr(x) for x in STATED)}) AND {column} NOT LIKE '{AGENT}%')"
+
+
+def added_sql(column: str) -> str:
+    """SQL: the link whose extractor is `column` is a fact you or an agent added."""
+    return f"({column} = 'user' OR {column} LIKE '{AGENT}%')"
 
 
 def norm(name: str | None) -> str:
@@ -178,8 +202,8 @@ class Writer:
         blocked = self.rejected.id_pairs()
         if not blocked:
             return 0
-        n = self.s.execute(text(f"DELETE FROM edges e WHERE e.extractor <> ALL(:stated) AND {blocked_sql('e.src', 'e.dst')}"),
-                           {"stated": list(STATED), "blocked": blocked}).rowcount
+        n = self.s.execute(text(f"DELETE FROM edges e WHERE {inferred('e.extractor')} AND {blocked_sql('e.src', 'e.dst')}"),
+                           {"blocked": blocked}).rowcount
         self.skipped += n
         return n
 

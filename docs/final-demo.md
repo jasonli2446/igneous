@@ -101,8 +101,8 @@ What is in them, so you know what to click:
 ## 3. The MCP server (3–4 min)
 
 > The same graph is an MCP server, so any agent can use it as memory: Claude Code, Claude Desktop, Cursor. One
-> command to register, read-only by design. The tools are the explorer's own functions, so the agent sees exactly what
-> the UI shows.
+> command to register, read-only unless you let it write. The tools are the explorer's own functions, so the agent
+> sees exactly what the UI shows.
 
 | Tool | What it does |
 |---|---|
@@ -115,6 +115,7 @@ What is in them, so you know what to click:
 | `timeline`, `commitments` | Dated activity or a pair's history, and the promises found in a node's records |
 | `search` | Keyword + semantic search over the shared records (skips browsing history unless asked) |
 | `ask` | A cited answer from the text, or "can't answer" |
+| `remember`, `link` | Only on a server registered with `--write`: add a fact the agent was told or found, shown in the explorer as added by it, with Remove and Undo |
 
 Everything a tool returns reaches the agent's model, so it carries text and names only from the sources opted in
 (here, everything the persona came through); the rest would show as counts.
@@ -170,6 +171,14 @@ Pick 3–4. Each needs no setup beyond registration. Speak as Mira: the server's
    Expect: `ask` answers "COB 10/23" and cites the email it comes from: question q002 of the Enron gold set
    (`api/eval/questions.jsonl`), answered in the demo mailbox `make demo` reads.
 
+8. **Remember something** (a server registered with `--write`: `igneous mcp install --name igneous-write --database
+   igneous_persona --sources email,fs,takeout,linkedin,ai_chats --write`):
+   > Using igneous-write: remember that Dana Kimura comes to my Thursday board game night.
+
+   Expect: `find` (Dana) → `remember` with a new project "Board game night" (kind hobby). In the explorer, open Dana:
+   the project is there, and clicking the line says "Added by claude-code." with the note; **Remove** takes it out,
+   with Undo. It stays through **Rebuild**.
+
 Adding "two records is enough" to prompt 4 keeps it short; without it the agent may keep reading. Time each prompt
 in a fresh session before recording: times depend on the model and on the warm cache (step 8).
 
@@ -190,7 +199,8 @@ in a fresh session before recording: times depend on the model and on the warm c
   (`api/eval/README.md`: hybrid recall@10 0.81 vs 0.41 lexical; Ask cited the gold source on 87% of answerable
   questions; entity resolution P 0.95 / R 0.93, never on a name alone).
 - **Privacy:** local, read-only, per-source opt-in before any model sees content, secrets encrypted or git-ignored.
-  The MCP server is read-only and shares only what is opted in. The demo's data is invented.
+  The MCP server shares only what is opted in, and writes only when you let it: each fact an agent adds carries its
+  name and is removed in one click. The demo's data is invented.
 
 ## If something goes wrong
 

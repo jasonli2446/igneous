@@ -152,7 +152,7 @@ def test_corrections_become_intents_and_dropped_links_one_row_each(test_db, monk
                     ('thread:q', 'Quiz · May 2025', 'thread', '{Quiz}', 'rejected', 'burst'),
                     ('thread:r', 'Rent', 'chore', '{Rent}', 'rejected', 'burst')"""))
         for _ in range(2):  # the upgrade, then a downgrade and the upgrade again
-            command.upgrade(config, "head")
+            command.upgrade(config, revision.revision)
             with engine.connect() as c:
                 dropped = c.execute(text("SELECT id, src_key, dst_key FROM edges_dropped")).all()
                 rejection = c.execute(text("""SELECT src_key, dst_key, type, extractor, verdict, source
@@ -169,6 +169,73 @@ def test_corrections_become_intents_and_dropped_links_one_row_each(test_db, monk
             assert [tuple(r) for r in parents] == [("thread:a", "thread:b", "user")]
             assert [tuple(r) for r in registry] == [("thread:p", "active", False), ("thread:r", "rejected", True)]
             command.downgrade(config, revision.down_revision)
+        engine.dispose()
+    finally:
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+def test_every_fact_becomes_one_override_row_and_an_agents_fact_holds_what_it_names(test_db, monkeypatch):
+    """The facts migration on a database written by the code before it: a project you put under another becomes an
+    override 'link' (and so does one a connection you took out holds), thread_parents goes, and an agent's fact holds
+    a person as yours does. Downgrading puts the hierarchy back and drops the agents' facts; upgrading again gives the
+    same rows."""
+    from alembic import command
+    from alembic.config import Config
+
+    revision = next(r for r in dbm._script().walk_revisions() if (r.doc or "").startswith("Every fact you or an agent"))
+    name = f"{TEST_DB}_facts"
+    url = make_url(settings.database_url).set(database=name).render_as_string(hide_password=False)
+    admin = create_engine(make_url(settings.database_url).set(database="postgres"), isolation_level="AUTOCOMMIT")
+    config = Config(str(API / "alembic.ini"))
+    config.set_main_option("script_location", str(API / "migrations"))
+    monkeypatch.setattr(settings, "database_url", url)  # migrations/env.py connects to settings.database_url
+    try:
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+            c.execute(text(f'CREATE DATABASE "{name}"'))
+        command.upgrade(config, revision.down_revision)
+        engine = create_engine(url)
+        with engine.begin() as c:
+            ids = dict(c.execute(text("""
+                INSERT INTO nodes (type, key, name) VALUES ('Person', 'pat@x.test', 'Pat'),
+                    ('Organization', 'org:acme', 'Acme'), ('Project', 'thread:a', 'Atlas')
+                RETURNING key, id""")).all())
+            c.execute(text("""INSERT INTO thread_parents (child_key, parent_key, origin)
+                              VALUES ('thread:a', 'thread:b', 'user')"""))
+            c.execute(text("""INSERT INTO overrides (op, node_keys, value, data) VALUES ('unlink',
+                ARRAY['Project:thread:a', 'Project:thread:c'], 'PART_OF',
+                '{"user_link": true, "links": [], "parents": [["thread:c", "thread:a", "user"]]}')"""))
+            c.execute(text("""INSERT INTO edges (src, dst, type, extractor, props)
+                              VALUES (:p, :o, 'WORKED_AT', 'agent:helper', '{"why": "Pat said so"}')"""),
+                      {"p": ids["pat@x.test"], "o": ids["org:acme"]})
+        held = "SELECT node_held(:p, NULL)"
+        for _ in range(2):  # the upgrade, then a downgrade and the upgrade again
+            command.upgrade(config, revision.revision)
+            with engine.connect() as c:
+                links = c.execute(text("SELECT node_keys, value, data FROM overrides WHERE op = 'link'")).all()
+                unlink = c.execute(text("SELECT data FROM overrides WHERE op = 'unlink'")).scalar_one()
+                tables = c.execute(text("SELECT to_regclass('thread_parents')")).scalar()
+                pat = c.execute(text(held), {"p": ids["pat@x.test"]}).scalar()
+            assert [(r[0], r[1], r[2]["by"]) for r in links] == [(["Project:thread:a", "Project:thread:b"], "PART_OF",
+                                                                  "user")]
+            assert "parents" not in unlink and unlink["links"] == [
+                {"op": "link", "node_keys": ["Project:thread:c", "Project:thread:a"], "value": "PART_OF",
+                 "data": {"props": {"why": "you said so"}, "by": "user"}}]
+            assert tables is None and pat is True
+            command.downgrade(config, revision.down_revision)
+            with engine.connect() as c:
+                parents = c.execute(text("SELECT child_key, parent_key, origin FROM thread_parents")).all()
+                agents = c.execute(text("SELECT count(*) FROM edges WHERE extractor LIKE 'agent:%'")).scalar()
+                pat = c.execute(text(held), {"p": ids["pat@x.test"]}).scalar()
+                remaining = c.execute(text("SELECT count(*) FROM overrides WHERE op = 'link'")).scalar()
+            assert [tuple(r) for r in parents] == [("thread:a", "thread:b", "user")]
+            assert (agents, pat, remaining) == (0, False, 0)
+            with engine.begin() as c:  # an agent's fact, as this code would have it, for the upgrade again
+                c.execute(text("""INSERT INTO edges (src, dst, type, extractor, props)
+                                  VALUES (:p, :o, 'WORKED_AT', 'agent:helper', '{"why": "Pat said so"}')"""),
+                          {"p": ids["pat@x.test"], "o": ids["org:acme"]})
         engine.dispose()
     finally:
         with admin.connect() as c:

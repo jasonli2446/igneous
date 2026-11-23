@@ -10,8 +10,13 @@ only of the people and things those records name, and counts of the rest (`withh
 default, the tools return the graph's structure and counts only.
 
 `ask` is the one tool that calls a hosted model (Claude on Bedrock, which costs money): it answers from opted-in
-records as Ask does and, like every model call, keeps the model's reading of the question in the model cache. No other
-tool writes anything.
+records as Ask does and, like every model call, keeps the model's reading of the question in the model cache.
+
+The graph is the user's: an agent writes to it only when they turn writes on (IGNEOUS_MCP_WRITE, or `igneous mcp
+--write`). Then two more tools are served, `remember` and `link`, the only ones with a writable session: each adds one
+fact (graph/facts.py) about what the user shares with the client (or about the user), tagged 'agent:<the client's
+name>' as the client named itself when it connected. The explorer shows it with that origin, and the user takes it out
+in one click; nothing is ever written to a source. Without writes on, they don't exist.
 
 Arguments are checked against each tool's schema before any database work. A tool given the id of nothing, or asked
 for something it can't do, fails with a message (the result's `isError`): the one error shape.
@@ -21,14 +26,16 @@ from contextlib import contextmanager
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from pydantic import Field
+from mcp_types import ToolAnnotations
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous import source_catalog
-from igneous.db import read_only_session
+from igneous.config import settings
+from igneous.db import SessionLocal, read_only_session
 from igneous.graph import identity
 
 if TYPE_CHECKING:
@@ -49,7 +56,9 @@ server = MCPServer(
         "ranks someone's relationships; `timeline` gives dated activity; `commitments` gives cited promises. Answer "
         "questions about structure (who went, who's on it, what's under it) with these, usually in 2-4 calls. Use "
         "`search` or `ask` only for what was said. Cite node_ids and item_ids. A result's `withheld` counts the records "
-        "and names the user hasn't opted in to share with you: never guess at them. Everything is read-only."
+        "and names the user hasn't opted in to share with you: never guess at them. Everything is read-only, unless "
+        "the user turned on writes: then `remember` and `link` add a fact the user told you or that you found (shown "
+        "to them with your name, and undone in one click); `find` first, so a fact joins what the graph already has."
     ),
 )
 
@@ -387,19 +396,135 @@ def ask(question: Annotated[str, Field(min_length=1, max_length=2000)]) -> dict:
                          "filters": _filters(d, r.get("filters") or {})})
 
 
-def main(database: str | None = None, sources: str | None = None) -> None:
-    """Serve over stdio. `database` names another database on the configured server, and `sources` replaces
-    IGNEOUS_LLM_SOURCES, for this server only (`igneous mcp --database --sources`)."""
+# ---------------------------------------------------------------------------------------------------------------
+# Writes (IGNEOUS_MCP_WRITE): facts an agent adds for the user, each with the agent's name on it, each undone in one click.
+# ---------------------------------------------------------------------------------------------------------------
+
+class NewThing(BaseModel):
+    """Something the graph doesn't have yet, which the fact brings in."""
+    name: Annotated[str, Field(min_length=1, max_length=120, description="what the user calls it")]
+    type: Literal["Project", "Organization"] = Field(
+        "Project", description="Project: anything the user does or did (a project, hobby, trip, class, job, club); "
+                               "Organization: a company, school, lab or group they were part of")
+    kind: Annotated[str, Field(min_length=1, max_length=40)] | None = Field(
+        None, description="a project's kind, which sets its section in the explorer: hobby, trip, class, job, project")
+
+
+Thing = Annotated[int, Field(ge=1)] | NewThing
+Why = Annotated[str, Field(min_length=1, max_length=500, description="why: what the user said, or the records (item_ids) "
+                                                                     "it comes from")]
+# What `remember` may state, from subject to object; "same person" is only the user's to say.
+Relation = Literal["INVOLVED_IN", "PART_OF", "WORKED_AT", "MEMBER_OF", "RELATED_TO"]
+WRITES = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
+
+
+def _client(ctx: Context) -> str:
+    """The name the client gave itself when it connected, or 'unknown client'."""
+    try:
+        params = ctx.session.client_params
+    except ValueError:  # called outside any client's request
+        params = None
+    return (params.client_info.name if params is not None else "") or "unknown client"
+
+
+def _state(subject: "int | NewThing", relation: str, object_: "int | NewThing", note: str, ctx: Context) -> dict:
+    """Add one fact as this client's agent, through a writable session, and answer by the rule every answer follows:
+    what it joins by name only where the user shares it. A node the client may not name is refused: it can't have
+    learned of it here (the user, whom it is talking to, is the one exception)."""
+    from igneous.disclosure import Disclosure
+    from igneous.graph import facts
+
+    def end(x: "int | NewThing") -> "int | facts.New":
+        return x if isinstance(x, int) else facts.New(x.type, x.name, x.kind)
+
+    by = facts.agent(_client(ctx))
+    with SessionLocal() as s:
+        d = Disclosure(s)
+        owner = identity.self_id(s)
+        try:
+            for x in (subject, object_):
+                if not isinstance(x, int):
+                    continue
+                identity.node(s, x)  # the id of nothing is an error
+                if x != owner and d.name(x) is None:
+                    raise ToolError(f"node {x} isn't shared with you: state facts only about what the user shares "
+                                    "with you, and about the user")
+            r = facts.add(s, end(subject), relation, end(object_), note, by)
+        except identity.NotFound as e:
+            raise ToolError(f"no node {e.node_id}") from e
+        except (LookupError, ValueError) as e:
+            raise ToolError(str(e)) from e
+        types = dict(s.execute(text("SELECT id, type FROM nodes WHERE id = ANY(:i)"),
+                               {"i": [i for i in (r["src"], r["dst"]) if i is not None]}).all())
+
+        def side(node_id: int | None) -> dict | None:
+            if node_id is None:  # in the graph once the rebuild that is running publishes
+                return None
+            if node_id in r["nodes"]:
+                return {"node_id": node_id, "type": types[node_id], "new": True}  # called what you called it
+            name = d.name(node_id)
+            if name is None:
+                d.withhold_nodes(types[node_id])  # the user, when no record the client may read names them
+            return {"node_id": node_id, "type": types[node_id], "name": name}
+
+        answer = {"from": side(r["src"]), "relation": relation, "to": side(r["dst"]), "link_id": r["id"], "by": by,
+                  "override_id": r["override_id"], "applied": r["applied"], "already": r["already"]}
+        if r.get("note"):
+            answer["note"] = r["note"]
+        return d.report(answer)
+
+
+def remember(subject: Thing, relation: Relation, object: Thing, note: Why, ctx: Context) -> dict:
+    """Record a fact the user told you, or one you found in their records, so their graph keeps it: `subject relation
+    object`. INVOLVED_IN: a person took part in a project (a trip, class, hobby, job). PART_OF: a record, group chat,
+    event or project is part of a project, or a project was done at an organization. WORKED_AT / MEMBER_OF: a person
+    worked or studied at, or belongs to, an organization. RELATED_TO: any two things are connected. Each side is a
+    node_id (`find` it first, or `me` for the user), or something the graph doesn't have yet: {"name", "type":
+    "Project" | "Organization", "kind"}. The fact is shown to the user as added by you, with your note, and they can
+    take it out in one click; `override_id` undoes it."""
+    return _state(subject, relation, object, note, ctx)
+
+
+def link(a: Annotated[int, Field(ge=1)], b: Annotated[int, Field(ge=1)], why: Why, ctx: Context) -> dict:
+    """Record that two things in the graph are connected (RELATED_TO), and why: two node_ids from `find`, `me` or
+    another tool. For a specific relation (took part in, part of, worked at), or something new, use `remember`. Shown
+    to the user as added by you, and undone in one click."""
+    return _state(a, "RELATED_TO", b, why, ctx)
+
+
+_writing: set[str] = set()  # the write tools being served
+
+
+def serve_writes(on: bool) -> None:
+    """Serve the write tools while writes are on (IGNEOUS_MCP_WRITE), and only then."""
+    for tool in (remember, link):
+        if on and tool.__name__ not in _writing:
+            server.add_tool(tool, annotations=WRITES)
+            _writing.add(tool.__name__)
+        elif not on and tool.__name__ in _writing:
+            server.remove_tool(tool.__name__)
+            _writing.discard(tool.__name__)
+
+
+serve_writes(settings.mcp_write)
+
+
+def main(database: str | None = None, sources: str | None = None, write: bool | None = None) -> None:
+    """Serve over stdio. `database` names another database on the configured server, `sources` replaces
+    IGNEOUS_LLM_SOURCES and `write` IGNEOUS_MCP_WRITE, for this server only (`igneous mcp --database --sources
+    --write`)."""
     import sys
     import threading
 
     from igneous import db
-    from igneous.config import settings
 
     if database:
         db.use_database(database)
     if sources is not None:
         settings.llm_sources = sources
+    if write is not None:
+        settings.mcp_write = write
+    serve_writes(settings.mcp_write)
     if problem := db.schema_status():
         print(f"igneous mcp: {problem}", file=sys.stderr)  # stdout is the protocol channel
         raise SystemExit(2)

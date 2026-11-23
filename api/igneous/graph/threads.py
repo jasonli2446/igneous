@@ -35,7 +35,7 @@ Writes `Project` nodes (props.derived 'threads', through graph/derived.py's Writ
 link you rejected is never written), PART_OF item -> thread and INVOLVED_IN person -> thread with their evidence; a
 thread no registry row builds any more is deleted. Then: duplicates resolved and related threads linked
 (resolve_threads), umbrellas over them (an org, lab or program several threads sit under), the hierarchy you stated
-(thread_parents), and the group chats and calendar series that are about a thread.
+(a project you put under another), and the group chats and calendar series that are about a thread.
 """
 import hashlib
 import json
@@ -852,10 +852,9 @@ def _is_umbrella(term: str, thread_names: list[str], months: int, shown: list[st
 
 
 def stated_hierarchy(s: Session) -> int:
-    """The Project hierarchy someone stated (thread_parents: you through POST /graph/link, or a gold set you
-    pinned), as PART_OF links with extractor 'user', on the Projects as they are now (one you folded away: the one it
-    went into). Written as the threads are built, so the stages after this one see it; the last step writes it
-    again."""
+    """The Project hierarchy you stated (your facts, POST /facts: graph/overrides.py stated_parents), as PART_OF links
+    with extractor 'user', on the Projects as they are now (one you folded away: the one it went into). Written as
+    the threads are built, so the stages after this one see it; the last step writes it again."""
     from igneous.graph.derived import merges
     from igneous.graph.overrides import stated_parents as rows
 

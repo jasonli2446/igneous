@@ -27,12 +27,23 @@ def test_self_merges_and_cycles_never_fold_a_project_into_itself():
     assert all(k != v for k, v in p.merges.items())
 
 
-def test_hide_is_idempotent_and_links_keep_their_type_and_props():
+def test_hide_is_idempotent_and_links_keep_their_type_props_and_who_stated_them():
     p = plan([row(1, "hide", [A]), row(2, "hide", [A]),
               row(3, "link", ["Person:x", A], "INVOLVED_IN", {"props": {"why": "you added this"}}),
-              row(4, "unlink", [A, "Person:x"], data={"pair_correction": True})])
+              row(4, "unlink", [A, "Person:x"], data={"pair_correction": True}),
+              row(5, "link", ["Person:y", "Project:added:board games"], "INVOLVED_IN",
+                  {"props": {"why": "she hosts it"}, "by": "agent:claude-code",
+                   "nodes": {"Project:added:board games": {"type": "Project", "name": "Board Games"}}}),
+              row(6, "link", ["Person:x", "Project:added:board games"], "INVOLVED_IN",
+                  {"props": {}, "nodes": {"Project:added:board games": {"type": "Project", "name": "board games"}}})])
     assert p.hidden == {A}
-    assert p.links == [("Person:x", A, "INVOLVED_IN", {"why": "you added this"})]
+    assert p.links == [("Person:x", A, "INVOLVED_IN", {"why": "you added this"}, "user"),
+                       ("Person:y", "Project:added:board games", "INVOLVED_IN", {"why": "she hosts it"},
+                        "agent:claude-code"),
+                       ("Person:x", "Project:added:board games", "INVOLVED_IN", {}, "user")]
+    # A new thing is what the oldest fact that names it says.
+    assert p.nodes == {"Project:added:board games": {"type": "Project", "name": "Board Games",
+                                                     "by": "agent:claude-code"}}
 
 
 def test_rename_without_value_is_ignored():
@@ -48,10 +59,12 @@ def test_entity_routes_are_registered():
     assert "get" in paths["/graph/entity/{node_id}"]
     assert "delete" in paths["/overrides/{override_id}"]
     assert "get" in paths["/graph/suggestions"] and "post" in paths["/graph/edge/confirm"]
+    # One write path for what you or an agent add: a fact. A link is taken out by its id.
+    assert "post" in paths["/facts"] and "/graph/link" not in paths and "delete" in paths["/graph/link/{edge_id}"]
 
 
-def test_adding_a_connection_accepts_only_pairs_the_menu_offers(db):
-    """POST /graph/link accepts only the pairs its menu offers for the two kinds of thing (#181)."""
+def test_adding_a_fact_accepts_only_pairs_the_menu_offers(db):
+    """POST /facts accepts only the pairs its menu offers for the two kinds of thing (#181)."""
     from fastapi.testclient import TestClient
     from sqlalchemy import text
 
@@ -60,7 +73,16 @@ def test_adding_a_connection_accepts_only_pairs_the_menu_offers(db):
     ids = [db.execute(text("INSERT INTO nodes (type, key, name) VALUES (:t, :k, :k) RETURNING id"),
                       {"t": t, "k": k}).scalar_one() for t, k in (("Person", "a"), ("Person", "b"), ("Project", "p"))]
     client = TestClient(app)
-    assert client.post("/graph/link", json={"src": ids[0], "dst": ids[1], "type": "PART_OF"}).status_code == 400
-    assert client.post("/graph/link", json={"src": ids[2], "dst": ids[0], "type": "SAME_AS"}).status_code == 400
-    assert client.post("/graph/link", json={"src": ids[0], "dst": 10**9, "type": "RELATED_TO"}).status_code == 404
+
+    def fact(subject, relation, object_, **more):
+        return client.post("/facts", json={"subject": subject, "relation": relation, "object": object_, **more})
+
+    assert fact(ids[0], "PART_OF", ids[1]).status_code == 400
+    assert fact(ids[2], "SAME_AS", ids[0]).status_code == 400
+    assert fact(ids[0], "RELATED_TO", 10**9).status_code == 404
+    assert fact(ids[0], "RELATED_TO", ids[0]).status_code == 400                       # nothing is linked to itself
+    assert fact(ids[0], "SAME_AS", ids[1], agent="helper").status_code == 400          # only you say who is who
+    assert fact(ids[0], "INVOLVED_IN", ids[2], agent="helper").status_code == 400      # an agent says why
+    assert fact(ids[0], "INVOLVED_IN", {"name": "  ", "type": "Project"}).status_code in (400, 422)
+    assert fact(ids[0], "INVOLVED_IN", {"name": "Chess", "type": "Person"}).status_code == 422
     assert db.execute(text("SELECT count(*) FROM overrides")).scalar() == 0
