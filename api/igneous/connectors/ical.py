@@ -30,7 +30,7 @@ left out and counted, never the end of the import.
 """
 import re
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -66,11 +66,13 @@ class Calendar:
 
 @dataclass
 class Listing:
-    """One calendar's records as of its export: every record's external id is `<scope>/<event or occurrence id>`."""
+    """One calendar's records as of its export: every record's external id is `<scope>/<event or occurrence id>`.
+    `calendar_id` is set when the scope is `<account>/<calendar id>`."""
     name: str
     scope: str
     exported: datetime
     items: list[SourceItem]
+    calendar_id: str | None = None
 
 
 def _zone(tzid: str | None) -> ZoneInfo | None:
@@ -233,15 +235,22 @@ class Report:
         return out
 
 
-def listings(calendars: list[Calendar], owner: str | None, report: Report | None = None) -> list[Listing]:
+def listings(calendars: list[Calendar], owner: str | None, report: Report | None = None,
+             known: dict[str, str] | None = None) -> list[Listing]:
     """Each calendar's records: every occurrence of every event up to the calendar's export, as Google Calendar
-    records (gcal), in time order. A calendar without a single event has no listing: nothing says when it was
-    exported."""
+    records (gcal), in time order. A calendar with no event was exported with the others (an export stamps them all
+    at once), so it is listed, empty, unless nothing in the export says when that was. `known`: the owner's calendar
+    ids by calendar name, as earlier exports named them, for a calendar this export doesn't name the id of (one with
+    no events of its own)."""
     report = report if report is not None else Report()
+    stamp = max((c.exported for c in calendars if c.exported), default=None)
     out = []
     for cal in calendars:
-        if cal.exported is None:
+        exported = cal.exported or stamp
+        if exported is None:
             continue
+        if owner and not cal.id and (known or {}).get(cal.name):
+            cal = replace(cal, id=known[cal.name])
         keyed = bool(owner and cal.id)
         scope = f"{owner}/{cal.id}" if keyed else f"takeout/{cal.name}"
         masters: dict[str, Component] = {}
@@ -263,7 +272,7 @@ def listings(calendars: list[Calendar], owner: str | None, report: Report | None
             google = uid.lower().endswith(GOOGLE_UID)
             event = _Event(cal, uid, f"{scope}/{uid[:-len(GOOGLE_UID)] if google else uid}", scope, owner)
             try:
-                found, cut = event.records(masters.get(uid), changed.get(uid, {}), cal.exported)
+                found, cut = event.records(masters.get(uid), changed.get(uid, {}), exported)
             except UNREADABLE:
                 report.unreadable += 1
                 continue
@@ -278,7 +287,7 @@ def listings(calendars: list[Calendar], owner: str | None, report: Report | None
             rows += found
         items = [item for _start, _id, item in sorted(rows, key=lambda r: (r[0], r[1]))]
         report.occurrences += len(items)
-        out.append(Listing(cal.name, scope, cal.exported, items))
+        out.append(Listing(cal.name, scope, exported, items, cal.id if keyed else None))
     return out
 
 

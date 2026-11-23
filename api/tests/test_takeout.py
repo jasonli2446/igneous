@@ -491,6 +491,27 @@ def test_two_calendars_keyed_alike_in_one_export_keep_each_others_records(db, tm
         assert (again["inserted"], again["updated"], again["deleted"], again["unchanged"]) == (0, 0, 0, 2)
 
 
+def test_a_calendar_emptied_or_keyed_by_a_later_export_keeps_no_stale_events(db, tmp_path):
+    """A newer export whose Work calendar holds nothing removes its events; and a calendar an earlier export couldn't
+    key (no Chat export said whose it was) is replaced by the same calendar a later export keys."""
+    work = "DTSTART:20250602T150000Z\nORGANIZER;CN=Work:mailto:w1@group.calendar.google.com\nUID:plan@google.com\nSUMMARY:Plan"
+    chat_user = {"Google Chat/Users/User 1/user_info.json": {"user": {"name": "Me", "email": "me@example.com"}}}
+    early = build_zip(tmp_path / "takeout-20250701T000000Z-001.zip", {
+        "Calendar/Work.ics": ics("20250701T000000Z", work, name="Work")})
+    later = build_zip(tmp_path / "takeout-20250801T000000Z-001.zip", {
+        "Calendar/Work.ics": ics("20250801T000000Z", work, name="Work"), **chat_user})
+    emptied = build_zip(tmp_path / "takeout-20250901T000000Z-001.zip", {
+        "Calendar/me@example.com.ics": ics("20250901T000000Z", RETRO),
+        "Calendar/Work.ics": ics("20250901T000000Z", name="Work"), **chat_user})
+    with SessionLocal() as s:
+        takeout.run_import(s, [early])
+        assert set(calendar_records(s)) == {"takeout/Work/plan"}
+        takeout.run_import(s, [later])
+        assert set(calendar_records(s)) == {"me@example.com/w1@group.calendar.google.com/plan"}
+        takeout.run_import(s, [emptied])
+        assert set(calendar_records(s)) == {"me@example.com/me@example.com/retro"}
+
+
 def test_a_calendar_sync_keeps_its_window_and_the_export_adds_only_what_came_before(db, tmp_path):
     from fakes import FakeCalendar
 
