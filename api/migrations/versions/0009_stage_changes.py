@@ -11,12 +11,12 @@ has it, move their links to that node and go. An address domain is not evidence 
 domain is not an organization, so MEMBER_OF rows the spine derived from domains and unlinked personal-domain
 organizations are deleted.
 
-Revision ID: 0011
+Revision ID: 0009
 Revises: 0008
 """
 from alembic import op
 
-revision = "0011"
+revision = "0009"
 down_revision = "0008"
 
 

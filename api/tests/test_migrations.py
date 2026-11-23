@@ -57,7 +57,7 @@ def test_downgrading_to_base_and_upgrading_again_gives_the_fresh_schema(test_db,
 
 
 def test_organizations_keyed_by_company_name_converge_on_one_node_each(test_db, monkeypatch):
-    """Migration 0011: company:<slug> (contact cards) and name:<slug> (model mentions) become org:<slug>, merging into
+    """Migration 0009: company:<slug> (contact cards) and name:<slug> (model mentions) become org:<slug>, merging into
     an org: node that already exists; changes pending in the old shared flag carry over to entity resolution."""
     from alembic import command
     from alembic.config import Config
