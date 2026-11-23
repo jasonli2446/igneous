@@ -236,10 +236,6 @@ def _edge(s: Session, src: int, dst: int, type_: str, props: dict, sid: int | No
 def run(s: Session, log=print) -> int:
     from igneous.llm import visible_nodes
 
-    # Nothing touched since the last completed rebuild: avoid a costly, quota-free but
-    # unnecessary scan. Dirty node markers are retained for resolve below.
-    if not dirty.pending(s):
-        return 0
     cands = candidates(s)
     # Equal names only propose a merge. Strong single anchors remain Projects; only corroborated pairs combine.
     cands = {f"{name}:{min(node_id for node_id, _ in component)}": {**candidate, "anchors": component, "screen": name}
@@ -317,7 +313,6 @@ def run(s: Session, log=print) -> int:
         built += 1
         log(f"  {c['display'][:40]:40s} anchors={len(c['anchors'])} mentions={mentioned}") if log else None
     overrides.apply(s)  # corrections (rename / hide / merge / unlink) always win, so they survive every rebuild
-    # Resolve consumes this same dirty batch after entities has incorporated all evidence.
     dirty.touch(s)
     s.commit()
     return built

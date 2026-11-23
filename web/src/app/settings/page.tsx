@@ -13,21 +13,6 @@ const STATUS: Record<SourceInfo["status"], { label: string; dot: string; text: s
   needs_attention: { label: "Needs attention", dot: "bg-danger", text: "text-danger" },
 };
 
-const STAGE_LABEL: Record<string, string> = {
-  spine: "Reading your sources into people, threads and events",
-  chunk: "Splitting text into searchable pieces",
-  embed: "Indexing meaning for search",
-  topics: "Finding topics",
-  entities: "Finding people and organizations in text",
-  self: "Working out which person is you",
-  resolve: "Merging duplicate people",
-  profile: "Reading your resume and LinkedIn",
-  threads: "Finding trips, classes, jobs and projects",
-  backbone: "Placing them under your schools and workplaces",
-  organizations: "Finding where people work",
-  verify: "Checking each connection against its sources",
-};
-
 const nf = new Intl.NumberFormat();
 
 function when(date: string | null) {
@@ -223,10 +208,18 @@ function ModelPanel({ model }: { model: ModelStatus }) {
   );
 }
 
+// The API names each stage as it starts (label), how many steps the run has, and counts within long stages.
+function buildProgress(p: Job["progress"] | undefined) {
+  const steps = p?.steps ?? 0;
+  const step = Math.min(p?.step ?? 0, steps);
+  const within = p?.count != null && p?.total ? Math.min(p.count / p.total, 1) : 0;
+  const counted = p?.count != null ? `${nf.format(p.count)}${p.total ? ` of ${nf.format(p.total)}` : ""}` : null;
+  return { step, steps, label: p?.label ?? null, counted, share: steps ? (Math.max(step - 1, 0) + within) / steps : 0 };
+}
+
 function BuildGraph({ job, itemCount, onRun, starting }: { job: Job | null; itemCount: number; onRun: () => void; starting: boolean }) {
   const running = job?.status === "running";
-  const p = job?.progress;
-  const stage = p?.stage ? STAGE_LABEL[p.stage] ?? p.stage : null;
+  const { step, steps, label, counted, share } = buildProgress(job?.progress);
   return (
     <section className="mt-8 rounded-md border border-line bg-panel" aria-labelledby="build-heading">
       <div className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
@@ -234,8 +227,9 @@ function BuildGraph({ job, itemCount, onRun, starting }: { job: Job | null; item
           <h2 id="build-heading" className="text-sm font-medium text-ink">Build the graph</h2>
           <p className="mt-1 max-w-xl text-sm leading-6 text-muted">
             Syncing only collects your data. Press Rebuild after you connect or sync sources so the Graph, Ask and
-            Search pages can use it. It only processes what is new, so it is safe to run again. The first run can take
-            a few minutes.
+            Search pages can use it. It reads what is new, then works out who is who, your projects, threads and
+            organizations again, and shows them all at once when it finishes: until then the Graph keeps the previous
+            build. It is safe to run again; the first run can take a few minutes.
           </p>
           <p className="mt-2 font-mono text-xs text-muted">Command line: igneous pipeline</p>
         </div>
@@ -247,10 +241,10 @@ function BuildGraph({ job, itemCount, onRun, starting }: { job: Job | null; item
       {running && (
         <div className="px-5 pb-4" role="status">
           <div className="h-1.5 overflow-hidden rounded-full bg-hover">
-            <div className="h-full bg-accent transition-[width]" style={{ width: `${((p?.step ?? 1) - 1) / (p?.steps ?? 7) * 100}%` }} />
+            <div className="h-full bg-accent transition-[width]" style={{ width: `${share * 100}%` }} />
           </div>
           <p className="mt-1.5 text-xs text-muted">
-            Step {p?.step ?? 1} of {p?.steps ?? 7}{stage ? `: ${stage}` : ""}
+            {steps ? `Step ${step} of ${steps}` : "Starting"}{label ? `: ${label}` : ""}{counted ? ` (${counted})` : ""}
           </p>
         </div>
       )}
@@ -258,7 +252,7 @@ function BuildGraph({ job, itemCount, onRun, starting }: { job: Job | null; item
         <p className="px-5 pb-4 text-sm text-accent" role="status">Done. <Link href="/" className="underline underline-offset-4">Open the graph</Link>.</p>
       )}
       {job?.status === "failed" && (
-        <div className="px-5 pb-4"><InlineError message={`The build stopped: ${job.error ?? "unknown error"}. Fix that and press Rebuild; it resumes where it stopped.`} /></div>
+        <div className="px-5 pb-4"><InlineError message={`The build stopped${label ? ` while ${label.charAt(0).toLowerCase()}${label.slice(1)}` : ""}: ${job.error ?? "unknown error"}. The Graph keeps the previous build. Fix that and press Rebuild; records it already read are kept.`} /></div>
       )}
     </section>
   );

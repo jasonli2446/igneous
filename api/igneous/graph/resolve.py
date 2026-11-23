@@ -207,8 +207,9 @@ def candidates(s: Session) -> list[tuple[P, P, float, dict]]:
     return out
 
 
-def run(s: Session, threshold: float = THRESHOLD) -> dict:
-    if not dirty.pending(s):
+def run(s: Session, threshold: float = THRESHOLD, rescore: bool = False) -> dict:
+    changes = dirty.pending(s, "resolve")
+    if not changes and not rescore:
         return {"same_as": 0, "clusters": 0}
     s.execute(text("DELETE FROM edges WHERE type = 'SAME_AS' AND extractor = :ex"), {"ex": EXTRACTOR})  # not 'contacts'
     merged = 0
@@ -223,7 +224,7 @@ def run(s: Session, threshold: float = THRESHOLD) -> dict:
             merged += 1
     s.commit()
     clusters = refresh_canonical(s)
-    dirty.clear(s)
+    dirty.consume(s, "resolve", changes)
     dirty.touch(s)
     s.commit()
     return {"same_as": merged, "clusters": clusters}

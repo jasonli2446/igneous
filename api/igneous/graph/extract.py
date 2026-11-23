@@ -6,6 +6,7 @@ so every stored edge points at real text (criterion 2).
 """
 import json
 import re
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import text
@@ -145,8 +146,9 @@ def store(s: Session, item, body: str, out: dict) -> dict:
     return stats
 
 
-def run(s: Session, limit: int = 200, log=print) -> int:
-    """Extract the newest opted-in source items. Empty ``IGNEOUS_LLM_SOURCES`` means no automatic model calls."""
+def run(s: Session, limit: int = 200, log=print, progress: Callable[[int, int], None] | None = None) -> int:
+    """Extract the newest opted-in source items, committing each as it is stored; `progress(done, total)` after each.
+    Empty ``IGNEOUS_LLM_SOURCES`` means no automatic model calls."""
     sources = llm.allowed_sources()
     if not sources:
         log("  extraction skipped: set IGNEOUS_LLM_SOURCES to opt in a source")
@@ -178,7 +180,7 @@ def run(s: Session, limit: int = 200, log=print) -> int:
     with ThreadPoolExecutor(WORKERS) as pool:
         futures = {r.id: pool.submit(extract_one, bodies[r.id].strip()) for r in rows
                    if len(bodies[r.id].strip()) >= MIN_CHARS}
-        for r in rows:
+        for done, r in enumerate(rows, 1):
             f = futures.get(r.id)
             if f is not None:
                 try:
@@ -195,6 +197,8 @@ def run(s: Session, limit: int = 200, log=print) -> int:
             s.execute(text("UPDATE source_items SET raw_meta = raw_meta || CAST(:m AS jsonb) WHERE id = :id"),
                       {"m": json.dumps({f"extracted_v{VERSION}": True}), "id": r.id})
             s.commit()
+            if progress:
+                progress(done, len(rows))
     # Conservative and cached: only explicit later confirmation can resolve a derived promise.
     from igneous.graph.history import refresh_commitment_status
     totals["resolved"] = refresh_commitment_status(s)

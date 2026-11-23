@@ -1,29 +1,49 @@
-"""Persistent dirty markers for derived graph work.
+"""What changed since a stage last covered it, and the graph version readers cache against.
 
-A marker is intentionally keyed by node rather than a source: a source item can
-change several nodes, and later stages can consume exactly the affected graph
-clusters.  Marking is idempotent and safe to call from every stage.
+A source change (records added, changed or deleted) is recorded for every stage that skips work while its inputs
+are unchanged (`pipeline.GATED`), once per writing transaction. Such a stage reads the changes it is about to cover
+(`pending`) and removes exactly those (`consume`) in the transaction that publishes its work: a change committed
+while it runs stays for the next run, a failed run keeps them all, and no stage consumes another's changes.
+
+The graph version is bumped once each time a rebuild publishes (pipeline.publishing) and by each correction made
+through the API, so the explorer and the MCP server know when a cached view is stale.
 """
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 
 def mark(s: Session, node_ids: set[int], reason: str) -> None:
-    if not node_ids:
-        return
-    s.execute(text("""
-        INSERT INTO dirty_nodes (node_id, reason) SELECT unnest(CAST(:ids AS bigint[])), :reason
-        ON CONFLICT (node_id) DO UPDATE SET reason = EXCLUDED.reason, marked_at = now()
-    """), {"ids": sorted(node_ids), "reason": reason[:200]})
+    """Record that a source change touched `node_ids` (nothing to record when it touched none)."""
+    if node_ids:
+        _record(s, reason)
 
 
 def mark_rebuild(s: Session) -> None:
-    s.execute(text("INSERT INTO dirty_rebuild (id) VALUES (true) ON CONFLICT DO NOTHING"))
+    """Record that source records were deleted."""
+    _record(s, "source records deleted")
 
 
-def pending(s: Session) -> set[int]:
-    ids = set(s.execute(text("SELECT node_id FROM dirty_nodes")).scalars())
-    return ids | ({-1} if s.execute(text("SELECT 1 FROM dirty_rebuild LIMIT 1")).first() else set())
+def _record(s: Session, reason: str) -> None:
+    from igneous.pipeline import GATED
+
+    s.execute(text("""
+        INSERT INTO pipeline_changes (stage, xact, reason)
+        SELECT unnest(CAST(:stages AS text[])), pg_current_xact_id(), :reason
+        ON CONFLICT (stage, xact) DO NOTHING
+    """), {"stages": sorted(GATED), "reason": reason[:200]})
+
+
+def pending(s: Session, stage: str) -> list[int]:
+    """The changes `stage` has not covered yet, visible now."""
+    return list(s.execute(text("SELECT id FROM pipeline_changes WHERE stage = :st ORDER BY id"),
+                          {"st": stage}).scalars())
+
+
+def consume(s: Session, stage: str, ids: list[int]) -> None:
+    """`stage` covered these changes (from `pending`); takes effect when the caller's transaction commits."""
+    if ids:
+        s.execute(text("DELETE FROM pipeline_changes WHERE stage = :st AND id = ANY(:ids)"),
+                  {"st": stage, "ids": ids})
 
 
 def touch(s: Session) -> None:
@@ -32,10 +52,3 @@ def touch(s: Session) -> None:
 
 def version(s: Session) -> int:
     return s.execute(text("SELECT version FROM graph_version WHERE id = true")).scalar_one()
-
-
-def clear(s: Session, node_ids: set[int] | None = None) -> None:
-    if node_ids is None:
-        s.execute(text("DELETE FROM dirty_nodes; DELETE FROM dirty_rebuild"))
-    elif node_ids:
-        s.execute(text("DELETE FROM dirty_nodes WHERE node_id = ANY(:ids)"), {"ids": sorted(node_ids)})
