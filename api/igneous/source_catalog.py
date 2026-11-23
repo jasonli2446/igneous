@@ -2,7 +2,8 @@
 
 A connector can store more than one value (Google Takeout writes one per product), and the Sources page entry that
 describes a connector (`sources.SOURCES`) is also its id in IGNEOUS_LLM_SOURCES. Code that needs "the sources of a
-kind" asks here instead of keeping its own list.
+kind" asks here instead of keeping its own list. What a record is called where it is shown is the name of the entry
+that writes it, unless its value has a label of its own (`sources.labels`, which GET /sources serves).
 """
 from dataclasses import dataclass
 
@@ -17,27 +18,30 @@ class Stored:
     connector: str         # the Sources page entry that writes it
     kind: str              # one of KINDS
     local_text: bool = False  # text from files on this computer: hosted models also need the local-sources switch
+    # What a record from it is called where it is shown, when the name of the entry that writes it would say less
+    # (one of Takeout's products) or the wrong thing (a value more than one source stores).
+    label: str | None = None
 
 
 CATALOG: tuple[Stored, ...] = (
-    Stored("email", "email", "mail"),
+    Stored("email", "email", "mail", label="Email"),  # the Enron demo and the persona's mailbox
     Stored("gmail", "gmail", "mail"),
     Stored("imessage", "imessage", "chat"),
-    Stored("takeout_chat", "takeout", "chat"),
-    Stored("ai_chats", "ai_chats", "ai_chat"),
+    Stored("takeout_chat", "takeout", "chat", label="Google Chat"),
+    Stored("ai_chats", "ai_chats", "ai_chat", label="AI chats"),  # coding sessions and chat exports
     Stored("gcal", "gcal", "calendar"),
-    Stored("takeout_meet", "takeout", "calendar"),
+    Stored("takeout_meet", "takeout", "calendar", label="Google Meet"),
     Stored("gcontacts", "gcontacts", "contacts"),
     Stored("maccontacts", "maccontacts", "contacts"),
     Stored("drive", "drive", "document"),
     Stored("fs", "fs", "document", local_text=True),
     Stored("notes", "notes", "document", local_text=True),
     Stored("github", "github", "code"),
-    Stored("takeout_tasks", "takeout", "tasks"),
+    Stored("takeout_tasks", "takeout", "tasks", label="Google Tasks"),
     Stored("linkedin", "linkedin", "profile"),
-    Stored("takeout_activity", "takeout", "activity"),
-    Stored("takeout_chrome", "takeout", "activity"),
-    Stored("takeout_maps", "takeout", "places"),
+    Stored("takeout_activity", "takeout", "activity", label="My Activity"),
+    Stored("takeout_chrome", "takeout", "activity", label="Chrome"),
+    Stored("takeout_maps", "takeout", "places", label="Google Maps"),
 )
 BY_VALUE = {s.value: s for s in CATALOG}
 

@@ -120,6 +120,9 @@ def test_merging_threads_keeps_every_member_through_rebuilds_and_undo_gives_both
         == ("merged", "user")
     assert "Lisbon trip" in db.execute(text("SELECT props->'aliases' FROM nodes WHERE id = :p"),
                                        {"p": portland}).scalar()
+    # The panel offers to undo it, naming what was folded in.
+    shaped = client.get(f"/graph/entity/{portland}").json()["corrections"]
+    assert [(c["override_id"], c["op"], c["value"]) for c in shaped] == [(merge["override_id"], "merge", "Lisbon trip")]
     assert client.delete(f"/overrides/{merge['override_id']}").json()["applied"] == "now"
     lisbon = project(db, "Lisbon trip")
     assert lisbon and records(db, lisbon) == theirs and records(db, portland) == mine
@@ -339,6 +342,35 @@ def test_wrong_and_restore_say_per_pair_whether_a_link_still_joins_it(db):
     assert back["pairs"] == [{"a": min(chat, thread), "b": max(chat, thread), "still_linked": True}]
 
 
+def test_undo_says_per_pair_whether_a_link_joins_it_again(db):
+    """Undoing a link taken out or a link you added answers with its pairs too, so a view puts back or takes out
+    exactly those; undoing a rename touches no pair."""
+    _person, thread, chat, _derived, only = _pair_graph(db)
+    pair = {"a": min(chat, thread), "b": max(chat, thread)}
+    alone = client.post("/graph/edge/wrong", json={"edge": only}).json()
+    back = client.delete(f"/overrides/{alone['override_id']}").json()
+    assert back["applied"] == "now" and back["op"] == "unlink" and back["pairs"] == [{**pair, "still_linked": True}]
+    wrong = client.post("/graph/edge/wrong", json={"edge": only}).json()
+    added = client.post("/graph/link", json={"src": chat, "dst": thread, "type": "PART_OF"}).json()
+    assert client.delete(f"/overrides/{added['override_id']}").json()["pairs"] == [{**pair, "still_linked": False}]
+    assert client.delete(f"/overrides/{wrong['override_id']}").json()["pairs"] == [{**pair, "still_linked": True}]
+    renamed = client.post(f"/graph/entity/{thread}/rename", json={"name": "The trip"}).json()
+    assert client.delete(f"/overrides/{renamed['override_id']}").json()["pairs"] == []
+
+
+def test_a_pair_is_answered_as_the_people_the_explorer_shows(db):
+    """A link from another address of a person is answered as that person, their identity head (#224)."""
+    person, thread, _chat, _derived, _only = _pair_graph(db)
+    alias = db.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Person', 'pat@y.test', 'Pat') RETURNING id")
+                       ).scalar_one()
+    db.execute(text("INSERT INTO canonical (node_id, canonical_id) VALUES (:h, :h), (:a, :h)"), {"a": alias, "h": person})
+    edge = db.execute(text("""INSERT INTO edges (src, dst, type, extractor) VALUES (:a, :t, 'RELATED_TO', 'threads')
+                              RETURNING id"""), {"a": alias, "t": thread}).scalar_one()
+    wrong = client.post("/graph/edge/wrong", json={"edge": edge}).json()
+    # Still linked: the link you added joins the person (under their other address) and the project.
+    assert wrong["pairs"] == [{"a": min(person, thread), "b": max(person, thread), "still_linked": True}]
+
+
 @pytest.mark.usefixtures("local_models")
 def test_a_link_you_added_can_be_taken_out_kept_out_through_rebuilds_and_brought_back(db):
     person, thread, _chat, derived, _only = _pair_graph(db)
@@ -375,7 +407,7 @@ def test_not_the_same_person_splits_them_on_every_rebuild_whatever_joins_them_an
                {"a": a, "b": b})  # a shared contact card
     merged = client.post(f"/graph/person/{a}/merge", json={"other": b}).json()  # and you said so too
     assert merged["override_id"] and merged["person"] in (a, b)
-    split = client.post(f"/graph/person/{a}/split", json={"other": b}).json()
+    split = client.post(f"/graph/person/{a}/split", json={"key": "sam@b.test"}).json()
     assert split["applied"] == "now" and split["override_id"] and split["pairs"][0]["still_linked"]  # the card stays
     assert db.execute(text("SELECT count(*) FROM canonical")).scalar() == 0
     assert db.execute(text("SELECT count(*) FROM overrides WHERE op = 'link'")).scalar() == 0
@@ -386,7 +418,8 @@ def test_not_the_same_person_splits_them_on_every_rebuild_whatever_joins_them_an
     assert client.delete(f"/overrides/{split['override_id']}").json()["applied"] == "now"
     assert db.execute(text("SELECT count(DISTINCT canonical_id) FROM canonical")).scalar() == 1
     assert db.execute(text("SELECT count(*) FROM overrides WHERE op = 'link' AND value = 'SAME_AS'")).scalar() == 1
-    assert client.post(f"/graph/person/{a}/split", json={"other": a}).status_code == 400
+    assert client.post(f"/graph/person/{a}/split", json={"key": "sam@a.test"}).status_code == 400
+    assert client.post(f"/graph/person/{a}/split", json={"key": "nobody@x.test"}).status_code == 404
 
 
 def test_undoing_an_older_rejection_never_restores_a_link_a_later_one_covers(db):

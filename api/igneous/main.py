@@ -196,9 +196,10 @@ async def import_takeout(request: Request):
 
 @app.get("/sources")
 def list_sources(s: Session = Depends(get_session)):
-    """Every connector and import format with plain-language setup, requirement checks, and live status, plus
-    whether hosted model calls are on and which sources they may read."""
-    return {"sources": sources.describe(s), "model": model_status()}
+    """Every connector and import format with plain-language setup, requirement checks, and live status; whether
+    hosted model calls are on and which sources they may read; and `labels`, what a record from each stored source
+    value (a hit's or an item's `source`) is called where it is shown."""
+    return {"sources": sources.describe(s), "model": model_status(), "labels": sources.labels()}
 
 
 @app.post("/import/linkedin")

@@ -63,4 +63,24 @@ def test_adding_a_connection_accepts_only_pairs_the_menu_offers(db):
     assert client.post("/graph/link", json={"src": ids[0], "dst": ids[1], "type": "PART_OF"}).status_code == 400
     assert client.post("/graph/link", json={"src": ids[2], "dst": ids[0], "type": "SAME_AS"}).status_code == 400
     assert client.post("/graph/link", json={"src": ids[0], "dst": 10**9, "type": "RELATED_TO"}).status_code == 404
+    assert client.post("/graph/link", json={"src": ids[0], "dst": ids[0], "type": "RELATED_TO"}).status_code == 422
+    assert db.execute(text("SELECT count(*) FROM overrides")).scalar() == 0
+
+
+def test_two_people_become_one_only_through_same_person_never_an_added_connection(db):
+    """'+ Connect to…' never offers 'same person', and the link route refuses it: merging goes through POST
+    /graph/person/{id}/merge, which asks you to confirm."""
+    from fastapi.testclient import TestClient
+    from sqlalchemy import text
+
+    from igneous.main import app
+
+    a, b = (db.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Person', :k, :k) RETURNING id"),
+                       {"k": k}).scalar_one() for k in ("a@x.test", "b@x.test"))
+    client = TestClient(app)
+    options = client.get("/graph/link/options", params={"a": a, "b": b}).json()["options"]
+    assert [o["type"] for o in options] == ["RELATED_TO"]
+    assert client.post("/graph/link", json={"src": a, "dst": b, "type": "SAME_AS"}).status_code == 400
+    assert client.get("/graph/link/options", params={"a": a, "b": 10**9}).status_code == 404
+    assert client.get("/graph/link/options", params={"a": a, "b": a}).status_code == 422
     assert db.execute(text("SELECT count(*) FROM overrides")).scalar() == 0

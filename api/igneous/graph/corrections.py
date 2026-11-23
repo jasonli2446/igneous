@@ -180,7 +180,7 @@ def split(s: Session, a: int, b: int) -> dict:
         RETURNING op, node_keys, value, data"""), {"k": keys}).mappings()]
     oid, _snapshots = _reject(s, {(*keys, "SAME_AS", "user"): {"src": a, "dst": b}},
                               "you said they are not the same person", {"links": links})
-    return {"split": [a, b], "override_id": oid, "pairs": [(a, b)]}
+    return {"override_id": oid, "pairs": [(a, b)]}
 
 
 def remove_link(s: Session, edge_id: int) -> dict:
@@ -217,16 +217,35 @@ def remove_link(s: Session, edge_id: int) -> dict:
 
 
 def outcome(s: Session, pairs) -> list[dict]:
-    """For each node pair a correction touched: whether any link still joins the two now (either direction), so a view
-    removes or restores exactly those pairs."""
-    pairs = sorted({tuple(sorted(p)) for p in pairs})
+    """For each node pair a correction touched, as the explorer shows the two (each end its identity head): whether
+    any link still joins them now, under any of their identities and in either direction, so a view removes or
+    restores exactly those pairs. A pair that is one person now (two identities of one head) joins nothing on screen
+    and is left out."""
+    from igneous.graph import identity
+
+    head = identity.heads(s, {x for p in pairs for x in p})
+    pairs = sorted({tuple(sorted((head[a], head[b]))) for a, b in pairs if head[a] != head[b]})
+    if not pairs:
+        return []
     linked = {tuple(r) for r in s.execute(text("""
-        SELECT LEAST(e.src, e.dst), GREATEST(e.src, e.dst) FROM edges e
-        JOIN jsonb_to_recordset(CAST(:p AS jsonb)) AS q(a bigint, b bigint)
-          ON (e.src = q.a AND e.dst = q.b) OR (e.src = q.b AND e.dst = q.a)
+        WITH q AS (SELECT * FROM jsonb_to_recordset(CAST(:p AS jsonb)) AS q(a bigint, b bigint)),
+        ends AS (SELECT q.a, q.b, x.id AS x, y.id AS y FROM q
+                 CROSS JOIN LATERAL (SELECT q.a AS id UNION SELECT node_id FROM canonical WHERE canonical_id = q.a) x
+                 CROSS JOIN LATERAL (SELECT q.b AS id UNION SELECT node_id FROM canonical WHERE canonical_id = q.b) y)
+        SELECT DISTINCT ends.a, ends.b FROM ends
+        JOIN edges e ON (e.src = ends.x AND e.dst = ends.y) OR (e.src = ends.y AND e.dst = ends.x)
         WHERE COALESCE(e.props->>'verdict', '') <> 'drop'
     """), {"p": json.dumps([{"a": a, "b": b} for a, b in pairs])})}
     return [{"a": a, "b": b, "still_linked": (a, b) in linked} for a, b in pairs]
+
+
+def node_pairs(s: Session, keys) -> list[tuple[int, int]]:
+    """Pairs of natural keys (`Type:key`) as the node ids that hold those keys now; a pair whose node is gone is
+    left out."""
+    keys = list(keys)
+    ids = dict(s.execute(text("SELECT type || ':' || key, id FROM nodes WHERE type || ':' || key = ANY(:k)"),
+                         {"k": sorted({k for pair in keys for k in pair})}).all())
+    return [(ids[a], ids[b]) for a, b in keys if a in ids and b in ids]
 
 
 def restore(s: Session, row: dict) -> list[int]:
@@ -292,14 +311,23 @@ def restore(s: Session, row: dict) -> list[int]:
 
 
 def undo(s: Session, override_id: int) -> dict:
-    """Record the undo of one correction: its row waits, marked undone, for the step that reverses it. Raises
-    LookupError when there is no such active correction."""
+    """Record the undo of one correction: its row waits, marked undone, for the step that reverses it. Returns {id,
+    op, pairs}: `pairs` are the node pairs (by natural key) whose links the undo brings back or takes out, for a link
+    you added or a link taken out; none for a rename, hide or merge. Raises LookupError when there is no such active
+    correction."""
     row = s.execute(text("""
-        UPDATE overrides SET undone_at = now() WHERE id = :i AND undone_at IS NULL RETURNING id, op
+        UPDATE overrides SET undone_at = now() WHERE id = :i AND undone_at IS NULL RETURNING id, op, node_keys, data
     """), {"i": override_id}).mappings().first()
     if row is None:
         raise LookupError("No such correction (already undone?)")
-    return dict(row)
+    data = row["data"] or {}
+    pairs: set[tuple[str, str]] = set()
+    if row["op"] == "link" or (row["op"] == "unlink" and data.get("user_link")):
+        pairs.add(tuple(row["node_keys"][:2]))
+    elif row["op"] == "unlink":  # a pair rejection: the pairs its verdicts cover, and those of the links it removed
+        pairs |= {(v["a"], v["b"]) for v in data.get("verdicts", [])}
+        pairs |= {(e["src_key"], e["dst_key"]) for e in data.get("edges", [])}
+    return {"id": row["id"], "op": row["op"], "pairs": sorted(pairs)}
 
 
 def restore_links(s: Session, edge_ids: list[int]) -> dict:

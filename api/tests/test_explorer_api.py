@@ -167,7 +167,7 @@ def read_routes(w):
         routes += [(f"/graph/node/{node}", {}), (f"/graph/node/{node}/summary", {}),
                    (f"/graph/node/{node}/sources", {}), ("/timeline", {"a": node})]
     routes += [("/timeline", {"a": w.me_work, "b": w.sam2}), ("/graph/entity/" + str(w.atlas), {}),
-               ("/commitments", {"status": "all"}), ("/ask/suggestions", {}),
+               ("/commitments", {"status": "all"}), ("/ask/suggestions", {}), ("/graph/suggestions", {}),
                ("/experts", {"q": "robotics demo", "mode": "lexical"}), ("/graph/version", {})]
     return routes
 
@@ -206,6 +206,29 @@ def test_a_person_is_opened_and_shown_as_their_identity_head(world, client):
         ("Robotics crew", w.crew, 8), ("Lunch", None, 6)]
     entity = client.get(f"/graph/entity/{w.atlas}").json()
     assert [(p["id"], p["items"]) for p in entity["people"] if p["name"] == "Sam Lee"] == [(w.sam, 8)]
+
+
+def test_a_person_lists_their_other_identities_by_key_for_not_the_same_person(world, client):
+    w = world
+    assert client.get(f"/graph/node/{w.sam2}").json()["identities"] == [{"key": "sam.lee@b.test", "name": "Sam Lee"}]
+    assert client.get(f"/graph/node/{w.me}").json()["identities"] == [{"key": "me@acme.test", "name": "Me Myself"}]
+    assert client.get(f"/graph/node/{w.atlas}").json()["identities"] == []
+
+
+def test_a_suggestion_names_each_end_as_the_explorer_shows_it(world, client, db):
+    """An unsure link from another address of a person is asked about the person; one about a hidden project or a
+    service isn't asked at all."""
+    w = world
+    for a, b, kind, extractor in (("Person:ana@acme.test", "Person:sam.lee@b.test", "INTRODUCED", "relationship-history"),
+                                  ("Person:sam@a.test", "Project:thread:secret", "INVOLVED_IN", "threads"),
+                                  ("Person:alerts@bank.test", "Project:thread:atlas", "INVOLVED_IN", "threads")):
+        db.execute(text("""INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, reason,
+                                                      confidence, source)
+                           VALUES (:a, :b, :t, :x, 'e1', 'unsure', 'the records don''t say', 0.5, 'model')"""),
+                   {"a": a, "b": b, "t": kind, "x": extractor})
+    suggested = client.get("/graph/suggestions").json()["suggestions"]
+    assert [(x["edge"], x["src"], x["src_name"], x["dst"], x["dst_name"]) for x in suggested] == [
+        (w.intro, w.ana, "Ana Ames", w.sam, "Sam Lee")]
 
 
 def test_the_opening_view_shows_your_org_once_and_never_a_pair_you_rejected(world, client):
