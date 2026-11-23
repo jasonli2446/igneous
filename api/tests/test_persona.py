@@ -235,8 +235,9 @@ def test_a_slice_builds_its_graph_through_the_sources_registry_and_the_pipeline(
                        ("owen@northwind.example.com", "linkedin:owen-brandt-nw")):
         assert len({cluster(k) for k in identities}) == 1, identities
 
-    def thread(name: str):
-        return db.execute(text("SELECT id, props FROM nodes WHERE type = 'Project' AND name = :n"), {"n": name}).one()
+    def thread(name: str):  # the threads stage's (the entities stage may name a calendar series the same: #237)
+        return db.execute(text("SELECT id, props FROM nodes WHERE type = 'Project' AND name = :n "
+                               "AND props->>'derived' = 'threads'"), {"n": name}).one()
 
     def took_part(name: str) -> set[str]:
         return set(db.execute(text("""SELECT n.name FROM edges e JOIN nodes n ON n.id = e.src
