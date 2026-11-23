@@ -72,24 +72,6 @@ BUDGET = 400        # model calls per run (cheap and strong); the rest wait for 
 EXAMPLES = 4        # your past corrections shown as examples per call
 
 
-def _verdicts(moved: dict[str, str]) -> tuple[str, dict]:
-    """`edge_verdicts` as the graph is keyed now, for a FROM clause, with its parameters: a verdict recorded under a
-    key that stands for another now (`moved`, graph/derived.py rekeyed) is that key's, and of two verdicts on one link
-    yours wins, then the latest."""
-    if not moved:
-        return "edge_verdicts", {}
-    return """(SELECT DISTINCT ON (src_key, dst_key, type, extractor) * FROM (
-                   SELECT COALESCE(ma.new, v.src_key) AS src_key, COALESCE(mb.new, v.dst_key) AS dst_key, v.type,
-                          v.extractor, v.evidence, v.verdict, v.confidence, v.reason, v.source, v.updated_at
-                   FROM edge_verdicts v
-                   LEFT JOIN unnest(CAST(:moved_old AS text[]), CAST(:moved_new AS text[])) AS ma(old, new)
-                     ON ma.old = v.src_key
-                   LEFT JOIN unnest(CAST(:moved_old AS text[]), CAST(:moved_new AS text[])) AS mb(old, new)
-                     ON mb.old = v.dst_key) keyed
-               ORDER BY src_key, dst_key, type, extractor, source = 'user' DESC, updated_at DESC)""", {
-        "moved_old": sorted(moved), "moved_new": [moved[k] for k in sorted(moved)]}
-
-
 def claim_of(edge: dict) -> tuple:
     """The claim an edge makes: (type, extractor), or its variant for the kind of node at A (a group chat or series
     about a thread) or at B (a role, for a thread the backbone placed under one)."""
@@ -327,6 +309,24 @@ def _store(rows: list[dict], forget: list[dict] = ()) -> None:
         for _key, statement, params in writes:
             vs.execute(statement, params)
         vs.commit()
+
+
+def _verdicts(moved: dict[str, str]) -> tuple[str, dict]:
+    """`edge_verdicts` as the graph is keyed now, for a FROM clause, with its parameters: a verdict recorded under a
+    key that stands for another now (`moved`, graph/derived.py rekeyed) is that key's, and of two verdicts on one link
+    yours wins, then the latest."""
+    if not moved:
+        return "edge_verdicts", {}
+    return """(SELECT DISTINCT ON (src_key, dst_key, type, extractor) * FROM (
+                   SELECT COALESCE(ma.new, v.src_key) AS src_key, COALESCE(mb.new, v.dst_key) AS dst_key, v.type,
+                          v.extractor, v.evidence, v.verdict, v.confidence, v.reason, v.source, v.updated_at
+                   FROM edge_verdicts v
+                   LEFT JOIN unnest(CAST(:moved_old AS text[]), CAST(:moved_new AS text[])) AS ma(old, new)
+                     ON ma.old = v.src_key
+                   LEFT JOIN unnest(CAST(:moved_old AS text[]), CAST(:moved_new AS text[])) AS mb(old, new)
+                     ON mb.old = v.dst_key) keyed
+               ORDER BY src_key, dst_key, type, extractor, source = 'user' DESC, updated_at DESC)""", {
+        "moved_old": sorted(moved), "moved_new": [moved[k] for k in sorted(moved)]}
 
 
 def _order(row: dict) -> tuple[str, str, str, str]:
