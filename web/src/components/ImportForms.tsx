@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AiImportResult, api, Job, LinkedInResult, TakeoutResult } from "@/lib/api";
+import { AiImportResult, api, ImportInput, Job, LinkedInResult, TakeoutResult } from "@/lib/api";
 
 const nf = new Intl.NumberFormat();
 const AI_LABEL: Record<string, string> = { chatgpt: "ChatGPT", gemini: "Gemini", claude_ai: "Claude.ai" };
@@ -35,7 +35,7 @@ function Drop({ id, title, hint, accept, multiple, disabled, onFiles }: {
         const files = Array.from(e.dataTransfer.files);
         if (files.length) onFiles(multiple ? files : files.slice(0, 1));
       }}
-      className={`flex min-h-24 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border border-dashed px-4 py-5 text-center text-sm transition-colors ${
+      className={`flex min-h-24 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border border-dashed px-4 py-5 text-center text-sm transition-colors focus-within:border-accent focus-within:bg-hover ${
         dragging ? "border-accent bg-hover" : "border-line hover:bg-hover"
       } ${disabled ? "pointer-events-none opacity-60" : ""}`}>
       <span className="font-medium text-ink">{title}</span>
@@ -51,7 +51,8 @@ function Drop({ id, title, hint, accept, multiple, disabled, onFiles }: {
 }
 
 /** Starts a background import job, polls it, and calls onDone once when it succeeds. */
-function useImportJob(onDone: () => void) {
+function useImportJob(start: (input: ImportInput, onProgress?: (fraction: number) => void) => Promise<Job>,
+  onDone: () => void) {
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -72,13 +73,14 @@ function useImportJob(onDone: () => void) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [finished]);
 
-  async function start(run: (onProgress: (f: number) => void) => Promise<Job>, withUpload: boolean) {
+  async function run(input: ImportInput) {
     if (running) return;
+    const uploading = !!input.files?.length;
     setError(null);
     setStarting(true);
-    setUpload(withUpload ? 0 : null);
+    setUpload(uploading ? 0 : null);
     try {
-      setJob(await run(setUpload));
+      setJob(await start(input, uploading ? setUpload : undefined));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -86,7 +88,8 @@ function useImportJob(onDone: () => void) {
       setUpload(null);
     }
   }
-  return { job, error, upload, running, start };
+  const result = job?.status === "succeeded" ? job.result : null;
+  return { job, error, upload, running, run, result };
 }
 
 function PathForm({ id, label, placeholder, disabled, onSubmit }: {
@@ -122,23 +125,21 @@ function JobStatus({ upload, job, error, running, children }: {
 }
 
 function TakeoutForm({ onDone }: { onDone: () => void }) {
-  const { job, error, upload, running, start } = useImportJob(onDone);
+  const { job, error, upload, running, run, result } = useImportJob(api.importTakeout, onDone);
   const p = job?.progress;
-  const result = job?.status === "succeeded" ? (job.result as unknown as TakeoutResult | null) : null;
+  const done = result as TakeoutResult | null;
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <button type="button" disabled={running} className={secondary}
-          onClick={() => void start(() => api.importTakeout({ scanDownloads: true }), false)}>
+        <button type="button" disabled={running} className={secondary} onClick={() => void run({ scanDownloads: true })}>
           Scan Downloads for takeout-*.zip
         </button>
         <p className="mt-1.5 text-xs text-muted">Best for multi-GB files: they are read in place, not uploaded.</p>
       </div>
       <PathForm id="takeout-path" label="Path to a Takeout zip or folder" placeholder="~/Downloads/takeout-2025.zip or a folder"
-        disabled={running} onSubmit={(path) => void start(() => api.importTakeout({ path }), false)} />
+        disabled={running} onSubmit={(path) => void run({ path })} />
       <Drop id="takeout-file" title="Or choose the zip files" hint="Select all parts of a split export at once."
-        accept=".zip,application/zip" multiple disabled={running}
-        onFiles={(files) => void start((on) => api.importTakeout({ files }, on), true)} />
+        accept=".zip,application/zip" multiple disabled={running} onFiles={(files) => void run({ files })} />
       <JobStatus upload={upload} job={job} error={error} running={running}>
         {p?.items_total
           ? `Saving ${nf.format(p.items ?? 0)} of ${nf.format(p.items_total)} entries.`
@@ -146,18 +147,18 @@ function TakeoutForm({ onDone }: { onDone: () => void }) {
             ? `Reading file ${(p.files_done ?? 0) + 1} of ${p.files_total}${p.file ? `: ${p.file}` : ""}.`
             : "Starting."}
       </JobStatus>
-      {result && (
+      {done && (
         <div>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-            <Stat label="New days" value={result.inserted} />
-            <Stat label="Updated" value={result.updated} />
-            <Stat label="Unchanged" value={result.unchanged} />
-            <Stat label="Places" value={result.places} />
-            <Stat label="Secrets removed" value={result.redactions} />
+            <Stat label="New days" value={done.inserted} />
+            <Stat label="Updated" value={done.updated} />
+            <Stat label="Unchanged" value={done.unchanged} />
+            <Stat label="Places" value={done.places} />
+            <Stat label="Secrets removed" value={done.redactions} />
           </div>
-          {result.notes?.length > 0 && (
+          {done.notes?.length > 0 && (
             <ul className="mt-3 list-disc space-y-1 pl-5 text-xs leading-5 text-muted">
-              {result.notes.map((n) => <li key={n}>{n}</li>)}
+              {done.notes.map((n) => <li key={n}>{n}</li>)}
             </ul>
           )}
         </div>
@@ -167,84 +168,54 @@ function TakeoutForm({ onDone }: { onDone: () => void }) {
 }
 
 function LinkedInForm({ onDone }: { onDone: () => void }) {
-  const { job, error, upload, running, start } = useImportJob(onDone);
-  const result = job?.status === "succeeded" ? (job.result as unknown as LinkedInResult | null) : null;
+  const { job, error, upload, running, run, result } = useImportJob(api.importLinkedin, onDone);
+  const done = result as LinkedInResult | null;
   return (
     <div className="flex flex-col gap-4">
       <PathForm id="linkedin-path" label="Path to a LinkedIn export zip or folder"
         placeholder="~/Downloads/Basic_LinkedInDataExport.zip or a folder"
-        disabled={running} onSubmit={(path) => void start(() => api.importLinkedin({ path }), false)} />
+        disabled={running} onSubmit={(path) => void run({ path })} />
       <Drop id="linkedin-file" title="Or choose the zip file" hint="The .zip from LinkedIn's email, no need to unzip it."
-        accept=".zip,.csv,application/zip,text/csv" disabled={running}
-        onFiles={([file]) => void start((on) => api.importLinkedin({ file }, on), true)} />
+        accept=".zip,.csv,application/zip,text/csv" disabled={running} onFiles={(files) => void run({ files })} />
       <JobStatus upload={upload} job={job} error={error} running={running}>Saving your profile and connections.</JobStatus>
-      {result && (
+      {done && (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-          <Stat label="Connections" value={result.connections} />
-          <Stat label="Positions" value={result.positions} />
-          <Stat label="Schools" value={result.education} />
-          <Stat label="New" value={result.inserted} />
-          <Stat label="Updated" value={result.updated} />
-          <Stat label="Secrets removed" value={result.redactions} />
+          <Stat label="Connections" value={done.connections} />
+          <Stat label="Positions" value={done.positions} />
+          <Stat label="Schools" value={done.education} />
+          <Stat label="New" value={done.inserted} />
+          <Stat label="Updated" value={done.updated} />
+          <Stat label="Secrets removed" value={done.redactions} />
         </div>
       )}
     </div>
   );
 }
 
-type AiStatus =
-  | { kind: "idle" }
-  | { kind: "uploading"; progress: number; name: string }
-  | { kind: "done"; result: AiImportResult }
-  | { kind: "error"; message: string };
-
 function AiExportForm({ id, onDone }: { id: string; onDone: () => void }) {
-  const [status, setStatus] = useState<AiStatus>({ kind: "idle" });
-  const busy = status.kind === "uploading";
-
-  async function upload(file: File) {
-    if (busy) return;
-    setStatus({ kind: "uploading", progress: 0, name: file.name });
-    try {
-      const result = await api.importAiExport(file, undefined, (progress) => setStatus({ kind: "uploading", progress, name: file.name }));
-      setStatus({ kind: "done", result });
-      onDone();
-    } catch (cause) {
-      setStatus({ kind: "error", message: cause instanceof Error ? cause.message : String(cause) });
-    }
-  }
-
+  const { job, error, upload, running, run, result } = useImportJob(api.importAiExport, onDone);
+  const done = result as AiImportResult | null;
+  const read = job?.progress.conversations;
   return (
-    <div className="flex flex-col gap-3">
-      <Drop id={`${id}-file`} title="Drop the export here or choose a file" hint="The .zip from the email, or conversations.json from inside it."
-        accept=".zip,.json,application/zip,application/json" disabled={busy} onFiles={([file]) => void upload(file)} />
-      <div aria-live="polite" className="min-h-6 text-sm">
-        {status.kind === "uploading" && (
-          <div>
-            <div className="flex justify-between gap-3 text-xs text-muted">
-              <span className="truncate">{status.progress >= 1 ? "Reading conversations" : "Uploading"} {status.name}</span>
-              <span className="tabular-nums">{Math.round(status.progress * 100)}%</span>
-            </div>
-            <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-hover">
-              <div className="h-full bg-accent transition-[width]" style={{ width: `${status.progress * 100}%` }} />
-            </div>
+    <div className="flex flex-col gap-4">
+      <PathForm id={`${id}-path`} label="Path to the export zip or conversations.json"
+        placeholder="~/Downloads/export.zip" disabled={running} onSubmit={(path) => void run({ path })} />
+      <Drop id={`${id}-file`} title="Or choose the export file" hint="The .zip from the email, or conversations.json from inside it."
+        accept=".zip,.json,application/zip,application/json" disabled={running} onFiles={(files) => void run({ files })} />
+      <JobStatus upload={upload} job={job} error={error} running={running}>
+        {read ? `Read ${nf.format(read)} conversations so far.` : "Reading the export."}
+      </JobStatus>
+      {done && (
+        <div>
+          <p className="text-sm text-soft">{AI_LABEL[done.provider] ?? done.provider} chats.</p>
+          <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <Stat label="Conversations" value={done.conversations} />
+            <Stat label="New days" value={done.inserted} />
+            <Stat label="Updated" value={done.updated} />
+            <Stat label="Secrets removed" value={done.redactions} />
           </div>
-        )}
-        {status.kind === "error" && <p role="alert" className="text-danger">{status.message}</p>}
-        {status.kind === "done" && (
-          <div>
-            <p className="text-accent">
-              Imported {AI_LABEL[status.result.provider] ?? status.result.provider} chats. Press Rebuild below to add them to the graph.
-            </p>
-            <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
-              <Stat label="Conversations" value={status.result.conversations} />
-              <Stat label="New days" value={status.result.items_inserted} />
-              <Stat label="Updated" value={status.result.items_updated} />
-              <Stat label="Secrets removed" value={status.result.redactions} />
-            </div>
-          </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

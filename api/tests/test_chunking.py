@@ -76,18 +76,18 @@ def test_untrusted_boundaries_fall_back_to_plain_splitting():
 
 
 def test_redaction_moves_a_local_files_page_boundaries(tmp_path):
-    """The fs connector redacts after parsing: every replacement shifts what follows it."""
+    """Redaction at storage comes after parsing: every replacement shifts what follows it."""
     from pptx import Presentation
 
-    from igneous.connectors.base import SourceItem
+    from igneous.connectors.base import SourceItem, stored
     from igneous.connectors.filesystem import FilesystemConnector
 
     deck = Presentation()
     for words in (f"Setup uses {SECRET} for now", "Second slide", "Third slide"):
         deck.slides.add_slide(deck.slide_layouts[5]).shapes.add_textbox(0, 0, 1, 1).text = words
     deck.save(tmp_path / "deck.pptx")
-    (doc,) = [x for x in FilesystemConnector(tmp_path).sync({}) if isinstance(x, SourceItem)]
-    assert SECRET not in doc.body_text and doc.raw_meta["redactions"] == {"anthropic_key": 1}
+    (doc,) = [stored(x) for x in FilesystemConnector(tmp_path).sync({}) if isinstance(x, SourceItem)]
+    assert SECRET not in doc.body_text and doc.raw_meta["redactions"] == 1
     assert [doc.body_text[b["start"]:b["end"]] for b in doc.raw_meta["boundaries"]] == [
         "Setup uses [REDACTED:anthropic_key] for now", "Second slide", "Third slide"]
     assert chunking.chunks_for(doc) == [

@@ -1,9 +1,10 @@
 """The pipeline: every stage in dependency order, run the same way by `igneous pipeline` and by Rebuild on the
 Sources page (sources.run_pipeline).
 
-Source stages (spine, chunk, embed and, when asked, extract) turn new records into nodes, chunks, embeddings and
-model mentions. Each commits as it goes: what it writes is new data, safe to show at once, and a killed run resumes
-where it stopped.
+Source stages (redact, spine, chunk, embed and, when asked, extract) turn new records into nodes, chunks, embeddings
+and model mentions; redact first brings records stored under older credential rules (connectors/redact.py) up to the
+current ones, so nothing after it reads a credential they now match. Each commits as it goes: what it writes is new
+data, safe to show at once, and a killed run resumes where it stopped.
 
 Derived stages (self through corrections) recompute what is inferred from that data, in the order of what each
 reads. They run in one transaction (`publishing`) that bumps the graph version once and commits once, after the last
@@ -63,6 +64,11 @@ class Stage:
     run: Callable[[Session, Context], object]    # returns a count, or a dict of counts
     derived: bool                                # runs inside the publishing transaction
     gated: bool = False                          # skips work while no source change is pending for it (dirty.py)
+
+
+def _redact(s: Session, ctx: Context):
+    from igneous.connectors.base import redact_stored
+    return redact_stored(s)
 
 
 def _spine(s: Session, ctx: Context):
@@ -147,6 +153,7 @@ def _corrections(s: Session, ctx: Context):
 
 
 STAGES: tuple[Stage, ...] = (
+    Stage("redact", "Removing credentials from records stored under older rules", _redact, derived=False),
     Stage("spine", "Reading your sources into people, conversations and events", _spine, derived=False),
     Stage("chunk", "Splitting text into searchable pieces", _chunk, derived=False),
     Stage("embed", "Indexing meaning for search", _embed, derived=False),
@@ -167,18 +174,22 @@ STAGES: tuple[Stage, ...] = (
 NAMES = tuple(st.name for st in STAGES)
 GATED = frozenset(st.name for st in STAGES if st.gated)
 FINAL = "corrections"  # every run ends with it
+FIRST = "redact"  # every run that reads source records starts with it, so none of them reads an unredacted one
 
 
 def plan(names: list[str] | None = None, extract: int = 0) -> list[Stage]:
     """The stages a run executes, in pipeline order: `names` (default: every stage except extract, which runs only
-    when `extract`, the number of messages it may read with the model, is positive), always ending with
-    corrections. Raises ValueError for an unknown name, or for extract without a number of messages."""
+    when `extract`, the number of messages it may read with the model, is positive), starting with redact when a
+    source stage runs and always ending with corrections. Raises ValueError for an unknown name, or for extract
+    without a number of messages."""
     unknown = [n for n in names or () if n not in NAMES]
     if unknown:
         raise ValueError(f"unknown stage {', '.join(map(repr, unknown))}; the stages are {', '.join(NAMES)}")
     if names and "extract" in names and extract <= 0:
         raise ValueError("extract needs the number of messages to read with the model (--extract N)")
     wanted = set(names) if names else {n for n in NAMES if n != "extract" or extract > 0}
+    if any(not st.derived for st in STAGES if st.name in wanted):
+        wanted.add(FIRST)
     return [st for st in STAGES if st.name in wanted | {FINAL}]
 
 

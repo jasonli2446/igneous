@@ -17,8 +17,8 @@ def upgrade():
     op.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
             id          text PRIMARY KEY,
-            kind        text NOT NULL,            -- sync | pipeline | connect
-            source      text NOT NULL,            -- connector id, 'pipeline', or 'google_connect'
+            kind        text NOT NULL,            -- sync | import | pipeline
+            source      text NOT NULL,            -- a Sources page id, or 'pipeline'
             account     text,
             status      text NOT NULL DEFAULT 'running',   -- running | succeeded | failed
             started_at  timestamptz NOT NULL DEFAULT now(),

@@ -56,7 +56,7 @@ IGNEOUS_LLM_SOURCES=
 
 # Optional
 # IGNEOUS_LLM_ENABLED=false             # turn off every hosted model call
-# IGNEOUS_FILESYSTEM_ROOTS=~/Documents/notes,~/Desktop   # folders for the "Local files" source
+# IGNEOUS_FILESYSTEM_ROOTS=~/Documents/notes,~/Desktop   # "Local files" folders (default: Documents, Desktop, Downloads, iCloud Drive)
 # IGNEOUS_WEB_URL=http://localhost:3000 # where Google sign-in sends you back
 # IGNEOUS_DATA_DIR=../data              # OAuth client, token encryption key, Enron mailboxes (relative to api/)
 ```
@@ -92,7 +92,9 @@ Open <http://localhost:3000/settings> (**Sources** in the top bar). Every source
 **Connected accounts** (Google, GitHub), **Exports you upload** (ChatGPT, Claude.ai, LinkedIn, Google Takeout, with the
 upload or path box inline) and **On this computer** (Messages, Contacts, Claude Code and Codex chats, local files, Apple
 Notes). Each entry says what it reads, shows its status and last sync or import, and lists the steps to connect it.
-The list comes from `GET /sources`, so the page and the CLI never drift apart. Everything is read-only.
+Messages, Contacts and Apple Notes, the scheduled sync, and opening a local file from the reader work on macOS only.
+The page shows `GET /sources`, the registry in `api/igneous/sources.py`. That registry also builds each source's
+connector, so **Sync now**, `igneous sync` and the scheduled sync read a source the same way. Everything is read-only.
 
 Connect or import at least one source, then press **Rebuild** under "Build the graph". Rebuild runs the same pipeline as
 `igneous pipeline` (without model extraction): it reads what is new in your sources into people, conversations and
@@ -114,7 +116,7 @@ Enron demo (one mailbox, about 3k emails, end to end in a few minutes):
 
 ```bash
 make enron      # download and extract the mailboxes into data/ (~450 MB, once)
-make demo       # make migrate, igneous sync email --mailbox allen-p, igneous pipeline --extract 100
+make demo       # make migrate, igneous sync email (the allen-p demo mailbox), igneous pipeline --extract 100
 ```
 
 `make demo` calls the model for up to 100 messages (`EXTRACT=100`); that needs `AWS_BEARER_TOKEN_BEDROCK` and
@@ -140,13 +142,16 @@ The CLI uses the same `IGNEOUS_DATABASE_URL`, so `igneous sync ...` fills whiche
 ```bash
 cd api
 uv run igneous connect google                       # sign in to a Google account (read-only); repeat to add more
-uv run igneous sync gmail --since-days 90           # also: gcal, gcontacts, drive, github, imessage, maccontacts, notes, ai_chats
-uv run igneous sync fs --path ~/Documents/notes     # local files (default: IGNEOUS_FILESYSTEM_ROOTS)
-uv run igneous sync email --mailbox allen-p         # Enron demo mailbox
+uv run igneous connect github < token.txt           # a read-only GitHub token (or type it at the hidden prompt)
+uv run igneous disconnect google you@gmail.com      # forget an account's token (also github LOGIN); its items stay
+uv run igneous sync gmail                           # every connected account; `igneous sync --help` lists the sources
+uv run igneous sync fs                              # local files: the IGNEOUS_FILESYSTEM_ROOTS folders
+uv run igneous sync fs --path ~/Documents/notes     # just this folder; other folders' files are left alone
+uv run igneous sync email                           # Enron demo mailbox allen-p (--mailbox to pick others)
 
 uv run igneous import takeout ~/Downloads/takeout-*.zip     # or --downloads to use ~/Downloads/takeout-*.zip
 uv run igneous import linkedin ~/Downloads/Basic_LinkedInDataExport.zip   # a zip or an extracted folder
-# ChatGPT and Claude.ai exports are uploaded on the Sources page.
+uv run igneous import ai-export ~/Downloads/chatgpt-export.zip            # ChatGPT or Claude.ai, zip or JSON
 
 uv run igneous pipeline                             # read what is new and rebuild the graph (same as Rebuild)
 uv run igneous pipeline --extract 200               # also LLM-extract up to 200 newest messages (costs money)
@@ -158,30 +163,33 @@ The Google steps (the OAuth client file) are under [Google](#google-gmail-drive-
 
 `make synthetic-corpus` writes a small, deterministic fixture corpus to `data/synthetic-cross-source/`: five
 invented document-style files plus two ICS calendar events that reuse the public Enron demo persona addresses.
-It makes no network or model calls and **does not import** the data; it is input for the future filesystem and
-ICS importers. Every output is labeled synthetic and excludes real email text, credentials, and personal data.
+It makes no network or model calls and **does not import** the data. The Local files source reads the documents
+(`igneous sync fs --path ../data/synthetic-cross-source`); no source reads ICS calendars. Every output is labeled
+synthetic and excludes real email text, credentials, and personal data.
 Re-run it safely to restore the exact fixture, or validate an existing output with:
 
 ```bash
 cd api && uv run igneous verify-synthetic-corpus ../data/synthetic-cross-source
 ```
 
-`igneous pipeline` runs spine -> chunk -> embed -> extract -> self -> resolve -> thread_flags -> introductions -> topics
--> entities -> profile -> threads -> backbone -> organizations -> verify -> corrections (`api/igneous/pipeline.py`, the
-same list Rebuild runs, without extract). The order is what each stage reads: who you are and which identities are one
-person come before everything that counts people, your resume before the threads placed under it, the verifier after
-every link it checks, and your corrections last, so they always win. The source stages (spine through extract) only
-read what is new; the stages after them recompute what is derived. The topics stage lowercases and conservatively
-lemmatizes keys, merges only high-similarity local-embedding duplicates, and adds `RELATED_TO` after three shared
-messages; moved `ABOUT` edges keep their original provenance. Extraction, like every model call, reads only sources
-listed in `IGNEOUS_LLM_SOURCES`; set it to `email` before `make demo`, then use `EXTRACT=0` to skip calls or
-`EXTRACT=500` to process more. `docker compose up` also runs the api and web in containers.
+`igneous pipeline` runs redact -> spine -> chunk -> embed -> extract -> self -> resolve -> thread_flags -> introductions
+-> topics -> entities -> profile -> threads -> backbone -> organizations -> verify -> corrections
+(`api/igneous/pipeline.py`, the same list Rebuild runs, without extract). The order is what each stage reads: redact
+applies the current credential rules to items stored under older ones before anything reads them, who you are and
+which identities are one person come before everything that counts people, your resume before the threads placed
+under it, the verifier after every link it checks, and your corrections last, so they always win. The source stages
+(redact through extract) only read what is new; the stages after them recompute what is derived. The topics stage
+lowercases and conservatively lemmatizes keys, merges only high-similarity local-embedding duplicates, and adds
+`RELATED_TO` after three shared messages; moved `ABOUT` edges keep their original provenance. Extraction, like every
+model call, reads only sources listed in `IGNEOUS_LLM_SOURCES`; set it to `email` before `make demo`, then use
+`EXTRACT=0` to skip calls or `EXTRACT=500` to process more. `docker compose up` also runs the api and web in
+containers.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `api/igneous/connectors/` | `base.py` connector contract + resumable sync runner; one module per source (`gmail.py`, `gcal.py`, `drive.py`, `github.py`, `imessage.py`, `ai_chats.py`, `filesystem.py`, `takeout.py`, `linkedin.py`, ...); `redact.py` strips secrets before anything is stored |
+| `api/igneous/connectors/` | `base.py` connector contract + resumable sync runner, which stores every item's title, text and metadata text with the credentials `redact.py` matches replaced by `[REDACTED:<kind>]` (and `redact_stored`, the pipeline's first step, which brings items stored under an older version of those rules up to date); one module per source (`gmail.py`, `gcal.py`, `drive.py`, `github.py`, `imessage.py`, `ai_chats.py`, `filesystem.py`, `takeout.py`, `linkedin.py`, ...) |
 | `api/igneous/graph/` | `spine.py` deterministic graph; `extract.py` model mentions with span provenance; `entities.py`, `threads.py`, `resolve_threads.py`, `profile.py`, `backbone.py` derived projects, life threads and your orgs; `resolve.py` entity resolution; `verify.py` checks every derived link; `traversal.py` what the explorer shows; `invariants.py` `igneous check-graph` |
 | `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
 | `api/igneous/llm.py` | structured model calls and the rule for what a model may read (`allowed_sources`, `visible_nodes`); `providers.py` talks to Bedrock |
@@ -195,21 +203,27 @@ listed in `IGNEOUS_LLM_SOURCES`; set it to `email` before `make demo`, then use 
 
 Use the personal database (see Setup). Reads `~/Library/Messages/chat.db` read-only; each conversation-day becomes one
 item. The app that runs the API or CLI (Terminal, iTerm, your editor) needs Full Disk Access (System Settings,
-Privacy & Security). Press Sync now on the Messages entry, or:
+Privacy & Security). Press Sync now on the Messages entry, or run the same sync from the command line (the first sync
+reads the last 90 days; `--since-days` changes that):
 
 ```bash
-cd api && uv run igneous sync imessage --since-days 90 && uv run igneous pipeline
+cd api && uv run igneous sync imessage && uv run igneous pipeline
 ```
 
 **Never commit or demo personal data** (proposal CO-5): use the Enron DB for anything shared.
 
 ## Adding a stage or connector
 
-- **Connector:** implement `sync(cursor) -> Iterator[SourceItem | Checkpoint]` (see `connectors/base.py`), register it in `cli.py`.
+- **Connector:** a class whose `sync(cursor)` yields `SourceItem`s, a `Checkpoint` whenever what came before may be
+  committed, and a `Tombstone` for each item a change feed reports removed, or a final `CompletedScan` (with the
+  scopes it listed) when it listed everything (`connectors/base.py`; `run_sync` redacts and stores what it yields).
+  Then add its entry to `SOURCES` in `api/igneous/sources.py`, with the `build` that makes it (the CLI, the Sources
+  page and the scheduler all use that one) and the steps to set it up; each value it stores in
+  `source_items.source` to `source_catalog.py`; and how the spine turns its items into nodes (`graph/spine.py`).
 - **Pipeline stage:** add it to `STAGES` in `api/igneous/pipeline.py`, after every stage whose output it reads, with
-  the label the Sources page shows while it runs. A source stage (spine, chunk, embed, extract) reads only what is new
-  and commits as it goes. A derived stage runs inside the publishing transaction: it never commits, rolls back or bumps
-  the graph version, rebuilds only the rows it owns (its extractor), stores paid model results with
+  the label the Sources page shows while it runs. A source stage (redact, spine, chunk, embed, extract) reads only what
+  is new and commits as it goes. A derived stage runs inside the publishing transaction: it never commits, rolls back
+  or bumps the graph version, rebuilds only the rows it owns (its extractor), stores paid model results with
   `llm.cache_store` as they arrive, and leaves corrections to the last step. `igneous pipeline --stage NAME` runs it
   alone, then publishes.
 
@@ -270,14 +284,31 @@ without them). Postgres must be running (`make db`).
 
 ## Google (Gmail, Drive, Calendar, Contacts)
 
-1. Put the OAuth desktop client JSON at `data/google/client_secret.json` (git-ignored).
-2. `cd api && uv run igneous connect google` opens Google sign-in (read-only scopes). Click **Continue** past
-   "Google hasn't verified this app": the project is in Testing mode, so tokens expire after 7 days; re-run it then.
-3. `uv run igneous sync drive`, `uv run igneous sync gcal`, `uv run igneous sync gcontacts`,
-   `uv run igneous sync gmail --since-days 90`, then `uv run igneous pipeline`. Drive backfills files once,
-   then uses the Changes API; Google Docs, Sheets, and Slides export to parser-friendly text formats.
+Igneous signs in to Google through an OAuth client in a Google Cloud project of your own. Create it once:
 
-Gmail skips Promotions/Social/Forums by default (`--all-mail` to include them); in a real inbox they were 94% of mail.
+1. In the [Google Cloud console](https://console.cloud.google.com/) create a project.
+2. Under **APIs & Services > Library** enable the Gmail API, Google Drive API, Google Calendar API and People API.
+3. Under **APIs & Services > OAuth consent screen** choose **External**, give the app a name and your email, and add
+   each Google account you will connect as a **test user**. Leave the app in Testing.
+4. Under **APIs & Services > Credentials** create an **OAuth client ID** of type **Desktop app** and download its JSON.
+5. Save it as `data/google/client_secret.json` (git-ignored). The Sources page says when it finds the file.
+
+Then connect each account: **Connect a Google account** on the Sources page (Google sends the browser back to the API at
+`http://localhost:8000/sources/google/callback`, which a Desktop client allows), or `cd api && uv run igneous connect
+google` (it listens on a free local port; `--no-browser` prints the URL instead). Igneous asks only for read-only access
+to Gmail, Drive, Calendar and Contacts, plus your email address. Click **Continue** past "Google hasn't verified this
+app". In Testing mode Google expires the tokens after 7 days: connect again when a sync says the token expired.
+Disconnecting an account (under Gmail on the Sources page, or `igneous disconnect google you@gmail.com`) forgets its
+token; what it synced stays.
+
+Sync with **Sync now** on each entry, or `uv run igneous sync gmail` (and `gcal`, `gcontacts`, `drive`), then
+`uv run igneous pipeline`. Drive lists your files once (an interrupted listing continues where it stopped), then
+follows the Changes API. Google Docs and Slides export as text and Sheets as a workbook, every sheet; other files are
+downloaded only when they are a readable format of 20 MB or less (`MAX_DOCUMENT_BYTES` in `parsers.py`).
+
+Gmail's first sync reads the last 90 days (`--since-days` sets another window). It skips spam, drafts, Promotions,
+Social and Forums; `igneous sync gmail --all-mail` keeps the last three for that account, which remembers the choice
+(`--no-all-mail` switches back and removes them). Mail moved to Spam or Trash, or deleted, goes at the next sync.
 **Quota:** a Google Cloud project in Testing mode is cut off near 730 Gmail units/min (about 120 messages/min), far
 below Google's published 15,000. The connector paces itself to `IGNEOUS_GMAIL_UNITS_PER_MIN` (default 600; raise it in
 `api/.env` if your project's quota page allows more), so a large inbox takes a while but won't error out. Resuming

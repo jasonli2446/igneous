@@ -1,10 +1,14 @@
-"""Background jobs for the browser UI (syncs, pipeline runs, Google sign-in).
+"""Jobs: syncs, imports and pipeline runs, started from the browser UI or the scheduled sync.
 
-State lives in a small Postgres `jobs` table (migration 0007), so a page reload (or an API restart) still
-shows what happened. A partial unique index allows one running job per source.
-Jobs run in a daemon thread with their own Session; progress counts are written at most once a second.
+State lives in the `jobs` table, so a page reload or an API restart still shows what happened, and a partial unique
+index allows one running job per source. Each job records its owner, the host and process running it: a job left
+running by a process that died is marked failed (`fail_interrupted`, when the API or the scheduled sync starts),
+while one another live process runs is left alone. `start` runs a job in a daemon thread and `run` in the caller,
+each with its own Session; progress is written at most once a second.
 """
 import json
+import os
+import socket
 import threading
 import time
 import uuid
@@ -20,20 +24,53 @@ from igneous.db import SessionLocal
 Progress = Callable[..., None]  # progress(dict, force=False); unforced calls are throttled to 1/s
 Runner = Callable[[Session, Progress], dict | None]
 
+HOST = socket.gethostname()
+# What a job that stopped with its process leaves behind, and what to do about it.
+INTERRUPTED = {
+    "sync": "Interrupted: the process running it stopped. Sync again; it continues where it stopped.",
+    "import": "Interrupted: the process running it stopped before the import finished, so nothing was stored. "
+              "Import again.",
+    "pipeline": "Interrupted: the process running it stopped. Press Rebuild again; finished stages are kept.",
+}
+_MINE: set[str] = set()  # jobs this process started
+
 
 class JobBusy(RuntimeError):
     pass
 
 
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # alive, owned by another user
+        return True
+    return True
+
+
+def _dead(job) -> bool:
+    """Whether a running job's process is gone. Only a process on this host can be checked; a job without an owner
+    predates owners and outlived its process."""
+    if job.owner_pid is None:
+        return True
+    if job.owner_host != HOST:
+        return False
+    if job.owner_pid == os.getpid():  # this pid, but not this process's job: a process before it had the pid
+        return job.id not in _MINE
+    return not _alive(job.owner_pid)
+
+
 def fail_interrupted(s: Session) -> int:
-    """A job still 'running' at API startup lost its thread (restart / --reload): mark it failed."""
-    n = s.execute(text("""
-        UPDATE jobs SET status = 'failed', finished_at = now(),
-               error = 'Interrupted because the API restarted. Start it again; it resumes where it stopped.'
-        WHERE status = 'running'
-    """)).rowcount
+    """Mark failed the running jobs whose process died (an API restart or --reload, a scheduled sync that was
+    killed), each with what to do next. Safe to call from any process at any time."""
+    rows = s.execute(text("SELECT id, kind, owner_host, owner_pid FROM jobs WHERE status = 'running'")).all()
+    dead = [r for r in rows if _dead(r)]
+    for job in dead:
+        s.execute(text("UPDATE jobs SET status = 'failed', finished_at = now(), error = :e WHERE id = :i"),
+                  {"i": job.id, "e": INTERRUPTED.get(job.kind, "Interrupted: the process running it stopped.")})
     s.commit()
-    return n
+    return len(dead)
 
 
 def _row(r) -> dict:
@@ -54,20 +91,36 @@ def latest_by_source(s: Session) -> dict[str, dict]:
     return {r.source: _row(r) for r in rows}
 
 
-def start(kind: str, source: str, runner: Runner, account: str | None = None,
-          session_factory=SessionLocal) -> dict:
-    """Create the job row (JobBusy if `source` already has a running job) and run `runner` in a thread."""
+def _create(kind: str, source: str, account: str | None, session_factory) -> str:
+    """The job's row, owned by this process (JobBusy if `source` already has a running job)."""
     job_id = uuid.uuid4().hex[:12]
     with session_factory() as s:
         try:
-            s.execute(text("INSERT INTO jobs (id, kind, source, account) VALUES (:i, :k, :s, :a)"),
-                      {"i": job_id, "k": kind, "s": source, "a": account})
+            s.execute(text("""INSERT INTO jobs (id, kind, source, account, owner_host, owner_pid)
+                              VALUES (:i, :k, :s, :a, :h, :p)"""),
+                      {"i": job_id, "k": kind, "s": source, "a": account, "h": HOST, "p": os.getpid()})
             s.commit()
         except IntegrityError as e:
             s.rollback()
             raise JobBusy(f"{source} is already running") from e
+    _MINE.add(job_id)
+    return job_id
+
+
+def start(kind: str, source: str, runner: Runner, account: str | None = None,
+          session_factory=SessionLocal) -> dict:
+    """Create the job row (JobBusy if `source` already has a running job) and run `runner` in a thread."""
+    job_id = _create(kind, source, account, session_factory)
     threading.Thread(target=_work, args=(job_id, runner, session_factory), daemon=True,
                      name=f"job-{source}").start()
+    with session_factory() as s:
+        return get(s, job_id)
+
+
+def run(kind: str, source: str, runner: Runner, account: str | None = None, session_factory=SessionLocal) -> dict:
+    """Create the job row and run `runner` here; returns the finished job (JobBusy if `source` is running)."""
+    job_id = _create(kind, source, account, session_factory)
+    _work(job_id, runner, session_factory)
     with session_factory() as s:
         return get(s, job_id)
 
@@ -90,7 +143,8 @@ def _work(job_id: str, runner: Runner, session_factory) -> None:
         with session_factory() as s:
             result = runner(s, progress)
     except Exception as e:
-        status, error = "failed", (str(e) or type(e).__name__)[:500]
+        # A sync that failed for some accounts still reports what the others stored.
+        status, error, result = "failed", (str(e) or type(e).__name__)[:500], getattr(e, "result", None)
     final = None
     if result and {"inserted", "updated", "unchanged"} <= result.keys():
         final = {"items": result["inserted"] + result["updated"] + result["unchanged"]}
@@ -100,9 +154,10 @@ def _work(job_id: str, runner: Runner, session_factory) -> None:
                    progress = COALESCE(CAST(:p AS jsonb), progress)
             WHERE id = :i"""),
                   {"st": status, "e": error, "i": job_id,
-                   "r": json.dumps(result) if result is not None else None,
+                   "r": json.dumps(result, default=str) if result is not None else None,
                    "p": json.dumps(final) if final else None})
         s.commit()
+    _MINE.discard(job_id)
 
 
 class _Counting:
@@ -121,5 +176,5 @@ class _Counting:
 
 def run_connector(s: Session, connector: Connector, account: str, progress: Progress,
                   limit: int | None = None) -> dict:
-    """`run_sync` with progress: exactly what `igneous sync` does, plus item counts for the job row."""
+    """`run_sync` with progress: item counts for the job row."""
     return run_sync(s, _Counting(connector, progress), account=account, limit=limit)
