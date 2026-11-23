@@ -349,16 +349,26 @@ def _shared(s: Session, focus: Iterable[int], people: Iterable[int]) -> dict[tup
 # Why two things are linked.
 # ---------------------------------------------------------------------------------------------------------------
 
+def _as_drawn(s: Session, node: dict) -> tuple[list[int], dict[int, int]]:
+    """The nodes a node is, as the explorer draws it, and {stand-in: the node} for those it draws as the node: a person
+    is all of their identities, and an organization that stands for a thread (graph/backbone.py) is that thread too,
+    since what is placed under the organization hangs on its thread."""
+    ids = identity.members(s, node["id"])
+    thread = (node["props"] or {}).get("thread") if node["type"] == "Organization" else None
+    return (ids + [int(thread)], {int(thread): node["id"]}) if thread else (ids, {})
+
+
 def explain(s: Session, a: int, b: int, limit: int = 8, named: dict[str, str] | None = None) -> dict:
     """Why two nodes are connected: the conversations they share (message counts, dates, the latest excerpt), the
     events they both attended, their latest shared messages, the links between them (each with where it came from, its
     reason and evidence), or the shortest path when there are none, and the corrections you made to the pair. A person
-    is all of their identities; a phone number reads as its contact (`named`, `names` by default). Raises
-    identity.NotFound, and ValueError when a and b are one identity."""
+    is all of their identities, and an organization that stands for a thread is that thread too (a thread the backbone
+    placed under it is linked to its thread); a phone number reads as its contact (`named`, `names` by default).
+    Raises identity.NotFound, and ValueError when a and b are one identity."""
     na, nb = identity.node(s, a), identity.node(s, b)
-    if na["id"] == nb["id"]:
+    (ids_a, alias_a), (ids_b, alias_b) = _as_drawn(s, na), _as_drawn(s, nb)
+    if na["id"] == nb["id"] or set(ids_a) & set(ids_b):
         raise ValueError("Those are the same node: pick two different things.")
-    ids_a, ids_b = identity.members(s, na["id"]), identity.members(s, nb["id"])
     named = names(s) if named is None else named
     convo = s.execute(text(f"""
         WITH a AS (SELECT e.dst AS m FROM edges e WHERE e.src = ANY(:a) AND e.type = 'SENT'
@@ -398,7 +408,7 @@ def explain(s: Session, a: int, b: int, limit: int = 8, named: dict[str, str] | 
         "thread_id": c["thread_id"] if c["shown"] else None, "thread": label(c["thread"], "Thread", named),
         "messages": c["messages"], "people": people.get(c["thread_id"], 0), "first": c["first"], "last": c["last"],
         "source": c["source"], "excerpt": name_handles(c["excerpt"], named)} for c in convo]
-    links = connection(s, ids_a, ids_b, named, allow_path=total == 0 and not events)
+    links = connection(s, ids_a, ids_b, named, allow_path=total == 0 and not events, alias={**alias_a, **alias_b})
     from igneous.graph.corrections import for_pair
     return {"a": {"id": na["id"], "name": label(na["name"], na["type"], named)},
             "b": {"id": nb["id"], "name": label(nb["name"], nb["type"], named)},
@@ -469,14 +479,17 @@ def shared_items(s: Session, ids_a: list[int], ids_b: list[int], named: dict[str
     return [item_card(dict(r), named) for r in rows]
 
 
-def connection(s: Session, ids_a: list[int], ids_b: list[int], named: dict[str, str], allow_path: bool = True) -> dict:
+def connection(s: Session, ids_a: list[int], ids_b: list[int], named: dict[str, str], allow_path: bool = True,
+               alias: dict[int, int] | None = None) -> dict:
     """Works for any pair: `direct` = edges between the two (all their identities), each with its reason and
     evidence items; when there are none, `path` = the shortest route through shown nodes (at most 3 hops) with each
-    hop's evidence. Each end of an edge or a hop is shown as its identity head."""
+    hop's evidence. Each end of an edge or a hop is shown as its identity head, or as the node it stands in for
+    (`alias`: an organization's thread is shown as the organization)."""
     edge_cols = "e.id, e.src, e.dst, e.type, e.extractor, e.props, e.confidence"
+    alias = alias or {}
 
     def views(rows: list[dict], hops: list[tuple[int, int]] | None = None) -> list[dict]:
-        ends = identity.heads(s, [x for r in rows for x in (r["src"], r["dst"])])
+        ends = {n: alias.get(h, h) for n, h in identity.heads(s, [x for r in rows for x in (r["src"], r["dst"])]).items()}
         about = {i: (n, t) for i, n, t in s.execute(text("SELECT id, name, type FROM nodes WHERE id = ANY(:i)"),
                                                      {"i": sorted(set(ends.values()))})}
         ev = _evidence(s, [r["id"] for r in rows], named)

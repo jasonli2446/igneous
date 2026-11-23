@@ -195,3 +195,32 @@ def test_only_what_an_org_holds_goes_under_it_by_its_domain(db):
     assert why["Acme · Dec 2024"] == "named for Acme Robotics; 100% of its conversations involve acme.test"
     assert why["Atlas · Feb 2025"] == "what you wrote about your Engineer role (since Jan 2025) names Atlas"
     assert why["Beacon rollout"] == "a work project; 100% of its conversations involve acme.test"
+
+
+def test_why_shows_a_placement_by_its_own_link_and_this_is_wrong_keeps_it_out(db):
+    """The explorer draws a class the backbone placed under State University as linked to the university, which
+    stands for its own thread. Why shows the placement itself (its reason and its records), drawn between the two;
+    "This is wrong" on it takes it out, and the next build doesn't place the class there again."""
+    me(db)
+    linkedin(db, education=[("State University", "BS", "2021-09", "2025-05")])
+    db.commit()
+    profile.run(db, log=None)
+    db.execute(text("""UPDATE nodes SET props = props || '{"domains": ["state.edu"]}' WHERE type = 'Organization'"""))
+    found(db, "CS 401 · Sep-Oct 2024", "CS 401", "cy@state.edu", ["CS 401 homework 1", "CS 401 homework 2",
+                                                                  "CS 401 midterm"], 0)
+    backbone.run(db, log=None)
+    school = db.execute(text("SELECT id FROM nodes WHERE type = 'Organization'")).scalar_one()
+    course = db.execute(text("SELECT id FROM nodes WHERE name = 'CS 401 · Sep-Oct 2024'")).scalar_one()
+    client = TestClient(app)
+    why = client.get("/graph/explain", params={"a": school, "b": course}).json()
+    (link,) = why["direct"]
+    assert (link["src"], link["dst"], link["src_name"], link["dst_name"]) == (
+        course, school, "CS 401 · Sep-Oct 2024", "State University")
+    assert link["why"] == "most of its records name CS 401; 100% of its conversations involve state.edu"
+    assert sorted(card["title"] for card in link["evidence"]) == ["CS 401 homework 1", "CS 401 homework 2",
+                                                                  "CS 401 midterm"]
+    assert not link["stated"] and why["path"] is None
+    assert client.post("/graph/edge/wrong", json={"edge": link["id"]}).status_code == 200
+    assert client.get("/graph/explain", params={"a": school, "b": course}).json()["direct"] == []
+    backbone.run(db, log=None)  # the next build: the class is still one, and still mostly the school's mail
+    assert "CS 401 · Sep-Oct 2024" not in parents(db)
