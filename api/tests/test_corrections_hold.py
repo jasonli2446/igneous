@@ -11,7 +11,7 @@ from pipeline_data import day, event, local_models, mail  # noqa: F401
 from sqlalchemy import text
 
 from igneous import llm, pipeline
-from igneous.graph import backbone, corrections, threads
+from igneous.graph import backbone, corrections, threads, verify
 from igneous.graph.derived import Writer
 from igneous.main import app
 
@@ -120,6 +120,9 @@ def test_merging_threads_keeps_every_member_through_rebuilds_and_undo_gives_both
         == ("merged", "user")
     assert "Lisbon trip" in db.execute(text("SELECT props->'aliases' FROM nodes WHERE id = :p"),
                                        {"p": portland}).scalar()
+    # The panel offers to undo it, naming what was folded in.
+    shaped = client.get(f"/graph/entity/{portland}").json()["corrections"]
+    assert [(c["override_id"], c["op"], c["value"]) for c in shaped] == [(merge["override_id"], "merge", "Lisbon trip")]
     assert client.delete(f"/overrides/{merge['override_id']}").json()["applied"] == "now"
     lisbon = project(db, "Lisbon trip")
     assert lisbon and records(db, lisbon) == theirs and records(db, portland) == mine
@@ -214,8 +217,9 @@ def test_a_message_you_linked_leaves_with_its_record_and_the_link_comes_back_wit
 
 
 def test_a_dropped_link_whose_record_is_gone_is_not_brought_back(db):
-    """'This is right' on a link the verifier dropped, after the record behind it was deleted: your verdict stands,
-    and the link stays out (a rebuild makes it again only from records that remain)."""
+    """Your 'keep' on a link the verifier dropped ('This is right' landing while a rebuild drops it), after the record
+    behind it was deleted: your verdict stands, and the link stays out (a rebuild makes it again only from records
+    that remain)."""
     person = db.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Person', 'pat@x.test', 'Pat') "
                              "RETURNING id")).scalar_one()
     trip = db.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Project', 'thread:trip', 'Trip') "
@@ -228,11 +232,12 @@ def test_a_dropped_link_whose_record_is_gone_is_not_brought_back(db):
                        VALUES ('Person:pat@x.test', 'Project:thread:trip', 'INVOLVED_IN', 'threads', 'd', 'drop', 0.9,
                                'model')"""))
     corrections.apply_all(db)
-    dropped = db.execute(text("SELECT id FROM edges_dropped")).scalar_one()
+    dropped = db.execute(text("SELECT src_key, dst_key, type, extractor FROM edges_dropped")).one()
     db.execute(text("DELETE FROM source_items WHERE id = :r"), {"r": record})
-    back = client.post("/graph/edge/restore", json={"edges": [dropped]}).json()
-    assert back["applied"] == "now" and back["restored"] == [] and back["kept"] == 1
+    verify.record_correction(db, *dropped, "keep", "you said this connection is right")
+    corrections.apply_all(db)
     assert db.execute(text("SELECT count(*) FROM edges_dropped")).scalar() == 0
+    assert db.execute(text("SELECT count(*) FROM edges")).scalar() == 0
     assert db.execute(text("SELECT verdict, source FROM edge_verdicts")).one() == ("keep", "user")
 
 
@@ -263,10 +268,12 @@ def test_a_dropped_link_is_archived_once_by_natural_key_and_goes_when_you_say_it
     archived = db.execute(text("""SELECT src_key, dst_key, type, extractor, count(*) FROM edges_dropped
                                   GROUP BY 1, 2, 3, 4""")).all()
     assert archived and all(n == 1 for *_k, n in archived)
-    mo = db.execute(text("SELECT id FROM edges_dropped WHERE src_key = 'Person:mo@q.test'")).scalar_one()
-    back = client.post("/graph/edge/restore", json={"edges": [mo]}).json()
-    assert back["restored"] == [mo] and back["kept"] == 1 and back["applied"] == "now"
-    assert [p["still_linked"] for p in back["pairs"]] == [True]
+    mo, *key = db.execute(text("SELECT id, src_key, dst_key, type, extractor FROM edges_dropped "
+                               "WHERE src_key = 'Person:mo@q.test'")).one()
+    # 'This is right' landing while a rebuild drops the link: the final step brings it back with your 'keep'.
+    verify.record_correction(db, *key, "keep", "you said this connection is right")
+    corrections.apply_all(db)
+    assert db.execute(text("SELECT count(*) FROM edges WHERE id = :i"), {"i": mo}).scalar() == 1
     assert db.execute(text("SELECT count(*) FROM edges_dropped WHERE src_key = 'Person:mo@q.test'")).scalar() == 0
     pipeline.run(db)  # your 'keep' is a label: the verifier never drops it again
     assert db.execute(text("""SELECT e.props->>'verdict', e.props->>'verified_by' FROM edges e JOIN nodes p
@@ -328,15 +335,46 @@ def _pair_graph(db):
     return person, thread, chat, derived, only
 
 
-def test_wrong_and_restore_say_per_pair_whether_a_link_still_joins_it(db):
+def test_wrong_says_per_pair_whether_a_link_still_joins_it(db):
     person, thread, chat, derived, only = _pair_graph(db)
     wrong = client.post("/graph/edge/wrong", json={"edge": derived}).json()
-    assert wrong["pairs"] == [{"a": min(person, thread), "b": max(person, thread), "still_linked": True}]  # stated
+    # The link you added still joins them: the explorer draws a link you added even between a pair you rejected.
+    assert wrong["pairs"] == [{"a": min(person, thread), "b": max(person, thread), "still_linked": True}]
+    # A link read from your data still joins chat and project, but nothing else is drawn between a pair you rejected.
+    db.execute(text("INSERT INTO edges (src, dst, type, extractor) VALUES (:c, :t, 'MENTIONS', 'spine')"),
+               {"c": chat, "t": thread})
     alone = client.post("/graph/edge/wrong", json={"edge": only}).json()
     assert alone["pairs"] == [{"a": min(chat, thread), "b": max(chat, thread), "still_linked": False}]
-    back = client.post("/graph/edge/restore", json={"edges": alone["edges"]}).json()
-    assert back["restored"] == [only] and back["applied"] == "now"
-    assert back["pairs"] == [{"a": min(chat, thread), "b": max(chat, thread), "still_linked": True}]
+
+
+def test_undo_says_per_pair_whether_a_link_joins_it_again(db):
+    """Undoing a link taken out or a link you added answers with its pairs too, so a view puts back or takes out
+    exactly those; undoing a rename touches no pair."""
+    _person, thread, chat, _derived, only = _pair_graph(db)
+    pair = {"a": min(chat, thread), "b": max(chat, thread)}
+    alone = client.post("/graph/edge/wrong", json={"edge": only}).json()
+    back = client.delete(f"/overrides/{alone['override_id']}").json()
+    assert back["applied"] == "now" and back["op"] == "unlink" and back["pairs"] == [{**pair, "still_linked": True}]
+    wrong = client.post("/graph/edge/wrong", json={"edge": only}).json()
+    added = client.post("/graph/link", json={"src": chat, "dst": thread, "type": "PART_OF"}).json()
+    assert added["pairs"] == [{**pair, "still_linked": True}]  # your link joins a pair whose inferred links you rejected
+    assert client.delete(f"/overrides/{added['override_id']}").json()["pairs"] == [{**pair, "still_linked": False}]
+    assert client.delete(f"/overrides/{wrong['override_id']}").json()["pairs"] == [{**pair, "still_linked": True}]
+    renamed = client.post(f"/graph/entity/{thread}/rename", json={"name": "The trip"}).json()
+    assert client.delete(f"/overrides/{renamed['override_id']}").json()["pairs"] == []
+
+
+def test_a_pair_is_answered_as_the_people_the_explorer_shows(db):
+    """A link from another address of a person is answered as that person, their identity head."""
+    person, thread, _chat, _derived, _only = _pair_graph(db)
+    alias = db.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Person', 'pat@y.test', 'Pat') RETURNING id")
+                       ).scalar_one()
+    db.execute(text("INSERT INTO canonical (node_id, canonical_id) VALUES (:h, :h), (:a, :h)"), {"a": alias, "h": person})
+    edge = db.execute(text("""INSERT INTO edges (src, dst, type, extractor) VALUES (:a, :t, 'RELATED_TO', 'threads')
+                              RETURNING id"""), {"a": alias, "t": thread}).scalar_one()
+    wrong = client.post("/graph/edge/wrong", json={"edge": edge}).json()
+    # Still linked: the link you added joins the person (under their other address) and the project.
+    assert wrong["pairs"] == [{"a": min(person, thread), "b": max(person, thread), "still_linked": True}]
 
 
 @pytest.mark.usefixtures("local_models")
@@ -348,7 +386,8 @@ def test_a_link_you_added_can_be_taken_out_kept_out_through_rebuilds_and_brought
     assert added["applied"] == "now" and added["id"] and added["override_id"]
     out = client.delete(f"/graph/link/{added['id']}").json()
     assert out["applied"] == "now" and out["override_id"]
-    assert out["pairs"] == [{"a": min(person, thread), "b": max(person, thread), "still_linked": True}]  # stated
+    # The inferred link and the one you added earlier still join them.
+    assert out["pairs"] == [{"a": min(person, thread), "b": max(person, thread), "still_linked": True}]
     assert db.execute(text("SELECT count(*) FROM edges WHERE id = :e"), {"e": added["id"]}).scalar() == 0
 
     def yours() -> int:
@@ -375,8 +414,14 @@ def test_not_the_same_person_splits_them_on_every_rebuild_whatever_joins_them_an
                {"a": a, "b": b})  # a shared contact card
     merged = client.post(f"/graph/person/{a}/merge", json={"other": b}).json()  # and you said so too
     assert merged["override_id"] and merged["person"] in (a, b)
-    split = client.post(f"/graph/person/{a}/split", json={"other": b}).json()
-    assert split["applied"] == "now" and split["override_id"] and split["pairs"][0]["still_linked"]  # the card stays
+    # Split off the identity the person isn't shown as, by its key, as their panel lists it.
+    other = "sam@b.test" if merged["person"] == a else "sam@a.test"
+    assert [i["key"] for i in client.get(f"/graph/node/{a}").json()["identities"]] == [other]
+    split = client.post(f"/graph/person/{a}/split", json={"key": other}).json()
+    # The card still joins them, but nothing is drawn between two people you said are not one.
+    assert split["applied"] == "now" and split["override_id"]
+    assert split["pairs"] == [{"a": min(a, b), "b": max(a, b), "still_linked": False}]
+    assert db.execute(text("SELECT count(*) FROM edges WHERE extractor = 'contacts'")).scalar() == 1
     assert db.execute(text("SELECT count(*) FROM canonical")).scalar() == 0
     assert db.execute(text("SELECT count(*) FROM overrides WHERE op = 'link'")).scalar() == 0
     assert frozenset((a, b)) in resolve.rejected(db, yours=True)
@@ -386,7 +431,14 @@ def test_not_the_same_person_splits_them_on_every_rebuild_whatever_joins_them_an
     assert client.delete(f"/overrides/{split['override_id']}").json()["applied"] == "now"
     assert db.execute(text("SELECT count(DISTINCT canonical_id) FROM canonical")).scalar() == 1
     assert db.execute(text("SELECT count(*) FROM overrides WHERE op = 'link' AND value = 'SAME_AS'")).scalar() == 1
-    assert client.post(f"/graph/person/{a}/split", json={"other": a}).status_code == 400
+    # Only one of the person's own other identities can be split off: never the one they are shown as, nor anyone
+    # else's address.
+    head = db.execute(text("SELECT DISTINCT canonical_id FROM canonical")).scalar_one()
+    shown_as = db.execute(text("SELECT key FROM nodes WHERE id = :h"), {"h": head}).scalar_one()
+    db.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Person', 'sam@c.test', 'Sam Lee')"))
+    for key in (shown_as, "sam@c.test", "nobody@x.test"):
+        assert client.post(f"/graph/person/{head}/split", json={"key": key}).status_code == 404
+    assert db.execute(text("SELECT count(*) FROM overrides WHERE op = 'unlink'")).scalar() == 0
 
 
 def test_undoing_an_older_rejection_never_restores_a_link_a_later_one_covers(db):

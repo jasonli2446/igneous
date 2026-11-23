@@ -1,29 +1,32 @@
 "use client";
 
 import { useState } from "react";
-import type { Corrected } from "@/components/Inspector";
 import { SourceRows } from "@/components/SourceList";
 import { InlineError, Skeleton } from "@/components/ui";
 import { api, type WhyEdge } from "@/lib/api";
+import { type Corrected, linkKey } from "@/lib/corrections";
 import { formatDay, formatDayRange } from "@/lib/dates";
+import { addedBy, relationLabel } from "@/lib/graph-style";
 import { useRequest } from "@/lib/hooks";
+import { useSourceLabel } from "@/lib/sources";
 
-const REL: Record<string, string> = {
-  CORRESPONDS: "corresponds with", PART_OF: "is part of", INVOLVED_IN: "is involved in", RELATED_TO: "is related to",
-  ATTENDED: "attended", MENTIONS: "mentions", ABOUT: "is about", INTRODUCED: "introduced", MEMBER_OF: "is a member of",
-  SENT: "sent", RECEIVED: "received", IN_THREAD: "is in", REPLIES_TO: "replied to", AUTHORED: "authored", SAME_AS: "is the same as",
-};
+type Answer = "wrong" | "right" | "remove";
 
 /** One link: who and how, where it came from (the API says, in plain words), the verifier's reason when it has
- *  judged it, and the items it came from. Only an inferred link can be called wrong. */
-function EdgeCard({ e, terms, onWrong, busy }: { e: WhyEdge; terms: string[]; onWrong?: (e: WhyEdge) => void; busy?: boolean }) {
+ *  judged it, and the items it came from. An inferred link can be called wrong, one the verifier was unsure about
+ *  also right, and one you or an agent added (marked with who) removed. */
+function EdgeCard({ e, terms, onAnswer, busy }: { e: WhyEdge; terms: string[]; onAnswer: (e: WhyEdge, a: Answer) => void; busy: boolean }) {
+  const by = addedBy(e.origin);
   return (
     <li className="rounded-md border border-line p-2.5">
       <div className="flex items-start gap-2">
         <span className="min-w-0 flex-1 text-sm font-medium break-words">
-          {e.src_name} <span className="font-normal text-muted">{REL[e.type] ?? e.type.toLowerCase()}</span> {e.dst_name}
+          {e.src_name} <span className="font-normal text-muted">{relationLabel(e.type)}</span> {e.dst_name}
         </span>
-        {e.verdict === "unsure" && <span className="shrink-0 rounded bg-hover px-1.5 py-px text-[10px] text-muted">Suggestion</span>}
+        {e.verdict === "unsure" && <span className="shrink-0 rounded bg-hover px-1.5 py-px text-[10px] text-muted">To check</span>}
+        {by && (
+          <span className="shrink-0 rounded bg-hover px-1.5 py-px text-[10px] text-muted">{by === "you" ? "Yours" : `Added by ${by}`}</span>
+        )}
       </div>
       {e.reason
         ? <p className="mt-1 text-xs leading-relaxed text-soft">{e.reason}</p>
@@ -32,51 +35,70 @@ function EdgeCard({ e, terms, onWrong, busy }: { e: WhyEdge; terms: string[]; on
             {e.how}
           </p>}
       {e.evidence.length > 0 && <div className="mt-2"><SourceRows items={e.evidence} highlight={terms} /></div>}
-      {!e.stated && onWrong && (
-        <button type="button" disabled={busy} onClick={() => onWrong(e)}
-          className="mt-2 text-xs text-muted hover:text-danger hover:underline disabled:opacity-50">
-          This is wrong
-        </button>
-      )}
+      <div className="mt-2 flex gap-3 text-xs">
+        {e.verdict === "unsure" && (
+          <button type="button" disabled={busy} onClick={() => onAnswer(e, "right")}
+            className="text-muted hover:text-accent hover:underline disabled:opacity-50">This is right</button>
+        )}
+        {!e.stated && !by && (
+          <button type="button" disabled={busy} onClick={() => onAnswer(e, "wrong")}
+            className="text-muted hover:text-danger hover:underline disabled:opacity-50">This is wrong</button>
+        )}
+        {by && (
+          <button type="button" disabled={busy} onClick={() => onAnswer(e, "remove")}
+            className="text-muted hover:text-danger hover:underline disabled:opacity-50">Remove</button>
+        )}
+      </div>
     </li>
   );
 }
 
 /** The evidence behind a link: what two people actually share. */
-export default function WhyConnected({ a, b, revision, onCloseAction, onOpenAction, onCorrectedAction, onRestoredAction }: {
+export default function WhyConnected({ a, b, revision, onCloseAction, onOpenAction, onCorrectedAction }: {
   a: number; b: number;
   /** Bumped after every correction: the panel loads again to show its result. */
   revision: number;
   onCloseAction: () => void; onOpenAction: (id: number) => void;
-  /** A link was rejected: the page says so, offers Undo and shows the graph without it. */
+  /** A correction made here: the page says what changed and when it applies, offers Undo and shows the result. */
   onCorrectedAction: (c: Corrected) => void;
-  /** An earlier rejection was undone here: the page shows the link again. */
-  onRestoredAction: () => void;
 }) {
   const { data: r, error: loadError, retry } = useRequest(`${a}-${b}`, (signal) => api.explain(a, b, signal), revision);
+  const sourceLabel = useSourceLabel();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // "This is wrong": your verdict removes the link now and keeps it gone on every rebuild.
-  const wrong = (edge: WhyEdge) => {
+  const run = (failed: string, act: () => Promise<Corrected>) => {
     if (saving) return;
     setSaving(true);
     setError(null);
-    api.edgeIsWrong(edge.id).then((res) => {
-      onCorrectedAction({
-        text: `Removed ${res.edges.length} inferred connection${res.edges.length === 1 ? "" : "s"}.`,
-        undo: () => api.restoreEdges(res.edges),
-      });
-    }).catch((e) => setError(`Couldn't remove it. (${String(e)})`)).finally(() => setSaving(false));
+    act().then(onCorrectedAction).catch((e) => setError(`${failed} (${String(e)})`)).finally(() => setSaving(false));
   };
 
-  const undo = (overrideId: number) => {
-    if (saving) return;
-    setSaving(true);
-    setError(null);
-    api.undoCorrection(overrideId).then(onRestoredAction)
-      .catch((e) => setError(`Couldn't undo the removal. (${String(e)})`)).finally(() => setSaving(false));
+  // "This is wrong": your verdict removes the link and keeps it gone on every rebuild. "This is right" answers a link
+  // the verifier was unsure about. "Remove" takes out a link you or an agent added; its Undo brings it back.
+  const answer = (edge: WhyEdge, a: Answer) => {
+    if (a === "wrong") {
+      run("Couldn't remove it.", async () => {
+        const res = await api.edgeIsWrong(edge.id);
+        const n = res.edges.length;
+        return { text: `Removed ${n} inferred connection${n === 1 ? "" : "s"}.`, answer: res,
+          undo: () => api.undoCorrection(res.override_id) };
+      });
+    } else if (a === "right") {
+      run("Couldn't save that.", async () => ({ text: "Marked as right: the checks learn from it.", answer: await api.edgeIsRight(edge.id) }));
+    } else {
+      run("Couldn't remove it.", async () => {
+        const res = await api.removeLink(edge.id);
+        const by = addedBy(edge.origin);
+        return { text: by === "you" ? "Removed the connection you added." : `Removed the connection ${by} added.`,
+          answer: res, undo: () => api.undoCorrection(res.override_id),
+          link: { key: linkKey(edge.src, edge.dst, edge.type), shown: false } };
+      });
+    }
   };
+
+  const undo = (overrideId: number) =>
+    run("Couldn't undo the removal.", async () => ({ text: "Brought the connection back.", answer: await api.undoCorrection(overrideId) }));
 
   return (
     <div className="space-y-4 p-4 text-sm">
@@ -102,10 +124,10 @@ export default function WhyConnected({ a, b, revision, onCloseAction, onOpenActi
               across {r.conversations.length} conversation{r.conversations.length === 1 ? "" : "s"}</>}
             {r.messages > 0 && r.events.length > 0 && ", and "}
             {r.events.length > 0 && <>{r.events.length} shared event{r.events.length === 1 ? "" : "s"}</>}
-            {r.messages === 0 && r.events.length === 0 && !r.direct.length && !r.path && !r.corrections?.length && "No connection found within three steps."}
+            {r.messages === 0 && r.events.length === 0 && !r.direct.length && !r.path && !r.corrections.length && "No connection found within three steps."}
           </p>
 
-          {r.corrections?.length > 0 && (
+          {r.corrections.length > 0 && (
             <section aria-label="Earlier corrections">
               <h3 className="mb-2 text-xs font-medium text-muted">Earlier corrections</h3>
               <ul className="space-y-2">
@@ -130,7 +152,7 @@ export default function WhyConnected({ a, b, revision, onCloseAction, onOpenActi
           {r.direct.length > 0 && (
             <section aria-label="Why linked">
               <h3 className="mb-2 text-xs font-medium text-muted">Why they&apos;re linked</h3>
-              <ul className="space-y-2">{r.direct.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} onWrong={wrong} busy={saving} />)}</ul>
+              <ul className="space-y-2">{r.direct.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} onAnswer={answer} busy={saving} />)}</ul>
             </section>
           )}
 
@@ -139,7 +161,7 @@ export default function WhyConnected({ a, b, revision, onCloseAction, onOpenActi
               <h3 className="mb-2 text-xs font-medium text-muted">
                 {r.path.length <= 2 ? "How they're linked" : `Linked through ${r.path.length - 1} other thing${r.path.length === 2 ? "" : "s"}`}
               </h3>
-              <ul className="space-y-2">{r.path.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} onWrong={wrong} busy={saving} />)}</ul>
+              <ul className="space-y-2">{r.path.map((e) => <EdgeCard key={e.id} e={e} terms={[r.a.name, r.b.name]} onAnswer={answer} busy={saving} />)}</ul>
             </section>
           )}
 
@@ -163,7 +185,7 @@ export default function WhyConnected({ a, b, revision, onCloseAction, onOpenActi
                     ) : <span className="font-medium">{c.thread || "Untitled conversation"}</span>}
                     <div className="mt-0.5 text-xs text-muted">
                       {c.messages} together{c.people > 2 ? `, ${c.people} people in it` : ""} ·{" "}
-                      {formatDayRange(c.first, c.last)} · {c.source === "imessage" ? "Messages" : c.source === "gmail" ? "Gmail" : "Email"}
+                      {formatDayRange(c.first, c.last)} · {sourceLabel(c.source)}
                     </div>
                     {c.excerpt && (
                       <p className="mt-1.5 line-clamp-3 whitespace-pre-wrap text-xs leading-relaxed text-soft">

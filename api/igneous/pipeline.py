@@ -198,6 +198,22 @@ def _lock(s: Session, name: str) -> None:
     s.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": name})
 
 
+def rebuilding(s: Session) -> bool:
+    """Whether a rebuild is reading sources or deriving now: it holds SOURCES or DERIVING, so a correction made
+    meanwhile applies when it publishes. The test graph/corrections.py apply_now makes, made the same way: each lock
+    taken shared without waiting, and let go at once."""
+    held: list[str] = []
+    try:
+        for gate in (SOURCES_LOCK, DERIVING_LOCK):
+            if not s.execute(text("SELECT pg_try_advisory_lock_shared(hashtext(:k))"), {"k": gate}).scalar():
+                return True
+            held.append(gate)
+        return False
+    finally:
+        for gate in held:
+            s.execute(text("SELECT pg_advisory_unlock_shared(hashtext(:k))"), {"k": gate})
+
+
 @contextmanager
 def publishing(s: Session):
     """One change to the derived graph, published at once: hold the deriving lock (a rebuild deriving waits for any

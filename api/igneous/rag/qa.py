@@ -184,9 +184,21 @@ NO_SOURCES = ("Ask sends the passages it finds to a hosted model, and no source 
               "The Sources page shows each source's id.")
 
 
+NOT_SET_UP = ("Ask sends the passages it finds to a hosted model, which isn't set up ({why}). Search and the graph work "
+              "without it.")
+
+
 def _not_opted_in(message: str, filters: dict) -> dict:
     return {"answerable": False, "answer": message, "citations": [], "evidence": [], "timing": {"retrieve_s": 0.0},
             "reason": "no_opted_in_sources", "filters": filters}
+
+
+def not_set_up(s: Session, why: str, f: Filters | None = None) -> dict:
+    """What the HTTP API answers when `answer` meets a hosted model whose calls are off or that has no key
+    (llm.LLMDisabled, `why`): no answer and nothing sent, as with nothing opted in, with how to set it up. `filters`
+    are the request's own."""
+    return {"answerable": False, "answer": NOT_SET_UP.format(why=why), "citations": [], "evidence": [],
+            "timing": {"retrieve_s": 0.0}, "reason": "model_not_set_up", "filters": describe(s, f or Filters())}
 
 
 @dataclass(frozen=True)

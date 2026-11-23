@@ -92,10 +92,10 @@ What is in them, so you know what to click:
 | Click **Lakeshore University** | It opens to her classes: CS 341 through the CS 481 capstone. Nobody configured this; it comes from her resume and LinkedIn plus which threads involve the school's people and dates. |
 | Click **Northwind Robotics** | The job: how she was hired and the Heron field trials. Open Heron for the colleagues she wrote and chatted with. |
 | Click the **Lisbon trip** | Who went comes from the trip's own group chat, not from everyone who mentioned it: Dana, Sofia and Rafael. Theo, who never went, isn't on it, and a "remember Lisbon?" message six months later isn't part of it. |
-| Click **Dana Kimura** | One person, three identities: her school address, her personal address and her LinkedIn profile. And the two Alex Chens stay two people. |
+| Click **Dana Kimura** | One person, three identities: her school address, under her name, and her personal address and her LinkedIn profile, listed under Also known as, each with **Not the same person** should a match be wrong. And the two Alex Chens stay two people. |
 | Click a **line** between two nodes | Why they're connected: the kind of link, who made it (a rule, the AI checker, or you), its reason, and the exact records. Open any record. |
 | **This is wrong** on a link | It disappears in place with Undo. That's a permanent verdict: never rebuilt, and used as an example for the checker. |
-| **+ Connect to…** / **Same person as…** | Add what it missed in plain words, or merge two identities. Stored as yours, never second-guessed. |
+| **+ Connect to…** / **Same person as…** | Add what it missed in plain words, or merge two identities once you confirm. Stored as yours, never second-guessed: a link you added shows as yours in Why, with Remove. |
 | Search a new centre (top bar), e.g. **Priya Raman** | Re-centres on her and opens her connections. The pill top-left says whose graph you're on, one click back. |
 
 ## 3. The MCP server (3–4 min)

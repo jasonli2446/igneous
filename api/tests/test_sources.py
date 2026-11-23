@@ -273,6 +273,17 @@ def test_describe_lists_every_source_with_status(committed_db):
     assert github["can_sync"] is False
 
 
+def test_every_stored_source_has_the_label_the_page_names_it_by(test_db):
+    """GET /sources says what a record from each stored value is called: the name of the entry that writes it, or its
+    own label where that name would say less (one of Takeout's products) or the wrong thing (mail two sources store)."""
+    from igneous import source_catalog
+
+    labels = TestClient(app).get("/sources").json()["labels"]
+    assert set(labels) == set(source_catalog.BY_VALUE)
+    assert labels["gmail"] == "Gmail" and labels["gcal"] == "Google Calendar" and labels["fs"] == "Local files"
+    assert labels["email"] == "Email" and labels["ai_chats"] == "AI chats" and labels["takeout_maps"] == "Google Maps"
+
+
 def test_a_saved_github_token_is_an_account(db):
     secrets.save(db, "github", "octo", "github_pat_" + "x" * 30)
     github = next(r for r in sources.describe(db) if r["id"] == "github")

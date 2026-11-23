@@ -1,24 +1,25 @@
 "use client";
 
-import { sourceLabel } from "@/components/SourceList";
 import type { AppliedFilters as Filters } from "@/lib/api";
+import { formatDay } from "@/lib/dates";
+import { useSourceLabel } from "@/lib/sources";
 
 const DAY_MS = 86_400_000;
-const day = (d: Date) => d.toLocaleDateString(undefined, { dateStyle: "medium" });
 
 function dates(since: string | null, until: string | null): string | null {
   if (!since && !until) return null;
   const last = until ? new Date(new Date(until).getTime() - DAY_MS) : null; // `until` is exclusive
   if (since && last) {
-    const first = day(new Date(since));
-    return first === day(last) ? `On ${first}` : `${first} to ${day(last)}`;
+    const first = formatDay(since);
+    return first === formatDay(last) ? `On ${first}` : `${first} to ${formatDay(last)}`;
   }
-  return since ? `Since ${day(new Date(since))}` : `Before ${day(new Date(until!))}`;
+  return since ? `Since ${formatDay(since)}` : `Before ${formatDay(until)}`;
 }
 
 /** What narrowed a search or an answer, as chips. Filters the question stated are marked, so a surprising result
  *  ("why only calendar events?") explains itself. Renders nothing when nothing was filtered. */
 export default function AppliedFilters({ filters, scope }: { filters: Filters | undefined; scope: "search" | "answer" }) {
+  const sourceLabel = useSourceLabel();
   if (!filters) return null;
   const asked = new Set<string>(filters.from_question);
   const chips: { label: string; fromQuestion: boolean }[] = [];

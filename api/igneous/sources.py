@@ -300,6 +300,12 @@ MODEL_ID = {"chatgpt": "ai_chats", "claude_ai": "ai_chats"}  # the IGNEOUS_LLM_S
 _OPTION_FLAG = {"path": "--path", "mailboxes": "--mailbox", "since_days": "--since-days", "all_mail": "--all-mail"}
 
 
+def labels() -> dict[str, str]:
+    """What a record from each stored source value is called where it is shown (a search hit, the reader, a filter):
+    its own label (source_catalog), or else the name of the entry on this page that writes it."""
+    return {v.value: v.label or BY_ID[v.connector]["name"] for v in source_catalog.CATALOG}
+
+
 def model_use(sid: str, allowed: frozenset[str]) -> dict:
     """Whether a hosted model may read this source (yes | partly | no), and how to change that."""
     if sid == "persona":

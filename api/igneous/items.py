@@ -119,8 +119,9 @@ def item_view(row: dict, named: dict[str, str] | None = None) -> dict:
 
 
 def node_detail(s: Session, node_id: int) -> dict:
-    """A node as the inspector shows it (a person as their identity head), with its own record when it has one.
-    Raises identity.NotFound."""
+    """A node as the inspector shows it (a person as their identity head), with its own record when it has one. A
+    person's `identities` are the other addresses, numbers and profiles merged into them, each by its key (an identity
+    merged into someone is never named by its node id), for "not the same person". Raises identity.NotFound."""
     from igneous.graph.traversal import category, label, names
 
     n = identity.node(s, node_id)
@@ -131,8 +132,11 @@ def node_detail(s: Session, node_id: int) -> dict:
                         {"i": n["source_item_id"]}).mappings().first()
         item = item_view(dict(row), named) if row else None
     props = n["props"] or {}
+    identities = [{"key": r["key"], "name": label(r["name"], "Person", named)} for r in identity.others(s, n["id"])
+                  ] if n["type"] == "Person" else []
     return {"id": n["id"], "type": n["type"], "key": n["key"], "name": label(n["name"], n["type"], named),
-            "category": category(n["type"], props.get("kind")), "props": props, "source_item": item}
+            "category": category(n["type"], props.get("kind")), "props": props, "source_item": item,
+            "identities": identities}
 
 
 def sources_of(s: Session, node_id: int, limit: int = 10, offset: int = 0,

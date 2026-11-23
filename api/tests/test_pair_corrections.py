@@ -108,8 +108,8 @@ def test_undo_restores_exact_edges_evidence_and_previous_verdict(graph):
     # An unrelated fact added after the correction must not be erased by Undo.
     c = node(s, "Project", "Unrelated")
     later = edge(s, b, c, extractor="user", props={"note": "added later"})
-    restored = client.post("/graph/edge/restore", json={"edges": [eid]})
-    assert restored.status_code == 200 and set(restored.json()["restored"]) == set(result["edges"])
+    undone = client.delete(f"/overrides/{result['override_id']}")
+    assert undone.status_code == 200 and undone.json()["applied"] == "now"
     assert [r for r in rows(s, "edges") if r["id"] != later] == before["edges"]
     assert rows(s, "edge_evidence") == before["edge_evidence"]
     assert rows(s, "edge_verdicts") == before["edge_verdicts"]
@@ -174,8 +174,7 @@ def test_undo_does_not_remove_a_later_independent_correction(graph):
     eid = edge(s, a, b, "INVOLVED_IN")
     result = client.post("/graph/edge/wrong", json={"edge": eid}).json()
     verify.record_correction(s, "Person:A", "Project:B", "INVOLVED_IN", "threads", "drop", "a later decision")
-    response = client.post("/graph/edge/restore", json={"edges": result["edges"]})
-    assert response.json()["restored"] == []
+    assert client.delete(f"/overrides/{result['override_id']}").status_code == 200
     assert rows(s, "edge_verdicts")[0]["reason"] == "a later decision"
     assert rows(s, "edges") == []
 
@@ -190,10 +189,9 @@ def test_rebuilt_node_ids_do_not_break_rejection_or_undo(graph):
     edge(s, a, rebuilt, "PART_OF", "new-rule")
     verify.run(s, log=None)
     assert rows(s, "edges") == []
-    response = client.post("/graph/edge/restore", json={"edges": result["edges"]})
-    assert response.json()["restored"] == [eid]
+    assert client.delete(f"/overrides/{result['override_id']}").status_code == 200
     (restored,) = rows(s, "edges")
-    assert restored["dst"] == rebuilt
+    assert restored["id"] == eid and restored["dst"] == rebuilt
 
 
 def test_rejecting_and_restoring_identity_link_refreshes_canonical_state(graph, monkeypatch):
@@ -212,22 +210,25 @@ def test_rejecting_and_restoring_identity_link_refreshes_canonical_state(graph, 
     result = client.post("/graph/edge/wrong", json={"edge": eid}).json()
     assert len(commits) == 2 and result["applied"] == "now"  # the intent (verdict and snapshot), then the change
     assert s.execute(text("SELECT count(*) FROM canonical")).scalar() == 0
-    assert client.post("/graph/edge/restore", json={"edges": result["edges"]}).json()["restored"] == [eid]
-    assert len(commits) == 4
+    assert client.delete(f"/overrides/{result['override_id']}").json()["applied"] == "now"
+    assert [r["id"] for r in rows(s, "edges")] == [eid] and len(commits) == 4
     assert s.execute(text("SELECT count(*) FROM canonical")).scalar() == 2
 
 
-def test_restoring_an_old_archive_cannot_bypass_a_newer_pair_correction(graph):
+def test_your_keep_on_a_link_the_verifier_dropped_cannot_bypass_a_newer_pair_correction(graph):
+    """Your 'keep' reaches a link the verifier dropped when 'This is right' lands while a rebuild drops it; it never
+    brings the link back across a rejection of yours."""
     s, client = graph
     a, b = node(s, "Person", "A"), node(s, "Project", "B")
-    old = edge(s, a, b, "INVOLVED_IN", "old-rule")
+    edge(s, a, b, "INVOLVED_IN", "old-rule")
     s.execute(text("""INSERT INTO edge_verdicts (src_key,dst_key,type,extractor,evidence,verdict,confidence)
                      VALUES ('Person:A','Project:B','INVOLVED_IN','old-rule','hash','drop',.9)"""))
     verify.apply_verdicts(s)
+    assert s.execute(text("SELECT count(*) FROM edges_dropped")).scalar() == 1
     new = edge(s, b, a, extractor="new-rule")
     result = client.post("/graph/edge/wrong", json={"edge": new}).json()
-    response = client.post("/graph/edge/restore", json={"edges": [old]})
-    assert response.json()["restored"] == []
+    verify.record_correction(s, "Person:A", "Project:B", "INVOLVED_IN", "old-rule", "keep", "you said it is right")
+    verify.apply_verdicts(s)
     assert s.execute(text("SELECT 1 FROM overrides WHERE id=:i"), {"i": result["override_id"]}).first()
     assert s.execute(text("SELECT 1 FROM edge_verdicts WHERE source='user' AND evidence=:e"),
                      {"e": f"override:{result['override_id']}"}).first()
@@ -242,6 +243,5 @@ def test_undo_skips_deleted_source_records_without_touching_other_edges(graph):
     other = edge(s, b, c, extractor="user")
     result = client.post("/graph/edge/wrong", json={"edge": eid}).json()
     s.execute(text("DELETE FROM source_items WHERE id=:i"), {"i": sid})
-    response = client.post("/graph/edge/restore", json={"edges": result["edges"]})
-    assert response.status_code == 200 and response.json()["restored"] == []
+    assert client.delete(f"/overrides/{result['override_id']}").status_code == 200
     assert [r["id"] for r in rows(s, "edges")] == [other]

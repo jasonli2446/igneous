@@ -1,6 +1,9 @@
-// Every color the app draws with outside the stylesheet: section hues for nodes, and the theme's colors for the 3D
-// graph. Kept free of WebGL imports so it is safe to load during server rendering (importing it from Graph3D would
-// drag three.js into SSR and crash with "window is not defined").
+// Every color the app draws with outside the stylesheet (section hues for nodes, and the theme's colors for the 3D
+// graph), and the words for node types, link types and who added a link. Kept free of WebGL imports so it is safe to
+// load during server rendering (importing it from Graph3D would drag three.js into SSR and crash with "window is not
+// defined").
+
+import type { Origin } from "@/lib/api";
 
 // Each section keeps one hue across the graph and the panels, so a glance tells you what kind of thing a dot is.
 const SECTION_HUE: Record<string, string> = {
@@ -55,7 +58,27 @@ const TYPE_LABEL: Record<string, string> = {
   Topic: "Topic", Commitment: "Commitment", Decision: "Decision",
 };
 
-export function typeLabel(type: string, props?: { group?: boolean } | null) {
-  if (type === "Thread") return props?.group ? "Group chat" : "Conversation";
+/** A node's type in words; a conversation the thread flags mark as a group (`props.group`) is a group chat. */
+export function typeLabel(type: string, props?: Record<string, unknown>) {
+  if (type === "Thread") return props?.group === true ? "Group chat" : "Conversation";
   return TYPE_LABEL[type] ?? type;
+}
+
+/** What a link of each type says, read from its source to its destination ("Ana is part of Atlas"). */
+const RELATION: Record<string, string> = {
+  CORRESPONDS: "corresponds with", PART_OF: "is part of", INVOLVED_IN: "is involved in", RELATED_TO: "is related to",
+  ATTENDED: "attended", MENTIONS: "mentions", ABOUT: "is about", INTRODUCED: "introduced", MEMBER_OF: "is a member of",
+  WORKED_AT: "worked at", SENT: "sent", RECEIVED: "received", IN_THREAD: "is in", REPLIES_TO: "replied to",
+  AUTHORED: "authored", SAME_AS: "is the same as",
+};
+
+export function relationLabel(type: string) {
+  return RELATION[type] ?? type.toLowerCase().replaceAll("_", " ");
+}
+
+/** Who added a link, which they can take out again: "you", or the agent's name; null for a link read from your data
+ *  or inferred. */
+export function addedBy(origin: Origin): string | null {
+  if (origin === "user") return "you";
+  return origin.startsWith("agent:") ? origin.slice("agent:".length) : null;
 }
