@@ -29,6 +29,9 @@ from igneous.rag.search import Filters, _where, hybrid
 CONTEXT_CHUNKS = 8  # passages the model sees
 EXPAND_PER_HIT = 2  # graph neighbours kept per hit, the closest first
 GRAPH_SLOTS = 3  # of the CONTEXT_CHUNKS, places held for graph neighbours when nothing reranks the evidence
+# A hit sent to more people than this is a broadcast: its sender's mail with each recipient isn't one conversation,
+# so it gets no "same correspondents" neighbours (a 51-recipient report would otherwise reach hundreds).
+CORRESPONDENTS_MAX_RECIPIENTS = 5
 RELATION = {-1: "reply", 0: "thread", 1: "correspondents"}  # how a neighbour is linked to its hit, closest first
 log = logging.getLogger(__name__)
 
@@ -57,7 +60,8 @@ SCHEMA = {
 def expand(s: Session, hits: list[dict], per_hit: int = EXPAND_PER_HIT, f: Filters | None = None) -> list[dict]:
     """Each hit's closest graph neighbours, at most `per_hit` of them: first its direct reply chain (REPLIES_TO,
     both directions), then other messages in its thread, then messages between its sender and a recipient within
-    14 days; within each, nearest in time to the hit first. Neighbours obey the same filters as retrieval and
+    14 days (unless the hit is a broadcast); within each, nearest in time to the hit first. Neighbours obey the
+    same filters as retrieval and
     inherit the score of the hit that reached them (`via_chunk_id`). A neighbour may itself be a hit that ranks
     below that hit (a reply whose subject repeats the question's words); a hit that ranks above it is not one."""
     rank = {h["chunk_id"]: i for i, h in enumerate(hits)}
@@ -88,14 +92,15 @@ def expand(s: Session, hits: list[dict], per_hit: int = EXPAND_PER_HIT, f: Filte
             JOIN edges other ON other.src IN (snd.src, rcv.dst) AND other.type = 'SENT' AND other.dst <> hit.node
             JOIN edges otherrcv ON otherrcv.src = other.dst AND otherrcv.type = 'RECEIVED'
                  AND otherrcv.dst IN (snd.src, rcv.dst) AND otherrcv.dst <> other.src
-            WHERE abs(extract(epoch FROM other.valid_from - snd.valid_from)) < 14 * 86400)
+            WHERE abs(extract(epoch FROM other.valid_from - snd.valid_from)) < 14 * 86400
+              AND (SELECT count(*) FROM edges r WHERE r.src = hit.node AND r.type = 'RECEIVED') <= :max_recipients)
         SELECT c.id, c.text, c.node_id, si.id AS source_item_id, si.source, si.external_id, si.title,
                si.occurred_at, n.via, n.pri, abs(extract(epoch FROM si.occurred_at - n.at)) AS distance
         FROM (SELECT * FROM reply UNION ALL SELECT * FROM thread_sib UNION ALL SELECT * FROM pair_sib) n
         JOIN chunks c ON c.node_id = n.msg AND c.ord = 0
         JOIN source_items si ON si.id = c.source_item_id
         WHERE TRUE {where}
-    """), {"nodes": list(reached_by), **params}).mappings().all()
+    """), {"nodes": list(reached_by), "max_recipients": CORRESPONDENTS_MAX_RECIPIENTS, **params}).mappings().all()
     # Rank every (passage, hit) pair first, closest relation then nearest in time, and only then cap each hit's
     # share; a passage reached from several hits goes to the first that may take it.
     rows = sorted(rows, key=lambda r: (r["pri"], r["distance"] is None, float(r["distance"] or 0), r["id"],

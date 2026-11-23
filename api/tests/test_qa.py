@@ -158,6 +158,24 @@ def test_thread_siblings_are_the_nearest_in_time_to_the_hit(db):
     assert [n["relation"] for n in out] == ["reply", "thread"]
 
 
+def test_only_personal_mail_reaches_its_correspondents_other_messages(db):
+    box = Mailbox(db)
+    others = [_node(db, "Person", f"p{i}@example.test", f"Person {i}") for i in range(qa.CORRESPONDENTS_MAX_RECIPIENTS)]
+    box.mail("note", "Quick question", "Can you check the numbers?", T0)
+    box.mail("later", "Numbers", "Here are the numbers you asked about.", T0 + timedelta(days=3), sender=box.me,
+             recipient=box.sam)
+    box.mail("report", "Daily report", "Report for the day.", T0 + timedelta(days=1))
+    for person in others:  # one recipient too many for a conversation
+        _edge(db, box.nodes["report"], person, "RECEIVED", T0 + timedelta(days=1))
+    db.flush()
+
+    def neighbours(key):
+        return [(n["chunk_id"], n["relation"]) for n in
+                qa.expand(db, [{"chunk_id": box.chunks[key], "node_id": box.nodes[key], "score": 0.1}])]
+    assert (box.chunks["later"], "correspondents") in neighbours("note")
+    assert neighbours("report") == []
+
+
 def test_citations_come_only_with_an_answer_and_carry_item_and_node_ids(mailbox, model, monkeypatch):
     monkeypatch.setattr(rerank.settings, "reranker_enabled", False)
     b1 = mailbox.chunks["b1"]
