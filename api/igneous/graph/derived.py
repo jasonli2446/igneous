@@ -4,8 +4,9 @@ A rejection of yours ("This is wrong", or unlinking something from a project) is
 nodes, keyed by their natural keys (`Type:key`). It holds for the pair, not one rule's spelling of a link: no
 derived edge of any type, in either direction, joins them again. It also holds for the pair's identities: a person
 is their identity head (another address of theirs is still them), and a Project is the Project it was folded into
-(a merge you made, two threads found to be one, or a folder's Project that joined the thread it is about). `rejections` reads those pairs, for the writers and for what reads
-the graph (`Rejections.heads`: the pairs as the explorer shows identities); `Writer` never writes an edge between one.
+(a merge you made, two threads found to be one, or a folder's Project that joined the thread it is about).
+`rejections` reads those pairs, for the writers and for what reads the graph (`Rejections.heads`: the pairs as the
+explorer shows identities); `Writer` never writes an edge between one.
 
 A Project is written under one contract by every stage that derives Projects (entities, threads with their
 umbrellas, backbone): `Writer.project` upserts it by key with the props the stage derives this run, records the name
