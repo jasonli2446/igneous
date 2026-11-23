@@ -29,7 +29,8 @@ from sqlalchemy.orm import Session
 
 from igneous.connectors.mac_contacts import SOURCES as CONTACT_DBS
 from igneous.connectors.mac_contacts import norm_phone
-from igneous.graph.identity import OWNER_KEY, head_sql, self_id
+from igneous.graph import identity
+from igneous.graph.identity import OWNER_KEY, self_id
 from igneous.graph.organizations import PERSONAL_DOMAINS
 
 EXTRACTOR = "self"
@@ -159,35 +160,39 @@ def _signals(s: Session) -> list[tuple[str, str]]:
 # A person is a human you correspond with, not an organization that emails you. A sender is a service when the
 # contact is one-way (you never wrote to them, they aren't in your contacts, you share no group chat) and what
 # they send is mostly notifications or marketing (item_class): airlines, banks, newsletters, "Adam from Bolt".
-ONE_WAY_SENDERS = text(f"""
-WITH me AS (SELECT unnest(CAST(:mine AS bigint[])) AS id
-            UNION SELECT node_id FROM canonical WHERE canonical_id = ANY(CAST(:mine AS bigint[]))),
-i_wrote AS (SELECT DISTINCT {head_sql('r.dst')} AS p
-            FROM edges s JOIN edges r ON r.src = s.dst AND r.type = 'RECEIVED'
-            WHERE s.type = 'SENT' AND s.src IN (SELECT id FROM me)),
+# Identities count as one person by trusted links only (`known`: node -> cluster), never by the last run's scoring.
+ONE_WAY_SENDERS = text("""
+WITH known AS (SELECT * FROM unnest(CAST(:nodes AS bigint[]), CAST(:roots AS bigint[])) AS k(node, root)),
+me AS (SELECT unnest(CAST(:mine AS bigint[])) AS id
+       UNION SELECT k.node FROM known k JOIN known m ON m.root = k.root WHERE m.node = ANY(CAST(:mine AS bigint[]))),
+wrote AS (SELECT DISTINCT r.dst AS p FROM edges s JOIN edges r ON r.src = s.dst AND r.type = 'RECEIVED'
+          WHERE s.type = 'SENT' AND s.src IN (SELECT id FROM me)),
+i_wrote AS (SELECT DISTINCT COALESCE(k.root, wrote.p) AS p FROM wrote LEFT JOIN known k ON k.node = wrote.p),
 -- Domains you write to people at (your school, your employers): someone there who emails you is a colleague
 -- even if you never wrote to them personally, not a service.
-my_domains AS (SELECT DISTINCT split_part(n.key, '@', 2) AS d FROM i_wrote JOIN nodes n ON n.id = i_wrote.p
+my_domains AS (SELECT DISTINCT split_part(n.key, '@', 2) AS d FROM wrote JOIN nodes n ON n.id = wrote.p
                WHERE n.key LIKE '%@%' AND split_part(n.key, '@', 2) <> ALL(:personal)),
 sent AS (SELECT e.src AS p, count(*) AS n,
                 count(*) FILTER (WHERE si.item_class IN ('notification', 'marketing')) AS bulk
          FROM edges e JOIN nodes m ON m.id = e.dst JOIN source_items si ON si.id = m.source_item_id
          WHERE e.type = 'SENT' GROUP BY e.src)
 SELECT p.id, p.name, sent.n, sent.bulk
-FROM sent JOIN nodes p ON p.id = sent.p
+FROM sent JOIN nodes p ON p.id = sent.p LEFT JOIN known k ON k.node = p.id
 WHERE p.type = 'Person' AND p.key LIKE '%@%' AND sent.bulk >= 0.5 * sent.n
   AND NOT COALESCE((p.props->>'self')::bool, false)
   AND p.props->>'named_by' IS DISTINCT FROM 'contacts'
-  AND {head_sql('p.id')} NOT IN (SELECT p FROM i_wrote)
+  AND COALESCE(k.root, p.id) NOT IN (SELECT p FROM i_wrote)
   AND split_part(p.key, '@', 2) NOT IN (SELECT d FROM my_domains)
 """)
 
 
 def one_way_senders(s: Session, mine: list[int]) -> set[int]:
-    """People you (any of `mine`, your identities, and their resolved clusters) never wrote to, outside your domains
-    and your contacts, who send you mostly bulk mail: all of it bulk at 80%, or at 50% when their name isn't even
-    shaped like a person's."""
-    return {r.id for r in s.execute(ONE_WAY_SENDERS, {"mine": mine, "personal": sorted(PERSONAL_DOMAINS)})
+    """People you (any of `mine`, your identities, and those trusted links join to them) never wrote to, at any of
+    their trusted identities, outside your domains and your contacts, who send you mostly bulk mail: all of it bulk at
+    80%, or at 50% when their name isn't even shaped like a person's."""
+    known = identity.known(s)
+    return {r.id for r in s.execute(ONE_WAY_SENDERS, {"mine": mine, "personal": sorted(PERSONAL_DOMAINS),
+                                                      "nodes": list(known), "roots": list(known.values())})
             if r.bulk >= 0.8 * r.n or not looks_like_person_name(r.name)}
 
 

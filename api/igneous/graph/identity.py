@@ -8,6 +8,9 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 OWNER_KEY = "me"
+# SAME_AS links that are ground truth, which entity resolution never second-guesses: your identity signals, contact
+# cards, your corrections, a commit's verified email, a LinkedIn connection's address.
+TRUSTED = ("self", "contacts", "user", "github", "linkedin")
 
 
 def self_id(s: Session) -> int | None:
@@ -30,6 +33,27 @@ def members(s: Session, node_id: int) -> list[int]:
     ids = s.execute(text(f"SELECT node_id FROM canonical WHERE canonical_id = {head_sql(':id')}"),
                     {"id": node_id}).scalars().all()
     return sorted({node_id, *ids})
+
+
+def known(s: Session) -> dict[int, int]:
+    """The identities known to be one person before any scoring: each Person with a trusted SAME_AS link (TRUSTED) ->
+    the smallest id in its cluster of such links. A stage that runs before entity resolution folds identities by
+    these, never by `canonical`, which still holds the last run's scored merges."""
+    parent: dict[int, int] = {}
+
+    def find(x: int) -> int:
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a, b in s.execute(text("""
+        SELECT e.src, e.dst FROM edges e JOIN nodes a ON a.id = e.src AND a.type = 'Person'
+        JOIN nodes b ON b.id = e.dst AND b.type = 'Person' WHERE e.type = 'SAME_AS' AND e.extractor = ANY(:t)
+    """), {"t": list(TRUSTED)}):
+        ra, rb = find(a), find(b)
+        parent[max(ra, rb)] = min(ra, rb)
+    return {n: find(n) for n in list(parent)}
 
 
 def card_keys(meta: dict) -> list[str]:
