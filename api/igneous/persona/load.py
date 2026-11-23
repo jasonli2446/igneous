@@ -17,7 +17,7 @@ from igneous.config import settings
 DATABASE = "igneous_persona"
 # Where each export's records are stored, as (connector, sync_state account) pairs: what its sync wrote last.
 ACCOUNTS = (("email", "mail"), ("fs", "documents"), ("takeout", "takeout"), ("linkedin", "linkedin"),
-            ("ai_chats", "chatgpt"))
+            ("ai_chats", "chatgpt"), ("vcard", "contacts"))
 
 
 class DatabaseExists(RuntimeError):
@@ -38,24 +38,29 @@ def manifest(folder: Path) -> dict:
 def connectors(s: Session, folder: Path) -> list[tuple[str, Callable]]:
     """The persona's exports as (name, connector factory), each read the way the Sources page reads its format: the
     maildir as `igneous sync email --path --mailbox` does, the documents folder as `igneous sync fs --path` does (both
-    built by their entries in sources.SOURCES), and the three exports by the connectors their imports run."""
+    built by their entries in sources.SOURCES), and the other exports by the connectors their imports run. A persona
+    folder whose manifest names no contacts export is read without one."""
     from igneous import sources
     from igneous.connectors.ai_exports import ExportConnector, preflight
     from igneous.connectors.linkedin import LinkedInConnector
     from igneous.connectors.takeout import TakeoutConnector, stored_calendars
+    from igneous.connectors.vcard import VCardConnector
 
     ex = manifest(folder)["exports"]
     ((_, mail),) = sources.BY_ID["email"]["build"](
         s, None, sources.SyncOptions(path=folder / ex["maildir"], mailboxes=(ex["mailbox"],)))
     ((_, documents),) = sources.BY_ID["fs"]["build"](s, None, sources.SyncOptions(path=folder / ex["documents"]))
     chatgpt = folder / ex["chatgpt"]
-    return [
+    out = [
         ("mail", mail),
         ("documents", documents),
         ("takeout", lambda: TakeoutConnector([folder / ex["takeout"]], stored=stored_calendars(s))),
         ("linkedin", lambda: LinkedInConnector([folder / ex["linkedin"]])),
         ("chatgpt", lambda: ExportConnector(chatgpt, preflight(chatgpt))),
     ]
+    if ex.get("contacts"):
+        out.append(("contacts", lambda: VCardConnector([folder / ex["contacts"]])))
+    return out
 
 
 def database_name(s: Session) -> str:

@@ -285,9 +285,15 @@ def test_er_rejects_mailing_lists():
     from igneous.graph.resolve import P, split_name, unresolvable
 
     for key, name in [("aei-bi_updates@www.brookings.org", "Aei-bi Updates"),
-                      ("western.price.survey.contacts@proxy4.ba.best.com", "Western Price Survey Contacts")]:
+                      ("western.price.survey.contacts@proxy4.ba.best.com", "Western Price Survey Contacts"),
+                      ("mailbox@mailzilla.net", "Mailbox Team")]:
         f, last = split_name(name, key)
         assert unresolvable(P(1, key, name, f, last, set()))
+    # A role is in the mailbox's name, never its domain: people at mailbox.org or onlinemailbox.net are people.
+    for key, name in [("nico.c@mailbox.example.com", "Nico Castellanos"), ("kevinscott@onlinemailbox.net", "Kevin Scott"),
+                      ("jo@alerts-and-digests.example.org", "Jo Park")]:
+        f, last = split_name(name, key)
+        assert not unresolvable(P(1, key, name, f, last, set())), key
 
 
 def test_quoted_header_parsing():

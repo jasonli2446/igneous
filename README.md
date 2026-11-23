@@ -104,8 +104,9 @@ web in containers instead, against the `igneous` database; the API container rea
 ### 5. Open the Sources page and follow it
 
 Open <http://localhost:3000/settings> (**Sources** in the top bar). Every source is one entry, grouped as
-**Connected accounts** (Google, GitHub), **Exports you upload** (ChatGPT, Claude.ai, LinkedIn, Google Takeout, with the
-upload or path box inline) and **On this computer** (Messages, Contacts, Claude Code and Codex chats, local files, Apple
+**Connected accounts** (Google, GitHub), **Exports you upload** (ChatGPT, Claude.ai, LinkedIn, Google Takeout, a
+contacts export in vCard, with the upload or path box inline) and **On this computer** (Messages, Contacts, Claude Code
+and Codex chats, local files, Apple
 Notes). Each entry says what it reads, shows its status and last sync or import, and lists the steps to connect it.
 Messages, Contacts and Apple Notes, the scheduled sync, and opening a local file from the reader work on macOS only.
 The page shows `GET /sources`, the registry in `api/igneous/sources.py`. That registry also builds each source's
@@ -144,8 +145,8 @@ are six people's mail, so nobody is "you" there: search for `jeff.skilling` or `
 Enron is mail only. The synthetic persona has every kind of source, so it shows what mail alone can't: life
 threads, the backbone of schools and workplaces, the profile, and evidence across sources. It is Mira Castellanos,
 an invented computer science student, from August 2024 to October 2026: a mailbox, a Google Takeout export (chat,
-tasks, Meet, Maps, My Activity, Chrome, and her calendar), LinkedIn and ChatGPT exports, and a documents folder with
-resumes, notes and a git checkout (`api/igneous/persona`). Generated from a seed on this
+tasks, Meet, Maps, My Activity, Chrome, and her calendar), LinkedIn, ChatGPT and contacts (vCard) exports, and a
+documents folder with resumes, notes and a git checkout (`api/igneous/persona`). Generated from a seed on this
 computer, with no network or model calls:
 
 ```bash
@@ -158,7 +159,7 @@ how), never with raw inserts, and the persona's sync refuses any database other 
 holds records, so it never mixes with Enron or your own data. The build places the classes and the job's threads
 under Lakeshore University and Northwind Robotics by their email domains. Without a model, threads are named by their
 term and month ("Lisbon · Jan-Mar 2025"); with `AWS_BEARER_TOKEN_BEDROCK` set and its sources opted in
-(`IGNEOUS_LLM_SOURCES=email,fs,takeout,gcal,linkedin,ai_chats`, `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`), a Rebuild
+(`IGNEOUS_LLM_SOURCES=email,fs,takeout,gcal,linkedin,ai_chats,vcard`, `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`), a Rebuild
 also names them and checks where each was placed. Its gold set (threads, the identities that are one person, Ask
 questions) makes it an eval too: `api/eval/README.md`. `docs/final-demo.md` runs on it.
 
@@ -193,6 +194,7 @@ uv run igneous sync persona                         # import them, only into ign
 uv run igneous import takeout ~/Downloads/takeout-*.zip     # or --downloads to use ~/Downloads/takeout-*.zip
 uv run igneous import linkedin ~/Downloads/Basic_LinkedInDataExport.zip   # a zip or an extracted folder
 uv run igneous import ai-export ~/Downloads/chatgpt-export.zip            # ChatGPT or Claude.ai, zip or JSON
+uv run igneous import vcard ~/Downloads/contacts.vcf                       # Google Contacts' or Apple's export
 
 uv run igneous pipeline                             # read what is new and rebuild the graph (same as Rebuild)
 uv run igneous pipeline --extract 200               # also LLM-extract up to 200 newest messages (costs money)
@@ -316,10 +318,10 @@ times (2 by default). `IGNEOUS_LLM_ENABLED=false` turns off hosted model calls (
 `/ask` returns 503).
 
 **What a model may read.** Only the sources listed in `IGNEOUS_LLM_SOURCES`: the comma-separated ids the Sources
-page shows (`gmail,ai_chats`; `takeout` covers every Takeout product but its Gemini chats and calendar, which count as
-`ai_chats` and `gcal` like those sources' own records; `ai_chats` covers every AI chat import). Every hosted
-call follows one rule (`api/igneous/llm.py`): a prompt carries text only from records in those sources, names only of
-people and things that appear in them, and counts for everything else. Local files and Apple Notes also need
+page shows (`gmail,ai_chats`; `takeout` covers every Takeout product but its Gemini chats, calendar and contacts,
+which count as `ai_chats`, `gcal` and `vcard` like those sources' own records; `ai_chats` covers every AI chat import).
+Every hosted call follows one rule (`api/igneous/llm.py`): a prompt carries text only from records in those sources,
+names only of people and things that appear in them, and counts for everything else. Local files and Apple Notes also need
 `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`. Search and Ask may also send the question itself (never a record) to the
 cheap model to pick out who, where and when (below). Empty, the default, means no model call at all; Ask then says to
 opt a source in. Results the model gave earlier stay cached and keep counting. The Sources page shows, per source,

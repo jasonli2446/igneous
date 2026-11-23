@@ -8,8 +8,8 @@ shown in a demo (CLAUDE.md, CO-5).
 
 Mira Castellanos studies computer science at Lakeshore University (fictional, like everything here) from August 2024
 to her graduation in May 2026. Her records: a mailbox, a Google Takeout export (chat, tasks, Meet, Maps, My Activity,
-Chrome, and her calendar), LinkedIn and ChatGPT exports, and a documents folder with two resumes, class notes and a git
-checkout.
+Chrome, and her calendar), LinkedIn and ChatGPT exports, her phone's contacts (a Google Contacts export), and a
+documents folder with two resumes, class notes and a git checkout.
 What is in them, so you know what to click:
 
 - **Classes**, each named by its code: CS 341, ENVS 210 (fall 2024), CS 375, CS 362 (spring 2025), CS 452 with its
@@ -21,7 +21,8 @@ What is in them, so you know what to click:
 - **The side project**: Tidepool, beach water-quality alerts, built with Rafael; Priya introduced Mira to Hannah
   Brooks, whose city team piloted it in 2026.
 - **People**: Dana writes from a school and a personal address; two different people are named Alex Chen (a CS 452
-  teammate and a Northwind firmware engineer).
+  teammate and a Northwind firmware engineer); Priya and her brother Nico are on her phone by name and number only,
+  and each number joins the address they write from.
 
 ## Before you start (once, about 20 minutes)
 
@@ -31,7 +32,7 @@ What is in them, so you know what to click:
 2. **Point the API at it** in `api/.env`:
    ```bash
    IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous_persona
-   IGNEOUS_LLM_SOURCES=email,fs,takeout,gcal,linkedin,ai_chats   # the sources the persona came through
+   IGNEOUS_LLM_SOURCES=email,fs,takeout,gcal,linkedin,ai_chats,vcard   # the sources the persona came through
    IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true                 # its documents (resumes, notes) too
    ```
 3. **Let the model read it** (needs `AWS_BEARER_TOKEN_BEDROCK` in the API's shell): start the API and press
@@ -52,7 +53,7 @@ What is in them, so you know what to click:
    Enron database for Ask at scale (prompt 7):
    ```bash
    cd api
-   uv run igneous mcp install --database igneous_persona --sources email,fs,takeout,gcal,linkedin,ai_chats
+   uv run igneous mcp install --database igneous_persona --sources email,fs,takeout,gcal,linkedin,ai_chats,vcard
    uv run igneous mcp install --name igneous-enron --database igneous --sources email
    uv run igneous connect bedrock     # for `ask` only: the model key, saved where the server finds it
    claude mcp list | grep igneous     # -> ✔ Connected, twice
@@ -62,7 +63,7 @@ What is in them, so you know what to click:
 7. **Quiet other MCP servers.** Claude Code waits for every configured server at startup. A server that times out
    (for example a stale `figma` entry) shows as one failed "waiting for MCP servers" step at the start of the session.
    Remove or disable it before recording.
-8. **Check it.** `uv run igneous mcp check --database igneous_persona --sources email,fs,takeout,gcal,linkedin,ai_chats`
+8. **Check it.** `uv run igneous mcp check --database igneous_persona --sources email,fs,takeout,gcal,linkedin,ai_chats,vcard`
    starts the server as Claude Code does and calls every tool once (add `--ask` to try `ask`, which costs a model
    call). It also brings what the tools read into the database's memory, so the first prompt doesn't wait on the disk.
 
@@ -88,12 +89,12 @@ What is in them, so you know what to click:
 
 | Do | Say |
 |---|---|
-| Open **Sources** | Setup lives in the UI: each source says what it reads and how to connect it. The persona came in through five of them: its mailbox, Google Takeout, LinkedIn, ChatGPT and Local files; the Demo group says how it was made. Rebuild runs the whole pipeline. |
+| Open **Sources** | Setup lives in the UI: each source says what it reads and how to connect it. The persona came in through six of them: its mailbox, Google Takeout, LinkedIn, ChatGPT, the contacts export and Local files; the Demo group says how it was made. Rebuild runs the whole pipeline. |
 | Open **Graph** | It opens on Mira. The first ring is only what matters most: her school and workplace, her sustained projects and trips, and her closest people. Closeness is recency-weighted, so it reflects her life now. One-off emails, newsletters and bots are never nodes. |
 | Click **Lakeshore University** | It opens to her classes: CS 341 through the CS 481 capstone. Nobody configured this; it comes from her resume and LinkedIn plus which threads involve the school's people and dates. |
 | Click **Northwind Robotics** | The job: how she was hired and the Heron field trials. Open Heron for the colleagues she wrote and chatted with. |
 | Click the **Lisbon trip** | Who went comes from the trip's own group chat, not from everyone who mentioned it: Dana, Sofia and Rafael. Theo, who never went, isn't on it, and a "remember Lisbon?" message six months later isn't part of it. |
-| Click **Dana Kimura** | One person, three identities: her school address, her personal address and her LinkedIn profile. And the two Alex Chens stay two people. |
+| Click **Dana Kimura** | One person, four identities: her school address, her personal address, her LinkedIn profile and the phone number on her contact card. And the two Alex Chens stay two people. |
 | Click a **line** between two nodes | Why they're connected: the kind of link, who made it (a rule, the AI checker, or you), its reason, and the exact records. Open any record. |
 | **This is wrong** on a link | It disappears in place with Undo. That's a permanent verdict: never rebuilt, and used as an example for the checker. |
 | **+ Connect to…** / **Same person as…** | Add what it missed in plain words, or merge two identities. Stored as yours, never second-guessed. |

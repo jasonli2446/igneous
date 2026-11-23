@@ -151,7 +151,7 @@ PEOPLE: dict[str, Person] = {p.key: p for p in [
     # Lakeshore students
     Person("dana", "Dana Kimura", f"dkimura@{LAKESHORE}", others=("dana.kimura@inbox.example.net",), org="friend",
            role="roommate", company="Great Lakes Water Trust", position="Field Technician (incoming)",
-           linkedin="dana-kimura-wq41", connected=date(2023, 2, 2)),
+           linkedin="dana-kimura-wq41", connected=date(2023, 2, 2), phone="+1 (440) 555-0123"),
     Person("rafael", "Rafael Ortiz", f"rortiz@{LAKESHORE}", org="friend", role="classmate",
            company="Cobalt Health", position="Software Engineer", linkedin="rafael-ortiz-dev",
            connected=date(2023, 9, 12)),
@@ -189,9 +189,11 @@ PEOPLE: dict[str, Person] = {p.key: p for p in [
            company="Brightline Analytics", position="Data Analyst", linkedin="theo-marsh-data",
            connected=date(2023, 5, 3)),
     Person("ama", "Ama Boateng", "ama.boateng@mailbox.example.com", org="friend", role="dana's cousin"),
-    Person("mom", "Elena Castellanos", "elena.castellanos@post.example.org", org="family", role="mother"),
+    Person("mom", "Elena Castellanos", "elena.castellanos@post.example.org", org="family", role="mother",
+           phone="+1 (440) 555-0110"),
     Person("dad", "Roberto Castellanos", "roberto.castellanos@post.example.org", org="family", role="father"),
-    Person("nico", "Nico Castellanos", "nico.c@mailbox.example.com", org="family", role="brother"),
+    Person("nico", "Nico Castellanos", "nico.c@mailbox.example.com", org="family", role="brother",
+           phone="+1 (440) 555-0139"),
     # Port Avalon
     Person("greg", "Greg Ferris", "greg@lindenproperties.example.com", org="landlord", role="landlord"),
     Person("hannah", "Hannah Brooks", "hbrooks@parks.portavalon.example.org", org="city",
@@ -203,6 +205,13 @@ PEOPLE: dict[str, Person] = {p.key: p for p in [
 def p(key: str) -> Person:
     """A person by key; "me" is Mira."""
     return ME if key == "me" else PEOPLE[key]
+
+
+# Her phone's contacts, as Google Contacts exports them: everyone she has a number for. Most cards also hold the
+# person's address; these hold only the number (and a colleague's company), as a contact saved from a call does.
+NUMBER_ONLY = ("priya", "nico")
+# The postal address on a card, by person: a place of PLACES.
+CARD_PLACES = {"mom": "parents", "owen": "northwind"}
 
 
 # LinkedIn connections who appear in no other record: classmates and acquaintances from before these two years.

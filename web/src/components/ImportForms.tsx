@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AiImportResult, api, ImportInput, Job, LinkedInResult, TakeoutResult } from "@/lib/api";
+import { AiImportResult, api, ImportInput, Job, LinkedInResult, TakeoutResult, VCardResult } from "@/lib/api";
 
 const nf = new Intl.NumberFormat();
 const AI_LABEL: Record<string, string> = { chatgpt: "ChatGPT", gemini: "Gemini", claude_ai: "Claude.ai" };
@@ -192,6 +192,48 @@ function LinkedInForm({ onDone }: { onDone: () => void }) {
   );
 }
 
+function VCardForm({ onDone }: { onDone: () => void }) {
+  const { job, error, upload, running, run, result } = useImportJob(api.importVcard, onDone);
+  const done = result as VCardResult | null;
+  return (
+    <div className="flex flex-col gap-4">
+      <PathForm id="vcard-path" label="Path to a contacts export (.vcf) or a folder of them"
+        placeholder="~/Downloads/contacts.vcf" disabled={running} onSubmit={(path) => void run({ path })} />
+      <Drop id="vcard-file" title="Or choose the .vcf files" hint="One file holds every contact you exported."
+        accept=".vcf,.vcard,text/vcard,text/x-vcard" multiple disabled={running} onFiles={(files) => void run({ files })} />
+      <JobStatus upload={upload} job={job} error={error} running={running}>Saving your contact cards.</JobStatus>
+      {done && (
+        <div>
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+            <Stat label="Cards" value={done.cards} />
+            <Stat label="Phone numbers" value={done.phones} />
+            <Stat label="Email addresses" value={done.emails} />
+            <Stat label="New" value={done.inserted} />
+            <Stat label="Updated" value={done.updated} />
+            <Stat label="Unchanged" value={done.unchanged} />
+          </div>
+          {done.without_phone_or_email > 0 && (
+            <p className="mt-3 text-xs leading-5 text-muted">
+              {done.without_phone_or_email === 1
+                ? "1 card has no phone number or email address, so it names no one here and was skipped."
+                : `${nf.format(done.without_phone_or_email)} cards have no phone number or email address, so they name `
+                  + "no one here and were skipped."}
+            </p>
+          )}
+          {done.same_as_another > 0 && (
+            <p className="mt-3 text-xs leading-5 text-muted">
+              {done.same_as_another === 1
+                ? "1 card holds exactly the numbers and addresses of another card, so it was read as that card."
+                : `${nf.format(done.same_as_another)} cards hold exactly the numbers and addresses of another card, so `
+                  + "each was read as that card."}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AiExportForm({ id, onDone }: { id: string; onDone: () => void }) {
   const { job, error, upload, running, run, result } = useImportJob(api.importAiExport, onDone);
   const done = result as AiImportResult | null;
@@ -225,6 +267,7 @@ export default function ImportForm({ sourceId, onDone }: { sourceId: string; onD
   switch (sourceId) {
     case "takeout": return <TakeoutForm onDone={onDone} />;
     case "linkedin": return <LinkedInForm onDone={onDone} />;
+    case "vcard": return <VCardForm onDone={onDone} />;
     case "chatgpt":
     case "claude_ai": return <AiExportForm id={sourceId} onDone={onDone} />;
     default: return null;

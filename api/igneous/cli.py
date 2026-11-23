@@ -177,6 +177,28 @@ def import_linkedin(paths: list[Path] = typer.Argument(..., help="LinkedIn expor
     print(result, f"in {time.time() - t:.1f}s")
 
 
+@import_app.command("vcard")
+def import_vcard(paths: list[Path] = typer.Argument(..., help="a contacts export (.vcf) from Google Contacts, Apple "
+                                                              "Contacts or iCloud, or a folder or zip of them")):
+    """Contacts export (vCard 3 or 4): names, phone numbers, emails, organizations and addresses. Each number and
+    address becomes the person the card names. Re-running is a no-op."""
+    from igneous.connectors import vcard
+
+    try:
+        resolved = vcard.resolve_paths([str(p) for p in paths])
+        vcard.preflight(resolved)
+    except vcard.VCardError as e:
+        raise typer.BadParameter(str(e)) from e
+    t = time.time()
+    with session() as s:
+        result = vcard.run_import(s, resolved)
+    skipped, same = result["without_phone_or_email"], result["same_as_another"]
+    print(f"contact cards: {result['cards']}, phone numbers: {result['phones']}, email addresses: {result['emails']}"
+          + (f", cards without either (skipped): {skipped}" if skipped else "")
+          + (f", cards with exactly another card's numbers and addresses (read as that one): {same}" if same else "")
+          + f"; {_stats(result)} in {time.time() - t:.1f}s")
+
+
 @import_app.command("ai-export")
 def import_ai_export(path: Path = typer.Argument(..., exists=True, dir_okay=False,
                                                  help="the ChatGPT or Claude.ai export .zip as emailed, or the "
@@ -376,8 +398,8 @@ def persona_generate(out: Path = typer.Argument(..., help="the folder to write t
                                                                  "gold set (igneous/persona/gold) describes the default"),
                      until: str = typer.Option(None, help="YYYY-MM-DD: only what happened up to that day (a smaller "
                                                           "persona)")):
-    """Write the persona's mailbox, Google Takeout, LinkedIn and ChatGPT exports and documents folder. No network,
-    no model calls. Import them with `igneous sync persona`, into a database of their own."""
+    """Write the persona's mailbox, Google Takeout, LinkedIn, ChatGPT and contacts exports and documents folder. No
+    network, no model calls. Import them with `igneous sync persona`, into a database of their own."""
     from datetime import date
 
     from igneous import persona
@@ -390,7 +412,8 @@ def persona_generate(out: Path = typer.Argument(..., help="the folder to write t
     print(f"wrote {manifest['person']}, {manifest['first_day']} to {manifest['last_day']}, to {out}: {c['mail']} "
           f"emails, {c['chat_lines']} chat messages, {c['chatgpt_conversations']} ChatGPT conversations, "
           f"{c['documents']} documents, {c['tasks']} tasks, {c['place_visits']} place visits, "
-          f"{c['linkedin_connections']} LinkedIn connections")
+          f"{c['calendar_events']} calendar events, {c['linkedin_connections']} LinkedIn connections, "
+          f"{c['contact_cards']} contact cards")
 
 
 @persona_app.command("database")

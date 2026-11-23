@@ -41,6 +41,7 @@ from itertools import pairwise
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous import source_catalog
 from igneous.connectors.mac_contacts import norm_phone
 from igneous.graph import dirty, item_class, quoted
 from igneous.graph.identity import OWNER_KEY, OWNER_NAME, card_keys
@@ -49,7 +50,7 @@ from igneous.graph.organizations import company_key
 
 BATCH = 1000
 MAIL = ("email", "gmail")
-CONTACTS = ("gcontacts", "maccontacts")
+CONTACTS = source_catalog.CONTACTS  # contact cards: Google Contacts, Contacts.app, contacts exports (vCard)
 
 # These edges represent a discrete message or event, rather than an ongoing relationship.
 POINT_IN_TIME_TYPES = frozenset({"SENT", "RECEIVED", "IN_THREAD", "REPLIES_TO", "ATTENDED"})
@@ -1022,7 +1023,7 @@ BUILDERS = {
     "ai_chats": build_ai_chat,
     "github": build_github,
     "gcal": build_event,
-    "gcontacts": build_contact, "maccontacts": build_contact,
+    "gcontacts": build_contact, "maccontacts": build_contact, "vcard": build_contact,
     "linkedin": build_linkedin,
     "fs": build_file, "drive": build_file, "notes": build_file,
     "takeout_chat": build_takeout, "takeout_meet": build_takeout, "takeout_tasks": build_takeout,
