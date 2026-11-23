@@ -67,7 +67,7 @@ def test_only_jobs_whose_process_died_are_failed(db):
     assert jobs.fail_interrupted(db) == 3
     assert status(db, "scheduler") == ("running", None) and status(db, "elsewhere") == ("running", None)
     assert status(db, "crashed") == ("failed", jobs.INTERRUPTED["import"])
-    assert "Import again; an import starts over" in status(db, "crashed")[1]
+    assert "nothing was stored. Import again." in status(db, "crashed")[1]
     assert "Press Rebuild again" in status(db, "old-me")[1]
     assert "Sync again; it continues where it stopped" in status(db, "unowned")[1]
 

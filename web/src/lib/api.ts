@@ -129,44 +129,18 @@ async function get<T>(
   return (await r.json()) as T;
 }
 
-export type AiImportResult = {
-  provider: "chatgpt" | "claude_ai" | "gemini";
-  conversations: number;
-  items_inserted: number;
-  items_updated: number;
-  redactions: number;
-};
+/** What an import route takes: files to upload, or a path the API reads in place (it runs on your computer). */
+export type ImportInput = { files?: File[]; path?: string; scanDownloads?: boolean };
 
-// XHR rather than fetch: fetch cannot report upload progress.
-function importAiExport(file: File, provider?: string, onProgress?: (fraction: number) => void) {
-  return new Promise<AiImportResult>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", new URL("/import/ai-export", API).toString());
-    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
-    xhr.onerror = () => reject(new Error("Could not reach the API."));
-    xhr.onload = () => {
-      let body: { detail?: unknown } = {};
-      try { body = JSON.parse(xhr.responseText); } catch {}
-      if (xhr.status >= 200 && xhr.status < 300) return resolve(body as unknown as AiImportResult);
-      reject(new Error(typeof body.detail === "string" ? body.detail : `Import failed (${xhr.status}).`));
-    };
-    const form = new FormData();
-    form.append("file", file);
-    if (provider) form.append("provider", provider);
-    xhr.send(form);
-  });
-}
-
-export type TakeoutResult = {
-  inserted: number; updated: number; unchanged: number; places: number; redactions: number;
-  parts: Record<string, number>; counts: Record<string, number>; notes: string[];
-};
-
-// A Takeout zip can be several GB: prefer { path } or { scan_downloads } (this API runs on your computer) over upload.
-function importTakeout(input: { files?: File[]; path?: string; scanDownloads?: boolean }, onProgress?: (fraction: number) => void) {
+/** Start an import job. XHR rather than fetch: fetch cannot report upload progress. */
+function startImport(route: string, input: ImportInput, onProgress?: (fraction: number) => void) {
+  const form = new FormData();
+  for (const f of input.files ?? []) form.append("file", f);
+  if (input.path?.trim()) form.append("path", input.path.trim());
+  if (input.scanDownloads) form.append("scan_downloads", "true");
   return new Promise<Job>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", new URL("/import/takeout", API).toString());
+    xhr.open("POST", new URL(route, API).toString());
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
     xhr.onerror = () => reject(new Error("Could not reach the API."));
     xhr.onload = () => {
@@ -175,42 +149,21 @@ function importTakeout(input: { files?: File[]; path?: string; scanDownloads?: b
       if (xhr.status >= 200 && xhr.status < 300) return resolve(body as unknown as Job);
       reject(new Error(typeof body.detail === "string" ? body.detail : `Import failed (${xhr.status}).`));
     };
-    const form = new FormData();
-    for (const f of input.files ?? []) form.append("file", f);
-    if (input.path?.trim()) form.append("path", input.path.trim());
-    if (input.scanDownloads) form.append("scan_downloads", "true");
     xhr.send(form);
   });
 }
 
-export type LinkedInResult = {
-  inserted: number; updated: number; unchanged: number; connections: number; positions: number; education: number;
-  profile: number; redactions: number;
+/** The stats every import's job result carries. */
+type ImportStats = { inserted: number; updated: number; unchanged: number; redactions: number };
+export type AiImportResult = ImportStats & { provider: "chatgpt" | "claude_ai" | "gemini"; conversations: number };
+export type TakeoutResult = ImportStats & {
+  places: number; parts: Record<string, number>; counts: Record<string, number>; notes: string[];
 };
-
-// A LinkedIn export is small: upload the zip, or give a path (this API runs on your computer).
-function importLinkedin(input: { file?: File; path?: string }, onProgress?: (fraction: number) => void) {
-  return new Promise<Job>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", new URL("/import/linkedin", API).toString());
-    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
-    xhr.onerror = () => reject(new Error("Could not reach the API."));
-    xhr.onload = () => {
-      let body: { detail?: unknown } = {};
-      try { body = JSON.parse(xhr.responseText); } catch {}
-      if (xhr.status >= 200 && xhr.status < 300) return resolve(body as unknown as Job);
-      reject(new Error(typeof body.detail === "string" ? body.detail : `Import failed (${xhr.status}).`));
-    };
-    const form = new FormData();
-    if (input.file) form.append("file", input.file);
-    if (input.path?.trim()) form.append("path", input.path.trim());
-    xhr.send(form);
-  });
-}
+export type LinkedInResult = ImportStats & { connections: number; positions: number; education: number; profile: number };
 
 export type Job = {
   id: string;
-  kind: "sync" | "pipeline" | "connect" | "import";
+  kind: "sync" | "pipeline" | "import";
   source: string;
   account: string | null;
   status: "running" | "succeeded" | "failed";
@@ -219,8 +172,9 @@ export type Job = {
   progress: {
     items?: number; items_total?: number; stage?: string | null; step?: number; steps?: number;
     file?: string; files_done?: number; files_total?: number;
+    conversations?: number; account?: string;
   };
-  result: Record<string, number> | null;
+  result: Record<string, unknown> | null;
   error: string | null;
 };
 
@@ -263,9 +217,13 @@ async function send<T>(method: string, path: string, body?: unknown, params: Rec
 }
 
 export const api = {
-  importAiExport,
-  importTakeout,
-  importLinkedin,
+  // A Takeout export can be several GB: prefer a path or scanDownloads (read in place) to an upload.
+  importTakeout: (input: ImportInput, onProgress?: (fraction: number) => void) =>
+    startImport("/import/takeout", input, onProgress),
+  importLinkedin: (input: ImportInput, onProgress?: (fraction: number) => void) =>
+    startImport("/import/linkedin", input, onProgress),
+  importAiExport: (input: ImportInput, onProgress?: (fraction: number) => void) =>
+    startImport("/import/ai-export", input, onProgress),
   job: (id: string, signal?: AbortSignal) => get<Job>(`/jobs/${id}`, {}, signal),
   sources: (signal?: AbortSignal) => get<{ sources: SourceInfo[]; model: ModelStatus }>("/sources", {}, signal),
   jobs: (signal?: AbortSignal) => get<{ jobs: Job[] }>("/jobs", {}, signal),

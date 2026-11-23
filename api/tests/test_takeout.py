@@ -225,20 +225,10 @@ def test_scan_downloads(tmp_path):
     assert [p.name for p in takeout.downloads_zips(tmp_path)] == ["takeout-1-001.zip"]
 
 
-def clean():
-    with SessionLocal() as s:
-        s.execute(text("DELETE FROM nodes WHERE type = 'Place' OR (type IN ('File', 'Message') AND key LIKE 'takeout\\_%')"))
-        s.execute(text("DELETE FROM source_items WHERE source LIKE 'takeout\\_%' OR "
-                       "(source = 'ai_chats' AND external_id LIKE 'gemini/gemini-2025-05-01/%')"))
-        s.execute(text("DELETE FROM sync_state WHERE connector = 'takeout'"))
-        s.commit()
-
-
 @pytest.fixture
-def db(test_db):
-    clean()
-    yield
-    clean()
+def db(committed_db):
+    """These tests commit through their own sessions (as an import does): start from an empty graph."""
+    yield committed_db
 
 
 def test_import_is_idempotent_and_builds_graph(db, zpath):

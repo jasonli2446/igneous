@@ -78,20 +78,10 @@ def test_preflight_rejects_empty(tmp_path):
         linkedin.preflight([tmp_path])
 
 
-def clean():
-    with SessionLocal() as s:
-        s.execute(text("DELETE FROM nodes WHERE key LIKE 'linkedin:%' OR key LIKE '%@linkedin-test.example' "
-                       "OR key IN ('org:globex', 'linkedin-test.example')"))
-        s.execute(text("DELETE FROM source_items WHERE source = 'linkedin'"))
-        s.execute(text("DELETE FROM sync_state WHERE connector = 'linkedin'"))
-        s.commit()
-
-
 @pytest.fixture
-def db(test_db):
-    clean()
-    yield
-    clean()
+def db(committed_db):
+    """These tests commit through their own sessions (as an import does): start from an empty graph."""
+    yield committed_db
 
 
 def test_reimport_is_noop_and_graph(db, zpath):

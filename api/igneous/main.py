@@ -1,21 +1,23 @@
+import zipfile
+from collections.abc import Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated
+from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
-from igneous import jobs, sources
+from igneous import jobs, sources, uploads
 from igneous.config import settings
 from igneous.connectors import secrets
-from igneous.connectors.ai_exports import ExportConnector, ExportError, export_items, parse_export
-from igneous.connectors.base import run_sync
 from igneous.db import SessionLocal, get_session, schema_status
 from igneous.graph import identity
 from igneous.graph.entity_api import router as entity_router
@@ -54,11 +56,13 @@ class NamedResponse(JSONResponse):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Refuse to serve a database whose schema isn't the code's, and fail the running jobs whose process died."""
+    """Refuse to serve a database whose schema isn't the code's; fail the running jobs whose process died, and remove
+    the uploads they left."""
     if problem := schema_status():
         raise RuntimeError(problem)
     with SessionLocal() as s:
         jobs.fail_interrupted(s)
+    uploads.sweep()
     yield
 
 
@@ -104,19 +108,69 @@ def expert_search(q: str = Query(..., min_length=1), k: int = Query(10, ge=1, le
     return {"experts": experts(s, q, k=k, evidence_limit=evidence_limit, mode=mode)}
 
 
+@dataclass
+class ImportRequest:
+    """What an import route was sent: local paths to read in place (this API runs on your computer), and uploaded
+    files, staged for the job."""
+    paths: list[str]
+    staged: uploads.Staged
+    scan_downloads: bool = False
+    provider: str | None = None
+
+
+async def _import_request(request: Request, prefix: str) -> ImportRequest:
+    """A JSON body {"path" | "paths", "scan_downloads", "provider"}, or a multipart form with the same fields and
+    `file` parts, whose files are copied off the event loop."""
+    if request.headers.get("content-type", "").startswith("application/json"):
+        body = await request.json()
+        raw = body.get("path") or body.get("paths") or []
+        return ImportRequest([raw] if isinstance(raw, str) else [str(p) for p in raw], uploads.Staged(None, []),
+                             bool(body.get("scan_downloads")), body.get("provider") or None)
+    form = await request.form()
+    files = [f for f in form.getlist("file") if hasattr(f, "file")]
+    return ImportRequest([str(p) for p in form.getlist("path") if isinstance(p, str) and p.strip()],
+                         await uploads.stage(files, prefix),
+                         str(form.get("scan_downloads", "")).lower() in ("1", "true", "on"),
+                         str(form.get("provider") or "") or None)
+
+
+# An input that can't be imported: the reason goes back with 422.
+IMPORT_ERRORS = (ValueError, OSError, zipfile.BadZipFile)
+
+
+async def _start_import(source: str | Callable[[], str], req: ImportRequest, prepare: Callable[[], Callable]):
+    """Check the input (`prepare` returns the job's runner, off the event loop) and start the import job, which then
+    owns the staged uploads; they are removed at once if it doesn't start."""
+    with req.staged:
+        try:
+            runner = await run_in_threadpool(prepare)
+        except IMPORT_ERRORS as e:
+            raise HTTPException(422, str(e)) from e
+        job = _start_job("import", source() if callable(source) else source, req.staged.removing_after(runner))
+        req.staged.hand_off()
+        return job
+
+
 @app.post("/import/ai-export")
-def import_ai_export(file: UploadFile, provider: Annotated[str | None, Form()] = None,
-                     s: Session = Depends(get_session)):
-    """Import a ChatGPT / claude.ai / Gemini (Takeout JSON) export, zipped or raw. Only the parsed, redacted
-    day-items are stored; the upload sits in Starlette's spooled temp file and is discarded after the request."""
-    try:
-        kind, convs = parse_export(file.file, provider or None)
-    except ExportError as e:
-        raise HTTPException(422, str(e)) from e
-    items = export_items(kind, convs)
-    stats = run_sync(s, ExportConnector(items), account=kind)
-    return {"provider": kind, "conversations": len(convs), "items_inserted": stats["inserted"],
-            "items_updated": stats["updated"], "redactions": stats["redactions"]}
+async def import_ai_export(request: Request):
+    """Import a ChatGPT or Claude.ai export (or Gemini's MyActivity.json from Takeout) as a background job; poll
+    /jobs/{id}. Send a multipart `file` (the zip as emailed, or the conversations.json inside it) or JSON/form
+    `{"path": ...}` to read it in place, and `provider` (chatgpt, claude_ai, gemini) only if it isn't recognised.
+    The job reads one conversation at a time and stores only the redacted day-items; the upload is removed when it
+    ends. Its result: {provider, conversations, inserted, updated, unchanged, redactions}."""
+    from igneous.connectors import ai_exports
+
+    req = await _import_request(request, "ai-export")
+    found: dict[str, str] = {}
+
+    def prepare():
+        files = [Path(p).expanduser() for p in req.paths] + req.staged.files
+        if len(files) != 1:
+            raise ai_exports.ExportError("Send one export: the zip, or the conversations.json inside it.")
+        found["provider"] = ai_exports.preflight(files[0], req.provider)
+        return lambda sess, progress: ai_exports.run_import(sess, files[0], found["provider"], progress)
+
+    return await _start_import(lambda: found["provider"], req, prepare)
 
 
 @app.post("/import/takeout")
@@ -125,47 +179,16 @@ async def import_takeout(request: Request):
     Send multipart `file` parts (the zip(s) as downloaded) or JSON/form `{"path": "<zip or folder>"}` and/or
     `scan_downloads: true` to read ~/Downloads/takeout-*.zip in place. This API runs on your computer, so reading
     a local path is fine and avoids pushing multi-GB zips through the browser."""
-    import shutil
-    import tempfile
-    from pathlib import Path
-
     from igneous.connectors import takeout
 
-    tmp: str | None = None
-    try:
-        if request.headers.get("content-type", "").startswith("application/json"):
-            body = await request.json()
-            paths, scan = body.get("path") or body.get("paths"), bool(body.get("scan_downloads"))
-        else:
-            form = await request.form()
-            paths, scan = [str(p) for p in form.getlist("path") if p], str(form.get("scan_downloads", "")).lower() in ("1", "true", "on")
-            uploads = [f for f in form.getlist("file") if hasattr(f, "file")]
-            if uploads:
-                tmp = tempfile.mkdtemp(prefix="igneous-takeout-")
-                for i, up in enumerate(uploads):
-                    with open(Path(tmp) / f"{i}-{Path(up.filename or 'takeout.zip').name}", "wb") as out:
-                        shutil.copyfileobj(up.file, out)
-                paths = [*paths, tmp]
-        resolved = takeout.resolve_paths(paths, scan)
+    req = await _import_request(request, "takeout")
+
+    def prepare():
+        resolved = takeout.resolve_paths([*req.paths, *map(str, req.staged.files)], req.scan_downloads)
         takeout.preflight(resolved)
-    except (takeout.TakeoutError, ValueError) as e:
-        if tmp:
-            shutil.rmtree(tmp, ignore_errors=True)
-        raise HTTPException(422, str(e)) from e
+        return lambda sess, progress: takeout.run_import(sess, resolved, progress)
 
-    def runner(sess, progress):
-        try:
-            return takeout.run_import(sess, resolved, progress)
-        finally:
-            if tmp:
-                shutil.rmtree(tmp, ignore_errors=True)
-
-    try:
-        return _start_job("import", "takeout", runner)
-    except HTTPException:
-        if tmp:
-            shutil.rmtree(tmp, ignore_errors=True)
-        raise
+    return await _start_import("takeout", req, prepare)
 
 
 @app.get("/sources")
@@ -180,48 +203,16 @@ async def import_linkedin(request: Request):
     """Import a LinkedIn data export (the zip, or Connections only) as a background job; poll /jobs/{id}.
     Send a multipart `file` (the zip as downloaded) or JSON/form `{"path": "<zip or folder>"}`. This API runs on
     your computer, so reading a local path is fine."""
-    import shutil
-    import tempfile
-    import zipfile
-    from pathlib import Path
-
     from igneous.connectors import linkedin
 
-    tmp: str | None = None
-    try:
-        if request.headers.get("content-type", "").startswith("application/json"):
-            body = await request.json()
-            paths = body.get("path") or body.get("paths")
-        else:
-            form = await request.form()
-            paths = [str(p) for p in form.getlist("path") if p]
-            uploads = [f for f in form.getlist("file") if hasattr(f, "file")]
-            if uploads:
-                tmp = tempfile.mkdtemp(prefix="igneous-linkedin-")
-                for i, up in enumerate(uploads):
-                    with open(Path(tmp) / f"{i}-{Path(up.filename or 'linkedin.zip').name}", "wb") as out:
-                        shutil.copyfileobj(up.file, out)
-                paths = [*paths, *(str(p) for p in sorted(Path(tmp).iterdir()))]
-        resolved = linkedin.resolve_paths(paths)
+    req = await _import_request(request, "linkedin")
+
+    def prepare():
+        resolved = linkedin.resolve_paths([*req.paths, *map(str, req.staged.files)])
         linkedin.preflight(resolved)
-    except (linkedin.LinkedInError, ValueError, zipfile.BadZipFile) as e:
-        if tmp:
-            shutil.rmtree(tmp, ignore_errors=True)
-        raise HTTPException(422, str(e)) from e
+        return lambda sess, progress: linkedin.run_import(sess, resolved, progress)
 
-    def runner(sess, progress):
-        try:
-            return linkedin.run_import(sess, resolved, progress)
-        finally:
-            if tmp:
-                shutil.rmtree(tmp, ignore_errors=True)
-
-    try:
-        return _start_job("import", "linkedin", runner)
-    except HTTPException:
-        if tmp:
-            shutil.rmtree(tmp, ignore_errors=True)
-        raise
+    return await _start_import("linkedin", req, prepare)
 
 
 def _start_job(kind: str, source: str, runner, account: str | None = None):

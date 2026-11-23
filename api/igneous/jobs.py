@@ -28,8 +28,8 @@ HOST = socket.gethostname()
 # What a job that stopped with its process leaves behind, and what to do about it.
 INTERRUPTED = {
     "sync": "Interrupted: the process running it stopped. Sync again; it continues where it stopped.",
-    "import": "Interrupted: the process running it stopped. Import again; an import starts over, and keeps what it "
-              "already stored.",
+    "import": "Interrupted: the process running it stopped before the import finished, so nothing was stored. "
+              "Import again.",
     "pipeline": "Interrupted: the process running it stopped. Press Rebuild again; finished stages are kept.",
 }
 _MINE: set[str] = set()  # jobs this process started
