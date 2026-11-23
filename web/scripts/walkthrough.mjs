@@ -17,7 +17,8 @@ const WEB = (process.env.WEB_URL ?? "http://localhost:3000").replace(/\/$/, "");
 const [FIRST, SECOND] = (process.env.WALK_PEOPLE ?? "Ina Rangel|John Lavorato").split("|");
 // A person and a top connection of theirs joined by an inferred link, which "This is wrong" can remove.
 const [PERSON, OTHER] = (process.env.WALK_PAIR ?? "Mery L Brown|Pallen").split("|");
-// Centres to cycle through for the twenty changes.
+// Centres to cycle through for the twenty changes. "Phillip K. Allen" is the owner's other address
+// (k..allen@enron.com), which no identity signal links to the owner, so it is a person of its own.
 const SEEDS = (process.env.WALK_SEEDS ?? "Ina Rangel|John Lavorato|Christi L Nicolay|Mery L Brown|Phillip K. Allen")
   .split("|");
 const CHANGES = 20;
