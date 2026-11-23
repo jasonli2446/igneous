@@ -1,4 +1,4 @@
-"""Structured chat calls, their result cache, and the one rule for what a hosted model may read.
+"""Hosted model calls, their result cache, and the one rule for what a hosted model may read.
 
 Every hosted call follows the same policy: a prompt carries text only from records in opted-in sources
 (`allowed_sources`), names only of people and things that appear in such records (`visible_nodes`), and counts
@@ -15,7 +15,7 @@ from igneous.config import settings
 from igneous.providers import LLMDisabled, ProviderError, ProviderUnavailable, chat
 
 __all__ = ["LLMDisabled", "ProviderError", "ProviderUnavailable", "allowed_sources", "cache_lookup", "cache_store",
-           "model_status", "require_whole_corpus", "structured", "visible_nodes"]
+           "complete", "model_status", "require_whole_corpus", "structured", "visible_nodes"]
 
 LOCAL_SOURCES = source_catalog.LOCAL_TEXT  # also need IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED
 
@@ -36,6 +36,13 @@ def structured(system: str, user: str, schema: dict, max_tokens: int = 4000, eff
     if not isinstance(parsed, dict):
         raise ProviderError("the model's answer is not a JSON object")
     return parsed, result.usage
+
+
+def complete(messages: list[dict], max_tokens: int = 2000, effort: str = "low", model: str | None = None) -> str:
+    """One free-text chat call (on `model`, else IGNEOUS_LLM_MODEL) for a caller that drives the conversation itself,
+    such as another engine answering from an export of the graph. `messages` are {role, content} with an optional
+    system message; their content follows the same rule as every prompt. Raises the providers' errors."""
+    return chat(messages, max_tokens=max_tokens, effort=effort, model=model).text
 
 
 def cache_lookup(key: str) -> dict | None:
