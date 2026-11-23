@@ -340,6 +340,29 @@ def test_a_calendars_first_listing_removes_what_it_no_longer_lists_in_its_window
     assert cursor["sync_tokens"] == {"team": "t2"} and cursor["since"] == {"team": params["timeMin"]}
 
 
+def test_an_expired_token_lists_the_calendar_again_and_removes_what_it_no_longer_lists(db):
+    from sqlalchemy import text
+
+    from igneous.connectors.base import run_sync
+
+    now = datetime.now(UTC)
+    for external_id in ("me@x.com/team/kept", "me@x.com/team/gone"):
+        db.execute(text("INSERT INTO source_items (source, external_id, content_hash, occurred_at) "
+                        "VALUES ('gcal', :e, 'h', :at)"), {"e": external_id, "at": now - timedelta(days=3)})
+    earlier = (now - timedelta(days=400)).isoformat()
+    db.execute(text("INSERT INTO sync_state (connector, account, cursor) VALUES ('gcal', 'me@x.com', CAST(:c AS jsonb))"),
+               {"c": '{"sync_tokens": {"team": "t1"}, "calendars": ["team"], "since": {"team": "' + earlier + '"}}'})
+    kept = {"id": "kept", "summary": "Kept", "start": {"dateTime": (now - timedelta(days=3)).isoformat()}}
+    calendar = FakeCalendar([{"id": "team", "summary": "Team"}],
+                            [http_error(410, "fullSyncRequired"), {"items": [kept], "nextSyncToken": "t2"}])
+    stats = run_sync(db, CalendarConnector(None, "me@x.com", service=calendar), account="me@x.com")
+    assert [("syncToken" in c, "timeMin" in c) for c in calendar.calls] == [(True, False), (False, True)]
+    assert stats["deleted"] == 1  # deleted while the token was expired: no change feed said so
+    assert set(db.execute(text("SELECT external_id FROM source_items")).scalars()) == {"me@x.com/team/kept"}
+    cursor = db.execute(text("SELECT cursor FROM sync_state WHERE account = 'me@x.com'")).scalar_one()
+    assert cursor["since"] == {"team": earlier}  # the window only grows
+
+
 def test_a_calendar_that_leaves_the_list_takes_its_events(db):
     from sqlalchemy import text
 
