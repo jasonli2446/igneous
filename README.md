@@ -317,10 +317,10 @@ times (2 by default). `IGNEOUS_LLM_ENABLED=false` turns off hosted model calls (
 `/ask` returns 503).
 
 **What a model may read.** Only the sources listed in `IGNEOUS_LLM_SOURCES`: the comma-separated ids the Sources
-page shows (`gmail,ai_chats`; `takeout` covers every Takeout product but its Gemini chats and calendar, which count as
-`ai_chats` and `gcal` like those sources' own records; `ai_chats` covers every AI chat import). Every hosted
-call follows one rule (`api/igneous/llm.py`): a prompt carries text only from records in those sources, names only of
-people and things that appear in them, and counts for everything else. Local files and Apple Notes also need
+page shows (`gmail,ai_chats`; `takeout` covers every Takeout product but its Gemini chats, calendar and contacts,
+which count as `ai_chats`, `gcal` and `vcard` like those sources' own records; `ai_chats` covers every AI chat import).
+Every hosted call follows one rule (`api/igneous/llm.py`): a prompt carries text only from records in those sources,
+names only of people and things that appear in them, and counts for everything else. Local files and Apple Notes also need
 `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`. Search and Ask may also send the question itself (never a record) to the
 cheap model to pick out who, where and when (below). Empty, the default, means no model call at all; Ask then says to
 opt a source in. Results the model gave earlier stay cached and keep counting. The Sources page shows, per source,

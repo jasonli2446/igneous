@@ -237,12 +237,14 @@ def test_a_slice_builds_its_graph_through_the_sources_registry_and_the_pipeline(
     def cluster(key: str) -> int:
         return db.execute(text("SELECT COALESCE(c.canonical_id, n.id) FROM nodes n LEFT JOIN canonical c "
                                "ON c.node_id = n.id WHERE n.type = 'Person' AND n.key = :k"), {"k": key}).scalar_one()
-    # Phone numbers from her contacts export: Owen's card ties his number to his address; Priya's holds only her
-    # number and name, which resolution joins to her mail.
+    # Phone numbers from her contacts export: Dana's, Owen's and her mother's cards tie each number to an address;
+    # Priya's and Nico's hold only a number and a name, which resolution joins to their mail.
     for identities in (("dkimura@lakeshore.example.edu", "dana.kimura@inbox.example.net", "linkedin:dana-kimura-wq41",
                         "+14405550123"),
                        ("owen@northwind.example.com", "linkedin:owen-brandt-nw", "+14405550181"),
-                       ("priya@northwind.example.com", "+14405550162")):
+                       ("elena.castellanos@post.example.org", "+14405550110"),
+                       ("priya@northwind.example.com", "+14405550162"),
+                       ("nico.c@mailbox.example.com", "+14405550139")):
         assert len({cluster(k) for k in identities}) == 1, identities
 
     def thread(name: str):  # the threads stage's (the entities stage may name a calendar series the same: #237)
