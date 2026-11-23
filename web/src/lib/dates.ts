@@ -22,6 +22,17 @@ export function formatDayTime(iso: string | null | undefined): string {
   return d ? DAY_TIME.format(d) : "";
 }
 
+// Months of a span the API gives as dates ("2025-01-01" for January 2025): read in UTC, so no time zone moves a
+// month's first day into the month before.
+const MONTH = new Intl.DateTimeFormat(undefined, { month: "short", year: "numeric", timeZone: "UTC" });
+
+/** "Jan 2025 – May 2026", "since Jul 2026", or "" without a start. */
+export function formatMonthRange(from: string | null | undefined, to: string | null | undefined): string {
+  const a = parse(from), b = parse(to);
+  if (!a) return "";
+  return b ? MONTH.formatRange(a, b < a ? a : b) : `since ${MONTH.format(a)}`;
+}
+
 /** "Mar 4 – Jun 1, 2001", or a single day when both ends fall on it. */
 export function formatDayRange(from: string | null | undefined, to: string | null | undefined): string {
   const a = parse(from), b = parse(to);
