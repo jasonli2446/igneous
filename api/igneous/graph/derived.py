@@ -8,9 +8,9 @@ is their identity head (another address of theirs is still them), and a Project 
 between one.
 
 A Project is written under one contract by every stage that derives Projects (entities, threads with their
-umbrellas, backbone): `Writer.project` upserts it by key, records the name the stage derived as
-`props.original_name`, and leaves a name you gave it (`props.renamed`) in place. The pipeline's last step
-(graph/overrides.py) puts every Project back to its derived state and applies your corrections again.
+umbrellas, backbone): `Writer.project` upserts it by key with the props the stage derives this run, records the name
+it derived as `props.original_name`, and leaves a name you gave it (`props.renamed`) in place. The pipeline's last
+step (graph/overrides.py) puts every Project back to its derived state and applies your corrections again.
 """
 import json
 import re
@@ -23,6 +23,9 @@ from sqlalchemy.orm import Session
 # Extractors that state a fact rather than infer it: read from your data, or added by you. Never rejected, never
 # judged by the verifier.
 STATED = ("spine", "user", "profile", "contacts", "self", "github", "linkedin")
+# A Project's props that the stage deriving it doesn't own: your corrections' (renamed, hidden: the last step sets
+# them again), and the backbone's marks on the threads it places (graph/backbone.py).
+OTHERS = ("renamed", "hidden", "org", "org_why", "same_as_org")
 
 
 def norm(name: str | None) -> str:
@@ -197,14 +200,17 @@ class Writer:
         return eid
 
     def project(self, key: str, name: str, props: dict) -> int:
-        """Upsert the Project `key` named `name` (props.derived says which stage derives it): the derived name is
-        kept as props.original_name, and a name you gave it stays."""
+        """Upsert the Project `key` named `name` with `props` (props.derived says which stage derives it) and the
+        derived name as props.original_name, in place of whatever it derived before; a name you gave it stays, and
+        so do the props other writers own (OTHERS)."""
         nid = self.s.execute(text("""
             INSERT INTO nodes (type, key, name, props) VALUES ('Project', :k, :n, CAST(:p AS jsonb))
             ON CONFLICT (type, key) DO UPDATE SET
                 name = CASE WHEN COALESCE((nodes.props->>'renamed')::bool, false) THEN nodes.name ELSE EXCLUDED.name END,
-                props = nodes.props || EXCLUDED.props
+                props = EXCLUDED.props || COALESCE((SELECT jsonb_object_agg(k, v) FROM jsonb_each(nodes.props) kv(k, v)
+                                                    WHERE k = ANY(CAST(:others AS text[]))), '{}'::jsonb)
             RETURNING id
-        """), {"k": key, "n": name[:120], "p": json.dumps({**props, "original_name": name[:120]})}).scalar_one()
+        """), {"k": key, "n": name[:120], "p": json.dumps({**props, "original_name": name[:120]}),
+               "others": list(OTHERS)}).scalar_one()
         self.rejected.track(nid, f"Project:{key}")
         return nid

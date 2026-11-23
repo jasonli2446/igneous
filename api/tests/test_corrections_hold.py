@@ -71,6 +71,18 @@ def test_renames_and_hides_hold_on_threads_and_org_threads_and_undo_brings_back_
     assert (name_of(db, portland), hidden(db, lisbon), name_of(db, acme)) == ("Portland trip", False, "Acme Robotics")
 
 
+def test_a_project_holds_what_its_stage_derives_now_and_what_others_set_on_it(db):
+    """A stage writes a Project's props afresh (one it no longer derives goes); your name and flags, and the
+    backbone's marks, stay."""
+    w = Writer(db, "threads")
+    nid = w.project("thread:x", "Trip", {"derived": "threads", "kind": "trip", "suggested": True})
+    db.execute(text("""UPDATE nodes SET name = 'My trip', props = props || '{"renamed": true, "org": 7, "x": 1}'
+                       WHERE id = :i"""), {"i": nid})
+    assert w.project("thread:x", "Summer trip", {"derived": "threads", "kind": "trip"}) == nid
+    assert db.execute(text("SELECT name, props FROM nodes WHERE id = :i"), {"i": nid}).one() == (
+        "My trip", {"derived": "threads", "kind": "trip", "original_name": "Summer trip", "renamed": True, "org": 7})
+
+
 def test_your_hide_of_a_thread_the_backbone_also_hid_outlives_the_backbone(db):
     """The backbone marks a thread named like an org as the org's duplicate (its own flag); your hide is yours."""
     me = db.execute(text("INSERT INTO nodes (type, key, name, props) VALUES ('Person', 'me', 'Mo', '{\"self\": true}') "
@@ -279,22 +291,28 @@ def test_wrong_and_restore_say_per_pair_whether_a_link_still_joins_it(db):
     assert back["pairs"] == [{"a": min(chat, thread), "b": max(chat, thread), "still_linked": True}]
 
 
+@pytest.mark.usefixtures("local_models")
 def test_a_link_you_added_can_be_taken_out_kept_out_through_rebuilds_and_brought_back(db):
-    person, thread, _chat, _derived, _only = _pair_graph(db)
+    person, thread, _chat, derived, _only = _pair_graph(db)
+    assert client.delete(f"/graph/link/{derived}").status_code == 400  # inferred: say it is wrong instead
+    assert client.delete("/graph/link/999999").status_code == 404
     added = client.post("/graph/link", json={"src": person, "dst": thread, "type": "INVOLVED_IN"}).json()
     assert added["applied"] == "now" and added["id"] and added["override_id"]
     out = client.delete(f"/graph/link/{added['id']}").json()
     assert out["applied"] == "now" and out["override_id"]
+    assert out["pairs"] == [{"a": min(person, thread), "b": max(person, thread), "still_linked": True}]  # stated
     assert db.execute(text("SELECT count(*) FROM edges WHERE id = :e"), {"e": added["id"]}).scalar() == 0
-    corrections.apply_all(db)  # every rebuild's last step
-    assert db.execute(text("SELECT count(*) FROM edges WHERE src = :a AND dst = :t AND extractor = 'user' "
-                           "AND type = 'INVOLVED_IN'"), {"a": person, "t": thread}).scalar() == 0
+
+    def yours() -> int:
+        return db.execute(text("""SELECT count(*) FROM edges WHERE src = :a AND dst = :t AND extractor = 'user'
+                                  AND type = 'INVOLVED_IN'"""), {"a": person, "t": thread}).scalar()
+
+    pipeline.run(db)
+    assert yours() == 0
     assert client.delete(f"/overrides/{out['override_id']}").json()["applied"] == "now"
-    assert db.execute(text("SELECT count(*) FROM edges WHERE src = :a AND dst = :t AND extractor = 'user' "
-                           "AND type = 'INVOLVED_IN'"), {"a": person, "t": thread}).scalar() == 1
-    derived = db.execute(text("SELECT id FROM edges WHERE extractor = 'threads' AND type = 'INVOLVED_IN'")).scalar()
-    assert client.delete(f"/graph/link/{derived}").status_code == 400
-    assert client.delete("/graph/link/999999").status_code == 404
+    assert yours() == 1
+    pipeline.run(db)
+    assert yours() == 1
 
 
 @pytest.mark.usefixtures("local_models")

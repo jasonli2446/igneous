@@ -104,6 +104,77 @@ def test_organizations_keyed_by_company_name_converge_on_one_node_each(test_db, 
         admin.dispose()
 
 
+def test_corrections_become_intents_and_dropped_links_one_row_each(test_db, monkeypatch):
+    """The corrections migration on a database written by the code before it: what the verifier dropped is one row
+    per natural key (stale and orphaned rows go), an unlink in the older format is your rejection of the pair, the
+    links you added are intents, a thread named without the model is unjudged, and a candidate a failed model call
+    rejected is judged again. Downgrading and upgrading again keeps it all."""
+    from alembic import command
+    from alembic.config import Config
+
+    revision = next(r for r in dbm._script().walk_revisions() if (r.doc or "").startswith("Corrections as intents"))
+    name = f"{TEST_DB}_intents"
+    url = make_url(settings.database_url).set(database=name).render_as_string(hide_password=False)
+    admin = create_engine(make_url(settings.database_url).set(database="postgres"), isolation_level="AUTOCOMMIT")
+    config = Config(str(API / "alembic.ini"))
+    config.set_main_option("script_location", str(API / "migrations"))
+    monkeypatch.setattr(settings, "database_url", url)  # migrations/env.py connects to settings.database_url
+    try:
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+            c.execute(text(f'CREATE DATABASE "{name}"'))
+        command.upgrade(config, revision.down_revision)
+        engine = create_engine(url)
+        with engine.begin() as c:
+            ids = dict(c.execute(text("""
+                INSERT INTO nodes (type, key, name) VALUES ('Person', 'pat@x.test', 'Pat'),
+                    ('Project', 'thread:a', 'Atlas'), ('Project', 'thread:b', 'Kiosk'), ('Project', 'project:c', 'Cy')
+                RETURNING key, id""")).all())
+            pat, a, b = (ids[k] for k in ("pat@x.test", "thread:a", "thread:b"))
+            c.execute(text("""
+                INSERT INTO edges_dropped (id, src, dst, type, extractor) VALUES
+                    (90, :pat, :a, 'INVOLVED_IN', 'threads'), (91, :pat, :a, 'INVOLVED_IN', 'threads'),
+                    (92, :pat, :a, 'INVOLVED_IN', 'threads'), (93, :pat, :b, 'RELATED_TO', 'threads'),
+                    (94, :pat, 999999, 'INVOLVED_IN', 'threads')"""), {"pat": pat, "a": a, "b": b})
+            c.execute(text("""
+                INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, confidence, source)
+                VALUES ('Person:pat@x.test', 'Project:thread:a', 'INVOLVED_IN', 'threads', 'd', 'drop', 0.9, 'model')"""))
+            c.execute(text("""INSERT INTO overrides (op, node_keys) VALUES
+                              ('unlink', ARRAY['Project:project:c', 'Person:pat@x.test'])"""))
+            c.execute(text("""
+                INSERT INTO edges (src, dst, type, extractor, props) VALUES
+                    (:a, :b, 'PART_OF', 'user', '{}'), (:pat, :b, 'RELATED_TO', 'user', '{"why": "you added this"}')
+            """), {"a": a, "b": b, "pat": pat})
+            c.execute(text("""
+                INSERT INTO thread_registry (key, name, kind, terms, status, origin) VALUES
+                    ('thread:p', 'Portland · Aug 2025', 'thread', '{Portland}', 'active', 'burst'),
+                    ('thread:q', 'Quiz · May 2025', 'thread', '{Quiz}', 'rejected', 'burst'),
+                    ('thread:r', 'Rent', 'chore', '{Rent}', 'rejected', 'burst')"""))
+        for _ in range(2):  # the upgrade, then a downgrade and the upgrade again
+            command.upgrade(config, "head")
+            with engine.connect() as c:
+                dropped = c.execute(text("SELECT id, src_key, dst_key FROM edges_dropped")).all()
+                rejection = c.execute(text("""SELECT src_key, dst_key, type, extractor, verdict, source
+                                              FROM edge_verdicts WHERE source = 'user'""")).all()
+                unlink = c.execute(text("SELECT data FROM overrides WHERE op = 'unlink'")).scalar_one()
+                links = c.execute(text("SELECT node_keys, value FROM overrides WHERE op = 'link'")).all()
+                parents = c.execute(text("SELECT child_key, parent_key, origin FROM thread_parents")).all()
+                registry = c.execute(text("SELECT key, status, judged FROM thread_registry ORDER BY key")).all()
+            assert [tuple(r) for r in dropped] == [(92, "Person:pat@x.test", "Project:thread:a")]
+            assert [tuple(r) for r in rejection] == [
+                ("Person:pat@x.test", "Project:project:c", "INVOLVED_IN", "entities", "drop", "user")]
+            assert unlink["pair_correction"] and unlink["verdicts"][0]["previous"] is None
+            assert [tuple(r) for r in links] == [(["Person:pat@x.test", "Project:thread:b"], "RELATED_TO")]
+            assert [tuple(r) for r in parents] == [("thread:a", "thread:b", "user")]
+            assert [tuple(r) for r in registry] == [("thread:p", "active", False), ("thread:r", "rejected", True)]
+            command.downgrade(config, revision.down_revision)
+        engine.dispose()
+    finally:
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
 def test_schema_status_is_none_at_head(test_db):
     assert dbm.schema_status() is None
 

@@ -499,8 +499,7 @@ def _write_thread(w: Writer, row, members: list, facet_of: dict[int, str], alias
     terms = list(row.terms)
     props = {"derived": "threads", "kind": row.kind or "thread", "terms": terms[:6], "start": span[0].isoformat(),
              "end": span[-1].isoformat(), "sources": dict(sorted(Counter(r.source for r in members).items())),
-             "records": len(members), "origin": row.origin, "pinned": row.pinned, "judged": row.judged,
-             "named_from": _named_from(row), "aliases": aliases}
+             "records": len(members), "pinned": row.pinned, "named_from": _named_from(row), "aliases": aliases}
     tid = w.project(row.key, row.name, props)
     for it in _by_time(members):
         if it.node_id:
@@ -603,10 +602,15 @@ def run(s: Session, log=print, report=None) -> dict:
        cover: judged once (budget permitting); kept ones join the registry, rejected ones are remembered.
     3. Threads no row builds go; then duplicates and related threads (resolve_threads), umbrellas, the hierarchy you
        stated, and the group chats and calendar series that are about a thread.
-    `report(count, total, note)` follows the judgments."""
+    `report(count, total, note)` follows each part: the unjudged rows looked at, the new candidates looked at, and
+    then what comes after them."""
     from igneous.graph import overrides, resolve_threads
 
     report = report or (lambda count=None, total=None, note=None: None)
+
+    def step(note: str) -> None:  # a new part of the stage: its note, and no count yet
+        report()
+        report(note=note)
     items = _items(s)
     items_by_id = {r.id: r for r in items}
     # Only this stage's own links; yours ('user') are not its to delete.
@@ -630,7 +634,8 @@ def run(s: Session, log=print, report=None) -> dict:
     unjudged = [r for r in _rows(s) if not r.judged and r.status == "active" and r.key not in renamed]
     if unjudged:
         found = registered(unjudged, items)
-        for row in unjudged:
+        for i, row in enumerate(unjudged, 1):
+            report(count=i, total=len(unjudged), note="judging threads named without the model")
             members = list(found.get(row.key, {}).values())
             if not members:
                 continue
@@ -650,7 +655,6 @@ def run(s: Session, log=print, report=None) -> dict:
                 s.execute(text("""UPDATE thread_registry SET status = 'active', merged_into = NULL, updated_at = now()
                                   WHERE status = 'merged' AND merged_into = :k"""), {"k": row.key})
             stats["rejudged"] += 1
-            report(count=stats["calls"], total=JUDGE_BUDGET, note="judging threads named without the model")
 
     # 1b. Every row's records; a merged row's go to the thread it ends up in.
     rows = _rows(s)
@@ -667,10 +671,11 @@ def run(s: Session, log=print, report=None) -> dict:
 
     # 2. New candidates: name seeds first (long-running), then bursts; only what known threads don't cover. A kept
     # one is built from its registry row, exactly as every later run builds it.
-    report(note="finding new threads")
+    step("finding new threads")
     cands = [c for c in (_seed_candidate(s, sd, items_by_id) for sd in name_seeds(s)) if c]
     cands += candidates(s)
-    for c in cands:
+    for i, c in enumerate(cands, 1):
+        report(count=i, total=len(cands), note="judging new threads")
         fresh = {k: v for k, v in c["items"].items() if k not in claimed}
         if len(fresh) < MIN_ITEMS:
             continue  # already covered by a thread we know
@@ -683,7 +688,6 @@ def run(s: Session, log=print, report=None) -> dict:
         if verdict is None:
             stats["waiting"] += 1  # the call failed or the budget is spent: judged on a later run
             continue
-        report(count=stats["calls"], total=JUDGE_BUDGET, note="judging new threads")
         terms = [t for t in (verdict.get("defining_terms") or c["terms"]) if len(t) >= 3] or c["terms"]
         row = SimpleNamespace(key=key, name=(verdict.get("name") or c["terms"][0])[:80], kind=verdict.get("kind"),
                               terms=terms, span_start=c["start"], span_end=c["end"], status="active",
@@ -715,7 +719,7 @@ def run(s: Session, log=print, report=None) -> dict:
     s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'
                       AND NOT COALESCE((props->>'umbrella')::bool, false) AND NOT (key = ANY(:keep))"""),
               {"keep": built})
-    report(note="resolving duplicate threads")
+    step("resolving duplicate threads")
     stats["resolution"] = resolve_threads.run(s, log=None, writer=w)
     survivors = stats["resolution"].get("survivors") or []
     if survivors:  # built again with their new facets, as every later run builds them

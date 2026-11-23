@@ -55,7 +55,9 @@ Progress = Callable[..., None]  # progress(state: dict, force: bool = False): th
 @dataclass(frozen=True)
 class Context:
     """What a stage gets besides the session."""
-    report: Callable[..., None]  # report(count=None, total=None, note=None): progress within the stage
+    # report(count=None, total=None, note=None): progress within the stage. A count (of a total) replaces the last
+    # one, a note replaces the last note and leaves the count, and a call with neither clears the count.
+    report: Callable[..., None]
     extract: int = 0             # messages extract may read with the model
 
 
@@ -270,9 +272,9 @@ def run(s: Session, names: list[str] | None = None, *, extract: int = 0, progres
                    "note": None, "results": {}}
 
     def report(count: int | None = None, total: int | None = None, note: str | None = None) -> None:
-        if note is None:
+        if count is not None or note is None:
             state.update(count=count, total=total)
-        else:
+        if note is not None:
             state["note"] = note
         notify(dict(state))
 

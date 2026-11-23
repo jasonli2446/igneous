@@ -359,9 +359,10 @@ def refresh_canonical(s: Session) -> int:
     Trusted links (TRUSTED) are unioned first and hold, except that no link of any kind joins two identities you said
     are not one person, directly or through others. A scored link is also refused when it would put two different
     first names in one cluster (else a surname-only address like taylor@ bridges Liz and Larry Taylor), add anyone to
-    your own cluster, or join two identities the verifier confidently said are not one person (`rejected`). Each cluster's head is you for your own, else its best-connected member (so the explorer shows "Kenneth
-    Lay" with all his addresses folded in), and the head shows the cluster's best human name. The head's own name is
-    kept in props.own_name meanwhile and comes back once it no longer heads a cluster named otherwise."""
+    your own cluster, or join two identities the verifier confidently said are not one person (`rejected`). Each
+    cluster's head is you for your own, else its best-connected member (so the explorer shows "Kenneth Lay" with all
+    his addresses folded in), and the head shows the cluster's best human name. The head's own name is kept in
+    props.own_name meanwhile and comes back once it no longer heads a cluster named otherwise."""
     edges = s.execute(text("""
         SELECT e.src, e.dst, e.confidence, e.extractor, e.id FROM edges e
         JOIN nodes a ON a.id = e.src AND a.type = 'Person' JOIN nodes b ON b.id = e.dst AND b.type = 'Person'

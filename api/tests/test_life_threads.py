@@ -21,15 +21,23 @@ from igneous.graph import threads
 
 
 @pytest.mark.usefixtures("life")
-def test_every_gold_thread_is_found_once_under_its_parent(db):
+def test_every_gold_thread_is_found_once_under_its_parent_and_the_long_stages_say_how_far_they_are(db):
     from eval.threads_eval import score
 
-    pipeline.run(db)
+    states = []
+    pipeline.run(db, progress=lambda state, force=False: states.append(dict(state)))
     out = score(life_threads.GOLD)
     assert out["summary"] == {"found": 8, "of": 8, "duplicated": 0, "leaks": 0, "hierarchy_ok": 4,
                               "hierarchy_of": 4, "participant_errors": 0}, json.dumps(out, indent=1, default=str)
     kinds = {r["name"]: r["kind"] for r in out["threads"]}
     assert kinds["Portland trip"] == kinds["Lisbon trip"] == "trip" and kinds["CS 401"] == kinds["EE 221"] == "class"
+    # Within its stage, as the Sources page shows it: how many candidates of how many, then the next step.
+    judging = [(st["count"], st["total"]) for st in states
+               if st["stage"] == "threads" and st["note"] == "judging new threads" and st["count"]]
+    assert judging and judging[-1][0] == judging[-1][1] > 1
+    assert any(st["note"] == "resolving duplicate threads" and st["count"] is None for st in states)
+    counted = [(st["count"], st["total"]) for st in states if st["stage"] == "verify" and st["count"]]
+    assert counted and counted[-1][0] == counted[-1][1]  # every planned model call made
 
 
 def snapshot(s) -> dict:
