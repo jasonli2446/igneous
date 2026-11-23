@@ -155,12 +155,15 @@ def evidence(s, questions: list[dict], golds: dict[str, set[int]], configs: list
             label = f"{name}@{size}" if config["use_graph"] else name
             found, seconds = 0, []
             with reranker(config["reranker"]), pool(size), no_model_calls():
+                if questions:  # loads the models and warms the caches, so the timings are of answering alone
+                    qa.gather(s, questions[0]["question"], use_graph=config["use_graph"], mode=config["mode"])
                 for q in questions:
                     ev = qa.gather(s, q["question"], use_graph=config["use_graph"], mode=config["mode"])
                     seconds.append(ev.retrieve_s)
                     found += bool({p["source_item_id"] for p in ev.passages} & golds[q["id"]])
             out[label] = {"evidence_recall": round(found / max(1, len(questions)), 3),
-                          "p50_s": round(pct(seconds, 50), 2), "p95_s": round(pct(seconds, 95), 2)}
+                          "p50_s": round(statistics.median(seconds), 2) if seconds else 0.0,
+                          "p95_s": round(pct(seconds, 0.95), 2)}
             print("evidence", label, out[label])
     return out
 
