@@ -275,7 +275,7 @@ def test_timeline_returns_bounded_dated_metadata_without_raw_source_content():
     assert params["limit_plus_one"] == 2 and params["a"] == 1 and params["b"] == 2
 
 
-def test_timeline_endpoint_validates_bounds_and_translates_missing_entities(monkeypatch):
+def test_timeline_endpoint_validates_bounds_and_translates_missing_entities(test_db, monkeypatch):
     from fastapi.testclient import TestClient
 
     from igneous import main
