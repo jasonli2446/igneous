@@ -189,23 +189,26 @@ IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous
   uv run python eval/persona_eval.py
 ```
 
-On the default seed with the model off (2026-11-23, main at `ed585c1`), after `make persona` (one pipeline run) and
-after a second run:
+On the default seed with the model off (2026-11-23), after `make persona` (one pipeline run) and after a second run:
 
 | | One run | Two runs |
 |---|---|---|
 | Gold threads found | 12 of 12 | 12 of 12 |
-| Found twice or more (another Project for the same thing) | 11 | 10 |
-| Records that must not be in their thread, but are | 1 | 1 |
+| Found twice or more (another Project for the same thing) | 3 | 2 |
+| Records that must not be in their thread, but are | 0 | 0 |
 | Placed right (under its school or job, or under nothing) | 7 of 10 | 7 of 10 |
 | Who took part: missing or wrongly there | 0 | 0 |
 | Identities: clusters P / R | 1.00 / 0.94 | 1.00 / 0.94 |
 | Identities: pairs ≥ 0.5, P / R | 1.00 / 0.83 | 1.00 / 0.83 |
 | Ask retrieval, recall@10 over 13 answerable questions: hybrid / dense / lexical | 0.85 / 0.77 / 0.85 | the same |
 
-- Most duplicates are a Project the entities stage named from a folder ("Lisbon 2025", "CS 341 Operating Systems",
-  "tidepool") beside the thread the threads stage found for the same thing; CS 481 is also split in two threads
-  ("Harborline", "Demo Day").
+- A folder, series or group chat a thread is about joins that thread (graph/entities.py), so the documents folder's
+  "Lisbon 2025", "CS 341 Operating Systems" and "tidepool" are part of their threads, not Projects beside them. The
+  duplicates left: CS 481 split in two threads ("Harborline", "Demo Day"), with its folder "CS 481 Senior Capstone" a
+  Project of its own beside them since no thread is named by its code; Northwind's hiring thread ("Northwind ·
+  Dec-Jan 2025"), which the backbone places under a "Northwind Robotics" thread of its own, since it takes a thread
+  for an organization's own only when it is named like the organization; and, on the first run, each organization's
+  second node (below).
 - Each organization is two nodes: the company LinkedIn's connections name (`org:lakeshore-university`) and the one
   found by email domain (`lakeshore.example.edu`). The first run ties Mira's LinkedIn positions to the company nodes,
   so the backbone gives both nodes a thread, and only the domain's holds anything; the second run ties the school to
@@ -213,8 +216,10 @@ after a second run:
 - The placements are by email domain: the classes, the Heron field trials and the hiring thread go under the right
   organization, and the Lisbon and Iceland trips and Tidepool under Lakeshore University too, since most of their
   people write from the school's domain.
-- The leak is a "remember Lisbon?" chat six months after the trip: the folder-named "Lisbon 2025" takes in every
-  record that mentions Lisbon.
+- Nothing a gold thread must not hold is in it: the "remember Lisbon?" chat six months after the trip is outside the
+  trip's window, and no newsletter joins anything. A notice sent to you, a search, a page or a place that names a
+  thread while it happened is its evidence, never one of its records: the trip links its flight and guesthouse
+  bookings, the check-in notice, the searches and the Maps days, and none of the 26 fare newsletters.
 - The only identity left apart is classmate Alex Chen's LinkedIn profile: two people share the name, so the name
   alone joins neither.
 - Retrieval moves by a question or two between builds of the same seed (hybrid recall@10 from 0.77 to 0.92 over
