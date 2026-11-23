@@ -252,8 +252,8 @@ cd api && uv run igneous sync imessage && uv run igneous pipeline
   (`raw_meta.fingerprint`); the message stays while any copy remains.
 - In a mailbox, assistants send some of the owner's mail. The owner is whoever sent most of its sent folders, so an
   executive's mailbox that an assistant ran (lay-k, skilling-j) would name the assistant if imported alone.
-- Embeddings stay local (`bge-small-en-v1.5`, 384-d, FastEmbed); Bedrock as a second index was dropped
-  (`docs/decisions/0002-bedrock-interop.md`). Each chunk records the model behind its vector: setting
+- Embeddings are made on this computer (`bge-small-en-v1.5`, 384-d, FastEmbed; `docs/decisions/0001-local-embeddings.md`);
+  Bedrock as a second index was dropped (`docs/decisions/0002-bedrock-interop.md`). Each chunk records the model behind its vector: setting
   `IGNEOUS_EMBEDDING_MODEL` to another 384-dimensional model re-embeds every chunk on the next pipeline run, and search
   compares only vectors from the configured model meanwhile; another dimension needs a migration.
 
