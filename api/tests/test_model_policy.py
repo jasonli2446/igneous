@@ -295,3 +295,23 @@ def test_commitment_checks_read_only_opted_in_messages(db, monkeypatch):
     assert len(rec.prompts) == 1
     assert "send the deck" in rec.prompts[0] and "Deck received" in rec.prompts[0]
     assert rec.leaked() == []
+
+
+def test_naming_a_domain_reads_only_its_peoples_opted_in_mail(db, monkeypatch):
+    """Ana signs her mail (opted in); her mail in a source never opted in stays out of the prompt."""
+    from igneous.graph import organizations
+
+    ana = _node(db, "Person", "ana@acme.test", "Ana Ames")
+    for ref, source, body in (("g1", "gmail", "See you Monday.\n--\nAna Ames, Acme Robotics"),
+                              ("e1", "email", "PRIVATEMARKER thanks, Pat Private")):
+        item = _item(db, source, ref, "Hi", body, T0)
+        _edge(db, ana, _node(db, "Message", f"{source}:{ref}", "Hi", item=item), "SENT", item=item)
+    rec = Recorder()
+    monkeypatch.setattr(llm, "chat", rec)
+    monkeypatch.setattr(llm.settings, "llm_enabled", True)
+    monkeypatch.setattr(llm.settings, "llm_sources", "")
+    assert organizations.model_name(db, "acme.test") is None and rec.prompts == []
+    monkeypatch.setattr(llm.settings, "llm_sources", "gmail")
+    assert organizations.model_name(db, "acme.test") is None  # the recorder answers with an empty name
+    assert len(rec.prompts) == 1 and "Domain: acme.test" in rec.prompts[0] and "Acme Robotics" in rec.prompts[0]
+    assert rec.leaked() == []

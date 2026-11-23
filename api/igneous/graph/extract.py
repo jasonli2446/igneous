@@ -105,8 +105,9 @@ ON CONFLICT (src, dst, type, extractor) DO NOTHING
 
 
 def store(s: Session, item, body: str, out: dict) -> dict:
-    """Write one item's extraction. Mentions attach to the Message node; people resolve to an existing Person
-    by exact name when there is exactly one (cheap ER; the real resolver is #entity-resolution)."""
+    """Write one item's extraction. Mentions attach to the Message node. A person resolves to an existing Person by
+    exact name when exactly one has it, else to a `name:<slug>` node that entity resolution may merge; an
+    organization is keyed `org:<slug>`, the node a contact card, LinkedIn or your resume gives that company."""
     stats = {"mentions": 0, "dropped": 0, "topics": 0, "commitments": 0, "decisions": 0, "dropped_claims": 0}
     common = {"at": item.occurred_at, "extractor": EXTRACTOR, "version": VERSION, "model": settings.llm_model,
               "sid": item.id}
@@ -123,7 +124,8 @@ def store(s: Session, item, body: str, out: dict) -> dict:
                                 {"n": name}).scalars().all()
                 target = ids[0] if len(ids) == 1 else None
             if target is None:
-                target = s.execute(UPSERT_NODE, {"type": typ, "key": f"name:{_key(name)}", "name": name,
+                key = f"org:{_key(name)}" if typ == "Organization" else f"name:{_key(name)}"
+                target = s.execute(UPSERT_NODE, {"type": typ, "key": key, "name": name,
                                                  "props": json.dumps({"origin": EXTRACTOR})}).scalar_one()
             s.execute(INSERT_EDGE, {**common, "src": item.node_id, "dst": target, "type": "MENTIONS",
                                     "props": json.dumps({"role": m.get("role"), "quote": m["quote"]}),

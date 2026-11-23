@@ -1674,7 +1674,7 @@ def test_organization_candidates_exclude_personal_domains_and_normalize_contact_
     assert domain_of("pat@studio.vc") == "studio.vc"
     assert domain_of("pat@gmail.com") is None
     assert domain_of("not-an-email") is None
-    assert company_key("  Studio Ventures, LLC ") == ("company:studio-ventures-llc", "Studio Ventures, LLC")
+    assert company_key("  Studio Ventures, LLC ") == ("org:studio-ventures-llc", "Studio Ventures, LLC")
     assert company_key(" ") is None
 
 
