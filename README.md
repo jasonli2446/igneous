@@ -31,6 +31,10 @@ Every table comes from a migration. After pulling, run `uv run alembic upgrade h
 API, the CLI and the MCP server check the schema first and refuse to run on any other, with the reason and the fix:
 a database behind the code, one migrated by newer code, no schema yet, or Postgres not reachable.
 
+Upgrading past migration 0010 (which records each node and edge belongs to): the next Rebuild or `igneous pipeline`
+reads every record into the graph once more, about 40 seconds for the six Enron baseline mailboxes (26k records),
+and then deletes what no record supports. Chunks and embeddings are kept.
+
 Tests (`make test`) never use that database or your personal one, nor your `api/.env` or model credentials: each
 run creates, migrates and finally drops its own `igneous_test_<pid>` database on the same server
 (`api/tests/conftest.py`), so two runs can share a server.
@@ -113,7 +117,8 @@ make demo       # make migrate, igneous sync email --mailbox allen-p, igneous pi
 `make demo` calls the model for up to 100 messages (`EXTRACT=100`); that needs `AWS_BEARER_TOKEN_BEDROCK` and
 `IGNEOUS_LLM_SOURCES=email`, which Ask and the evaluation need too. Run `make demo EXTRACT=0` to skip model calls. `make baseline` ingests six mailboxes
 (about 26k emails; embedding takes about 45 minutes on CPU, and search falls back to lexical for unembedded chunks
-meanwhile). Then try searching `jeff.skilling` or `phillip.allen` on the Graph page.
+meanwhile). The demo's Graph page opens on Phillip Allen: one mailbox's sent folders name its owner. Six mailboxes
+are six people's mail, so nobody is "you" there: search for `jeff.skilling` or `phillip.allen` to start.
 
 Your own data goes in a separate database. Create it, migrate it, and point the API and CLI at it:
 
@@ -171,11 +176,11 @@ skip calls or `EXTRACT=500` to process more. Everything is incremental: re-runni
 | Path | What |
 |---|---|
 | `api/igneous/connectors/` | `base.py` connector contract + resumable sync runner; one module per source (`gmail.py`, `gcal.py`, `drive.py`, `github.py`, `imessage.py`, `ai_chats.py`, `filesystem.py`, `takeout.py`, `linkedin.py`, ...); `redact.py` strips secrets before anything is stored |
-| `api/igneous/graph/` | `spine.py` deterministic graph; `extract.py` model mentions with span provenance; `entities.py`, `threads.py`, `resolve_threads.py`, `profile.py`, `backbone.py` derived projects, life threads and your orgs; `resolve.py` entity resolution; `verify.py` checks every derived link; `traversal.py` what the explorer shows; `invariants.py` `igneous check-graph` |
+| `api/igneous/graph/` | `spine.py` the graph read from record metadata, recording which records support each node and edge; `extract.py` model mentions with span provenance; `entities.py`, `threads.py`, `resolve_threads.py`, `profile.py`, `backbone.py` derived projects, life threads and your orgs; `resolve.py` entity resolution; `verify.py` checks every derived link; `traversal.py` what the explorer shows; `invariants.py` `igneous check-graph` |
 | `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
 | `api/igneous/llm.py` | structured model calls and the rule for what a model may read (`allowed_sources`, `visible_nodes`); `providers.py` talks to Bedrock |
 | `api/eval/` | gold questions, ER labels, harnesses, results (see `api/eval/README.md`) |
-| `api/igneous/pipeline.py` | per-stage watermarks; every stage is incremental and safe to re-run |
+| `api/igneous/pipeline.py` | the stages in run order; each finds its own work (spine and chunk: the records whose content changed since they read them), so every stage is safe to re-run |
 | `api/igneous/main.py` | FastAPI app: search, ask, the explorer's `/graph/*` routes, sources, sync and import jobs (the full list at <http://localhost:8000/docs>) |
 | `api/migrations/` | the whole schema, as plain SQL migrations (`0001_core_schema.py` onward); app code never creates tables |
 | `web/` | Next.js: the 3D explorer (`Graph3D.tsx`, 3d-force-graph) with the inspector and why-view, Ask, Search, and the Sources page |
@@ -195,12 +200,22 @@ cd api && uv run igneous sync imessage --since-days 90 && uv run igneous pipelin
 ## Adding a stage or connector
 
 - **Connector:** implement `sync(cursor) -> Iterator[SourceItem | Checkpoint]` (see `connectors/base.py`), register it in `cli.py`.
-- **Pipeline stage:** read rows newer than `watermark(s, STAGE)`, write, then `advance(...)`. See `rag/chunking.py`.
+  Each value it stores in `source_items.source` goes in `source_catalog.py` and in `graph/spine.py`'s `BUILDERS` (a
+  builder that builds nothing is fine); `igneous check-graph` reports a stored value the catalog doesn't know.
+- **Pipeline stage:** find your own work and mark it done at the version you read, in the transaction that writes the
+  result, never by a timestamp (a sync can commit records stamped before your last run). See `rag/chunking.py`: it
+  reads records whose `chunked_hash` differs from `content_hash` and writes back the hash it read. Edges a stage writes
+  carry its own extractor; the spine's (`spine`, `contacts`, `github`, `linkedin`) list their records in
+  `spine_edge_support`, and a person or organization the spine built stays while another stage's edge uses it.
 
 ## Known gaps in the baseline
 
-- Enron has no `In-Reply-To`/`References` headers. Threads are keyed on subject + participants; `REPLIES_TO` is inferred and sparse.
-- Enron stores one email in several folders with different Message-IDs. Messages dedupe on a content fingerprint (`raw_meta.fingerprint`).
+- Enron has no `In-Reply-To`/`References` headers. Threads are keyed on subject + participants; `REPLIES_TO` comes from
+  quoted "Original Message" headers that name exactly one message, else is inferred within the thread.
+- Enron stores one email in several folders with different Message-IDs. Messages dedupe on a content fingerprint
+  (`raw_meta.fingerprint`); the message stays while any copy remains.
+- In a mailbox, assistants send some of the owner's mail. The owner is whoever sent most of its sent folders, so an
+  executive's mailbox that an assistant ran (lay-k, skilling-j) would name the assistant if imported alone.
 - Embeddings stay local (`bge-small-en-v1.5`, 384-d, FastEmbed); Bedrock as a second index was dropped
   (`docs/decisions/0002-bedrock-interop.md`).
 
