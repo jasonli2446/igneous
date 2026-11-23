@@ -1,6 +1,10 @@
-"""In-memory stand-ins for the Google API clients the connectors call. Each records its calls."""
+"""In-memory stand-ins for the Google and GitHub APIs the connectors call. Each records its calls."""
 import base64
+import io
+import json
 from types import SimpleNamespace
+from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlsplit
 
 from googleapiclient.errors import HttpError
 
@@ -129,6 +133,39 @@ class FakeGmail:
     def _history(self, **kwargs):
         self.calls.append(("history", kwargs))
         return Request(self.history_responses.pop(0))
+
+
+class _Response(io.BytesIO):
+    def __init__(self, body: bytes, headers: dict):
+        super().__init__(body)
+        self.headers = headers
+
+
+class FakeGitHub:
+    """An `opener` for GithubClient (in place of urlopen). `routes` maps a path to its JSON, or to a function of
+    the query that returns it; a path ending in a status code answers that error. /user/repos carries ETag `etag`
+    and answers 304 to it."""
+
+    def __init__(self, routes: dict, etag: str = '"repos-1"'):
+        self.routes, self.etag = routes, etag
+        self.calls: list[tuple[str, dict, str | None]] = []
+
+    def __call__(self, request, timeout=30):
+        url = urlsplit(request.full_url)
+        query = {k: v[0] for k, v in parse_qs(url.query).items()}
+        sent = request.get_header("If-none-match")
+        self.calls.append((url.path, query, sent))
+        if url.path == "/user/repos" and sent == self.etag:
+            raise HTTPError(request.full_url, 304, "Not Modified", {}, io.BytesIO())
+        route = self.routes.get(url.path, 404)
+        if isinstance(route, int):
+            raise HTTPError(request.full_url, route, "error", {}, io.BytesIO(b'{"message": "error"}'))
+        body = route(query) if callable(route) else route
+        headers = {"ETag": self.etag} if url.path == "/user/repos" else {}
+        return _Response(json.dumps(body).encode(), headers)
+
+    def paths(self) -> list[str]:
+        return [path for path, _, _ in self.calls]
 
 
 class FakePeople:

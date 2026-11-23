@@ -283,20 +283,14 @@ class GithubToken(BaseModel):
 @app.post("/sources/github/token")
 def github_token(body: GithubToken, s: Session = Depends(get_session)):
     """Store a fine-grained read-only token encrypted at rest; it is never returned or logged."""
-    token = body.token.strip()
-    if len(token) < 20 or " " in token:
-        raise HTTPException(422, "That does not look like a GitHub token.")
-    from igneous.connectors.github import GithubClient, GithubError
+    from igneous.connectors.github import GithubError, account_for
 
     try:
-        profile, _, _ = GithubClient(token).get("/user")
+        login = account_for(body.token)
     except GithubError as e:
         raise HTTPException(422, str(e)) from e
-    login = profile.get("login") if isinstance(profile, dict) else None
-    if not login:
-        raise HTTPException(422, "GitHub did not return an account for that token.")
-    secrets.save(s, "github", login, token)
-    return {"stored": True}
+    secrets.save(s, "github", login, body.token.strip())
+    return {"stored": True, "account": login}
 
 
 @app.get("/jobs")
