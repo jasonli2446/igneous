@@ -11,7 +11,7 @@ import sys
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
-from mixed_sources import PRIVATE, build, wipe
+from mixed_sources import PRIVATE, T0, _edge, _item, _node, build, wipe
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
@@ -49,6 +49,7 @@ def every_call(g: dict) -> list[tuple[str, dict]]:
     calls += [("search", {"query": q}) for q in ("PRIVATEMARKER", "Atlas plans", "Pat Private", "texts from Pat")]
     calls += [("search", {"query": "Atlas", "person_node_id": p}) for p in people]
     calls += [("correspondents", {"person_node_id": p}) for p in people]
+    calls += [("topics", {"person_node_id": p}) for p in people]
     calls += [("read_item", {"item_id": i}) for i in items]
     for n in nodes:
         calls += [("open_node", {"node_id": n}), ("timeline", {"node_id": n}), ("sources", {"node_id": n}),
@@ -107,6 +108,39 @@ def test_with_nothing_opted_in_only_structure_and_counts_leave(graph, monkeypatc
             assert name not in answer, (tool, args, answer)
 
 
+def test_topics_share_what_the_opted_in_records_say_and_count_the_rest(graph, monkeypatch):
+    """Sam's mail is opted in, his texts (Pat's number, folded into him) never: a topic shows only his mail's ids and is
+    named from its words; the topic only texts hold (dinner) isn't shared at all; every text is counted."""
+    from mixed_sources import talk
+
+    from igneous.graph.person_topics import person_topics
+
+    g = talk(graph)
+    r = call("topics", person_node_id=g["pat"])
+    assert not [marker for marker in PRIVATE if marker in json.dumps(r)]
+    assert (r["node_id"], r["name"], r["lately"]) == (g["sam"], "Sam Shared", [])
+    with SessionLocal() as s:
+        mail = dict(s.execute(text("SELECT source_item_id, id FROM nodes WHERE key LIKE 'gmail:g_'")).all())
+    atlas, platform = sorted(r["earlier"], key=lambda t: min(t["item_ids"]))
+    assert [mail[i] for i in sorted(atlas["item_ids"])] == [g["items"][f"g{i}"] for i in range(4)]
+    assert [mail[i] for i in sorted(platform["item_ids"])] == [g["items"][f"g{i}"] for i in range(4, 8)]
+    assert atlas["records"] == platform["records"] == 8 and atlas["named_by"] == "terms"
+    assert "Robotics Lab" in atlas["terms"] and atlas["name"] == " · ".join(atlas["terms"])
+    assert platform["thread"] == {"node_id": g["platform"], "name": "Atlas platform"}
+    assert atlas["thread"] is None  # you said Sam was never on Atlas
+    assert r["withheld"]["records"] == {"imessage": 11}
+    # A name the model gave from the mail alone is shared; the tool itself never asks for one.
+    monkeypatch.setattr(settings, "llm_enabled", True)
+    with SessionLocal() as s:
+        person_topics(s, g["sam"], model=lambda system, user: "the Atlas demo")
+        s.commit()
+    assert {t["name"] for t in call("topics", person_node_id=g["sam"])["earlier"]} == {"the Atlas demo"}
+    monkeypatch.setattr(settings, "llm_sources", "")
+    nothing = call("topics", person_node_id=g["sam"])
+    assert (nothing["name"], nothing["lately"], nothing["earlier"]) == (None, [], [])
+    assert nothing["withheld"]["records"] == {"gmail": 8, "imessage": 11}
+
+
 def test_ask_answers_from_opted_in_records_and_cites_ids_to_follow(graph, monkeypatch):
     def answer(_system, user, _schema, **_options):
         cited = int(user.split("[c", 1)[1].split("]", 1)[0])
@@ -149,10 +183,13 @@ def test_unknown_ids_are_errors_not_empty_answers(graph):
     for tool, args in (("open_node", {"node_id": 99_999}), ("timeline", {"node_id": 99_999}),
                        ("why_connected", {"a": graph["me"], "b": 99_999}), ("sources", {"node_id": 99_999}),
                        ("commitments", {"node_id": 99_999}), ("correspondents", {"person_node_id": 99_999}),
-                       ("read_item", {"item_id": 99_999}), ("search", {"query": "x", "person_node_id": 99_999})):
+                       ("read_item", {"item_id": 99_999}), ("search", {"query": "x", "person_node_id": 99_999}),
+                       ("topics", {"person_node_id": 99_999})):
         assert "99999" in failure(tool, **args), tool
     assert "same node" in failure("why_connected", a=graph["me"], b=graph["me"])
     assert "not a person" in failure("correspondents", person_node_id=graph["atlas"])
+    assert "with a person" in failure("topics", person_node_id=graph["atlas"])
+    assert "That's you" in failure("topics", person_node_id=graph["me"])
 
 
 @pytest.mark.parametrize(("tool", "args"), [
@@ -161,6 +198,7 @@ def test_unknown_ids_are_errors_not_empty_answers(graph):
     ("sources", {"node_id": 1, "limit": 51}), ("sources", {"node_id": 1, "offset": -1}),
     ("read_item", {"item_id": 1, "max_chars": 10}), ("read_item", {"item_id": 0}),
     ("correspondents", {"person_node_id": 1, "limit": 61}), ("why_connected", {"a": 1}),
+    ("topics", {"person_node_id": 0}), ("topics", {"person_node_id": 1, "limit": 21}),
     ("timeline", {"node_id": 1, "limit": 201}), ("commitments", {"node_id": 1, "status": "late"}),
     ("ask", {"question": ""}), ("open_node", {"node_id": "seven"}),
 ])
@@ -174,6 +212,13 @@ def test_arguments_are_checked_before_any_database_work(monkeypatch, tool, args)
 
 
 def test_check_calls_every_tool_through_the_protocol(graph):
+    # You answered Sam once: he is your closest correspondent, the one `check` asks `topics` about.
+    with SessionLocal() as s:
+        item = _item(s, "gmail", "reply", "Re: Robotics Lab: Atlas update 0", "Thanks, Sam.", T0)
+        reply = _node(s, "Message", "gmail:reply", "Re: Robotics Lab: Atlas update 0", item=item)
+        _edge(s, graph["me"], reply, "SENT", item=item)
+        _edge(s, reply, graph["sam"], "RECEIVED", item=item)
+        s.commit()
     calls = mcp_client.check(target=mcp_server.server, query="Atlas")
     assert {c.tool for c in calls} == {t.name for t in asyncio.run(mcp_server.server.list_tools())} - {"ask"}
     assert all(c.ok for c in calls), [(c.tool, c.note) for c in calls if not c.ok]

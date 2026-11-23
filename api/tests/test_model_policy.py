@@ -297,6 +297,30 @@ def test_node_summaries_carry_only_opted_in_records_and_names(graph, monkeypatch
     assert rec.leaked() == []
 
 
+def test_topic_names_quote_only_opted_in_records(graph, monkeypatch):
+    """What you talk about with someone (#154): each topic's name comes from excerpts of its opted-in records alone, and
+    names no node. Sam's mail is opted in and his texts (Pat's number, folded into him) are not: the two topics that
+    mix them quote the mail only, and the one only texts hold (dinner) is named by its terms with no call."""
+    from mixed_sources import talk
+
+    from igneous.graph.person_topics import person_topics
+
+    g = talk(graph)
+    rec = _record_prompts(monkeypatch, "gmail")
+    with SessionLocal() as s:
+        out = person_topics(s, g["pat"])
+    topics = out["lately"] + out["earlier"]
+    assert len(topics) == 3 and len(rec.prompts) == 2 and rec.leaked() == []
+    assert all("Atlas status from the Robotics Lab" in p for p in rec.prompts)
+    assert all("Sam Shared" not in p and "Me Myself" not in p for p in rec.prompts)  # no node is named
+    dinner = next(t for t in topics if any("dinner" in term for term in t["terms"]))
+    assert dinner["named_by"] == "terms" and dinner["records"] == 3
+    rec = _record_prompts(monkeypatch, "")
+    with SessionLocal() as s:
+        person_topics(s, g["sam"])
+    assert rec.prompts == []
+
+
 def test_a_summary_names_a_connection_only_from_its_own_opted_in_evidence(graph, monkeypatch):
     """Sam's mail is opted in; the organization only a LinkedIn record links him to is not. A summary of Sam never names
     it: a connection carries the sources of its own evidence, never those of the person's mail."""

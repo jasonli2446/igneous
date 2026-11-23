@@ -166,6 +166,7 @@ def read_routes(w):
     for node in (w.me, w.me_work, w.sam2, w.ana, w.crew, w.atlas, w.acme, w.standup):
         routes += [(f"/graph/node/{node}", {}), (f"/graph/node/{node}/summary", {}),
                    (f"/graph/node/{node}/sources", {}), ("/timeline", {"a": node})]
+    routes += [(f"/graph/node/{person}/topics", {}) for person in (w.sam2, w.ana, w.bo)]
     routes += [("/timeline", {"a": w.me_work, "b": w.sam2}), ("/graph/entity/" + str(w.atlas), {}),
                ("/commitments", {"status": "all"}), ("/ask/suggestions", {}),
                ("/experts", {"q": "robotics demo", "mode": "lexical"}), ("/graph/version", {})]
@@ -380,7 +381,8 @@ def test_dead_routes_are_gone():
                  "/graph/people", "/graph/network", "/graph/node/{node_id}/evidence"):
         assert dead not in paths, dead
     for live in ("/graph/view", "/graph/expand", "/graph/explain", "/graph/find", "/graph/node/{node_id}",
-                 "/graph/node/{node_id}/summary", "/graph/node/{node_id}/sources", "/timeline"):
+                 "/graph/node/{node_id}/summary", "/graph/node/{node_id}/sources", "/graph/node/{node_id}/topics",
+                 "/timeline"):
         assert live in paths, live
 
 

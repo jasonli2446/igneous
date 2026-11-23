@@ -235,7 +235,7 @@ subject, a file's name, a conversation's name). When the chunk layout changes (`
 | Path | What |
 |---|---|
 | `api/igneous/connectors/` | `base.py` connector contract + resumable sync runner, which stores every item's title, text and metadata text with the credentials `redact.py` matches replaced by `[REDACTED:<kind>]` (and `redact_stored`, the pipeline's first step, which brings items stored under an older version of those rules up to date); one module per source (`gmail.py`, `gcal.py`, `drive.py`, `github.py`, `imessage.py`, `ai_chats.py`, `filesystem.py`, `takeout.py`, `linkedin.py`, ...) |
-| `api/igneous/graph/` | `spine.py` the graph read from record metadata, recording which records support each node and edge and what each says about it; `names.py` a person's name in the order it is read; `extract.py` model mentions with span provenance; `entities.py`, `threads.py`, `resolve_threads.py`, `profile.py`, `backbone.py` derived projects, life threads and your orgs; `resolve.py` entity resolution; `verify.py` checks every derived link; `traversal.py` what the explorer shows; `invariants.py` `igneous check-graph` |
+| `api/igneous/graph/` | `spine.py` the graph read from record metadata, recording which records support each node and edge and what each says about it; `names.py` a person's name in the order it is read; `extract.py` model mentions with span provenance; `entities.py`, `threads.py`, `resolve_threads.py`, `profile.py`, `backbone.py` derived projects, life threads and your orgs; `resolve.py` entity resolution; `verify.py` checks every derived link; `traversal.py` what the explorer shows; `person_topics.py` what you talk about with someone (`GET /graph/node/{id}/topics`); `invariants.py` `igneous check-graph` |
 | `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `constraints.py` the filters a question states, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
 | `api/igneous/llm.py` | structured model calls and the rule for what a model may read (`allowed_sources`, `visible_nodes`); `providers.py` talks to Bedrock |
 | `api/igneous/mcp_server.py` | the MCP tools; `disclosure.py` applies the model rule to what they return; `mcp_client.py` is `igneous mcp install` and `check` |
@@ -345,7 +345,7 @@ test suite never runs it.
 
 ## MCP server (use the graph from Claude Code, Claude Desktop, Cursor)
 
-Eleven tools, each calling the readers the explorer and the API use, through a read-only database session:
+Twelve tools, each calling the readers the explorer and the API use, through a read-only database session:
 
 | Tool | What it returns |
 |---|---|
@@ -358,6 +358,7 @@ Eleven tools, each calling the readers the explorer and the API use, through a r
 | `sources(node_id, limit, offset)` | The records a node is made of, newest first, with item ids and snippets |
 | `read_item(item_id, offset, max_chars)` | One record in full, in pages |
 | `correspondents(person_node_id, limit)` | Someone's real relationships, closest first (two-way, recency-weighted) |
+| `topics(person_node_id, limit)` | What you talk about with someone, lately (the last 90 days) and earlier: topics clustered from your conversations, each with its records, dates, group chats and life thread; named by the model's cached name or its distinctive words |
 | `search(query, person_node_id, include_browsing, k)` | Hybrid keyword and semantic passages, with the filters the query states |
 | `ask(question)` | A cited answer from the hosted model, or "can't answer"; the one paid tool |
 

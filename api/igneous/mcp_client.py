@@ -6,7 +6,8 @@ the server reads the database's password from api/.env and the model key from th
 `igneous connect bedrock` saved, when it starts.
 
 `check` starts that same command as a client would, calls each tool once over the protocol with arguments it takes from
-the answers before (the owner from `me`, their closest node, a record of it), and reports each call's time and outcome.
+the answers before (the owner from `me`, their closest node, a record of it, the person they are closest to), and
+reports each call's time and outcome.
 `ask` calls a paid model, so it runs only when asked for. The calls also bring what the tools read into the database's
 memory, so the first question of a demo doesn't wait on the disk.
 """
@@ -70,6 +71,24 @@ def _note(answer: dict) -> str:
     return ", ".join(parts) or "ok"
 
 
+def _people(answer) -> list[int]:
+    """The people an answer names, in order: each dict whose type is Person, by its node_id (or id)."""
+    found: list[int] = []
+
+    def walk(value) -> None:
+        if isinstance(value, dict):
+            pid = value.get("node_id", value.get("id"))
+            if value.get("type") == "Person" and isinstance(pid, int) and pid not in found:
+                found.append(pid)
+            for v in value.values():
+                walk(v)
+        elif isinstance(value, list):
+            for v in value:
+                walk(v)
+    walk(answer)
+    return found
+
+
 async def _calls(target, ask: bool, query: str | None) -> list[Call]:
     from mcp import Client
 
@@ -106,6 +125,10 @@ async def _calls(target, ask: bool, query: str | None) -> list[Call]:
                 await call("read_item", item_id=item, max_chars=500)
             if owner:
                 await call("correspondents", person_node_id=owner, limit=10)
+            # Someone other than the owner from an answer so far: their closest correspondent, else anyone named.
+            people = [p for c in reversed(out) if c.answer for p in _people(c.answer) if p != owner]
+            if people:
+                await call("topics", person_node_id=people[0], limit=3)
         await call("search", query=query or "meeting", k=5)
         if ask:
             await call("ask", question=query or "What happened most recently?")

@@ -27,6 +27,8 @@ dependencies = [
     "python-pptx>=1.0",
     "python-multipart>=0.0.32",
     "ijson>=3.6.0",
+    # Person topics cluster stored embeddings (graph/person_topics.py).
+    "numpy>=2.0",
 ]
 
 [dependency-groups]

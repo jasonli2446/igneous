@@ -112,6 +112,7 @@ What is in them, so you know what to click:
 | `why_connected` | Why two things are linked, with the reason and the records behind it |
 | `sources`, `read_item` | The records behind a node, and the full text of one |
 | `correspondents` | Someone's real relationships, closest first |
+| `topics` | What you talk about with someone, lately and earlier, each topic with its records |
 | `timeline`, `commitments` | Dated activity or a pair's history, and the promises found in a node's records |
 | `search` | Keyword + semantic search over the shared records (skips browsing history unless asked) |
 | `ask` | A cited answer from the text, or "can't answer" |

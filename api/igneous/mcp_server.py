@@ -16,6 +16,7 @@ tool writes anything.
 Arguments are checked against each tool's schema before any database work. A tool given the id of nothing, or asked
 for something it can't do, fails with a message (the result's `isError`): the one error shape.
 """
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -46,7 +47,8 @@ server = MCPServer(
         "classes, jobs, projects) under the organizations and schools on their resume. Start with `me` for the big "
         "picture; `find` turns a name into a node_id; `open_node` shows what something is made of; `why_connected` "
         "explains a link with the records behind it; `sources` and `read_item` read those records; `correspondents` "
-        "ranks someone's relationships; `timeline` gives dated activity; `commitments` gives cited promises. Answer "
+        "ranks someone's relationships; `topics` says what the user talks about with someone, lately and earlier; "
+        "`timeline` gives dated activity; `commitments` gives cited promises. Answer "
         "questions about structure (who went, who's on it, what's under it) with these, usually in 2-4 calls. Use "
         "`search` or `ask` only for what was said. Cite node_ids and item_ids. A result's `withheld` counts the records "
         "and names the user hasn't opted in to share with you: never guess at them. Everything is read-only."
@@ -324,6 +326,67 @@ def correspondents(person_node_id: NodeId, limit: Annotated[int, Field(ge=1, le=
                    "weeks_in_touch": r["weeks"], "last": _day(r.get("last_at"))}
                   for p, strength, r in relationships(s, head["id"], limit)]
         return d.report({"node_id": head["id"], "name": d.name(head["id"]), "correspondents": d.nodes(ranked)})
+
+
+@server.tool()
+def topics(person_node_id: NodeId, limit: Annotated[int, Field(ge=1, le=20)] = 6) -> dict:
+    """What the user talks about with a person, recent first: the topics of their conversations (every address of
+    the person), `lately` (talked about in the last 90 days) and `earlier`, ranked by recency-weighted volume as
+    closeness is. Each has how many records and when, the group chats it happened in, the life thread it belongs to,
+    and item_ids for `read_item`. A topic is named by the name the model gave it from records shared with you, else
+    by its distinctive words. Never calls a model."""
+    from igneous.graph import person_topics as pt
+    from igneous.graph.traversal import rejected
+
+    with _reading() as (s, d):
+        try:
+            found = pt.topics(s, person_node_id)
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        c, head = found.clustered, found.person["id"]
+        shared = {i for i, r in enumerate(c.records) if d.readable(r.source)}
+        # A topic none of whose records may be read isn't shared at all: its records are counted, nothing else.
+        sections: dict[str, list] = {"lately": [], "earlier": []}
+        more = {"lately": 0, "earlier": 0}
+        for section, ranked in (("lately", found.lately), ("earlier", found.earlier)):
+            for topic in ranked:
+                if shared.isdisjoint(topic.newest):
+                    for source, n in Counter(c.records[i].source for i in topic.newest).items():
+                        d.withhold_records(source, n)
+                elif len(sections[section]) < limit:
+                    sections[section].append(topic)
+                else:
+                    more[section] += 1
+        shown = [*sections["lately"], *sections["earlier"]]
+        by_model = pt.named_by_model(c, shown, d.sources, may_call=False)  # names a model gave from shared records
+        blocked = rejected(s)
+
+        def view(t: int, topic) -> dict:
+            mine = [i for i in topic.newest if i in shared]
+            for source, n in Counter(c.records[i].source for i in topic.newest if i not in shared).items():
+                d.withhold_records(source, n)
+            words = pt.terms(c.records, mine, sorted(shared))
+            nearest = next(i for i in topic.cluster.members if i in shared)
+            thread = topic.cluster.thread
+            thread = None if thread is None or frozenset({head, thread}) in blocked else \
+                next(iter(d.nodes([{"node_id": thread, "type": "Project"}])), None)
+            held = Counter(c.records[i].group for i in topic.newest if c.records[i].group is not None)
+            groups = d.nodes({"node_id": g, "type": "Group chat", "records": n}
+                             for g, n in sorted(held.items(), key=lambda x: (-x[1], x[0]))[:3])
+            recs = [c.records[i] for i in topic.newest]
+            return {"name": by_model.get(t) or pt.name_from_terms(words) or c.records[nearest].excerpt[:60],
+                    "named_by": "model" if t in by_model else "terms", "terms": words,
+                    "records": len(recs), "recent": sum(r.at >= found.since for r in recs),
+                    "first": _day(recs[-1].at), "last": _day(recs[0].at), "sources": sorted({r.source for r in recs}),
+                    "thread": {"node_id": thread["node_id"], "name": thread["name"]} if thread else None,
+                    "group_chats": [{"node_id": g["node_id"], "name": g["name"], "records": g["records"]}
+                                    for g in groups],
+                    "item_ids": [c.records[i].id for i in mine]}
+
+        views = [view(t, topic) for t, topic in enumerate(shown)]
+        n = len(sections["lately"])
+        return d.report({"node_id": head, "name": d.name(head), "since": _day(found.since), "lately": views[:n],
+                         "earlier": views[n:], "more": more})
 
 
 def _filters(d: "Disclosure", applied: dict) -> dict:

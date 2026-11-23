@@ -128,6 +128,41 @@ def build() -> dict:
     return g
 
 
+def talk(g: dict) -> dict:
+    """Make Sam and Pat one person with conversations to cluster (person topics, #154): Pat's number folded into Sam,
+    each record a vector (what its source's records share, plus its topic: Atlas, Atlas platform), and three texts
+    about something else (dinner) that only the texts hold. Returns `g` with the texts' Message ids as g["dinner"]."""
+    from igneous.config import settings
+    from igneous.graph import dirty
+
+    def vector(source: str, topic: int) -> str:
+        v = [0.0] * 384
+        v[100 if source == "gmail" else 101], v[topic] = 0.6, 0.8
+        return str(v)
+
+    with SessionLocal() as s:
+        s.execute(text("INSERT INTO canonical VALUES (:s, :s), (:p, :s)"), {"s": g["sam"], "p": g["pat"]})
+        for i in range(8):
+            for ref, source in ((f"g{i}", "gmail"), (f"i{i}", "imessage")):
+                s.execute(text("""UPDATE chunks SET embedding = CAST(:v AS vector), embedding_model = :m
+                                  WHERE node_id = :n"""),
+                          {"v": vector(source, 0 if i < 4 else 1), "m": settings.embedding_model, "n": g["items"][ref]})
+        g["dinner"] = []
+        for k in range(3):
+            body = f"PRIVATEMARKER dinner plans with Pat Private, night {k}"
+            iid = _item(s, "imessage", f"dinner{k}", "Chat with Pat Private", body, T0 + timedelta(days=200 + k))
+            m = _node(s, "Message", f"imessage:dinner{k}", "Chat with Pat Private", item=iid)
+            _edge(s, g["pat"], m, "SENT", item=iid)
+            _edge(s, m, g["me"], "RECEIVED", item=iid)
+            s.execute(text("""INSERT INTO chunks (source_item_id, node_id, ord, text, meta, embedding, embedding_model)
+                              VALUES (:i, :n, 0, :t, '{}', CAST(:v AS vector), :m)"""),
+                      {"i": iid, "n": m, "t": body, "v": vector("imessage", 2), "m": settings.embedding_model})
+            g["dinner"].append(m)
+        s.commit()
+    dirty.forget()  # readers cached at this graph version read the graph before this
+    return g
+
+
 def wipe() -> None:
     with SessionLocal() as s:
         _wipe(s)

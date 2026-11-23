@@ -25,6 +25,7 @@ from igneous.graph.entity_api import router as entity_router
 from igneous.graph.find import TYPES as FIND_TYPES
 from igneous.graph.find import find
 from igneous.graph.history import commitments
+from igneous.graph.person_topics import person_topics
 from igneous.graph.summary import summarize
 from igneous.graph.traversal import expand, explain, view
 from igneous.items import router as items_router
@@ -431,3 +432,17 @@ def graph_node_summary(node_id: int = PathParam(ge=1), s: Session = Depends(get_
     """2-4 plain sentences on how this node connects to the rest of the graph, its top connections, and the
     source items the summary drew on. Cached; a deterministic summary stands in when the model is off."""
     return summarize(s, node_id)
+
+
+@app.get("/graph/node/{node_id}/topics")
+def graph_node_topics(node_id: int = PathParam(ge=1), limit: int = Query(6, ge=1, le=20),
+                      s: Session = Depends(get_session)):
+    """What you talk about with a person: topics clustered from your conversations with them (all of their
+    identities), 'lately' (a record in the last 90 days) and 'earlier', recency-weighted as closeness is, `limit` of
+    each. Each topic has a name (a cheap model's, from opted-in records only, cached; else its distinctive terms),
+    its records (cards of the newest, every id), dates, the group conversations it happened in and the life thread it
+    belongs to (graph/person_topics.py). 404 for an unknown node, 422 for anything but a person other than you."""
+    try:
+        return person_topics(s, node_id, limit)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
