@@ -2,16 +2,16 @@
 conversation finds each part of it. Email: one chunk per message with quoted tails stripped, under "Subject:".
 Calendar events: title, time and attendees. Parsed documents (PDF, DOCX, PPTX, XLSX): chunks follow the pages,
 sections, slides and sheets the parser recorded, and each says where in the document it is. Everything else (local
-files, notes, AI chats, GitHub, Takeout days, messages) is split by length, the title first in every chunk."""
+files, notes, AI chats, GitHub, Takeout days, messages) is split by length, the title first in every chunk.
+
+`run` chunks the records whose content changed since it last read them (`chunked_hash`), once the spine has built
+them, and every record chunked under an older LAYOUT, once."""
 import json
 import re
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from igneous.pipeline import advance, watermark
-
-STAGE = "chunk"
 MAX_CHARS = 2000  # ~500 tokens
 OVERLAP = 200
 # Recorded in each chunk's meta. An item chunked under an older layout is chunked again once; an item whose chunks
@@ -120,53 +120,71 @@ def chunks_for(item) -> list[str]:
     return titled(item.title, split(body))
 
 
+BATCH = 500
+
+# Records whose content changed since chunk last read them, once the spine has built that version (a record is chunked
+# under the node it is), and records chunked under an older layout. `chunked_hash` is written back as the hash read: a
+# record that changes meanwhile stays pending.
+PENDING = text("""
+    SELECT si.id, si.source, si.title, si.body_text, si.occurred_at, si.raw_meta, si.content_hash, n.id AS node_id
+    FROM source_items si
+    LEFT JOIN nodes n ON (n.source_item_id = si.id AND n.type IN ('Message', 'File'))
+                      OR (si.source = 'gcal' AND n.type = 'Event'
+                          AND n.key = COALESCE(si.raw_meta->>'event_key', 'gcal:' || COALESCE(si.raw_meta->>'series_key', si.external_id))
+                          AND n.source_item_id = si.id)
+    WHERE ((si.chunked_hash IS DISTINCT FROM si.content_hash AND si.spined_hash = si.content_hash)
+           OR si.id = ANY(CAST(:again AS bigint[])))
+      AND si.id > :after
+    ORDER BY si.id LIMIT :n
+""")
+
+
 def run(s: Session) -> int:
-    """Chunk every item changed since the last run, and every item chunked under an older LAYOUT; returns how many
-    items it looked at. An item whose chunks come out the same keeps them, vectors included; the others' chunks are
-    replaced and wait for the embed stage."""
-    since = watermark(s, STAGE)
-    rows = s.execute(text("""
-        SELECT si.id, si.source, si.title, si.body_text, si.occurred_at, si.updated_at, si.raw_meta,
-               n.id AS node_id
-        FROM source_items si
-        LEFT JOIN nodes n ON (n.source_item_id = si.id AND n.type IN ('Message', 'File'))
-                          OR (si.source = 'gcal' AND n.type = 'Event'
-                              AND n.key = COALESCE(si.raw_meta->>'event_key', 'gcal:' || COALESCE(si.raw_meta->>'series_key', si.external_id))
-                              AND n.source_item_id = si.id)
-        -- contact cards carry no text worth searching
-        WHERE si.source NOT IN ('gcontacts', 'maccontacts') AND (si.updated_at > :since OR si.id = ANY(CAST(:again AS bigint[])))
-        ORDER BY si.updated_at, si.id
-    """), {"since": since, "again": _older_layout(s)}).all()
-    # Index chat text with contact names, not numbers, so "what did Sam say" finds it (lexically and densely).
-    from igneous.graph.traversal import handle_names, name_handles
-    named = handle_names(s) if any(r.source == "imessage" for r in rows) else {}
-    existing = dict(s.execute(text("""
-        SELECT source_item_id, array_agg(text ORDER BY ord) FROM chunks
-        WHERE source_item_id = ANY(CAST(:ids AS bigint[])) GROUP BY 1
-    """), {"ids": [r.id for r in rows]}).all()) if rows else {}
-    for item in rows:
-        if item.node_id is None:  # a duplicate copy (one email in two Enron folders); its node's item is chunked
-            s.execute(text("DELETE FROM chunks WHERE source_item_id = :id"), {"id": item.id})
-            continue
-        texts = chunks_for(item)
-        if item.source == "imessage":
-            texts = [name_handles(c, named) for c in texts]
-        meta = json.dumps({"source": item.source, "title": item.title, "layout": LAYOUT,
-                           "occurred_at": item.occurred_at.isoformat() if item.occurred_at else None})
-        if existing.get(item.id) == texts:
-            s.execute(text("UPDATE chunks SET node_id = :nid, meta = CAST(:meta AS jsonb) WHERE source_item_id = :sid"),
-                      {"sid": item.id, "nid": item.node_id, "meta": meta})
-            continue
-        s.execute(text("DELETE FROM chunks WHERE source_item_id = :id"), {"id": item.id})
-        for ord_, c in enumerate(texts):
-            s.execute(text("""
-                INSERT INTO chunks (source_item_id, node_id, ord, text, meta)
-                VALUES (:sid, :nid, :ord, :text, CAST(:meta AS jsonb))
-            """), {"sid": item.id, "nid": item.node_id, "ord": ord_, "text": c, "meta": meta})
-    if rows and rows[-1].updated_at > since:  # re-chunking old documents must not move the watermark back
-        advance(s, STAGE, rows[-1].updated_at)
-    s.commit()
-    return len(rows)
+    """Chunk every pending record (PENDING) and every record chunked under an older LAYOUT, one batch per
+    transaction; returns how many records it read. A record whose chunks come out the same keeps them, vectors
+    included; the others' chunks are replaced and wait for the embed stage."""
+    again, after, done = _older_layout(s), 0, 0
+    named = None
+    while rows := s.execute(PENDING, {"again": again, "after": after, "n": BATCH}).all():
+        # Index chat text with contact names, not numbers, so "what did Sam say" finds it (lexically and densely).
+        from igneous.graph.traversal import handle_names, name_handles
+        if named is None and any(r.source == "imessage" for r in rows):
+            named = handle_names(s)
+        existing = dict(s.execute(text("""
+            SELECT source_item_id, array_agg(text ORDER BY ord) FROM chunks
+            WHERE source_item_id = ANY(CAST(:ids AS bigint[])) GROUP BY 1
+        """), {"ids": [r.id for r in rows]}).all())
+        for item in rows:
+            # Contact cards carry no text worth searching; a duplicate copy (the same email in two Enron folders) is
+            # searched through the record its node points at.
+            if item.node_id is None or item.source in ("gcontacts", "maccontacts"):
+                if item.id in existing:
+                    s.execute(text("DELETE FROM chunks WHERE source_item_id = :id"), {"id": item.id})
+                continue
+            texts = chunks_for(item)
+            if item.source == "imessage":
+                texts = [name_handles(c, named or {}) for c in texts]
+            meta = json.dumps({"source": item.source, "title": item.title, "layout": LAYOUT,
+                               "occurred_at": item.occurred_at.isoformat() if item.occurred_at else None})
+            if existing.get(item.id) == texts:
+                s.execute(text("UPDATE chunks SET node_id = :nid, meta = CAST(:meta AS jsonb) "
+                               "WHERE source_item_id = :sid"), {"sid": item.id, "nid": item.node_id, "meta": meta})
+                continue
+            if item.id in existing:
+                s.execute(text("DELETE FROM chunks WHERE source_item_id = :id"), {"id": item.id})
+            for ord_, c in enumerate(texts):
+                s.execute(text("""
+                    INSERT INTO chunks (source_item_id, node_id, ord, text, meta)
+                    VALUES (:sid, :nid, :ord, :text, CAST(:meta AS jsonb))
+                """), {"sid": item.id, "nid": item.node_id, "ord": ord_, "text": c, "meta": meta})
+        s.execute(text("""
+            UPDATE source_items si SET chunked_hash = v.h
+            FROM unnest(CAST(:ids AS bigint[]), CAST(:hashes AS text[])) AS v(id, h)
+            WHERE si.id = v.id AND si.content_hash = v.h
+        """), {"ids": [r.id for r in rows], "hashes": [r.content_hash for r in rows]})
+        s.commit()
+        after, done = rows[-1].id, done + len(rows)
+    return done
 
 
 def _older_layout(s: Session) -> list[int]:

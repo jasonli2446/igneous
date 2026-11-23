@@ -110,14 +110,16 @@ def test_redaction_moves_a_local_files_page_boundaries(tmp_path):
 
 
 def _record(s, source, ext, title, body, raw=None, chunk=None) -> tuple[int, int]:
-    """A source item with its node, and optionally one chunk made under no layout (an older one), with a vector."""
+    """A source item with its node, built and chunked at its current content, and optionally one chunk made under
+    no layout (an older one), with a vector."""
     import json
 
     from sqlalchemy import text
 
     sid = s.execute(text("""
-        INSERT INTO source_items (source, external_id, content_hash, title, body_text, raw_meta)
-        VALUES (:s, :e, :e, :t, :b, CAST(:m AS jsonb)) RETURNING id"""),
+        INSERT INTO source_items (source, external_id, content_hash, title, body_text, raw_meta, spined_hash,
+                                  chunked_hash)
+        VALUES (:s, :e, :e, :t, :b, CAST(:m AS jsonb), :e, :e) RETURNING id"""),
         {"s": source, "e": ext, "t": title, "b": body, "m": json.dumps(raw or {})}).scalar_one()
     nid = s.execute(text("INSERT INTO nodes (type, key, name, source_item_id) VALUES (:t, :k, :k, :i) RETURNING id"),
                     {"t": "Message" if source in ("gmail", "email") else "File", "k": ext, "i": sid}).scalar_one()
@@ -129,20 +131,14 @@ def _record(s, source, ext, title, body, raw=None, chunk=None) -> tuple[int, int
 
 
 def test_items_chunked_under_an_older_layout_are_chunked_again_once_and_keep_unchanged_vectors(db):
-    from datetime import UTC, datetime
-
     from sqlalchemy import text
-
-    from igneous.pipeline import advance, watermark
 
     body, bounds = pages("First page", "Second page")
     doc, _ = _record(db, "drive", "doc", "plan.pdf", body, {"boundaries": bounds}, chunk=body)
     note, _ = _record(db, "fs", "notes.md", "notes.md", "Remember the milk", chunk="Remember the milk")
     mail, _ = _record(db, "gmail", "mail", "Hi", "hello", chunk="Subject: Hi\nhello")
     before = db.execute(text("SELECT id FROM chunks WHERE source_item_id = :i"), {"i": mail}).scalar_one()
-    watermark(db, chunking.STAGE)
-    advance(db, chunking.STAGE, datetime.now(UTC))  # all three are behind the watermark
-    assert chunking.run(db) == 3
+    assert chunking.run(db) == 3  # none changed: all three only for the layout
     rows = {r.source_item_id: r for r in db.execute(text(
         "SELECT id, source_item_id, text, meta->>'layout' AS layout, embedding IS NOT NULL AS has_vector FROM chunks"))}
     assert (rows[doc].text, rows[doc].has_vector) == ("plan.pdf, page 1 to page 2\nFirst page\n\nSecond page", False)
@@ -204,3 +200,32 @@ def test_fastembed_keeps_its_models_in_the_data_folder(monkeypatch, tmp_path):
         provider.cache_clear()
     monkeypatch.setattr(settings, "model_cache_dir", "/srv/models")
     assert settings.models_dir == "/srv/models"
+
+
+def test_chunk_reads_what_changed_once_the_spine_built_it(db):
+    """A record is chunked after the spine has built its current content, once; a change makes it pending again."""
+    import json
+
+    from sqlalchemy import text
+
+    from igneous.graph import spine
+
+    def put(body):
+        return db.execute(text("""
+            INSERT INTO source_items (source, external_id, content_hash, title, body_text, raw_meta)
+            VALUES ('email', 'box/inbox/1', md5(:b), 'Plans', :b, CAST(:m AS jsonb))
+            ON CONFLICT (source, external_id) DO UPDATE SET content_hash = EXCLUDED.content_hash,
+                body_text = EXCLUDED.body_text, raw_meta = EXCLUDED.raw_meta RETURNING id
+        """), {"b": body, "m": json.dumps({"message_id": "<plans@x.test>", "from": [{"email": "a@x.test"}],
+                                           "to": [{"email": "b@x.test"}]})}).scalar_one()
+
+    sid = put("first draft")
+    assert chunking.run(db) == 0          # not built yet: nothing to chunk it under
+    spine.run(db)
+    assert chunking.run(db) == 1 and chunking.run(db) == 0
+    put("second draft")                   # a sync changes it: both stages see it again
+    assert chunking.run(db) == 0
+    spine.run(db)
+    assert chunking.run(db) == 1
+    assert db.execute(text("SELECT text FROM chunks WHERE source_item_id = :i"), {"i": sid}).scalar() \
+        == "Subject: Plans\nsecond draft"
