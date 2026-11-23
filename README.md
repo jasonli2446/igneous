@@ -112,13 +112,14 @@ life threads and organizations again, publishing them all at once when it finish
 each sync or import; the first run takes a few minutes (embedding is the slow part). Then open **Graph**, **Ask** and
 **Search**.
 
-### Demo data (Enron) or your own data
+### Demo data (Enron, the synthetic persona) or your own data
 
-Two databases keep shareable and private data apart:
+Separate databases keep shareable and private data apart:
 
 | Database | Holds | Select with |
 |---|---|---|
 | `igneous` | The public Enron email corpus. Safe for demos, evaluation and screenshots. | the default; no setting needed |
+| `igneous_persona` | The synthetic persona: one invented life in every export format. Safe for demos, evaluation and screenshots. | `IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous_persona` |
 | `igneous_personal` | Your real data (Gmail, Calendar, Messages, Contacts, exports). **Never commit, export or demo it.** | `IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous_personal` |
 
 Enron demo (one mailbox, about 3k emails, end to end in a few minutes):
@@ -133,6 +134,27 @@ make demo       # make migrate, igneous sync email (the allen-p demo mailbox), i
 (about 26k emails; embedding takes about 45 minutes on CPU, and search falls back to lexical for unembedded chunks
 meanwhile). The demo's Graph page opens on Phillip Allen: one mailbox's sent folders name its owner. Six mailboxes
 are six people's mail, so nobody is "you" there: search for `jeff.skilling` or `phillip.allen` to start.
+
+Enron is mail only. The synthetic persona has every kind of source, so it shows what mail alone can't: life
+threads, the backbone of schools and workplaces, the profile, and evidence across sources. It is Mira Castellanos,
+an invented computer science student, from August 2024 to October 2026: a mailbox, a Google Takeout export (chat,
+tasks, Meet, Maps, My Activity, Chrome, and a calendar no importer reads yet), LinkedIn and ChatGPT exports, and a
+documents folder with resumes, notes and a git checkout (`api/igneous/persona`). Generated from a seed on this
+computer, with no network or model calls:
+
+```bash
+make persona          # generate data/persona, create igneous_persona, import every export, build the graph
+make persona CLEAN=1  # the same, replacing an igneous_persona that exists
+```
+
+Each export goes through its own source on the Sources page (the "Synthetic persona" entry in the Demo group says
+how), never with raw inserts, and the persona's sync refuses any database other than `igneous_persona` that already
+holds records, so it never mixes with Enron or your own data. The build places the classes and the job's threads
+under Lakeshore University and Northwind Robotics by their email domains. Without a model, threads are named by their
+term and month ("Lisbon · Jan-Mar 2025"); with `AWS_BEARER_TOKEN_BEDROCK` set and its sources opted in
+(`IGNEOUS_LLM_SOURCES=email,fs,takeout,linkedin,ai_chats`, `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`), a Rebuild
+also names them and checks where each was placed. Its gold set (threads, the identities that are one person, Ask
+questions) makes it an eval too: `api/eval/README.md`. `docs/final-demo.md` runs on it.
 
 Your own data goes in a separate database. Create it, migrate it, and point the API and CLI at it:
 
@@ -158,6 +180,8 @@ uv run igneous sync gmail                           # every connected account; `
 uv run igneous sync fs                              # local files: the IGNEOUS_FILESYSTEM_ROOTS folders
 uv run igneous sync fs --path ~/Documents/notes     # just this folder; other folders' files are left alone
 uv run igneous sync email                           # Enron demo mailbox allen-p (--mailbox to pick others)
+uv run igneous persona generate ../data/persona     # the synthetic persona's exports; make persona does it all
+uv run igneous sync persona                         # import them, only into igneous_persona or an empty database
 
 uv run igneous import takeout ~/Downloads/takeout-*.zip     # or --downloads to use ~/Downloads/takeout-*.zip
 uv run igneous import linkedin ~/Downloads/Basic_LinkedInDataExport.zip   # a zip or an extracted folder
@@ -172,7 +196,8 @@ uv run igneous schedule install                     # macOS: incremental sync ev
 The Google steps (the OAuth client file) are under [Google](#google-gmail-drive-calendar-contacts) below.
 
 `make synthetic-corpus` writes a small, deterministic fixture corpus to `data/synthetic-cross-source/`: five
-invented document-style files plus two ICS calendar events that reuse the public Enron demo persona addresses.
+invented document-style files plus two ICS calendar events that reuse the public Enron demo persona addresses, so
+they link to the Enron graph (the synthetic persona above is a separate, whole life with its own people).
 It makes no network or model calls and **does not import** the data. The Local files source reads the documents
 (`igneous sync fs --path ../data/synthetic-cross-source`); no source reads ICS calendars. Every output is labeled
 synthetic and excludes real email text, credentials, and personal data.
@@ -206,7 +231,8 @@ subject, a file's name, a conversation's name). When the chunk layout changes (`
 | `api/igneous/graph/` | `spine.py` the graph read from record metadata, recording which records support each node and edge and what each says about it; `names.py` a person's name in the order it is read; `extract.py` model mentions with span provenance; `entities.py`, `threads.py`, `resolve_threads.py`, `profile.py`, `backbone.py` derived projects, life threads and your orgs; `resolve.py` entity resolution; `verify.py` checks every derived link; `traversal.py` what the explorer shows; `invariants.py` `igneous check-graph` |
 | `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `constraints.py` the filters a question states, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
 | `api/igneous/llm.py` | structured model calls and the rule for what a model may read (`allowed_sources`, `visible_nodes`); `providers.py` talks to Bedrock |
-| `api/eval/` | gold questions, ER labels, harnesses, results (see `api/eval/README.md`) |
+| `api/igneous/persona/` | the synthetic persona: the cast and its storylines (`school.py`, `work.py`, `trips.py`, `project.py`, `everyday.py`, `routine.py`), the export formats (`formats.py`), loading it into its own database (`load.py`), and its gold set (`gold/`) |
+| `api/eval/` | gold questions, ER labels, harnesses, results (see `api/eval/README.md`); `persona_eval.py` scores the persona's gold set |
 | `api/igneous/pipeline.py` | the stage list in dependency order and the one runner `igneous pipeline` and Rebuild share; spine and chunk read only the records whose content changed since they read them, so every stage is safe to re-run |
 | `api/igneous/main.py` | FastAPI app: search, ask, the explorer's `/graph/*` routes, sources, sync and import jobs (the full list at <http://localhost:8000/docs>) |
 | `api/migrations/` | the whole schema, as plain SQL migrations (`0001_core_schema.py` onward); app code never creates tables |

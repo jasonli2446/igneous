@@ -151,6 +151,19 @@ def _email(opts: SyncOptions) -> Connector:
     return MaildirConnector(opts.path or Path(settings.data_dir) / "maildir", list(opts.mailboxes or DEMO_MAILBOXES))
 
 
+def _persona(s: Session, account: str | None, opts: SyncOptions) -> list[tuple[str, Callable[[], Connector]]]:
+    """The synthetic persona's exports, each read by its own format's connector (persona/load.py), into a database
+    that holds nothing else."""
+    from igneous.persona import MANIFEST, load
+
+    folder = opts.path or load.root()
+    if not (folder / MANIFEST).is_file():
+        raise SetupNeeded(f"No persona at {folder}: run make persona (or igneous persona generate {folder}).")
+    if problem := load.mixing(s):
+        raise SetupNeeded(problem)
+    return load.connectors(s, folder)
+
+
 # kind: google | local | remote | import. cli: the equivalent command, shown in muted text. build: how `sync()`
 # makes the source's connectors; options: the SyncOptions fields it accepts.
 SOURCES: list[dict] = [
@@ -262,7 +275,24 @@ SOURCES: list[dict] = [
                f"Press Sync now to read {', '.join(DEMO_MAILBOXES)}. Other mailboxes are read from the command line "
                "(igneous sync email --mailbox lay-k)."],
      "cli": "igneous sync email", "build": _local(_email), "options": {"path", "mailboxes"}},
+    {"id": "persona", "kind": "local", "name": "Synthetic persona", "group": "Demo",
+     "reads": "Two invented years of Mira Castellanos, a computer science student at the fictional Lakeshore "
+              "University: her mailbox, Google Takeout (chat, tasks, Meet, Maps, My Activity, Chrome), LinkedIn and "
+              "ChatGPT exports, and a documents folder with her resumes, notes and a git checkout. Generated on this "
+              "computer from a seed, so every source and the trips, classes, job and project they make can be shown "
+              "without personal data. For demos and evaluation, in a database of its own.",
+     "steps": ["From the repository root run make persona. It writes the exports to data/persona, creates the database "
+               "igneous_persona (make persona CLEAN=1 replaces it), reads each export through its own source on "
+               "this page, and builds the graph.",
+               "Point the API at it: set IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/"
+               "igneous_persona in api/.env (or the API's environment) and restart the API.",
+               "Sync now reads data/persona into this database again. It refuses a database that holds anything "
+               "else, so the persona never mixes with your data or the Enron demo."],
+     "cli": "make persona (igneous persona generate ../data/persona, then igneous sync persona)",
+     "build": _persona, "options": {"path"}},
 ]
+# The persona's records are stored under the sources its exports come through.
+PERSONA_STORED = ("email", "fs", *source_catalog.of_connector("takeout"), "linkedin", "ai_chats")
 BY_ID = {s["id"]: s for s in SOURCES}
 SYNCABLE = tuple(s["id"] for s in SOURCES if "build" in s)  # in page order
 IMPORT_TOOL = {"chatgpt", "gemini", "claude_ai"}  # raw_meta.tool values stored under source 'ai_chats'
@@ -272,6 +302,13 @@ _OPTION_FLAG = {"path": "--path", "mailboxes": "--mailbox", "since_days": "--sin
 
 def model_use(sid: str, allowed: frozenset[str]) -> dict:
     """Whether a hosted model may read this source (yes | partly | no), and how to change that."""
+    if sid == "persona":
+        n = sum(v in allowed for v in PERSONA_STORED)
+        state = "yes" if n == len(PERSONA_STORED) else "partly" if n else "no"
+        return {"id": "email,fs,takeout,linkedin,ai_chats", "allowed": state, "note": (
+            "Its records are stored under the sources it came through. A hosted model reads the ones IGNEOUS_LLM_SOURCES "
+            "lists: email,fs,takeout,linkedin,ai_chats for all of it, with IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true "
+            "for its documents." + (" All of it is opted in." if state == "yes" else ""))}
     mid = MODEL_ID.get(sid, sid)
     stored = source_catalog.of_connector(mid) or (mid,)
     n = sum(v in allowed for v in stored)
@@ -341,6 +378,11 @@ def check_requirements(source_id: str) -> tuple[bool, str | None]:
     elif source_id == "email":
         if not (Path(settings.data_dir) / "maildir").is_dir():
             return False, "No mailboxes at data/maildir. Run make enron first."
+    elif source_id == "persona":
+        from igneous.persona import MANIFEST, load
+
+        if not (load.root() / MANIFEST).is_file():
+            return False, "No persona at data/persona yet. Run make persona from the repository root."
     return True, None
 
 
@@ -360,8 +402,13 @@ def fs_roots() -> list[Path]:
 def describe(s: Session) -> list[dict]:
     from igneous import jobs, llm
     from igneous.connectors import secrets
+    from igneous.persona import formats as persona_formats
+    from igneous.persona import load as persona
 
     counts = dict(s.execute(text("SELECT source, count(*) FROM source_items GROUP BY 1")).all())
+    # The persona's mailbox is read by the same connector as the Enron demo's: it counts as the persona's, not Enron's.
+    persona_mail = s.execute(text("SELECT count(*) FROM source_items WHERE source = 'email' AND external_id LIKE :p"),
+                             {"p": f"{persona_formats.MAILBOX}/%"}).scalar()
     export_counts = dict(s.execute(text("""
         SELECT raw_meta->>'tool', count(*) FROM source_items WHERE source = 'ai_chats' GROUP BY 1""")).all())
     latest_item = dict(s.execute(text("SELECT source, max(updated_at) FROM source_items GROUP BY 1")).all())
@@ -389,9 +436,18 @@ def describe(s: Session) -> list[dict]:
             count = export_counts.get(sid, 0)
         elif sid == "ai_chats":
             count = ai_local
+        elif sid == "persona":  # a persona database holds nothing else (persona/load.py)
+            count = sum(counts.values()) if persona_mail else 0
+        elif sid == "email":
+            count = counts.get(sid, 0) - persona_mail
         else:
             count = counts.get(sid, 0)
         last = max((u for _, u in states.get(sid, [])), default=None)
+        if sid == "persona":
+            last = max((u for connector, label in persona.ACCOUNTS for a, u in states.get(connector, []) if a == label),
+                       default=None)
+        elif sid == "email":
+            last = max((u for a, u in states.get(sid, []) if a != dict(persona.ACCOUNTS)["email"]), default=None)
         if kind == "import":  # imports have no sync checkpoint: last import = newest item they wrote
             stamps = ([t for k, t in latest_item.items() if k.startswith("takeout_")] + [latest_export.get("gemini")]
                       if sid == "takeout" else [latest_item.get(sid) if sid == "linkedin" else latest_export.get(sid)])

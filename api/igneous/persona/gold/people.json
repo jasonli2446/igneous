@@ -1,0 +1,34 @@
+{
+ "about": "The persona's identities that are one person, and pairs that are two different people, by Person key: an address, a LinkedIn profile (linkedin:<slug>), or you (me). True by construction: the generator gave each person these identities.",
+ "people": [
+  {"name": "Mira Castellanos", "identities": ["me", "mcastellanos@lakeshore.example.edu"],
+   "why": "you: the address that sent the mail in the archive's Sent folder"},
+  {"name": "Dana Kimura", "identities": ["dkimura@lakeshore.example.edu", "dana.kimura@inbox.example.net", "linkedin:dana-kimura-wq41"],
+   "why": "a school and a personal address, both on threads with the landlord and Sofia, and a LinkedIn profile without an address"},
+  {"name": "Rafael Ortiz", "identities": ["rortiz@lakeshore.example.edu", "linkedin:rafael-ortiz-dev"]},
+  {"name": "Sofia Lindgren", "identities": ["slindgren@lakeshore.example.edu", "linkedin:sofia-lindgren-8b"]},
+  {"name": "Theo Marsh", "identities": ["theo.marsh@inbox.example.net", "linkedin:theo-marsh-data"]},
+  {"name": "Jordan Pike", "identities": ["jpike@lakeshore.example.edu", "linkedin:jordan-pike-22"]},
+  {"name": "Alex Chen (classmate)", "identities": ["achen7@lakeshore.example.edu", "linkedin:alex-chen-a7c21e"],
+   "why": "the classmate's LinkedIn profile shares no address, and another Alex Chen works at Northwind"},
+  {"name": "Alex Chen (Northwind)", "identities": ["alex@northwind.example.com", "linkedin:alexchen-firmware"],
+   "why": "his LinkedIn connection shares his work address"},
+  {"name": "Kevin Osei", "identities": ["kosei@lakeshore.example.edu", "linkedin:kevin-osei-3c8a10"]},
+  {"name": "Ruth Adeyemi", "identities": ["radeyemi@lakeshore.example.edu", "linkedin:ruth-adeyemi-7f3k2q"]},
+  {"name": "Martin Kowalski", "identities": ["mkowalski@lakeshore.example.edu", "linkedin:martin-kowalski-p2x9"]},
+  {"name": "Owen Brandt", "identities": ["owen@northwind.example.com", "linkedin:owen-brandt-nw"]},
+  {"name": "Priya Raman", "identities": ["priya@northwind.example.com", "linkedin:priya-raman-5d2e"]},
+  {"name": "Jonah Feld", "identities": ["jonah@northwind.example.com", "linkedin:jonah-feld-ops"]},
+  {"name": "Lucia Moretti", "identities": ["lucia@northwind.example.com", "linkedin:lucia-moretti-hr"]},
+  {"name": "Hannah Brooks", "identities": ["hbrooks@parks.portavalon.example.org", "linkedin:hannah-brooks-pa"]}
+ ],
+ "distinct": [
+  ["achen7@lakeshore.example.edu", "alex@northwind.example.com"],
+  ["linkedin:alex-chen-a7c21e", "alex@northwind.example.com"],
+  ["achen7@lakeshore.example.edu", "linkedin:alexchen-firmware"],
+  ["elena.castellanos@post.example.org", "roberto.castellanos@post.example.org"],
+  ["elena.castellanos@post.example.org", "nico.c@mailbox.example.com"],
+  ["dana.kimura@inbox.example.net", "theo.marsh@inbox.example.net"],
+  ["me", "elena.castellanos@post.example.org"]
+ ]
+}

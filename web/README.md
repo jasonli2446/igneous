@@ -65,3 +65,12 @@ The correction it makes is undone before it moves on, so the database ends as it
 WebGL in software and logs its own "GPU stall due to ReadPixels" driver notes; those are the only console warnings it
 ignores.
 The names it searches for come from the demo mailbox (`WALK_PEOPLE`, `WALK_PAIR` and `WALK_SEEDS` override them).
+On the synthetic persona (`make persona`), name its people:
+
+```bash
+WALK_PEOPLE="Dana Kimura|Priya Raman" WALK_PAIR="Owen Brandt|Mira Castellanos" \
+  WALK_SEEDS="Dana Kimura|Priya Raman|Owen Brandt|Rafael Ortiz|Sofia Lindgren" npm run walkthrough
+```
+
+Mira, the owner, is never searched for (search lists her as "You"); she is only the pair's other end, linked to Owen
+Brandt by the introduction Ruth Adeyemi made, an inferred link the correction can remove.

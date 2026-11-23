@@ -8,6 +8,7 @@ import typer
 
 from igneous import sources
 from igneous.db import SessionLocal
+from igneous.persona import DEFAULT_SEED
 from igneous.pipeline import STAGES
 
 app = typer.Typer(no_args_is_help=True)
@@ -338,6 +339,50 @@ def synthetic_corpus(out: Path = typer.Argument(..., help="directory for the gen
     manifest = generate(out)
     print(f"wrote {manifest['document_count']} documents and "
           f"{manifest['calendar_event_count']} calendar events to {out}")
+
+
+persona_app = typer.Typer(no_args_is_help=True, help="The synthetic persona: a fictional student's two years in every "
+                                                      "export format the Sources page reads, for demos and evaluation. "
+                                                      "make persona runs it end to end.")
+app.add_typer(persona_app, name="persona")
+
+
+@persona_app.command("generate")
+def persona_generate(out: Path = typer.Argument(..., help="the folder to write the exports to (make persona uses "
+                                                           "../data/persona); a persona already there is replaced"),
+                     seed: int = typer.Option(DEFAULT_SEED, help="the seed: the same seed writes the same bytes; the "
+                                                                 "gold set (igneous/persona/gold) describes the default"),
+                     until: str = typer.Option(None, help="YYYY-MM-DD: only what happened up to that day (a smaller "
+                                                          "persona)")):
+    """Write the persona's mailbox, Google Takeout, LinkedIn and ChatGPT exports and documents folder. No network,
+    no model calls. Import them with `igneous sync persona`, into a database of their own."""
+    from datetime import date
+
+    from igneous import persona
+
+    try:
+        manifest = persona.generate(out, seed, date.fromisoformat(until) if until else None)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
+    c = manifest["counts"]
+    print(f"wrote {manifest['person']}, {manifest['first_day']} to {manifest['last_day']}, to {out}: {c['mail']} "
+          f"emails, {c['chat_lines']} chat messages, {c['chatgpt_conversations']} ChatGPT conversations, "
+          f"{c['documents']} documents, {c['tasks']} tasks, {c['place_visits']} place visits, "
+          f"{c['linkedin_connections']} LinkedIn connections")
+
+
+@persona_app.command("database")
+def persona_database(clean: bool = typer.Option(False, "--clean", help="drop the database first if it exists")):
+    """Create the database IGNEOUS_DATABASE_URL names and migrate it. It must be a persona database (igneous_persona,
+    or igneous_persona_<name>); one that exists is left alone unless --clean."""
+    from igneous.persona import load
+
+    try:
+        name = load.create_database(clean)
+    except (ValueError, load.DatabaseExists) as e:
+        typer.echo(f"igneous: {e}", err=True)
+        raise typer.Exit(code=1) from e
+    print(f"created and migrated {name}")
 
 
 @app.command("verify-synthetic-corpus")

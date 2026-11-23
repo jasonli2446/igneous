@@ -179,6 +179,8 @@ def labeled(rows: list[dict]) -> tuple[list[dict], str]:
     """The rows to score, and which labels they carry: human-reviewed if any, else AI-reviewed, else drafts.
     `n/a` rows (not a person pair, e.g. mailing lists) are never scored."""
     rows = [r for r in rows if r["label"] in ("0", "1")]
+    if rows and all(r.get("reviewer") == "generator" for r in rows):
+        return rows, "ground truth (the synthetic persona's, by construction)"
     if reviewed := [r for r in rows if r["reviewed"] == "1"]:
         return reviewed, "human-reviewed"
     if ai := [r for r in rows if r.get("reviewer")]:
