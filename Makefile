@@ -46,7 +46,7 @@ test:
 
 check:  ## the checks CLAUDE.md requires before any PR (CI runs the same)
 	cd api && uv run ruff check . && uv run pytest -q
-	cd web && npx next typegen && npx tsc --noEmit && npm run build
+	cd web && npx next typegen && npx tsc --noEmit && npm run lint && npm run build
 
 audit:  ## fail on known advisories in the locked Python and npm dependencies, as CI does
 	cd api && bash -o pipefail -c 'uv export --frozen --no-hashes --no-emit-project | uvx pip-audit --strict --disable-pip --no-deps -r /dev/stdin'
