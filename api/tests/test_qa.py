@@ -194,6 +194,23 @@ def test_citations_come_only_with_an_answer_and_carry_item_and_node_ids(mailbox,
     assert not result["answerable"] and result["citations"] == [] and "withheld" in result["answer"]
 
 
+def test_the_mcp_ask_tool_cites_items_and_nodes_and_reports_failures(mailbox, model, monkeypatch):
+    from igneous import mcp_server
+
+    monkeypatch.setattr(rerank.settings, "reranker_enabled", False)
+    a1 = mailbox.chunks["a1"]
+    model.reply.update(answerable=True, answer=f"Requested [c{a1}].", cited=[a1])
+    out = mcp_server.ask(QUESTION)
+    (citation,) = out["citations"]
+    assert citation["chunk_id"] == a1 and citation["node_id"] == mailbox.nodes["a1"] and citation["item_id"]
+
+    def refuse(*_args, **_kwargs):
+        raise ProviderError("the model declined to answer")
+
+    monkeypatch.setattr(llm, "chat", refuse)
+    assert "declined" in mcp_server.ask(QUESTION)["error"]
+
+
 def test_ask_route_maps_provider_failures_and_validates_its_body(mailbox, model, monkeypatch):
     from igneous.main import app
 

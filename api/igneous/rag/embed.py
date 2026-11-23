@@ -40,7 +40,7 @@ def run(s: Session, log=print) -> int:
             raise RuntimeError(f"{model} makes {len(vecs[0])}-dimensional vectors and chunks.embedding holds {DIM}: "
                                f"set IGNEOUS_EMBEDDING_MODEL to a {DIM}-dimensional model, or change the column in a "
                                "migration and embed again")
-        # One statement per batch; per-row UPDATEs made the database, not the model, the bottleneck (~10x).
+        # One statement per batch: an UPDATE per row would make the database, not the model, the bottleneck (~10x).
         s.execute(text("""
             UPDATE chunks c SET embedding = CAST(u.v AS vector), embedding_model = :model
             FROM unnest(CAST(:ids AS bigint[]), CAST(:vs AS text[])) AS u(id, v) WHERE c.id = u.id
