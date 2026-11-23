@@ -61,8 +61,8 @@ class DriveConnector:
 
     name = "drive"
 
-    def __init__(self, creds, account: str):
-        self.svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+    def __init__(self, creds, account: str, service=None):
+        self.svc = service or build("drive", "v3", credentials=creds, cache_discovery=False)
         self.account = account
 
     def _folder_name(self, folder_id: str) -> str | None:
@@ -149,7 +149,8 @@ class DriveConnector:
             # A limited run deliberately restarts a fresh snapshot later, preventing a partial
             # listing from ever authorizing deletion reconciliation.
             yield Checkpoint({})
-        yield CompletedScan({"start_page_token": start_token}, self.name, frozenset(observed))
+        # The listing covers this account only: another account's files are not its to delete.
+        yield CompletedScan({"start_page_token": start_token}, self.name, frozenset(observed), scopes=(self.account,))
 
     def _changes(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | Tombstone]:
         start = cursor["start_page_token"]

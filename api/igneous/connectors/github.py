@@ -148,7 +148,7 @@ class GithubConnector:
         observed, emitted = set(), 0
         repo_names = {repo["full_name"] for repo in repos}
         for missing in set(cursor.get("repos", [])) - repo_names:
-            yield Tombstone(self.name, f"{self.account}/{missing}/", prefix=True)
+            yield Tombstone(self.name, f"{self.account}/{missing}", prefix=True)
         for repo in repos:
             for item in self._repo_items(repo, since):
                 observed.add(item.external_id)
@@ -158,6 +158,6 @@ class GithubConnector:
                     yield Checkpoint({**cursor, "repos_etag": etag})
         next_cursor = {"repos_etag": etag, "repos": sorted(repo_names), "synced_at": watermark}
         if full_scan:
-            yield CompletedScan(next_cursor, self.name, frozenset(observed), external_id_prefix=f"{self.account}/")
+            yield CompletedScan(next_cursor, self.name, frozenset(observed), scopes=(self.account,))
         else:
             yield Checkpoint(next_cursor)

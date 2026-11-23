@@ -38,21 +38,26 @@ class Checkpoint:
 
 @dataclass
 class CompletedScan:
-    """Final source snapshot event; only it permits reconciliation for ``source``.
+    """The last event of a sync that listed everything in its scopes. Only this event deletes items: the items of
+    `source` inside `scopes` that the scan did not observe.
 
-    ``external_ids`` contains every observed path, including files a connector chose not
-    to emit as a SourceItem. It must be the final event from a connector sync.
+    A scope is an external id that covers itself and every id below it (`me@x.com` covers `me@x.com/...`), so a
+    scan of one account, folder or mailbox reconciles only that part of the source. No scopes means the whole
+    source. `kept` scopes are parts the scan could not list (a folder it may not read): their items stay.
+    `external_ids` holds every id observed, including ids the connector chose not to store as items.
     """
     cursor: dict
     source: str
     external_ids: frozenset[str]
+    scopes: tuple[str, ...] = ()
+    kept: tuple[str, ...] = ()
     allow_empty_prune: bool = False
-    external_id_prefix: str | None = None  # constrain reconciliation for account-scoped snapshots
 
 
 @dataclass
 class Tombstone:
-    """A source item (or an account-safe external-ID prefix) removed by a change feed."""
+    """An item a change feed reports removed. With `prefix`, every item in the scope `external_id` names (the id
+    and everything below it, as in a CompletedScan)."""
     source: str
     external_id: str
     prefix: bool = False
@@ -61,7 +66,7 @@ class Tombstone:
 class Connector(Protocol):
     name: str
 
-    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | CompletedScan]: ...
+    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | CompletedScan | Tombstone]: ...
 
 
 UPSERT = text("""
@@ -93,49 +98,61 @@ def save_cursor(s: Session, connector: str, account: str, cursor: dict) -> None:
     """), {"c": connector, "a": account, "cur": json.dumps(cursor)})
 
 
-def _reconcile_completed_scan(s: Session, source: str, external_ids: frozenset[str],
-                              allow_empty_prune: bool, external_id_prefix: str | None = None) -> int:
-    """Remove items absent from a completed, non-suspicious source snapshot."""
-    if not external_ids and not allow_empty_prune:
-        return 0
-    scope = ""
-    values = {"source": source, "external_ids": sorted(external_ids), "prefix": external_id_prefix}
-    if external_id_prefix is not None:
-        # Use a literal prefix comparison rather than LIKE: account IDs may contain wildcard characters.
-        scope = " AND left(external_id, char_length(:prefix)) = :prefix"
-    if external_ids:
-        result = s.execute(text(f"""
-            DELETE FROM source_items
-            WHERE source = :source{scope} AND external_id <> ALL(CAST(:external_ids AS text[]))
-        """), values)
-    else:
-        result = s.execute(text(f"DELETE FROM source_items WHERE source = :source{scope}"), values)
-    return result.rowcount
+def _in_scopes(param: str) -> str:
+    """SQL: external_id lies in one of the scopes bound to :param. A literal comparison, not LIKE: account names
+    and paths may contain wildcard characters."""
+    return (f"EXISTS (SELECT 1 FROM unnest(CAST(:{param} AS text[])) AS scope(id) WHERE external_id = scope.id "
+            f"OR left(external_id, char_length(scope.id) + 1) = scope.id || '/')")
+
+
+def _reconcile(s: Session, scan: CompletedScan) -> int:
+    """Delete the items in a completed scan's scopes that it did not observe."""
+    if not scan.external_ids and not scan.allow_empty_prune:
+        return 0  # an empty listing is likelier a failure than a source that emptied
+    where = ["source = :source",
+             "NOT EXISTS (SELECT 1 FROM unnest(CAST(:observed AS text[])) AS seen(id) WHERE seen.id = external_id)"]
+    if scan.scopes:
+        where.append(_in_scopes("scopes"))
+    if scan.kept:
+        where.append(f"NOT {_in_scopes('kept')}")
+    return s.execute(text(f"DELETE FROM source_items WHERE {' AND '.join(where)}"), {
+        "source": scan.source, "observed": sorted(scan.external_ids), "scopes": list(scan.scopes),
+        "kept": list(scan.kept)}).rowcount
+
+
+def _delete(s: Session, tombstone: Tombstone) -> int:
+    where = _in_scopes("scopes") if tombstone.prefix else "external_id = :external_id"
+    return s.execute(text(f"DELETE FROM source_items WHERE source = :source AND {where}"), {
+        "source": tombstone.source, "external_id": tombstone.external_id, "scopes": [tombstone.external_id]}).rowcount
+
+
+def _deleted(s: Session, n: int) -> int:
+    """Deleted items can't reach the spine, so the stages that derive from evidence rebuild. The marker joins the
+    deleting transaction: no deletion commits without it."""
+    if n:
+        from igneous.graph import dirty
+        dirty.mark_rebuild(s)
+    return n
 
 
 def run_sync(s: Session, connector: Connector, account: str = "default", limit: int | None = None) -> dict:
-    """Upsert every item; reconcile deletions only after an explicit completed scan.
+    """Upsert every item; delete only what a Tombstone names or a CompletedScan did not observe.
 
-    Checkpoints deliberately do not imply a complete scan. Thus, an exception, process
-    stop, or ``--limit`` before ``CompletedScan`` can commit discovered additions and
-    updates but can never prune unseen source items.
+    A Checkpoint commits what came before it and never implies a complete scan, so an exception, a stopped process
+    or `limit` (which stops at the first checkpoint after that many items) can store additions and updates but never
+    deletes an item the scan had not reached.
     """
     stats = {"inserted": 0, "updated": 0, "unchanged": 0, "deleted": 0}
     cursor = load_cursor(s, connector.name, account)
     seen = 0
     for obj in connector.sync(cursor):
         if isinstance(obj, CompletedScan):
-            if limit is None:
-                stats["deleted"] += _reconcile_completed_scan(
-                    s, obj.source, obj.external_ids, obj.allow_empty_prune, obj.external_id_prefix)
+            stats["deleted"] += _deleted(s, _reconcile(s, obj))
             save_cursor(s, connector.name, account, obj.cursor)
             s.commit()
             break
         if isinstance(obj, Tombstone):
-            where = "left(external_id, char_length(:external_id)) = :external_id" if obj.prefix else "external_id = :external_id"
-            result = s.execute(text(f"DELETE FROM source_items WHERE source = :source AND {where}"),
-                               {"source": obj.source, "external_id": obj.external_id})
-            stats["deleted"] += result.rowcount
+            stats["deleted"] += _deleted(s, _delete(s, obj))
             continue
         if isinstance(obj, Checkpoint):
             save_cursor(s, connector.name, account, obj.cursor)
@@ -156,9 +173,5 @@ def run_sync(s: Session, connector: Connector, account: str = "default", limit: 
         else:
             stats["updated"] += 1
         seen += 1
-    if stats["deleted"]:
-        # Deleted rows cannot reach spine; force dependent evidence stages to rebuild.
-        from igneous.graph import dirty
-        dirty.mark_rebuild(s)
     s.commit()
     return stats

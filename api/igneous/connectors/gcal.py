@@ -30,8 +30,8 @@ def _external_id(account: str, resource_id: str) -> str:
 class CalendarConnector:
     name = "gcal"
 
-    def __init__(self, creds, account: str, since_days: int = 365):
-        self.svc = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    def __init__(self, creds, account: str, since_days: int = 365, service=None):
+        self.svc = service or build("calendar", "v3", credentials=creds, cache_discovery=False)
         self.account = account
         self.since_days = since_days
 
@@ -116,8 +116,8 @@ class CalendarConnector:
 class ContactsConnector:
     name = "gcontacts"
 
-    def __init__(self, creds, account: str):
-        self.svc = build("people", "v1", credentials=creds, cache_discovery=False)
+    def __init__(self, creds, account: str, service=None):
+        self.svc = service or build("people", "v1", credentials=creds, cache_discovery=False)
         self.account = account
 
     def sync(self, cursor: dict) -> Iterator[SourceItem | CompletedScan]:
@@ -145,4 +145,4 @@ class ContactsConnector:
             if not page:
                 break
         yield CompletedScan({"synced_at": datetime.now(UTC).isoformat()}, self.name, frozenset(observed),
-                            external_id_prefix=f"{self.account}/")
+                            scopes=(self.account,))
