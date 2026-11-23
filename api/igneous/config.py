@@ -11,9 +11,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="IGNEOUS_", env_file=API_DIR / ".env", extra="ignore")
 
     database_url: str = "postgresql+psycopg://igneous:igneous@localhost:5432/igneous"
-    # The Google OAuth client and the key that encrypts stored tokens (google/), the Enron mailboxes (maildir/), the
-    # synthetic persona (persona/) and, unless model_cache_dir names another folder, the local models (models/). A
-    # relative path is relative to the api folder.
+    # The Google OAuth client and the key that encrypts stored secrets (google/), the hosted model's key
+    # (secrets/), the Enron mailboxes (maildir/), the synthetic persona (persona/) and, unless model_cache_dir names
+    # another folder, the local models (models/). A relative path is relative to the api folder.
     data_dir: str = "../data"
     # Where the browser UI lives: the only site whose pages may call the API (igneous/access.py), and where the
     # Google sign-in callback sends you back. The API also answers to this host's name besides localhost.
