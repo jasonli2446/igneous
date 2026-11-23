@@ -12,12 +12,14 @@
 import { chromium } from "playwright";
 
 const WEB = (process.env.WEB_URL ?? "http://localhost:3000").replace(/\/$/, "");
-// Two people to centre on, then Back between them.
-const [FIRST, SECOND] = (process.env.WALK_PEOPLE ?? "K Allen|Phillip K Allen").split("|");
+// Two people to centre on, then Back between them: never the mailbox's owner (Phillip K Allen), whom the graph opens
+// on and whom Jump to lists as "You".
+const [FIRST, SECOND] = (process.env.WALK_PEOPLE ?? "Rangel, Ina|Lavorato, John").split("|");
 // A person and a top connection of theirs joined by an inferred link, which "This is wrong" can remove.
-const [PERSON, OTHER] = (process.env.WALK_PAIR ?? "Pallen|Mery L Brown").split("|");
+const [PERSON, OTHER] = (process.env.WALK_PAIR ?? "Mery L Brown|Pallen").split("|");
 // Centres to cycle through for the twenty changes.
-const SEEDS = (process.env.WALK_SEEDS ?? "K Allen|Phillip K Allen|Ina Rangel|John Lavorato|Pallen").split("|");
+const SEEDS = (process.env.WALK_SEEDS ?? "Rangel, Ina|Lavorato, John|Christi L Nicolay|Mery L Brown|Allen, Phillip K.")
+  .split("|");
 const CHANGES = 20;
 const TIMEOUT = 30_000;
 
@@ -98,8 +100,11 @@ async function walk(browser) {
   await page.goto(`${WEB}/`, { waitUntil: "domcontentloaded" });
   check(await page.title() === "Graph · Igneous", `page title is "${await page.title()}"`);
   check(await page.getByRole("heading", { level: 1, name: "Graph" }).count() === 1, "no Graph heading");
-  await shown();
-  pass();
+  // Your own graph, or, when no source says which person is you (several people's mailboxes), the empty state.
+  const empty = page.getByText("Nobody to start from yet", { exact: true });
+  const opened = await until("your graph or the empty state", async () =>
+    (await status.count()) ? `centred on ${(await shown()).name}` : (await empty.count()) ? "nobody to start from" : false);
+  pass(opened);
 
   step = `search for ${FIRST}`;
   await centreOn(FIRST);
