@@ -19,6 +19,11 @@ change on every rebuild:
 A Project you put under another Project is in `thread_parents` (origin 'user') instead: the threads stage reads it as
 it builds. The edges with extractor 'user' are exactly what these intents say: one for each, and no other.
 
+A correction stays keyed as it was recorded. What it names is resolved as the graph is now (graph/derived.py): a
+Project you folded away is the one it went into, and an organization known by a key another organization has now is
+that organization, with the backbone thread keyed by it (`rekeyed`), so a name you gave an organization's thread stays
+when the organization takes another key.
+
 `apply` is a pure function of these rows. It completes undos first (an undo marks its row `undone_at`; apply reverses
 the correction and forgets the row), puts every Project back to its derived state (its props.original_name, neither
 renamed nor hidden), and applies every correction again. It runs as the pipeline's last step and, when no rebuild is
@@ -41,11 +46,13 @@ class Plan:
     links: list[tuple[str, str, str, dict]] = field(default_factory=list)  # (src key, dst key, edge type, props)
 
 
-def plan(rows: list[dict]) -> Plan:
+def plan(rows: list[dict], moved: dict[str, str] | None = None) -> Plan:
     """Resolve active override rows into what to do. Pure, so it is testable without a database.
-    Later renames win; merge chains collapse (C into B into A -> C into A); an override aimed at a project
-    that was folded away follows it to the survivor."""
+    Every key is first taken as what it is now (`moved`: graph/derived.py `rekeyed`). Later renames win; merge chains
+    collapse (C into B into A -> C into A); an override aimed at a project that was folded away follows it to the
+    survivor."""
     p = Plan()
+    moved = moved or {}
 
     def survivor(k: str) -> str:
         while k in p.merges:
@@ -53,7 +60,7 @@ def plan(rows: list[dict]) -> Plan:
         return k
 
     for r in sorted(rows, key=lambda r: r["id"]):
-        keys = r["node_keys"]
+        keys = [follow(moved, k) for k in r["node_keys"]]
         if r["op"] == "rename" and r.get("value"):
             p.renames[keys[0]] = r["value"]
         elif r["op"] == "hide":
@@ -92,14 +99,14 @@ def _ids(s: Session, keys) -> dict[str, int]:
 
 def apply(s: Session) -> dict:
     """Complete every undo, then replay every correction. Idempotent."""
-    from igneous.graph.derived import merges
+    from igneous.graph.derived import merges, rekeyed
 
     undone = [r for r in load(s, undone=True) if r["undone_at"] is not None]
     for r in undone:
         _reverse(s, r)
     if undone:
         s.execute(text("DELETE FROM overrides WHERE id = ANY(:ids)"), {"ids": [r["id"] for r in undone]})
-    p = plan(load(s))  # with what the undos gave back (a link you added, then took out)
+    p = plan(load(s), rekeyed(s))  # with what the undos gave back (a link you added, then took out)
     _registry(s, p)
     folded = merges(s)
     return {"undone": len(undone), "merged": _merge(s, p, folded), "projects": _projects(s, p),
@@ -171,9 +178,12 @@ def fold_into(s: Session, fold: int, keep: int, fold_key: str, mark: bool = True
 
 
 def _unmerge(s: Session, r: dict) -> None:
-    """Undo a merge: the folded Project comes back as it was when you merged it, with every link that moved from it
-    (those marked merged_from); the next rebuild recomputes the rest."""
-    fold_key = r["node_keys"][1]
+    """Undo a merge: the folded Project comes back as it was when you merged it (under the key it has now), with every
+    link that moved from it (those marked merged_from); the next rebuild recomputes the rest."""
+    from igneous.graph.derived import rekeyed
+
+    recorded = r["node_keys"][1]
+    fold_key = follow(rekeyed(s), recorded)
     snapshot = (r.get("data") or {}).get("node") or {}
     type_, key = fold_key.split(":", 1)
     s.execute(text("""
@@ -186,8 +196,8 @@ def _unmerge(s: Session, r: dict) -> None:
     for end in ("dst", "src"):
         s.execute(text(f"""
             UPDATE edges SET {end} = :f, props = props - 'merged_from'
-            WHERE props->'merged_from'->>'key' = :fk AND props->'merged_from'->>'end' = :end
-        """), {"f": fold, "fk": fold_key, "end": end})
+            WHERE props->'merged_from'->>'key' = ANY(:fk) AND props->'merged_from'->>'end' = :end
+        """), {"f": fold, "fk": sorted({recorded, fold_key}), "end": end})
     name = snapshot.get("props", {}).get("original_name") or snapshot.get("name")
     if name:
         s.execute(text("""
@@ -246,8 +256,8 @@ def stated_parents(s: Session) -> list[tuple[str, str]]:
 def _links(s: Session, p: Plan, folded: dict[str, str]) -> int:
     """The connections you added, exactly: an edge with extractor 'user' for each intent (an override 'link', or a
     Project under a Project in thread_parents) on whatever each end is now (a Project you folded away: the one it went
-    into), and none that no intent backs (one you took out, a 'same person' you took back). Identity clusters are
-    rebuilt when a 'same person' link comes or goes."""
+    into; an organization known by another key now: that one, and its thread), and none that no intent backs (one you
+    took out, a 'same person' you took back). Identity clusters are rebuilt when a 'same person' link comes or goes."""
     links = [*p.links, *((c, q, "PART_OF", {"why": "you said so"}) for c, q in stated_parents(s))]
     ids = _ids(s, [follow(folded, k) for a, b, _t, _p in links for k in (a, b)])
     wanted: dict[tuple[int, int, str], dict] = {}

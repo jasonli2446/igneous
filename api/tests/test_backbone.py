@@ -4,11 +4,11 @@ import json
 from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
-from pipeline_data import put, rows
+from pipeline_data import card, put, rows
 from sqlalchemy import text
 
-from igneous import llm
-from igneous.graph import backbone, profile, traversal
+from igneous import llm, pipeline
+from igneous.graph import backbone, profile, summary, traversal
 from igneous.main import app
 
 
@@ -32,13 +32,14 @@ def linkedin(s, positions=(), education=()) -> None:
         None, "LinkedIn profile of Mo Self")
 
 
-def resume(s, when: datetime, experience=(), projects=()) -> None:
+def resume(s, when: datetime, experience=(), projects=(), education=()) -> None:
     """A resume in your documents folder, with the reading the model gave it earlier."""
     body = "Mo Self\nResume\n" + " ".join(e["title"] for e in experience) + "\n" + "experience " * 60
     put(s, "fs", f"docs/resume-{when:%Y}.pdf", f"Mo_Self_Resume_{when:%Y}.pdf", {"path": f"docs/resume-{when:%Y}.pdf"},
         when, body)
     llm.cache_store(profile.cache_key(body), {
-        "is_about_owner": True, "person_name": "Mo Self", "education": [],
+        "is_about_owner": True, "person_name": "Mo Self",
+        "education": [{"degree": "", "start": "", "end": "", "domain_hint": "", **e} for e in education],
         "experience": [{"start": "", "end": "", "domain_hint": "", "parent": "", "project": "", **e} for e in experience],
         "projects": [{"description": "", **p} for p in projects]})
 
@@ -102,6 +103,71 @@ def test_an_internship_then_a_full_time_job_at_one_company(db):
     shown = TestClient(app).get(f"/graph/entity/{intern}").json()
     assert {k: shown[k] for k in ("kind", "start", "end", "role_of")} == {
         "kind": "role", "start": "2024-06-01", "end": "2024-08-01", "role_of": "Acme Robotics"}
+    # Its summary without the model says what it is: a role, where and when, not "a project".
+    assert summary.fallback(summary.gather(db, intern)).startswith(
+        "Software Engineering Intern is your role at Acme Robotics, Jun 2024 to Aug 2024.")
+
+
+def roles_at(s, me_id: int) -> dict[str, list[tuple]]:
+    """Your organizations by key, each with its roles (title, start, end, via) as its one WORKED_AT link holds them."""
+    return {key: [(r["title"], r["start"], r["end"], r["via"]) for r in props["roles"]]
+            for key, props in rows(s, """SELECT o.key, e.props FROM edges e JOIN nodes o ON o.id = e.dst
+                                         WHERE e.src = :me AND e.type = 'WORKED_AT' AND e.extractor = 'profile'""",
+                                   me=me_id)}
+
+
+def test_one_organization_spelled_two_ways_keeps_every_role_and_one_degree_spelled_two_ways_is_one(db):
+    """Your resume calls your employer Northwind, at northwind.test, whose people's LinkedIn says Northwind Robotics;
+    your LinkedIn calls it Northwind Robotics. One organization, keyed as its people's company and named as your newest
+    document names it, holding the internship from the resume and the job from LinkedIn. Your degree at State
+    University is spelled two ways by the two documents, at the same dates: one degree. A lab your resume gives the
+    university's domain is the university's: its job joins the degree there, and the university keeps its name."""
+    me_id = me(db)
+    put(db, "linkedin", "connection/kai", "Kai Lee", {"kind": "connection", "name": "Kai Lee", "email": "kai@northwind.test",
+                                                      "company": "Northwind Robotics", "url": "https://linkedin.com/in/kai"})
+    put(db, "linkedin", "connection/cy", "Cy Cole", {"kind": "connection", "name": "Cy Cole", "email": "cy@state.test",
+                                                     "company": "State University", "url": "https://linkedin.com/in/cy"})
+    linkedin(db, positions=[("Northwind Robotics", "Software Engineer", "2025-01", "")],
+             education=[("State University", "Bachelor of Science - BS, Computer Science", "2020-09", "2024-05")])
+    resume(db, datetime(2024, 9, 1, tzinfo=UTC),
+           experience=[{"org": "Northwind", "title": "Software Engineering Intern", "start": "2024-06",
+                        "end": "2024-08", "domain_hint": "northwind.test"},
+                       {"org": "Robotics Lab", "title": "Research Assistant", "start": "2023-01", "end": "2023-06",
+                        "domain_hint": "state.test"}],
+           education=[{"school": "State University", "degree": "B.S. Computer Science", "start": "2020-09",
+                       "end": "2024-05"}])
+    db.commit()
+    profile.run(db, log=None)
+    assert roles_at(db, me_id) == {
+        "org:northwind-robotics": [("Software Engineer", "2025-01-01", None, "your LinkedIn"),
+                                   ("Software Engineering Intern", "2024-06-01", "2024-08-01", "your resume")],
+        "org:state-university": [("Research Assistant", "2023-01-01", "2023-06-01", "your resume"),
+                                 ("B.S. Computer Science", "2020-09-01", "2024-05-01", "your resume")]}
+    assert dict(rows(db, "SELECT key, name FROM nodes WHERE type = 'Organization'")) == {
+        "org:northwind-robotics": "Northwind", "org:state-university": "State University"}
+
+
+def test_your_name_for_a_role_stays_when_its_organization_takes_its_peoples_name(db):
+    """Your resume lists two roles at ACME, at acme.test: org:acme, a thread per role, and you rename the internship's.
+    Then Ana's card says acme.test is Acme Robotics: the organization is org:acme-robotics, and so are its roles'
+    threads (backbone:org:acme-robotics/...), the internship's still by your name."""
+    me(db)
+    resume(db, datetime(2025, 9, 1, tzinfo=UTC), experience=[
+        {"org": "ACME", "title": "Software Engineer", "start": "2025-01", "domain_hint": "acme.test"},
+        {"org": "ACME", "title": "Software Engineering Intern", "start": "2024-06", "end": "2024-08",
+         "domain_hint": "acme.test"}])
+    db.commit()
+    stages = ["profile", "organizations", "backbone"]
+    pipeline.run(db, stages)
+    intern = db.execute(text("SELECT id FROM nodes WHERE key = 'backbone:org:acme/software-engineering-intern'")).scalar()
+    renamed = TestClient(app).post(f"/graph/entity/{intern}/rename", json={"name": "My internship"}).json()
+    assert renamed["applied"] == "now"
+    card(db, "acct/people/1", "Ana Ames", emails=["ana@acme.test"], orgs=["Acme Robotics"])
+    db.commit()
+    pipeline.run(db, stages)
+    assert dict(rows(db, "SELECT key, name FROM nodes WHERE key LIKE 'backbone:%' ORDER BY key")) == {
+        "backbone:org:acme-robotics": "ACME", "backbone:org:acme-robotics/software-engineer": "Software Engineer",
+        "backbone:org:acme-robotics/software-engineering-intern": "My internship"}
 
 
 def test_overlapping_roles_leave_a_thread_both_hold_under_the_org(db):
@@ -133,14 +199,14 @@ T0 = datetime(2024, 9, 2, 15, tzinfo=UTC)
 
 
 def found(s, name: str, term: str, sender: str, subjects: list[str], start: int, kind: str = "thread",
-          key: str | None = None, named_from: str = "records") -> None:
-    """A thread the threads stage found, with its records: mail from `sender` with these subjects, a week apart from
-    day `start`. Without the model a thread's kind is 'thread' and its name is its term and months."""
+          key: str | None = None, named_from: str = "records", body: str = "{subject}. See you then.") -> int:
+    """A thread the threads stage found, with its records: mail from `sender` with these subjects (and `body`), a week
+    apart from day `start`. Without the model a thread's kind is 'thread' and its name is its term and months."""
     from pipeline_data import mail
 
     refs = [f"{term}-{i}" for i in range(len(subjects))]
     for ref, subject, i in zip(refs, subjects, range(len(subjects)), strict=True):
-        mail(s, ref, sender, [ME], subject, T0 + timedelta(days=start + 7 * i), body=f"{subject}. See you then.")
+        mail(s, ref, sender, [ME], subject, T0 + timedelta(days=start + 7 * i), body=body.format(subject=subject))
     s.commit()
     from igneous.graph import spine
     spine.run(s)
@@ -152,6 +218,7 @@ def found(s, name: str, term: str, sender: str, subjects: list[str], start: int,
     s.execute(text("""INSERT INTO edges (src, dst, type, extractor, confidence)
                       SELECT n.id, :t, 'PART_OF', 'threads', 0.6 FROM nodes n JOIN source_items si ON si.id = n.source_item_id
                       WHERE n.type = 'Message' AND si.external_id = ANY(:r)"""), {"t": tid, "r": refs})
+    return tid
 
 
 def test_only_what_an_org_holds_goes_under_it_by_its_domain(db):
@@ -224,3 +291,72 @@ def test_why_shows_a_placement_by_its_own_link_and_this_is_wrong_keeps_it_out(db
     assert client.get("/graph/explain", params={"a": school, "b": course}).json()["direct"] == []
     backbone.run(db, log=None)  # the next build: the class is still one, and still mostly the school's mail
     assert "CS 401 · Sep-Oct 2024" not in parents(db)
+
+
+def school_and_job(s) -> None:
+    """Mo studied at State University (state.edu) and was a TA there, and works at Acme Robotics (acme.test) as an
+    engineer and, from June, also as team lead; LinkedIn says what each job was about."""
+    me(s)
+    linkedin(s, positions=[("Acme Robotics", "Engineer", "2025-01", "", "Built Atlas, the fleet dashboard, all summer."),
+                           ("Acme Robotics", "Team Lead", "2025-06", "", "Ran the Beacon rollout."),
+                           ("State University", "Teaching Assistant", "2024-09", "2024-12", "")],
+             education=[("State University", "BS", "2021-09", "2025-05")])
+    s.commit()
+    profile.run(s, log=None)
+    s.execute(text("""UPDATE nodes SET props = props || jsonb_build_object('domains', jsonb_build_array(
+                          CASE name WHEN 'State University' THEN 'state.edu' ELSE 'acme.test' END))
+                      WHERE type = 'Organization'"""))
+
+
+def test_the_kind_a_model_judged_says_what_a_thread_is_before_the_course_codes_in_its_mail(db):
+    """A trip with a TA (whose signature names her course on every message) is still a trip; a thread named without
+    the model whose mail names a course only in what it quotes and in signatures is no class; "has 300" is no course.
+    A project the model calls a project is neither work nor a class; one it calls a TA job is work, under the TA job;
+    a demo day the model calls an event, most of whose own mail names CS 481, is a class, under the degree."""
+    school_and_job(db)
+    signed = "{subject}. See you then.\n\nThanks,\nCy\nTeaching Assistant, CS 210"
+    found(db, "Lake trip", "Lake", "cy@state.edu", ["Lake cabin", "Lake food", "Lake photos"], 10, kind="trip",
+          body=signed)
+    found(db, "Owl · Oct 2024", "Owl", "cy@state.edu", ["Owl notes", "Owl plan", "Owl ideas"], 20, body=(
+        "{subject}: the tracker has 300 owls now.\n\nOn Monday, Cy wrote:\n> CS 210 lab moved\n\n--\nCy, CS 210 TA"))
+    found(db, "Kestrel", "Kestrel", "cy@state.edu", ["Kestrel app", "Kestrel demo", "Kestrel bugs"], 30, kind="project")
+    found(db, "Grading", "Grading", "cy@state.edu", ["Grading week 1", "Grading week 2", "Grading week 3"], 40,
+          kind="teaching assistant")
+    found(db, "Demo Day", "Demo Day", "cy@state.edu", ["Demo Day plan", "Demo Day booth", "Demo Day!"], 60, kind="event",
+          body="{subject}: the CS 481 teams present at noon.")
+    backbone.run(db, log=None)
+    assert {c: p for c, p in parents(db).items() if c in ("Lake trip", "Owl · Oct 2024", "Kestrel", "Grading",
+                                                           "Demo Day")} == {
+        "Grading": "Teaching Assistant", "Demo Day": "BS"}
+
+
+def test_what_you_wrote_about_a_role_puts_a_thread_under_that_role_before_anything_is_inferred(db):
+    """Atlas falls in both Acme jobs' dates and most of its mail is with the university, where Mo had a TA job: the
+    Engineer description names it, so it goes under Engineer, whose dates alone wouldn't tell. A trip called Summer in
+    the same months isn't what "all summer" in the description names."""
+    school_and_job(db)
+    found(db, "Atlas · Jul 2025", "Atlas", "cy@state.edu", ["Atlas review", "Atlas bugs", "Atlas launch"], 300,
+          kind="work project")
+    found(db, "Summer", "Summer", "jo@acme.test", ["Summer plans", "Summer cabin", "Summer pics"], 310, kind="trip")
+    backbone.run(db, log=None)
+    assert parents(db).get("Atlas · Jul 2025") == "Engineer" and "Summer" not in parents(db)
+    why = dict(rows(db, """SELECT c.name, e.props->>'why' FROM edges e JOIN nodes c ON c.id = e.src
+                           WHERE e.type = 'PART_OF' AND e.extractor = 'backbone'"""))
+    assert why["Atlas · Jul 2025"] == "what you wrote about your Engineer role (since Jan 2025) names Atlas"
+
+
+def test_this_is_wrong_under_a_role_leaves_the_org_and_under_the_org_leaves_its_roles_too(db):
+    """Beacon is placed under the Team Lead job (what Mo wrote about it names Beacon). "This is wrong" there: the next
+    build puts it under Acme Robotics itself. "This is wrong" on that: it stays out of Acme and its roles."""
+    school_and_job(db)
+    beacon = found(db, "Beacon", "Beacon", "jo@acme.test", ["Beacon rollout", "Beacon fixes", "Beacon done"], 320,
+                   kind="work project")
+    client = TestClient(app)
+    backbone.run(db, log=None)
+    for expected in ("Team Lead", "Acme Robotics", None):
+        assert parents(db).get("Beacon") == expected
+        if expected:
+            link = db.execute(text("""SELECT id FROM edges WHERE src = :t AND type = 'PART_OF' AND extractor = 'backbone'"""),
+                              {"t": beacon}).scalar_one()
+            assert client.post("/graph/edge/wrong", json={"edge": link}).json()["applied"] == "now"
+            backbone.run(db, log=None)

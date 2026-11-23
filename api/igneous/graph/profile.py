@@ -20,10 +20,13 @@ you use. So the biggest parts of your life come from there first, and everything
      'profile'), named as you name them and found by their full name, or a word of it that stands for the project in
      your records ("Atlas" for "Atlas Mobile App", not "Mobile").
   4. A role is one title at one organization over one stretch of time: the same title in two documents, at dates
-     that overlap, is one role, while a second stint is another. Every version adds to it: an older version adds what
-     the newer ones left out, and a newer one wins on dates, except that an end it leaves open ("present") gives way
-     to an end another document states for after the newer one was written. Each organization and project comes
-     from the newest version that names it the same way.
+     that overlap, is one role, while a second stint is another; a degree at one school is one whatever each document
+     calls it ("B.S. Computer Science", "Bachelor of Science - BS, Computer Science") at dates that overlap. Every
+     version adds to it: an older version adds what the newer ones left out, and a newer one wins on title and dates,
+     except that an end it leaves open ("present") gives way to an end another document states for after the newer
+     one was written. Two names of one organization (your resume's "Northwind" and LinkedIn's "Northwind Robotics",
+     the company its people name) are one organization with every role from both, named as the newest document
+     names it. Each project comes from the newest version that names it the same way.
 
 A LinkedIn export (connectors/linkedin.py) is read too, without a model: its profile item carries the same structure
 in `raw_meta.profile`. It has no date of its own, so a dated resume wins on dates and LinkedIn fills in what the
@@ -160,13 +163,14 @@ def _date(v: str):
 
 
 def _same_role(a: dict, b: dict) -> bool:
-    """Two documents' entries for one role: the same title, at dates that overlap (or one of them gives none). Two
-    stints with one title are two roles."""
-    if norm(a["title"]) != norm(b["title"]):
-        return False
+    """Two documents' entries for one role: the same title, at dates that overlap (or one of them gives none); or, at a
+    school, a degree at dates that overlap, however each spells it ("B.S. Computer Science", "Bachelor of Science -
+    BS, Computer Science"). Two stints with one title are two roles."""
+    same_title = norm(a["title"]) == norm(b["title"])
     if not a["start"] or not b["start"]:
-        return True
-    return a["start"] <= (b["end"] or "9999") and b["start"] <= (a["end"] or "9999")
+        return same_title
+    overlap = a["start"] <= (b["end"] or "9999") and b["start"] <= (a["end"] or "9999")
+    return overlap and (same_title or (a["school"] and b["school"]))
 
 
 def _merge_role(kept: dict, older: dict) -> None:
@@ -212,10 +216,10 @@ def run(s: Session, log=print) -> dict:
     my_names = {n.lower() for n in s.execute(text("""
         SELECT n.name FROM nodes n WHERE n.id = :me OR n.id IN (SELECT node_id FROM canonical WHERE canonical_id = :me)
     """), {"me": self_id}).scalars() if n and "@" not in n}
-    # Every role, per organization: a position (or a degree, at a school) is (organization, title, dates), and each
-    # document's entry for it adds to the one role (`_same_role`, `_merge_role`). The organization's name, domain and
-    # parent come from the newest entry that gives them.
-    orgs: dict[str, dict] = {}     # org slug -> {name, domain_hint, parent, project, roles}
+    # Every entry, newest document first: a position (or a degree, at a school) is (organization, title, dates). The
+    # organization's name, domain and parent come from the newest entry that gives them, per name as written.
+    orgs: dict[str, dict] = {}     # org slug -> {name, domain_hint, parent, project, school}
+    entries: list[tuple[str, dict]] = []  # (org slug, role)
     projects: dict[str, dict] = {}
     used = 0
     for doc in documents(s):
@@ -229,23 +233,19 @@ def run(s: Session, log=print) -> dict:
         used += 1
         via = "your LinkedIn" if doc.source == "linkedin" else "your resume"
         at = doc.occurred_at.date().isoformat() if doc.occurred_at else None
-        entries = [(ed.get("school") or "", ed, True) for ed in out.get("education", [])] + \
-                  [(e.get("org") or "", e, False) for e in out.get("experience", [])]
-        for name, e, school in entries:
+        found = [(ed.get("school") or "", ed, True) for ed in out.get("education", [])] + \
+                [(e.get("org") or "", e, False) for e in out.get("experience", [])]
+        for name, e, school in found:
             k = _slug(name)
             if not k:
                 continue
-            org = orgs.setdefault(k, {"name": name, "domain_hint": "", "parent": "", "project": "", "roles": []})
+            org = orgs.setdefault(k, {"name": name, "domain_hint": "", "parent": "", "project": "", "school": False})
             for field in ("domain_hint", "parent", "project"):
                 org[field] = org[field] or (e.get(field) or "").strip()
-            role = {"title": ((e.get("degree") if school else e.get("title")) or "").strip(), "school": school,
-                    "start": _date(e.get("start")), "end": _date(e.get("end")), "via": via, "doc": doc.id, "at": at,
-                    "description": "" if school else _described(doc, e)}
-            same = next((r for r in org["roles"] if r["school"] == school and _same_role(r, role)), None)
-            if same:
-                _merge_role(same, role)
-            else:
-                org["roles"].append(role)
+            org["school"] |= school
+            entries.append((k, {"title": ((e.get("degree") if school else e.get("title")) or "").strip(),
+                                "school": school, "start": _date(e.get("start")), "end": _date(e.get("end")),
+                                "via": via, "doc": doc.id, "at": at, "description": "" if school else _described(doc, e)}))
         for p in out.get("projects", []):
             k = _slug(p["name"])
             if k and k not in projects:
@@ -259,6 +259,7 @@ def run(s: Session, log=print) -> dict:
     # it, never a rename of it.
     claimed: dict[str, int] = {}   # domain -> the org that claimed it
     by_name: dict[str, int] = {}   # the names your documents give -> org
+    named: set[int] = set()        # the orgs named this run: by the newest entry that names them
 
     def org_node(name: str, domain: str) -> tuple[int | None, int | None]:
         """(org id, the org it's part of when another one claimed its domain first); no id for a name that can't be
@@ -272,10 +273,13 @@ def run(s: Session, log=print) -> dict:
                 return None, None
             nid = s.execute(text("""
                 INSERT INTO nodes (type, key, name, props) VALUES ('Organization', :k, :n, '{"named_by": "profile"}')
-                ON CONFLICT (type, key) DO UPDATE SET name = EXCLUDED.name,
-                    props = nodes.props || '{"named_by": "profile"}'
+                ON CONFLICT (type, key) DO UPDATE SET props = nodes.props || '{"named_by": "profile"}'
                 RETURNING id
             """), {"k": company[0], "n": company[1]}).scalar_one()
+            if nid not in named:
+                s.execute(text("UPDATE nodes SET name = :n WHERE id = :i AND name IS DISTINCT FROM :n"),
+                          {"n": company[1], "i": nid})
+                named.add(nid)
             by_name[_slug(name)] = nid
         if d:
             claimed.setdefault(d, nid)
@@ -296,16 +300,32 @@ def run(s: Session, log=print) -> dict:
                "sid": sid})
 
     org_ids: dict[str, int] = {}
+    part_of: dict[str, int] = {}  # org slug -> the org that claimed its domain first
     named_projects: dict[int, set[str]] = {}  # org -> project names your resume puts under it
-    # Schools first: they claim their domains before a lab at the same domain does.
-    for k, e in sorted(orgs.items(), key=lambda kv: not any(r["school"] for r in kv[1]["roles"])):
-        oid, part_of = org_node(e["name"], e["domain_hint"])
-        if oid is None:
+    # Each name's organization, schools first: they claim their domains before a lab at the same domain does.
+    for k, e in sorted(orgs.items(), key=lambda kv: not kv[1]["school"]):
+        oid, by_domain = org_node(e["name"], e["domain_hint"])
+        if oid is not None:
+            org_ids[k] = oid
+            if by_domain:
+                part_of[k] = by_domain
+    # Every role at each organization, newest document first, under whatever name each document gives it ("Northwind"
+    # on your resume, "Northwind Robotics" on LinkedIn: one organization): each entry for a role adds to the one role
+    # (`_same_role`, `_merge_role`).
+    roles_at: dict[int, list[dict]] = {}
+    for k, role in entries:
+        if k not in org_ids:
             continue
-        org_ids[k] = oid
+        roles = roles_at.setdefault(org_ids[k], [])
+        same = next((r for r in roles if r["school"] == role["school"] and _same_role(r, role)), None)
+        if same:
+            _merge_role(same, role)
+        else:
+            roles.append(role)
+    for oid, listed in roles_at.items():
         # One link per organization (edges are one per pair, type and stage), with every role you had there, newest
         # first, each with its own dates; the link spans them all.
-        roles = sorted(e["roles"], key=lambda r: (r["start"] or "", r["end"] or "9999", r["title"]), reverse=True)
+        roles = sorted(listed, key=lambda r: (r["start"] or "", r["end"] or "9999", r["title"]), reverse=True)
         vias = {via: [r["title"] for r in roles if r["via"] == via] for via in dict.fromkeys(r["via"] for r in roles)}
         props = {"why": "; ".join(f"{via}: {', '.join(titles)}" for via, titles in vias.items()),
                  "title": roles[0]["title"],
@@ -316,12 +336,14 @@ def run(s: Session, log=print) -> dict:
         starts = [r["start"] for r in roles if r["start"]]
         edge(self_id, oid, "WORKED_AT", props, min(starts, default=None),
              None if any(r["end"] is None for r in roles) else max(r["end"] for r in roles), roles[0]["doc"])
-        parent = part_of
+    for k, oid in org_ids.items():
+        e, first = orgs[k], next(r for slug, r in entries if slug == k)
+        parent = part_of.get(k)
         if e["parent"]:
             parent = by_name.get(_slug(e["parent"])) or org_node(e["parent"], "")[0]
         if parent and parent != oid:
-            edge(oid, parent, "PART_OF", {"why": f"{roles[0]['via']}: {e['name']} is part of {e['parent'] or 'it'}"},
-                 sid=roles[0]["doc"])
+            edge(oid, parent, "PART_OF", {"why": f"{first['via']}: {e['name']} is part of {e['parent'] or 'it'}"},
+                 sid=first["doc"])
         if e["project"]:
             named_projects.setdefault(oid, set()).add(e["project"])
     # Projects become pinned rows of the thread registry, named as you name them. A row keeps its state (a project
@@ -351,9 +373,9 @@ def run(s: Session, log=print) -> dict:
     s.execute(text("""DELETE FROM nodes n WHERE n.type = 'Organization' AND n.props->>'named_by' = 'profile'
                       AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id OR e.dst = n.id)
                       AND NOT EXISTS (SELECT 1 FROM spine_node_support x WHERE x.node_id = n.id)"""))
-    stats = {"documents": used, "orgs": sum(1 for o in orgs.values() if not any(r["school"] for r in o["roles"])),
-             "schools": sum(1 for o in orgs.values() if any(r["school"] for r in o["roles"])),
-             "roles": sum(len(o["roles"]) for o in orgs.values()), "projects": len(projects)}
+    schools = {oid for oid, roles in roles_at.items() if any(r["school"] for r in roles)}
+    stats = {"documents": used, "orgs": len(roles_at) - len(schools), "schools": len(schools),
+             "roles": sum(len(roles) for roles in roles_at.values()), "projects": len(projects)}
     if log:
         log(json.dumps(stats))
     return stats

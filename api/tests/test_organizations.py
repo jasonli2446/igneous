@@ -1,22 +1,27 @@
 """Where people work: WORKED_AT facts from evidence only, one per person and organization, named in people's words;
-one node per organization, whichever stage meets it first, so two builds of the same data agree."""
+one node per organization, whichever stage meets it first, so two builds of the same data agree; and your corrections
+follow an organization whatever key the records give it."""
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 from conftest import API
+from fastapi.testclient import TestClient
 from pipeline_data import card, day, event, local_models, mail, put, rows  # noqa: F401
 from sqlalchemy import text
 
 from igneous import llm, pipeline
-from igneous.graph import organizations, spine
+from igneous.graph import organizations, spine, verify
+from igneous.main import app
 
 pytestmark = pytest.mark.usefixtures("local_models")
 ME = "me@gmail.com"  # your address at a mail provider: never an employer
 ACME = ["ana@acme.test", "bo@acme.test", "cy@acme.test"]
+client = TestClient(app)
 
 
 def build(s) -> None:
@@ -305,3 +310,166 @@ def test_check_graph_reports_a_domain_two_organizations_hold(db):
                        ('Organization', 'org:globex', 'Globex', '{"domains": ["globex.test"]}')"""))
     assert [(v.code, v.details) for v in domain_violations(db)] == [
         ("domain_held_twice", {"domain": "acme.test", "organizations": ["acme.test", "org:acme"]})]
+
+
+# --- Your corrections follow an organization whatever key it takes ----------------------------------------------
+
+def node_id(s, key: str) -> int:
+    return s.execute(text("SELECT id FROM nodes WHERE key = :k"), {"k": key}).scalar_one()
+
+
+def link(s, person: str) -> int | None:
+    """The organizations stage's WORKED_AT link from `person`."""
+    return s.execute(text("""SELECT e.id FROM edges e JOIN nodes p ON p.id = e.src WHERE p.key = :p
+                             AND e.type = 'WORKED_AT' AND e.extractor = 'organizations'"""), {"p": person}).scalar()
+
+
+def test_a_link_you_rejected_stays_out_when_a_card_gives_the_organization_its_company_key(db):
+    """You said Bo never worked at acme.test. Then Ana's card names its company, Acme Robotics, and the domain becomes
+    that company's node, org:acme-robotics: Bo stays out of it on every rebuild, the Why panel shows your rejection,
+    and undo brings him back."""
+    exchange(db, ACME, [0, 10, 21])
+    build(db)
+    wrong = client.post("/graph/edge/wrong", json={"edge": link(db, "bo@acme.test")}).json()
+    assert wrong["applied"] == "now" and ("bo@acme.test", "acme.test") not in worked_at(db)
+    card(db, "acct/people/3", "Ana Ames", emails=["ana@acme.test"], orgs=["Acme Robotics"])
+    for _ in range(2):
+        build(db)
+        assert organizations_(db) == [("org:acme-robotics", "Acme Robotics", ["acme.test"])]
+        assert worked_at(db) == {("me", "Acme Robotics"), ("ana@acme.test", "Acme Robotics"),
+                                 ("cy@acme.test", "Acme Robotics")}
+    bo, acme = node_id(db, "bo@acme.test"), node_id(db, "org:acme-robotics")
+    explained = client.get("/graph/explain", params={"a": bo, "b": acme}).json()
+    assert [c["override_id"] for c in explained["corrections"]] == [wrong["override_id"]]
+    assert client.delete(f"/overrides/{wrong['override_id']}").json()["applied"] == "now"
+    assert ("bo@acme.test", "Acme Robotics") in worked_at(db)
+
+
+def test_your_name_for_its_thread_your_link_and_your_verdict_follow_an_organization_to_its_company_key(db):
+    """Your mail makes acme.test one of your organizations, with a thread of its own. You rename the thread, say Dee
+    worked there and that Cy's link is right; then Ana's card makes it org:acme-robotics. The thread is
+    backbone:org:acme-robotics, still by your name (the inspector lists the rename), Dee's link and your verdict are on
+    the company, and acme.test is gone."""
+    exchange(db, ACME, [0, 10, 21])
+    mail(db, "dee-1", "dee@else.test", [ME], "Hello", day(3))
+    pipeline.run(db)
+    thread = node_id(db, "backbone:acme.test")
+    renamed = client.post(f"/graph/entity/{thread}/rename", json={"name": "Acme (my first job)"}).json()
+    added = client.post("/graph/link", json={"src": node_id(db, "dee@else.test"), "dst": node_id(db, "acme.test"),
+                                             "type": "WORKED_AT"}).json()
+    assert client.post("/graph/edge/confirm", json={"edge": link(db, "cy@acme.test")}).status_code == 200
+    card(db, "acct/people/3", "Ana Ames", emails=["ana@acme.test"], orgs=["Acme Robotics"])
+    for _ in range(2):
+        pipeline.run(db)
+        thread = node_id(db, "backbone:org:acme-robotics")
+        assert db.execute(text("SELECT name FROM nodes WHERE id = :i"), {"i": thread}).scalar() == "Acme (my first job)"
+        assert [c["override_id"] for c in client.get(f"/graph/entity/{thread}").json()["corrections"]] == [
+            renamed["override_id"]]
+        assert rows(db, """SELECT p.key, o.key FROM edges e JOIN nodes p ON p.id = e.src JOIN nodes o ON o.id = e.dst
+                           WHERE e.extractor = 'user'""") == [("dee@else.test", "org:acme-robotics")]
+        assert rows(db, """SELECT e.props->>'verdict', e.props->>'verified_by' FROM edges e WHERE e.id = :i""",
+                    i=link(db, "cy@acme.test")) == [("keep", "user")]
+        assert rows(db, "SELECT key FROM nodes WHERE type = 'Organization' ORDER BY key") == [("org:acme-robotics",)]
+        assert rows(db, "SELECT key FROM nodes WHERE key LIKE 'backbone:%'") == [("backbone:org:acme-robotics",)]
+    assert added["override_id"] and renamed["applied"] == "now"
+
+
+def test_your_name_for_your_resumes_organization_stays_when_its_people_name_it_otherwise(db):
+    """Your resume calls your employer ACME, at acme.test: org:acme, whose thread you rename. Then Ana's card says
+    Acme Robotics: the organization is org:acme-robotics, and its thread keeps your name."""
+    names = {ME: "Mo Self"}
+    for p in ACME:
+        for d in (0, 10, 21):
+            mail(db, f"to-{p}-{d}", ME, [p], f"Plan {d}", day(d), sent=True, names=names)
+            mail(db, f"from-{p}-{d}", p, [ME], f"Re: Plan {d}", day(d + 1), names=names)
+    resume(db, [{"org": "ACME", "title": "Engineer", "start": "2025-01", "domain_hint": "acme.test"}])
+    db.commit()
+    stages = ["spine", "self", "resolve", "profile", "organizations", "backbone"]
+    pipeline.run(db, stages)
+    assert organizations_(db) == [("org:acme", "ACME", ["acme.test"])]
+    renamed = client.post(f"/graph/entity/{node_id(db, 'backbone:org:acme')}/rename", json={"name": "My job"}).json()
+    card(db, "acct/people/3", "Ana Ames", emails=["ana@acme.test"], orgs=["Acme Robotics"])
+    db.commit()
+    pipeline.run(db, stages)
+    assert organizations_(db) == [("org:acme-robotics", "ACME", ["acme.test"])]
+    thread = node_id(db, "backbone:org:acme-robotics")
+    assert db.execute(text("SELECT name FROM nodes WHERE id = :i"), {"i": thread}).scalar() == "My job"
+    assert keys(db) == {"acme.test": "org:acme-robotics", "org:acme": "org:acme-robotics"}
+    assert renamed["applied"] == "now"
+
+
+def test_a_thread_you_put_under_an_organizations_thread_stays_there_alone_when_the_organization_takes_a_new_key(db):
+    """A project whose mail is all with acme.test, which you put under acme.test's thread yourself. When a card makes
+    the organization org:acme-robotics, the project is under the new thread by your link alone, on the build that
+    re-keys it and the next (the backbone sees your link before it places anything by domain)."""
+    from igneous.graph.derived import Writer
+
+    exchange(db, ACME, [0, 10, 21])
+    db.commit()
+    stages = ["spine", "self", "resolve", "organizations", "backbone"]
+    pipeline.run(db, stages)
+    project = Writer(db, "threads").project("thread:arm", "Robot arm", {"derived": "threads", "kind": "project"})
+    db.execute(text("""INSERT INTO edges (src, dst, type, extractor, source_item_id)
+                       SELECT n.id, :p, 'PART_OF', 'threads', n.source_item_id FROM nodes n
+                       WHERE n.type = 'Message' AND n.name LIKE 'Re: Plan%'"""), {"p": project})
+    db.commit()
+    added = client.post("/graph/link", json={"src": project, "dst": node_id(db, "backbone:acme.test"),
+                                             "type": "PART_OF"}).json()
+    assert added["applied"] == "now"
+    card(db, "acct/people/3", "Ana Ames", emails=["ana@acme.test"], orgs=["Acme Robotics"])
+    for _ in range(2):
+        db.commit()
+        pipeline.run(db, stages)
+        assert rows(db, """SELECT e.extractor, p.key FROM edges e JOIN nodes p ON p.id = e.dst
+                           WHERE e.src = :t AND e.type = 'PART_OF' AND p.type = 'Project'""", t=project) == [
+            ("user", "backbone:org:acme-robotics")]
+
+
+def test_the_verifier_never_judges_a_link_you_called_right_under_the_organizations_earlier_key(db, monkeypatch):
+    """You said Cy's link to acme.test is right; once a card makes it org:acme-robotics, the verifier judges every
+    link to the company but Cy's."""
+    exchange(db, ACME, [0, 10, 21])
+    build(db)
+    assert client.post("/graph/edge/confirm", json={"edge": link(db, "cy@acme.test")}).status_code == 200
+    card(db, "acct/people/3", "Ana Ames", emails=["ana@acme.test"], orgs=["Acme Robotics"])
+    mail(db, "sig", "ana@acme.test", [ME], "Re: Plan 21", day(23), "See you Monday.\n-- Ana, Acme Robotics")
+    build(db)
+    asked = []
+
+    def judge(system, user, schema, model=None, **_options):
+        asked.append(user)
+        return {"edges": []}, {}
+    monkeypatch.setattr(llm, "structured", judge)
+    monkeypatch.setattr(llm.settings, "llm_sources", "gmail,gcontacts")
+    verify.run(db, log=None)
+    judged = {m for prompt in asked for m in re.findall(r"^A = Person '([^']+)'; B = Organization", prompt, re.M)}
+    assert "Bo" in judged and "Cy" not in judged  # never Cy: you said that link is right
+    # ...and your verdict is an example the model learns from, under the organization's name now.
+    assert all("Cy -> Acme Robotics: keep" in prompt for prompt in asked)
+
+
+def keys(s) -> dict[str, str]:
+    return dict(rows(s, "SELECT key, org_key FROM organization_keys"))
+
+
+def test_every_key_an_organization_had_stands_for_where_it_is_now(db):
+    """organization_keys after each build: a domain and the organization holding it; your resume's spelling of a
+    company its people name otherwise; a key that gave up its domains, the organization they went to (not one that
+    stands on its own: a LinkedIn company); and what an earlier build knew, followed."""
+    k = organizations._keys_now
+    assert k(db, {"acme.test": "acme.test"}, {}, set()) == {}
+    # A card names the company: the domain is its, and so is the key your resume spelled it by.
+    assert k(db, {"acme.test": "org:acme-robotics"}, {"org:acme": "org:acme-robotics"}, set()) == {
+        "acme.test": "org:acme-robotics", "org:acme": "org:acme-robotics"}
+    # More of its people say Acme Robotics Inc: the company that held the domain goes with it, and what followed it too.
+    assert k(db, {"acme.test": "org:acme-robotics-inc"}, {}, set()) == {
+        "acme.test": "org:acme-robotics-inc", "org:acme": "org:acme-robotics-inc",
+        "org:acme-robotics": "org:acme-robotics-inc"}
+    # The cards go: the domain is its own again, and the company keys stand for it.
+    assert k(db, {"acme.test": "acme.test"}, {}, set()) == {
+        "org:acme": "acme.test", "org:acme-robotics": "acme.test", "org:acme-robotics-inc": "acme.test"}
+    assert keys(db)["acme.test"] == "acme.test"
+    # A company that stands on its own (LinkedIn) is itself, whatever it held before; one holding a domain is too.
+    assert k(db, {"acme.test": "org:acme", "globex.test": "org:acme-robotics"}, {},
+             {"org:acme-robotics-inc"}) == {"acme.test": "org:acme", "globex.test": "org:acme-robotics"}
+    assert "org:acme-robotics-inc" not in keys(db) and "org:acme-robotics" not in keys(db)

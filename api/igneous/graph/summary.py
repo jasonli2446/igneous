@@ -201,6 +201,11 @@ def gather(s: Session, node_id: int) -> dict:
     """Everything the summary may say, from edges and source items. Raises identity.NotFound."""
     n = identity.node(s, node_id)
     node = {"id": n["id"], "type": n["type"], "name": n["name"], "key": n["key"]}
+    props = n["props"] or {}
+    if n["type"] == "Project" and props.get("kind") == "role" and props.get("role_of"):
+        # A role you had (graph/backbone.py): where, and when.
+        node["role_of"] = s.execute(text("SELECT name FROM nodes WHERE id = :o"), {"o": props["role_of"]}).scalar()
+        node["start"], node["end"] = props.get("start"), props.get("end")
     if node["type"] == "Person":
         stats, conns = _person_connections(s, identity.members(s, node["id"]))
     elif node["type"] in ("Thread", "Event", "Organization", "Project"):
@@ -294,6 +299,12 @@ def fallback(facts: dict) -> str:
                      + (f", from {_month(stats.get('first'))} to {_month(stats.get('last'))}." if stats.get("first") else "."))
         if people:
             parts.append(f"Most active: {', '.join(c['name'] for c in people[:3])}.")
+    elif kind == "Project" and node.get("role_of"):
+        span = (f"{_month(node['start'])} to {_month(node['end'])}" if node.get("start") and node.get("end")
+                else f"since {_month(node['start'])}" if node.get("start") else "")
+        parts.append(f"{name} is your role at {node['role_of']}" + (f", {span}." if span else "."))
+        if conns:
+            parts.append(f"Under it: {', '.join(c['name'] for c in conns[:3])}.")
     elif kind in ("Event", "Organization", "Project"):
         label_ = {"Event": "an event", "Organization": "an organization", "Project": "a project"}[kind]
         n = stats.get("total_people") or len(people)

@@ -3,9 +3,12 @@
 A rejection of yours ("This is wrong", or unlinking something from a project) is a 'drop' verdict on a pair of
 nodes, keyed by their natural keys (`Type:key`). It holds for the pair, not one rule's spelling of a link: no
 derived edge of any type, in either direction, joins them again. It also holds for the pair's identities: a person
-is their identity head (another address of theirs is still them), and a Project is the Project it was folded into
-(a merge you made, or two threads found to be one). `rejections` reads those pairs, for the writers and for what reads
-the graph (`Rejections.heads`: the pairs as the explorer shows identities); `Writer` never writes an edge between one.
+is their identity head (another address of theirs is still them), a Project is the Project it was folded into
+(a merge you made, or two threads found to be one), and an organization is the one its key stands for now (a domain
+its company took over: graph/organizations.py), with the backbone's thread keyed by it (`rekeyed`). `rejections`
+reads those pairs, for the writers and for what reads the graph (`Rejections.heads`: the pairs as the explorer shows
+identities); `Writer` never writes an edge between one. Every other reader of a correction's keys resolves them the
+same way (`merges`, or `rekeyed` for what is the same thing under another key).
 
 A Project is written under one contract by every stage that derives Projects (entities, threads with their
 umbrellas, backbone): `Writer.project` upserts it by key with the props the stage derives this run, records the name
@@ -42,14 +45,42 @@ def follow(folded: dict[str, str], key: str) -> str:
     return key
 
 
+def rekeyed(s: Session) -> dict[str, str]:
+    """What is the same thing under another key now, by natural key: an organization known by a key another
+    organization has now (graph/organizations.py records them in `organization_keys`: a domain its company took over,
+    your resume's spelling of a company its people name otherwise), and the threads the backbone keys by it
+    (graph/backbone.py: the org's own, `backbone:<org key>`, and its roles', `backbone:<org key>/<title>`)."""
+    orgs = dict(s.execute(text("SELECT key, org_key FROM organization_keys WHERE key <> org_key ORDER BY key")).all())
+    if not orgs:
+        return {}
+    orgs = {old: follow(orgs, old) for old in orgs}
+    out = {}
+    for old, new in orgs.items():
+        out[f"Organization:{old}"] = f"Organization:{new}"
+        out[f"Project:backbone:{old}"] = f"Project:backbone:{new}"
+    earlier: dict[str, list[str]] = {}  # an org's key now -> the keys it had
+    for old, new in orgs.items():
+        earlier.setdefault(new, []).append(old)
+    roles = {tuple(key.removeprefix("backbone:").split("/", 1)) for key in s.execute(text(
+        "SELECT key FROM nodes WHERE type = 'Project' AND key LIKE 'backbone:%/%'")).scalars()}
+    for org, title in sorted(roles):
+        now = orgs.get(org, org)
+        for old in earlier.get(now, []):
+            out[f"Project:backbone:{old}/{title}"] = f"Project:backbone:{now}/{title}"
+    return out
+
+
 def merges(s: Session) -> dict[str, str]:
     """Every Project folded into another, by natural key: threads the registry merged (merged_into) and merges you
-    made in the inspector, each mapped to the Project it ends up in."""
+    made in the inspector, each mapped to the Project it ends up in; and what is the same thing under another key now
+    (`rekeyed`)."""
     from igneous.graph import overrides
 
+    moved = rekeyed(s)
     folded = {f"Project:{k}": f"Project:{m}" for k, m in s.execute(text(
         "SELECT key, merged_into FROM thread_registry WHERE status = 'merged' AND merged_into IS NOT NULL"))}
-    folded.update(overrides.plan(overrides.load(s)).merges)
+    folded.update(overrides.plan(overrides.load(s), moved).merges)
+    folded.update(moved)
     return {k: follow(folded, k) for k in folded}
 
 
