@@ -5,7 +5,9 @@ labels all of them. What they share is a distinctive term that suddenly shows up
 once. So a thread is found, not configured:
 
   1. Terms: capitalized phrases from item titles and text ("Portland", "Powell's", "CS 401", "Gloomhaven Night"). A
-     repeating event is one record (its Event's), and a chat day counts what was said, not its conversation's name.
+     term counts once per thing a record is: every occurrence of a repeating event is its one Event (so a weekly
+     standup named after your employer is one mention, not a hundred that make the name background), and a chat day
+     counts what was said, not its conversation's name.
   2. Burst: a term in 6+ records from 3+ kinds of source within BURST_DAYS, denser there than its own background
      and in at most MAX_DF of all records, is a candidate; its densest window is its span. Name seeds add
      long-running things named outright (a repository, a course code, a calendar series, a named group chat).
@@ -128,20 +130,28 @@ def _terms(text_: str) -> list[str]:
 
 
 def _items(s: Session) -> list:
+    """Every record of the life sources: `node_id` is the node that points at it (a message, file or event), and
+    `unit` the one it is, which every occurrence of a repeating event shares (its Event) as copies of one email share
+    their Message."""
     return s.execute(text("""
         SELECT DISTINCT ON (si.id) si.id, si.source, si.occurred_at, coalesce(si.title, '') AS title,
-               left(coalesce(si.body_text, ''), 4000) AS body, n.id AS node_id
+               left(coalesce(si.body_text, ''), 4000) AS body, n.id AS node_id, u.node_id AS unit
         FROM source_items si
         LEFT JOIN nodes n ON n.source_item_id = si.id AND n.type IN ('Message', 'File', 'Event')
+        LEFT JOIN (spine_node_support u JOIN nodes un ON un.id = u.node_id AND un.type IN ('Message', 'File', 'Event'))
+               ON u.source_item_id = si.id AND u.represents
         WHERE si.source = ANY(:src) AND si.occurred_at IS NOT NULL
           -- Notifications and marketing never make or join a thread (they stay searchable and as evidence):
           -- a promo that mentions "Chinatown" isn't part of anything.
           AND COALESCE(si.item_class, 'conversation') NOT IN ('notification', 'marketing')
-          -- A repeating event is one record here, the one its Event is (as search indexes it): a weekly standup
-          -- named after your employer is one mention, not a hundred that make the name background.
-          AND (si.source <> 'gcal' OR n.id IS NOT NULL)
-        ORDER BY si.id, n.id
+        ORDER BY si.id, n.id, u.node_id
     """), {"src": list(SOURCES)}).all()
+
+
+def _unit(it) -> tuple[str, int]:
+    """The one thing a record is, for counting terms: its node, shared by the records that are one thing."""
+    unit = getattr(it, "unit", None)
+    return ("node", unit) if unit is not None else ("record", it.id)
 
 
 def _by_time(rows) -> list:
@@ -174,22 +184,28 @@ def _bursts(its: list) -> list[tuple[int, int]]:
 
 def burst_candidates(items: list, excluded: set[str]) -> list[dict]:
     """Terms that spike across several kinds of source in one window, with their member items (pure: the same
-    items give the same candidates, in the same order, whatever order they come in). `excluded`: lowercase terms
-    never a thread on their own (people's names)."""
+    items give the same candidates, in the same order, whatever order they come in). A term counts once per thing a
+    record is (`_unit`), toward its share of all of them and its bursts, at the first record of that thing that names
+    it: a repeating event at its first occurrence. `excluded`: lowercase terms never a thread on their own (people's
+    names)."""
     if not items:
         return []
-    by_term: dict[str, list] = defaultdict(list)
+    by_term: dict[str, dict] = defaultdict(dict)  # term -> unit -> its first record naming the term
     for it in items:
         # Names of trips, classes and projects show up in titles and opening lines; the first 1,500 characters
         # of a body are enough and keep this fast on a large mailbox. A chat day's title is its conversation's name
         # (every day of a team chat names the team), not something said that day: only its text counts.
         title = "" if it.source in CHATS else it.title
+        unit = _unit(it)
         for t in sorted(set(_terms(title)) | set(_terms(it.body[:1500]))):
-            by_term[t].append(it)
+            first = by_term[t].get(unit)
+            if first is None or (it.occurred_at, it.id) < (first.occurred_at, first.id):
+                by_term[t][unit] = it
+    units = len({_unit(it) for it in items})
     out = []
     for term in sorted(by_term):
-        its = by_term[term]
-        if len(its) < MIN_ITEMS or len(its) > MAX_DF * len(items) or term.lower() in excluded:
+        its = list(by_term[term].values())
+        if len(its) < MIN_ITEMS or len(its) > MAX_DF * units or term.lower() in excluded:
             continue
         its = _by_time(its)
         for lo, hi in _bursts(its):
