@@ -140,7 +140,8 @@ def refresh_commitment_status(s: Session) -> int:
 MAX_INTRO_PARTICIPANTS = 4   # sender + recipients; larger threads are groups or mass mail, not introductions
 INTRO_WINDOW_DAYS = 180
 
-# Parameters: :ex, :version, :max_participants, :window_days.  Participants are canonical identities.
+# Parameters: :ex, :version, :max_participants, :window_days, :blocked (rejected pairs, graph/derived.py).
+# Participants are canonical identities.
 INTRODUCTIONS_SQL = """
 WITH raw AS (
   SELECT dst AS msg, src AS node, true AS is_sender, valid_from AS at, source_item_id AS sid
@@ -171,7 +172,8 @@ WITH raw AS (
   WHERE p.person IN (SELECT b FROM cand) AND q.person IN (SELECT c FROM cand)
 ), firsts AS (
   SELECT DISTINCT ON (x.b, x.c) x.* FROM cand x
-  WHERE NOT EXISTS (SELECT 1 FROM pm WHERE pm.b = x.b AND pm.c = x.c AND pm.at < x.at)
+  WHERE NOT (CAST(x.b AS text) || '>' || CAST(x.c AS text) = ANY(CAST(:blocked AS text[])))
+    AND NOT EXISTS (SELECT 1 FROM pm WHERE pm.b = x.b AND pm.c = x.c AND pm.at < x.at)
     AND EXISTS (SELECT 1 FROM pm WHERE pm.b = x.b AND pm.c = x.c AND pm.n <= :max_participants
                 AND pm.at > x.at AND pm.at <= x.at + make_interval(days => :window_days)
                 AND NOT EXISTS (SELECT 1 FROM parts r WHERE r.msg = pm.msg AND r.person = x.a))
@@ -191,13 +193,16 @@ def derive_introductions(s: Session) -> int:
     sender can introduce (so at most three pairs per message).  B and C must never have shared
     a message before, and must later share a small message *without* the introducer within
     ``INTRO_WINDOW_DAYS``.  Each pair gets one edge, from its earliest qualifying message.
-    Services are never B or C.  The user stays eligible as B or C.  Deterministic, source-cited,
-    and separate from model claims.  Rebuilds its own edges, so it is idempotent.
+    Services are never B or C.  The user stays eligible as B or C, and a pair you rejected never is
+    (graph/derived.py).  Deterministic, source-cited, and separate from model claims.  Rebuilds its own edges, so it
+    is idempotent.
     """
+    from igneous.graph.derived import rejections
+
     s.execute(text("DELETE FROM edges WHERE extractor = :ex AND type = 'INTRODUCED'"), {"ex": EXTRACTOR})
     return s.execute(text(INTRODUCTIONS_SQL), {
         "ex": EXTRACTOR, "version": VERSION, "max_participants": MAX_INTRO_PARTICIPANTS,
-        "window_days": INTRO_WINDOW_DAYS}).rowcount or 0
+        "window_days": INTRO_WINDOW_DAYS, "blocked": rejections(s).id_pairs()}).rowcount or 0
 
 
 def commitments(s: Session, status: str = "open", limit: int = 50, node_id: int | None = None) -> list[dict]:

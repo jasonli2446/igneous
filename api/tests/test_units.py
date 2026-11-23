@@ -377,8 +377,11 @@ def test_topic_normalization_is_conservative_and_similarity_requires_lexical_evi
     assert [(left.id, right.id) for left, right, _ in pairs] == [(1, 2)]
 
 
-def test_topic_related_to_uses_distinct_message_cooccurrences_and_own_extractor():
+def test_topic_related_to_uses_distinct_message_cooccurrences_and_own_extractor(monkeypatch):
+    from igneous.graph import derived
     from igneous.graph.topics import EXTRACTOR, _related
+
+    monkeypatch.setattr(derived, "rejections", lambda _s: derived.Rejections())
 
     class Result:
         rowcount = 4
@@ -398,7 +401,7 @@ def test_topic_related_to_uses_distinct_message_cooccurrences_and_own_extractor(
     assert delete[1] == {"ex": EXTRACTOR}
     assert "count(DISTINCT a.src)" in insert[0]
     assert "a.dst < b.dst" in insert[0]
-    assert insert[1]["minimum"] == 3 and insert[1]["ex"] == EXTRACTOR
+    assert insert[1]["minimum"] == 3 and insert[1]["ex"] == EXTRACTOR and insert[1]["blocked"] == []
 
 
 def test_locate_spans():
@@ -1783,9 +1786,10 @@ def test_verifier_snippets_claims_and_merge_safety():
     item = {"body": "lots of unrelated words " * 30 + " see you at Gloomhaven Night on Friday " + "more text " * 30,
             "title": "plans", "source": "gmail", "occurred_at": datetime(2026, 8, 1), "recipients": 2}
     assert "Gloomhaven Night" in verify._snippet(item, ["Gloomhaven Night"])  # the part that mentions the claim, not line 1
-    desc, digest = verify._describe({"src_type": "Person", "src_name": "A", "dst_type": "Project",
-                                     "dst_name": "Gloomhaven Night", "dst_kind": "tabletop game"}, [item])
-    assert "2 recipients" in desc and len(digest) == 64
+    edge = {"type": "INVOLVED_IN", "src_id": 1, "src_type": "Person", "src_name": "A", "dst_id": 2,
+            "dst_type": "Project", "dst_name": "Gloomhaven Night", "dst_kind": "tabletop game"}
+    desc = verify._describe(edge, [item], names={1: "Ana"})
+    assert "2 recipients" in desc and "A = Person 'Ana'" in desc and len(verify.digest(("INVOLVED_IN", "threads"), desc)) == 64
     # every claim the verifier judges is phrased; merges are only undone by a confident drop
     assert ("SAME_AS", "er") in verify.CLAIMS and ("PART_OF", "hierarchy") in verify.CLAIMS
     import inspect
@@ -1854,23 +1858,27 @@ def test_one_way_bulk_senders_are_services_but_colleagues_are_not():
 
 def test_links_you_stated_are_never_judged_by_the_model():
     from igneous.graph import verify
+    from igneous.graph.derived import STATED
 
-    # the verifier only judges model-derived links; your own (extractor 'user') are never in its claims
-    assert all(extractor != "user" for _type, extractor in verify.CLAIMS)
-    import inspect
-
-    from igneous.graph import threads
-    assert "'user', :v, 1.0" in inspect.getsource(threads.pinned_parents)
+    # the verifier only judges model-derived links; stated ones (yours: extractor 'user') are never in its claims
+    assert all(claim[1] not in STATED for claim in verify.CLAIMS)
 
 
-def test_person_merge_is_a_trusted_user_link():
-    import inspect
+def test_person_merge_is_a_trusted_user_link(db):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import text
 
-    from igneous.graph import entity_api, resolve
+    from igneous.graph import resolve
+    from igneous.main import app
 
-    src = inspect.getsource(entity_api.merge_people)
-    assert "'SAME_AS'" in src and "'user'" in src        # stored as your identity link
-    assert "user" in resolve.TRUSTED                      # which resolution always honors on every rebuild
+    a, b = (db.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Person', :k, 'Sam Lee') RETURNING id"),
+                       {"k": k}).scalar_one() for k in ("sam@a.test", "sam@b.test"))
+    answer = TestClient(app).post(f"/graph/person/{b}/merge", json={"other": a}).json()
+    assert answer["applied"] == "now" and answer["person"] in (a, b)
+    # stored as your identity link, an intent by natural keys, which resolution always honors on every rebuild
+    assert db.execute(text("SELECT op, value FROM overrides")).one() == ("link", "SAME_AS")
+    assert db.execute(text("SELECT src, dst FROM edges WHERE type = 'SAME_AS' AND extractor = 'user'")).one() == (a, b)
+    assert "user" in resolve.TRUSTED
 
 
 def test_profile_only_counts_documents_about_you():

@@ -14,7 +14,8 @@ Organizations are keyed by domain (acme.com) or, for a company name, `org:<slug>
 organizations on your resume are), so one company is one node. A domain is named in its people's own words where the
 data has them (the companies on their contact cards and LinkedIn connections), else by one cached cheap-model call per
 domain reading how its people sign their mail in opted-in sources, else by the domain itself; a name your resume gave
-it always stays. The stage owns only its own rows.
+it always stays. The stage owns only its own rows, written through graph/derived.py's Writer: a person and an
+organization you said aren't connected never are again.
 """
 import json
 import re
@@ -27,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from igneous.config import settings
 from igneous.graph import identity
+from igneous.graph.derived import Writer
 
 EXTRACTOR = "organizations"
 VERSION = "2"
@@ -288,6 +290,7 @@ def run(s: Session) -> dict:
     """Rebuild this stage's WORKED_AT edges from evidence, one per person and organization, and name the domains
     they point at. Returns {worked_at, organizations}."""
     s.execute(text("DELETE FROM edges WHERE extractor = :x"), {"x": EXTRACTOR})
+    w = Writer(s, EXTRACTOR, VERSION)
     mail = _mail_facts(s)
     names = _domain_names(s, {f.key for f in mail})
     # A company on a card that names one of these domains ("Acme Robotics" for acme.com) is that domain's node.
@@ -313,24 +316,11 @@ def run(s: Session) -> dict:
                       reverse=True)[:EVIDENCE]
         props = {"why": sorted({f.why for f in facts}), "inferred": True,
                  **({"school": True} if orgs[key][1] == "school" else {})}
-        edge = s.execute(text("""
-            INSERT INTO edges (src, dst, type, props, valid_from, valid_to, extractor, extractor_version, confidence,
-                               source_item_id)
-            VALUES (:person, :org, 'WORKED_AT', CAST(:props AS jsonb), :start, :end, :x, :v, :confidence, :sid)
-            ON CONFLICT (src, dst, type, extractor) DO UPDATE SET props = EXCLUDED.props,
-                valid_from = LEAST(edges.valid_from, EXCLUDED.valid_from),
-                valid_to = GREATEST(edges.valid_to, EXCLUDED.valid_to),
-                confidence = GREATEST(edges.confidence, EXCLUDED.confidence)
-            RETURNING id
-        """), {"person": person, "org": orgs[key][0], "props": json.dumps(props), "start": min(dates, default=None),
-               "end": max(dates, default=None), "x": EXTRACTOR, "v": VERSION,
-               "confidence": max(f.confidence for f in facts), "sid": kept[0] if kept else None}).scalar_one()
-        evidence = sorted({(f.sid, f.why) for f in facts if f.sid in kept})
-        if evidence:
-            s.execute(text("""INSERT INTO edge_evidence (edge_id, source_item_id, kind, detail)
-                              VALUES (:edge, :sid, :kind, CAST(:detail AS jsonb))"""),
-                      [{"edge": edge, "sid": sid, "kind": why, "detail": json.dumps({"inferred_by": EXTRACTOR})}
-                       for sid, why in evidence])
+        w.edge(person, orgs[key][0], "WORKED_AT", props, confidence=max(f.confidence for f in facts),
+               source_item_id=kept[0] if kept else None, valid_from=min(dates, default=None),
+               valid_to=max(dates, default=None),
+               evidence=[(sid, why, {"inferred_by": EXTRACTOR})
+                         for sid, why in sorted({(f.sid, f.why) for f in facts if f.sid in kept})])
     # Organizations this stage made that nothing points at any more (their evidence is gone).
     s.execute(text("""
         DELETE FROM nodes n WHERE n.type = 'Organization' AND n.props->>'inferred_by' = :x

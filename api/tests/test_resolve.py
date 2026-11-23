@@ -141,5 +141,6 @@ def test_a_clusters_name_leaves_with_the_merge(db):
     assert head.name == "Christine Lee" and head.props["own_name"] == "Chris Lee"
     link = db.execute(text("SELECT id FROM edges WHERE type = 'SAME_AS' AND extractor = 'er'")).scalar_one()
     corrections.reject(db, link)
+    corrections.apply_all(db)
     head = db.execute(text("SELECT name, props FROM nodes WHERE key = 'chris.lee@a.test'")).one()
     assert head.name == "Chris Lee" and "own_name" not in head.props and "shown_name" not in head.props

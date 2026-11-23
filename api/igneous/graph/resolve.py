@@ -318,9 +318,12 @@ def run(s: Session, threshold: float = THRESHOLD, rescore: bool = False) -> dict
     """), {"ex": EXTRACTOR, "v": VERSION}).scalar()
     rescored = bool(changes or stale or rescore)
     if rescored:
+        from igneous.graph.derived import rejections
+
         s.execute(text("DELETE FROM edges WHERE type = 'SAME_AS' AND extractor = :ex"), {"ex": EXTRACTOR})
+        blocked = rejections(s)  # a pair you said is wrong, on any link, is never one person by score
         links = [{"a": min(a.id, b.id), "b": max(a.id, b.id), "p": json.dumps(f), "c": sc}  # one edge per pair
-                 for a, b, sc, f in candidates(s) if sc >= threshold]
+                 for a, b, sc, f in candidates(s) if sc >= threshold and not blocked.blocks(a.id, b.id)]
         if links:
             s.execute(text("""
                 INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence)

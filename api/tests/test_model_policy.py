@@ -41,10 +41,8 @@ class Recorder:
 
 
 def _wipe(s):
-    for table in ("edge_verdicts", "edges_dropped", "thread_registry", "thread_parents"):
-        if s.execute(text("SELECT to_regclass(:t)"), {"t": table}).scalar():
-            s.execute(text(f"TRUNCATE {table}"))
-    s.execute(text(f"TRUNCATE {', '.join(TABLES)} RESTART IDENTITY CASCADE"))
+    s.execute(text(f"TRUNCATE edge_verdicts, edges_dropped, thread_registry, thread_parents, overrides, "
+                   f"{', '.join(TABLES)} RESTART IDENTITY CASCADE"))
     s.commit()
 
 
@@ -255,7 +253,7 @@ def test_thread_namer_sees_only_terms_its_shown_records_contain(monkeypatch):
                    2: SimpleNamespace(id=2, source="imessage", title="Chat", body="PRIVATEMARKER Zephyr",
                                       occurred_at=when)}}
     monkeypatch.setattr(llm.settings, "llm_sources", "")
-    assert threads._judge(session, c)["judged"] is False and rec.prompts == []
+    assert threads._judge(session, c)[0]["judged"] is False and rec.prompts == []
     monkeypatch.setattr(llm.settings, "llm_sources", "gmail")
     threads._judge(session, c)
     assert len(rec.prompts) == 1 and "Shared terms: Atlas\n" in rec.prompts[0]

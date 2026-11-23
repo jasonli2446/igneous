@@ -22,8 +22,11 @@ verdicts (graph/verify.py) are stored the moment they arrive.
   corrections         re-applies every correction committed before it, so a correction always wins
 
 A derived stage reads and writes through the session it is given and never commits, rolls back or bumps the graph
-version; it rebuilds only the rows it owns (its extractor), stores paid model results as they arrive, and leaves
-corrections to the last step.
+version; it rebuilds only the rows it owns (its extractor) through graph/derived.py's Writer, which never writes a link
+you rejected, stores paid model results as they arrive, and leaves corrections to the last step.
+
+Corrections never wait for a rebuild to finish (graph/corrections.py): one made while the derived phase runs is
+recorded at once and applied by this run's final step, which holds the publish lock only for itself and the commit.
 """
 import time
 from collections.abc import Callable
@@ -32,7 +35,6 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 
@@ -123,7 +125,7 @@ def _profile(s: Session, ctx: Context):
 
 def _threads(s: Session, ctx: Context):
     from igneous.graph import threads
-    return threads.run(s, log=None)
+    return threads.run(s, log=None, report=ctx.report)
 
 
 def _backbone(s: Session, ctx: Context):
@@ -138,12 +140,11 @@ def _organizations(s: Session, ctx: Context):
 
 def _verify(s: Session, ctx: Context):
     from igneous.graph import verify
-    return verify.run(s, log=None)
+    return verify.run(s, log=None, progress=lambda done, total: ctx.report(count=done, total=total))
 
 
 def _corrections(s: Session, ctx: Context):
-    from igneous.graph import overrides, verify
-    return {"overrides": overrides.apply(s), "verdicts": verify.apply_verdicts(s)}
+    return final_step(s)
 
 
 STAGES: tuple[Stage, ...] = (
@@ -182,37 +183,28 @@ def plan(names: list[str] | None = None, extract: int = 0) -> list[Stage]:
     return [st for st in STAGES if st.name in wanted | {FINAL}]
 
 
-class PublishBusy(RuntimeError):
-    """A rebuild is publishing the graph, and a request waited for it as long as it may."""
+# Advisory locks (hashtext of the name). A run holds RUN while it reads sources and publishes, and SOURCES while its
+# source stages run; the derived phase holds DERIVING; the final step holds PUBLISH exclusively until the commit, while
+# a correction records its intent under PUBLISH shared. A correction applies in place only while neither SOURCES nor
+# DERIVING is held, and CORRECTIONS keeps two corrections from applying at once (graph/corrections.py).
+RUN_LOCK = "igneous:run"
+SOURCES_LOCK = "igneous:sources"
+DERIVING_LOCK = "igneous:deriving"
+PUBLISH_LOCK = "igneous:publish"
+CORRECTIONS_LOCK = "igneous:corrections"
 
 
-CORRECTION_WAIT_MS = 15_000  # how long a request made through the API waits for a publishing rebuild
-
-
-def _publish_lock(s: Session, function: str, wait_ms: int | None) -> None:
-    """Take the publish lock in the session's transaction: `function` is pg_advisory_xact_lock for a publisher, the
-    _shared variant for a correction. With `wait_ms`, give up after that long: roll the transaction back (whatever it
-    did is undone) and raise PublishBusy."""
-    if wait_ms is not None:
-        s.execute(text(f"SET LOCAL lock_timeout = {int(wait_ms)}"))
-    try:
-        s.execute(text(f"SELECT {function}(hashtext('igneous:publish'))"))
-    except OperationalError as e:
-        if getattr(e.orig, "sqlstate", None) != "55P03":  # lock_not_available: the wait ran out
-            raise
-        s.rollback()
-        raise PublishBusy("The graph is being rebuilt. Try again when Rebuild on the Sources page finishes.") from e
-    if wait_ms is not None:
-        s.execute(text("SET LOCAL lock_timeout = DEFAULT"))
+def _lock(s: Session, name: str) -> None:
+    s.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": name})
 
 
 @contextmanager
-def publishing(s: Session, wait_ms: int | None = None):
-    """One change to the derived graph, published at once: wait for any other publisher (at most `wait_ms`, if
-    given), run the body in the session's transaction, then bump the graph version once and commit. An exception
-    rolls everything back, so readers keep the previous graph. Corrections made through the API wait for it
-    (`hold_off_publishing`)."""
-    _publish_lock(s, "pg_advisory_xact_lock", wait_ms)
+def publishing(s: Session):
+    """One change to the derived graph, published at once: hold the deriving lock (a rebuild deriving waits for any
+    other, and a correction meanwhile leaves its application to this rebuild's final step), run the body in the
+    session's transaction, then bump the graph version once and commit. The body ends with `final_step`. An exception
+    rolls everything back, so readers keep the previous graph."""
+    _lock(s, DERIVING_LOCK)
     try:
         yield
         from igneous.graph import dirty
@@ -223,34 +215,41 @@ def publishing(s: Session, wait_ms: int | None = None):
         raise
 
 
-def hold_off_publishing(s: Session) -> None:
-    """For a correction made through the API, before it reads or writes the graph: wait until no rebuild is
-    publishing, and keep the next one from starting until the caller's transaction ends. The correction then never
-    interleaves with a rebuild's writes (so neither can deadlock the other) and lands on the graph the rebuild just
-    published. Raises PublishBusy after CORRECTION_WAIT_MS."""
-    _publish_lock(s, "pg_advisory_xact_lock_shared", CORRECTION_WAIT_MS)
+def final_step(s: Session) -> dict:
+    """The last step of every rebuild: wait for corrections still being recorded (the exclusive publish lock, held
+    until the commit), then apply every correction recorded before it (graph/corrections.py apply_all)."""
+    from igneous.graph import corrections
+
+    _lock(s, PUBLISH_LOCK)
+    return corrections.apply_all(s)
 
 
 @contextmanager
 def _one_run_at_a_time(waiting: Callable[[], None]):
-    """Hold the run lock while a run reads sources and publishes, so two runs never interleave their writes. It is a
-    session lock on a connection of its own, which the stages' commits don't release."""
+    """Hold the run lock while a run reads sources and publishes, so two runs never interleave their writes, and the
+    sources lock until the caller says its source stages are done (yields that call). Both are session locks on a
+    connection of their own, which the stages' commits don't release."""
     from igneous.db import engine
 
     with engine.connect() as c:
-        if not c.execute(text("SELECT pg_try_advisory_lock(hashtext('igneous:run'))")).scalar():
+        if not c.execute(text("SELECT pg_try_advisory_lock(hashtext(:k))"), {"k": RUN_LOCK}).scalar():
             waiting()
-            c.execute(text("SELECT pg_advisory_lock(hashtext('igneous:run'))"))
+            c.execute(text("SELECT pg_advisory_lock(hashtext(:k))"), {"k": RUN_LOCK})
+        c.execute(text("SELECT pg_advisory_lock(hashtext(:k))"), {"k": SOURCES_LOCK})
+        reading = [True]
+
+        def done_reading() -> None:
+            if reading.pop() if reading else False:
+                c.execute(text("SELECT pg_advisory_unlock(hashtext(:k))"), {"k": SOURCES_LOCK})
         try:
-            yield
+            yield done_reading
         finally:
-            c.execute(text("SELECT pg_advisory_unlock(hashtext('igneous:run'))"))
+            done_reading()
+            c.execute(text("SELECT pg_advisory_unlock(hashtext(:k))"), {"k": RUN_LOCK})
 
 
-def run(s: Session, names: list[str] | None = None, *, extract: int = 0, progress: Progress | None = None,
-        wait_ms: int | None = None) -> dict:
-    """Run `plan(names, extract)`: the source stages, then the derived ones in one publishing transaction, which
-    waits at most `wait_ms` (if given) for another publisher, then raises PublishBusy with nothing published.
+def run(s: Session, names: list[str] | None = None, *, extract: int = 0, progress: Progress | None = None) -> dict:
+    """Run `plan(names, extract)`: the source stages, then the derived ones in one publishing transaction.
 
     `progress(state, force)` gets the run's state when a stage starts (force=True) and as a long one counts
     (force=False): {stage, label, step, steps, count, total, note, results}, where `results` maps each finished stage
@@ -277,13 +276,14 @@ def run(s: Session, names: list[str] | None = None, *, extract: int = 0, progres
         state["results"][st.name] = {"result": result, "seconds": round(time.monotonic() - started, 1)}
 
     reads_sources = any(not st.derived for st in stages)
-    # A run that only recomputes (an API correction's rebuild, `--stage resolve`) needs only the publish lock.
+    # A run that only recomputes (`--stage resolve`) reads no source: the deriving lock is all it needs.
     with _one_run_at_a_time(lambda: report(note="waiting for another pipeline run to finish")) if reads_sources \
-            else nullcontext():
+            else nullcontext(lambda: None) as done_reading:
         for st in stages:
             if not st.derived:
                 execute(st)
-        with publishing(s, wait_ms):
+        done_reading()
+        with publishing(s):
             for st in stages:
                 if st.derived:
                     execute(st)
