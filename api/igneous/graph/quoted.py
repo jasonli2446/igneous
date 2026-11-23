@@ -95,17 +95,18 @@ def quoting(s: Session, times: Iterable[datetime]) -> set[int]:
     """), {"t": local, "latest": LATEST, "earliest": EARLIEST}).scalars())
 
 
+# Each quote's window is one range scan of source_items(occurred_at) (OFFSET 0 keeps the planner from flattening it
+# into a join of every message with every quote); the senders' names come along.
 CANDIDATES = text("""
 SELECT c.child, m.id, si.title, si.occurred_at,
-       array_remove(array_agg(DISTINCT sender.name), NULL) AS senders
+       ARRAY(SELECT sender.name FROM edges snd JOIN nodes sender ON sender.id = snd.src
+             WHERE snd.dst = m.id AND snd.type = 'SENT' ORDER BY sender.name) AS senders
 FROM unnest(CAST(:child AS bigint[]), CAST(:t0 AS timestamptz[]), CAST(:t1 AS timestamptz[]),
             CAST(:before AS timestamptz[])) AS c(child, t0, t1, before)
-JOIN source_items si ON si.occurred_at >= c.t0 AND si.occurred_at < c.t1 AND si.occurred_at < c.before
+CROSS JOIN LATERAL (SELECT si.id, si.title, si.occurred_at FROM source_items si
+                    WHERE si.occurred_at >= c.t0 AND si.occurred_at < LEAST(c.t1, c.before) OFFSET 0) si
 JOIN spine_node_support ns ON ns.source_item_id = si.id AND ns.represents
 JOIN nodes m ON m.id = ns.node_id AND m.type = 'Message' AND m.id <> c.child
-LEFT JOIN edges snd ON snd.dst = m.id AND snd.type = 'SENT'
-LEFT JOIN nodes sender ON sender.id = snd.src
-GROUP BY c.child, m.id, si.id
 """)
 
 

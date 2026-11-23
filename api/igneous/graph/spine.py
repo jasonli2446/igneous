@@ -199,19 +199,20 @@ class Builder:
                  "fallback": self.nodes[h].fallback, "props": self.nodes[h].props, "sid": self.nodes[h].sid}
                 for h in known])})
         self.ids = ids
-        support = [{"n": ids[h], "r": rid, "x": rep} for h, n in self.nodes.items() if h in ids
-                   for rid, rep in n.records.items()]
+        support = [(ids[h], rid, rep) for h, n in self.nodes.items() if h in ids for rid, rep in n.records.items()]
         if support:
+            n_, r_, x_ = zip(*support, strict=True)
             s.execute(text("""
                 INSERT INTO spine_node_support (node_id, source_item_id, represents)
-                SELECT r.n, r.r, r.x FROM jsonb_to_recordset(CAST(:rows AS jsonb)) AS r(n bigint, r bigint, x boolean)
+                SELECT * FROM unnest(CAST(:n AS bigint[]), CAST(:r AS bigint[]), CAST(:x AS boolean[]))
                 ON CONFLICT (node_id, source_item_id) DO UPDATE
                     SET represents = spine_node_support.represents OR EXCLUDED.represents
-            """), {"rows": _rows(support)})
+            """), {"n": list(n_), "r": list(r_), "x": list(x_)})
         self._flush_edges()
 
     def _flush_edges(self) -> None:
-        """Write the batch's edges and the records supporting each, then each edge's interval from its support."""
+        """Write the batch's edges: new ones with their interval, and every edge's supporting records. An edge that
+        existed before gets its interval recomputed from all its support."""
         s = self.s
         merged: dict[tuple, _Edge] = {}
         for (src, dst, type_, ex), e in sorted(self.edges.items(), key=lambda kv: kv[1].ord):
@@ -233,43 +234,55 @@ class Builder:
         if not merged:
             return
         keys = list(merged)
-        found = _edge_ids(s, keys)
+        # An edge with an endpoint this flush created can't exist yet.
+        maybe = [k for k in keys if k[0] not in self.new and k[1] not in self.new]
+        found = _edge_ids(s, maybe)
+        old = {found[k][0] for k in found}
         fresh = [k for k in keys if k not in found]
         if fresh:
+            span_of = {k: (min((f for f, _t, _x in merged[k].records.values() if f is not None), default=None),
+                           max((t for _f, t, _x in merged[k].records.values() if t is not None), default=None))
+                       for k in fresh}
             for r in s.execute(text("""
-                INSERT INTO edges (src, dst, type, extractor, confidence, source_item_id)
-                SELECT r.a, r.b, r.t, r.x, r.c, r.sid
-                FROM jsonb_to_recordset(CAST(:rows AS jsonb)) AS r(o int, a bigint, b bigint, t text, x text, c real,
-                                                                    sid bigint)
-                ORDER BY r.o
+                INSERT INTO edges (src, dst, type, extractor, confidence, source_item_id, valid_from, valid_to)
+                SELECT a, b, t, x, c, sid, f, u
+                FROM unnest(CAST(:o AS int[]), CAST(:a AS bigint[]), CAST(:b AS bigint[]), CAST(:t AS text[]),
+                            CAST(:x AS text[]), CAST(:c AS real[]), CAST(:sid AS bigint[]), CAST(:f AS timestamptz[]),
+                            CAST(:u AS timestamptz[])) AS r(o, a, b, t, x, c, sid, f, u)
+                ORDER BY o
                 ON CONFLICT (src, dst, type, extractor) DO NOTHING
                 RETURNING id, src, dst, type, extractor, source_item_id
-            """), {"rows": _rows([{"o": merged[k].ord, "a": k[0], "b": k[1], "t": k[2], "x": k[3],
-                                   "c": merged[k].confidence, "sid": merged[k].sid} for k in fresh])}):
+            """), {"o": [merged[k].ord for k in fresh], "a": [k[0] for k in fresh], "b": [k[1] for k in fresh],
+                   "t": [k[2] for k in fresh], "x": [k[3] for k in fresh], "c": [merged[k].confidence for k in fresh],
+                   "sid": [merged[k].sid for k in fresh], "f": [span_of[k][0] for k in fresh],
+                   "u": [span_of[k][1] for k in fresh]}):
                 found[(r.src, r.dst, r.type, r.extractor)] = (r.id, r.source_item_id)
-            found.update(_edge_ids(s, [k for k in fresh if k not in found]))  # written meanwhile by another run
-        pointless = [{"id": found[k][0], "sid": merged[k].sid} for k in keys
+            raced = _edge_ids(s, [k for k in fresh if k not in found])  # written meanwhile by another run
+            found.update(raced)
+            old |= {i for i, _sid in raced.values()}
+        pointless = [(found[k][0], merged[k].sid) for k in keys
                      if k in found and found[k][1] is None and merged[k].sid is not None]
         if pointless:  # an edge first built without a record of its own now has one
+            e_, sid_ = zip(*pointless, strict=True)
             s.execute(text("""
                 UPDATE edges e SET source_item_id = r.sid
-                FROM jsonb_to_recordset(CAST(:rows AS jsonb)) AS r(id bigint, sid bigint)
+                FROM unnest(CAST(:e AS bigint[]), CAST(:sid AS bigint[])) AS r(id, sid)
                 WHERE e.id = r.id AND e.source_item_id IS NULL
-            """), {"rows": _rows(pointless)})
-        support = [{"e": found[k][0], "r": rid, "x": rep, "f": f, "t": t}
-                   for k in keys if k in found for rid, (f, t, rep) in merged[k].records.items()]
+            """), {"e": list(e_), "sid": list(sid_)})
+        support = [(found[k][0], rid, rep, f, t) for k in keys if k in found
+                   for rid, (f, t, rep) in merged[k].records.items()]
+        e_, r_, x_, f_, t_ = zip(*support, strict=True)
         s.execute(text("""
             INSERT INTO spine_edge_support (edge_id, source_item_id, represents, valid_from, valid_to)
-            SELECT r.e, r.r, r.x, r.f, r.t
-            FROM jsonb_to_recordset(CAST(:rows AS jsonb)) AS r(e bigint, r bigint, x boolean, f timestamptz,
-                                                                t timestamptz)
+            SELECT * FROM unnest(CAST(:e AS bigint[]), CAST(:r AS bigint[]), CAST(:x AS boolean[]),
+                                 CAST(:f AS timestamptz[]), CAST(:t AS timestamptz[]))
             ON CONFLICT (edge_id, source_item_id) DO UPDATE SET
                 represents = spine_edge_support.represents OR EXCLUDED.represents,
                 valid_from = LEAST(spine_edge_support.valid_from, EXCLUDED.valid_from),
                 valid_to = GREATEST(spine_edge_support.valid_to, EXCLUDED.valid_to)
-        """), {"rows": _rows(support)})
+        """), {"e": list(e_), "r": list(r_), "x": list(x_), "f": list(f_), "t": list(t_)})
         self.edge_ids = sorted({found[k][0] for k in keys if k in found})
-        span(s, self.edge_ids)
+        span(s, sorted(old))
 
 
 def _edge_ids(s: Session, keys: list[tuple]) -> dict[tuple, tuple[int, int | None]]:
@@ -1016,19 +1029,29 @@ def name_from_headers(s: Session) -> int:
 
 # --- the stage -----------------------------------------------------------------------------------------------------
 
+def _analyze(s: Session) -> None:
+    """Refresh the planner's statistics on what the spine writes in bulk: queries planned on a graph ten times
+    smaller than the one they run on pick nested loops that take minutes."""
+    s.execute(text("ANALYZE nodes, edges, spine_node_support, spine_edge_support, spine_quotes"))
+
+
 RECHECKS = 3  # rounds of rebuilding contact cards a run settles; any left are pending for the next run
 
 
 def run(s: Session) -> int:
     """Build every pending record, then settle what lost its support. Returns the number of records built."""
     cards = contact_cards(s)
-    built = deleted = rounds = 0
+    built = deleted = analyzed = rounds = 0
     while True:
         rows = s.execute(PENDING, {"n": BATCH}).all()
         if rows:
             _process(s, rows, cards)
             s.commit()
             built += len(rows)
+            if built >= 2 * max(analyzed, BATCH):
+                _analyze(s)
+                s.commit()
+                analyzed = built
             continue
         cards = contact_cards(s)  # as they are now, cards synced since the run began included
         settled = settle(s, cards)
@@ -1038,6 +1061,8 @@ def run(s: Session) -> int:
         if not settled["pending"] or rounds == RECHECKS:
             break
     if built or deleted:
+        if built + deleted >= BATCH:
+            _analyze(s)
         name_from_headers(s)  # each address's most common display name, across all mail
         s.commit()
     return built
