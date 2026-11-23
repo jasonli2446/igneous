@@ -104,7 +104,7 @@ def test_failures_are_explicit_provider_errors(bedrock, outcome, error, words):
 def test_no_token_or_the_kill_switch_is_llm_disabled(monkeypatch):
     monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
     monkeypatch.setattr(providers.settings, "llm_enabled", True)
-    with pytest.raises(LLMDisabled, match="AWS_BEARER_TOKEN_BEDROCK"):
+    with pytest.raises(LLMDisabled, match="no Bedrock key"):
         BedrockProvider(SONNET, 2).chat([{"role": "user", "content": "U"}])
     monkeypatch.setattr(providers.settings, "llm_enabled", False)
     with pytest.raises(LLMDisabled, match="IGNEOUS_LLM_ENABLED"):
@@ -148,3 +148,28 @@ def test_module_functions_reach_the_configured_models(monkeypatch):
     assert providers.rerank("q", ["short", "longer"]) == [5.0, 6.0]
     assert json.loads(providers.chat([{"role": "user", "content": "hi"}], max_tokens=12).text) == {
         "options": {"max_tokens": 12}}
+
+
+def test_the_key_comes_from_the_environment_else_from_what_connect_saved(monkeypatch):
+    """`igneous connect bedrock` saves the key encrypted in the data folder, for processes a client starts with nothing
+    from your shell (the MCP server); the environment wins; `disconnect bedrock` forgets it."""
+    from typer.testing import CliRunner
+
+    from igneous import cli
+    from igneous.config import settings
+    from igneous.connectors import secrets
+
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+    runner = CliRunner()
+    assert providers.bedrock_key() is None and llm.model_status()["configured"] is False
+    assert runner.invoke(cli.app, ["connect", "bedrock"], input="saved-key-value\n").exit_code == 0
+    stored = secrets._local("bedrock")
+    assert stored.is_relative_to(settings.data_dir) and b"saved-key-value" not in stored.read_bytes()
+    assert oct(stored.stat().st_mode & 0o777) == "0o600"
+    assert providers.bedrock_key() == "saved-key-value" and llm.model_status()["configured"] is True
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "environment-key")
+    assert providers.bedrock_key() == "environment-key"
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK")
+    assert runner.invoke(cli.app, ["disconnect", "bedrock"]).exit_code == 0
+    assert providers.bedrock_key() is None
+    assert runner.invoke(cli.app, ["disconnect", "bedrock"]).exit_code != 0

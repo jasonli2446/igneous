@@ -104,15 +104,20 @@ def test_self_mail_or_hidden_traffic_does_not_confirm_a_handle(graph):
     assert find(s, "sam")[0]["id"] == human
 
 
-def test_http_and_mcp_share_person_search_policy(graph):
-    from igneous import mcp_server
+def test_http_and_mcp_share_person_search_policy(graph, monkeypatch):
+    from igneous import llm, mcp_server
 
     s = graph
     node(s, "sam/repo", "github:sam/repo")
     human = node(s, "Sam Lee", "sam@example.test")
     node(s, "sam", "github:sam")
+    sid = s.execute(text("""INSERT INTO source_items (source,external_id,content_hash,title,body_text)
+                            VALUES ('gmail','m1','m1','Hello','From Sam Lee') RETURNING id""")).scalar_one()
+    s.execute(text("INSERT INTO edges (src,dst,type,extractor,source_item_id) VALUES (:a,:a,'SENT','spine',:i)"),
+              {"a": human, "i": sid})
+    monkeypatch.setattr(llm.settings, "llm_sources", "gmail")  # what the MCP tool may name
     response = TestClient(app).get("/graph/find", params={"q": "sam"})
     assert response.status_code == 200
     assert response.json()["results"][0]["id"] == human
-    assert mcp_server.find("sam")[0]["node_id"] == human
+    assert mcp_server.find("sam")["results"][0]["node_id"] == human
     assert all(h["name"] != "sam/repo" for h in response.json()["results"])

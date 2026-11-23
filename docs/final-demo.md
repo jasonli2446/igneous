@@ -47,24 +47,23 @@ What is in them, so you know what to click:
    make api                         # :8000 (runs with --reload)
    make web                         # :3000
    ```
-6. **Register the MCP server once** (user scope, so every new Claude Code session has it). Use the venv binary, not
-   `uv run`: it starts in about 2 s, so the session's first tool call never races the connection.
+6. **Register the MCP server once** (user scope, so every new Claude Code session has it), and a second one on the
+   Enron database for Ask at scale (prompt 7):
    ```bash
-   claude mcp add igneous --scope user \
-     -e IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous_persona \
-     -e IGNEOUS_LLM_SOURCES=email,fs,takeout,linkedin,ai_chats -e IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true \
-     -e AWS_REGION=us-east-1 -e AWS_BEARER_TOKEN_BEDROCK="$AWS_BEARER_TOKEN_BEDROCK" \
-     -- "$(pwd)/api/.venv/bin/igneous" mcp
-   claude mcp list | grep igneous     # -> ✔ Connected
+   cd api
+   uv run igneous mcp install --database igneous_persona --sources email,fs,takeout,linkedin,ai_chats
+   uv run igneous mcp install --name igneous-enron --database igneous --sources email
+   uv run igneous connect bedrock     # for `ask` only: the model key, saved where the server finds it
+   claude mcp list | grep igneous     # -> ✔ Connected, twice
    ```
-   The Bedrock variables only matter for `ask` and summaries. For Ask at scale (prompt 7), register a second server,
-   `igneous-enron`, the same way with `IGNEOUS_DATABASE_URL` left out (the Enron database `igneous`, built by
-   `make demo`) and `IGNEOUS_LLM_SOURCES=email`.
+   The persona's documents also need `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true` in `api/.env` (step 2). Nothing
+   secret goes into Claude Code's configuration.
 7. **Quiet other MCP servers.** Claude Code waits for every configured server at startup. A server that times out
    (for example a stale `figma` entry) shows as one failed "waiting for MCP servers" step at the start of the session.
    Remove or disable it before recording.
-8. **Warm it.** Open one Claude Code session and ask "Using igneous, who am I?" once. That fills the big picture
-   cache (the first call ranks every relationship; after that, instant).
+8. **Check it.** `uv run igneous mcp check --database igneous_persona --sources email,fs,takeout,linkedin,ai_chats`
+   starts the server as Claude Code does and calls every tool once (add `--ask` to try `ask`, which costs a model
+   call). It also brings what the tools read into the database's memory, so the first prompt doesn't wait on the disk.
 
 ## 1. What Igneous is (1–1.5 min)
 
@@ -107,14 +106,18 @@ What is in them, so you know what to click:
 
 | Tool | What it does |
 |---|---|
-| `me` | The big picture: work/school history and the most meaningful things in life now |
+| `me` | The big picture: work and school history and the most meaningful things in life now |
 | `find` | Name to node: people (all addresses), projects, trips, classes, orgs, chats |
 | `open_node` | What something is made of: a trip's travellers and chat, an org's projects, a person's world |
 | `why_connected` | Why two things are linked, with the reason and the records behind it |
 | `sources`, `read_item` | The records behind a node, and the full text of one |
 | `correspondents` | Someone's real relationships, closest first |
-| `search` | Keyword + semantic search over every record (skips browsing history unless asked) |
+| `timeline`, `commitments` | Dated activity or a pair's history, and the promises found in a node's records |
+| `search` | Keyword + semantic search over the shared records (skips browsing history unless asked) |
 | `ask` | A cited answer from the text, or "can't answer" |
+
+Everything a tool returns reaches the agent's model, so it carries text and names only from the sources opted in
+(here, everything the persona came through); the rest would show as counts.
 
 **Does it show its steps?** Yes. In an interactive Claude Code session every tool call shows as a line
 (`igneous - open_node (node_id: …)`) with its result collapsed under it; press `ctrl+o` to expand one. That's the
@@ -187,7 +190,7 @@ in a fresh session before recording: times depend on the model and on the warm c
   (`api/eval/README.md`: hybrid recall@10 0.81 vs 0.41 lexical; Ask cited the gold source on 87% of answerable
   questions; entity resolution P 0.95 / R 0.93, never on a name alone).
 - **Privacy:** local, read-only, per-source opt-in before any model sees content, secrets encrypted or git-ignored.
-  The MCP server is read-only. The demo's data is invented.
+  The MCP server is read-only and shares only what is opted in. The demo's data is invented.
 
 ## If something goes wrong
 
@@ -197,12 +200,13 @@ in a fresh session before recording: times depend on the model and on the warm c
 | Sync now on the persona says it never mixes with other records | The API points at another database. Set `IGNEOUS_DATABASE_URL` to `igneous_persona` and restart the API. |
 | Threads are named like "Lisbon · Jan-Mar 2025" and all sit under Projects | The model hasn't read the persona: set `AWS_BEARER_TOKEN_BEDROCK` and the opt-ins (step 2), then Rebuild once. |
 | Lakeshore University also opens to a trip or Tidepool | They were placed by email domain (most of their people write from the school's address). The model's checker judges each placement; without it nothing does. Either way it's the moment for **This is wrong**. |
-| Search shows two Lisbons (or two Icelands, two Tidepools, a class twice) | The other one is a documents folder made a project ("Lisbon 2025"): it takes in every record that mentions Lisbon, fare newsletters and her mother's mail included. Open the trip thread ("Lisbon · Jan-Mar 2025" without the model). |
+| Search shows CS 481 three times ("Harborline", "Demo Day", "CS 481 Senior Capstone") | The class's project and its demo day were found as threads of their own, and its documents folder stands as a project beside them since no thread is named by the course's code. Open "Harborline": it holds the class's mail and the team chat. |
 | Lakeshore University or Northwind Robotics shows twice, on her first ring or in search | One is the company her LinkedIn connections name, the other the organization found by its email domain, which holds the threads (in MCP, `find` lists both). Open the one with classes or projects under it. |
+| Search shows Northwind as "Northwind · Dec-Jan 2025" and "Northwind" besides Northwind Robotics | The first is her hiring (interviews and the offer), which sits under Northwind Robotics; the second is her documents folder Work/Northwind, a project of its own, since half its files are from the hiring months and half from the job. Open Northwind Robotics. |
 | Group chats show as "Google Chat Space AAAA…" | The Takeout reader doesn't read a chat's name yet, only its folder's. Open one: its members and messages are right. |
 | `me` lists Northwind only from July 2026 | The profile keeps one position per organization; the internship from January 2025 is in her LinkedIn export and resume. |
 | First tool call says "waiting for MCP servers" | Another configured server is slow; igneous still connects. Remove the slow one before recording. |
 | A trip or org opens with almost nothing | Its records arrived after the last build. Press Rebuild (or run `igneous pipeline`); the graph switches over when it publishes. |
-| `ask` returns "ask is unavailable" | The MCP env is missing the Bedrock token; re-run the `claude mcp add` with `-e AWS_BEARER_TOKEN_BEDROCK=...`. |
-| `ask` says no source is opted in | The MCP env has no `IGNEOUS_LLM_SOURCES`; re-run the `claude mcp add` with the opt-ins from step 6. |
+| `ask` returns "ask is unavailable" | The server found no model key: run `cd api && uv run igneous connect bedrock` and start a new session. |
+| `ask` says no source is opted in, or answers show `withheld` counts | The server was registered without the persona's opt-ins: run step 6's `igneous mcp install` again. |
 | `me` takes a few seconds | First call after a graph change; it's cached after that. Warm it before recording. |

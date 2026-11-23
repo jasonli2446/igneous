@@ -1,9 +1,10 @@
 from contextlib import nullcontext
 from pathlib import Path
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError, ProgrammingError
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from igneous.config import settings
 
@@ -18,6 +19,29 @@ def get_session():
     """FastAPI dependency."""
     with SessionLocal() as s:
         yield s
+
+
+def _read_only(_session, _transaction, connection) -> None:
+    connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+
+
+def read_only_session() -> Session:
+    """A session whose every transaction is read-only: Postgres refuses any write made through it."""
+    s = SessionLocal()
+    event.listen(s, "after_begin", _read_only)
+    return s
+
+
+def use_database(name: str) -> None:
+    """Point every session from now on at the database `name` on the configured server, with the configured user
+    and password (`igneous mcp --database`): the client that starts the process names the database, and no
+    credential leaves api/.env."""
+    global engine
+    url = make_url(settings.database_url).set(database=name)
+    settings.database_url = url.render_as_string(hide_password=False)
+    engine.dispose()
+    engine = create_engine(url, pool_pre_ping=True)
+    SessionLocal.configure(bind=engine)
 
 
 def _script():

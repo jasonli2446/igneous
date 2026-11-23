@@ -69,8 +69,14 @@ IGNEOUS_LLM_SOURCES=
 # IGNEOUS_DATA_DIR=../data              # OAuth client, token encryption key, Enron mailboxes (relative to api/)
 ```
 
-The Bedrock credentials are read from the process environment, not from `api/.env`, so export them in the shell that
-starts the API (and the CLI, if you run `igneous pipeline --extract`):
+The Bedrock key is not a setting in `api/.env`. Save it once, and every process finds it (the API, the CLI, and the MCP
+server its client starts):
+
+```bash
+cd api && uv run igneous connect bedrock   # type the key at the hidden prompt; it is kept encrypted in data/
+```
+
+or export it in the shell that starts the API and the CLI, which wins over the saved one:
 
 ```bash
 export AWS_BEARER_TOKEN_BEDROCK=...   # your Bedrock API key
@@ -176,6 +182,7 @@ cd api
 uv run igneous connect google                       # sign in to a Google account (read-only); repeat to add more
 uv run igneous connect github < token.txt           # a read-only GitHub token (or type it at the hidden prompt)
 uv run igneous disconnect google you@gmail.com      # forget an account's token (also github LOGIN); its items stay
+uv run igneous connect bedrock                      # save the model key (encrypted in data/); disconnect bedrock forgets it
 uv run igneous sync gmail                           # every connected account; `igneous sync --help` lists the sources
 uv run igneous sync fs                              # local files: the IGNEOUS_FILESYSTEM_ROOTS folders
 uv run igneous sync fs --path ~/Documents/notes     # just this folder; other folders' files are left alone
@@ -208,12 +215,13 @@ cd api && uv run igneous verify-synthetic-corpus ../data/synthetic-cross-source
 ```
 
 `igneous pipeline` runs redact -> spine -> chunk -> embed -> extract -> self -> resolve -> thread_flags -> introductions
--> topics -> entities -> profile -> organizations -> threads -> backbone -> verify -> corrections
+-> topics -> profile -> organizations -> threads -> entities -> backbone -> verify -> corrections
 (`api/igneous/pipeline.py`, the same list Rebuild runs, without extract). The order is what each stage reads: redact
 applies the current credential rules to items stored under older ones before anything reads them, who you are and
 which identities are one person come before everything that counts people, your resume and the organizations your mail
-shows you at before the threads placed under them, the verifier after every link it checks, and your corrections last,
-so they always win. The source stages
+shows you at before the threads placed under them, the threads before the folders, series and group chats that join the
+thread they are about (one real thing is one Project), the verifier after every link it checks, and your corrections
+last, so they always win. The source stages
 (redact through extract) only read what is new; the stages after them recompute what is derived. The topics stage
 lowercases and conservatively lemmatizes keys, merges only high-similarity local-embedding duplicates, and adds
 `RELATED_TO` after three shared messages; moved `ABOUT` edges keep their original provenance. Extraction, like every
@@ -231,6 +239,7 @@ subject, a file's name, a conversation's name). When the chunk layout changes (`
 | `api/igneous/graph/` | `spine.py` the graph read from record metadata, recording which records support each node and edge and what each says about it; `names.py` a person's name in the order it is read; `extract.py` model mentions with span provenance; `entities.py`, `threads.py`, `resolve_threads.py`, `profile.py`, `backbone.py` derived projects, life threads and your orgs; `resolve.py` entity resolution; `verify.py` checks every derived link; `traversal.py` what the explorer shows; `invariants.py` `igneous check-graph` |
 | `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `constraints.py` the filters a question states, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
 | `api/igneous/llm.py` | structured model calls and the rule for what a model may read (`allowed_sources`, `visible_nodes`); `providers.py` talks to Bedrock |
+| `api/igneous/mcp_server.py` | the MCP tools; `disclosure.py` applies the model rule to what they return; `mcp_client.py` is `igneous mcp install` and `check` |
 | `api/igneous/persona/` | the synthetic persona: the cast and its storylines (`school.py`, `work.py`, `trips.py`, `project.py`, `everyday.py`, `routine.py`), the export formats (`formats.py`), loading it into its own database (`load.py`), and its gold set (`gold/`) |
 | `api/eval/` | gold questions, ER labels, harnesses, results (see `api/eval/README.md`); `persona_eval.py` scores the persona's gold set |
 | `api/igneous/pipeline.py` | the stage list in dependency order and the one runner `igneous pipeline` and Rebuild share; spine and chunk read only the records whose content changed since they read them, so every stage is safe to re-run |
@@ -282,7 +291,10 @@ cd api && uv run igneous sync imessage && uv run igneous pipeline
 ## Known gaps in the baseline
 
 - Enron has no `In-Reply-To`/`References` headers. Threads are keyed on subject + participants; `REPLIES_TO` comes from
-  quoted "Original Message" headers that name exactly one message, else is inferred within the thread.
+  quoted "Original Message" headers that name exactly one message, else is inferred within the thread. Mail that has
+  them (the persona, any other mail archive) is threaded by its reply chain: a reply is in the thread of the message it
+  answers or, when that one isn't stored, of the message that began its conversation, and that first message is in
+  the thread too. Gmail threads are Gmail's conversations.
 - Enron stores one email in several folders with different Message-IDs. Messages dedupe on a content fingerprint
   (`raw_meta.fingerprint`); the message stays while any copy remains.
 - In a mailbox, assistants send some of the owner's mail. The owner is whoever sent most of its sent folders, so an
@@ -294,7 +306,8 @@ cd api && uv run igneous sync imessage && uv run igneous pipeline
 
 ## Model calls
 
-Q&A uses Claude Sonnet 5.5 on Amazon Bedrock. Set `AWS_BEARER_TOKEN_BEDROCK` and `AWS_REGION` (e.g. `us-east-1`).
+Q&A uses Claude Sonnet 5.5 on Amazon Bedrock: save the key with `igneous connect bedrock`, or set
+`AWS_BEARER_TOKEN_BEDROCK` (and `AWS_REGION`, `us-east-1` by default).
 All model access goes through `api/igneous/providers.py`: local FastEmbed embeddings and a local FastEmbed
 cross-encoder reranker, which send nothing anywhere, and Claude on Bedrock for chat (`IGNEOUS_LLM_MODEL`, and
 `IGNEOUS_LLM_CHEAP_MODEL` for high-volume checks). The Anthropic SDK retries a failed call `IGNEOUS_HOSTED_RETRIES`
@@ -336,26 +349,43 @@ test suite never runs it.
 
 ## MCP server (use the graph from Claude Code, Claude Desktop, Cursor)
 
-Fourteen read-only tools: `me` (the big picture), `find` (a name to node ids), `open_node`, `why_connected`,
-`timeline`, `commitments`, `sources` and `read_item` for the graph; `search` and `ask` for the text; and the
-lower-level `get_node`, `neighbors`, `correspondents` and `evidence`.
+Eleven tools, each calling the readers the explorer and the API use, through a read-only database session:
 
-`timeline(node_id, other_node_id=None, limit=50)` returns dated activity or a pair's direct relationship history,
-with source item ids and no source text. A record named by its title (a message, an event, a conversation named after
-its subject) keeps its name only when its source is in `IGNEOUS_LLM_SOURCES`, since tool results reach the client's
-model. `commitments(node_id, status="open", limit=50)` returns existing promises
-from that node's records, with who/what, status and source spans. For a person it includes messages they sent or
-received; check `who` before attributing a promise. Both resolve merged identities, accept limits from 1 to 200,
-and work without model credentials. Commitments also accepts `resolved` or `all` for status.
+| Tool | What it returns |
+|---|---|
+| `me()` | Who you are: where you worked and studied (your resume, LinkedIn and corrections), and the explorer's first ring: your organizations, sustained projects and trips, closest people. Start here. |
+| `find(name)` | A name to node ids: people (every address and number they use), projects, trips, classes, organizations, group chats, events, places, files |
+| `open_node(node_id)` | What a node is made of, as the explorer opens it, what it is part of, and its activity (message counts and dates) |
+| `why_connected(a, b)` | Each link between two nodes (its kind, the rule, AI check or person that made it, its reason and records), the conversations and events they share, your corrections to the pair; else the shortest path |
+| `timeline(node_id, other_node_id, limit)` | Dated activity, or a pair's relationship history: each link's kind, direction, dates and record id, no record text |
+| `commitments(node_id, status, limit)` | Promises the model found in a node's records (`open`, `resolved` or `all`), each with the span it was read from |
+| `sources(node_id, limit, offset)` | The records a node is made of, newest first, with item ids and snippets |
+| `read_item(item_id, offset, max_chars)` | One record in full, in pages |
+| `correspondents(person_node_id, limit)` | Someone's real relationships, closest first (two-way, recency-weighted) |
+| `search(query, person_node_id, include_browsing, k)` | Hybrid keyword and semantic passages, with the filters the query states |
+| `ask(question)` | A cited answer from the hosted model, or "can't answer"; the one paid tool |
+
+**What leaves through MCP.** A tool's answer goes to the model the client runs, so it follows the rule a hosted model's
+prompt follows (`api/igneous/disclosure.py`, [Model calls](#model-calls)): text only from the sources in
+`IGNEOUS_LLM_SOURCES`, names only of the people and things those records name, and counts (`withheld`) for the rest.
+With nothing opted in, the default, the tools return the graph's structure and counts only. Only `ask` calls a model,
+and like every model call it keeps the model's reading of the question in the model cache; nothing else writes.
+
+Register it with Claude Code, at user scope so every session has it:
 
 ```bash
-claude mcp add igneous -e AWS_REGION=us-east-1 -e AWS_BEARER_TOKEN_BEDROCK=$AWS_BEARER_TOKEN_BEDROCK \
-  -- uv run --directory "$(pwd)/api" igneous mcp
+cd api
+uv run igneous mcp install                 # the database and opt-ins api/.env names
+uv run igneous mcp install --name igneous-enron --database igneous --sources email   # a second one, on the Enron demo
+uv run igneous mcp check                   # start it as a client does and call each tool once; --ask also calls ask
+uv run igneous connect bedrock             # for ask only: save the model key where the server finds it
 ```
 
-The model credentials only matter for `ask`, which reads only the sources in `IGNEOUS_LLM_SOURCES` (`api/.env`).
-MCP clients don't pass your shell's environment through, so set the credentials with `-e` as above (other tools work
-without them). Postgres must be running (`make db`).
+`install` registers this checkout's `api/.venv/bin/igneous mcp` (it starts in about two seconds) and puts no credential
+in Claude Code's configuration: the server reads the database password from `api/.env`, and the model key from
+`AWS_BEARER_TOKEN_BEDROCK` or what `igneous connect bedrock` saved. For another client (Claude Desktop, Cursor),
+register the command `install` prints. Postgres must be running (`make db`). A tool given the id of nothing fails with
+a message, and arguments out of range are refused before the database is read.
 
 ## Google (Gmail, Drive, Calendar, Contacts)
 

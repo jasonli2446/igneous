@@ -403,16 +403,14 @@ def test_names_are_labels_not_rewrites_of_ids_and_links(world, client, db):
     assert card_["snippet"].startswith("Call Pat Contact or +19995550000")  # text names known numbers only
 
 
-def test_record_titles_reach_the_timeline_only_from_opted_in_sources(world, client, monkeypatch):
+def test_the_timeline_names_counterparts_as_the_explorer_does(world, client, monkeypatch):
+    """The local API names every counterpart (a message by its subject); what an outside model may see of it is the
+    MCP tool's to decide (test_mcp_policy.py)."""
     from igneous import llm
 
     w = world
     monkeypatch.setattr(llm.settings, "llm_sources", "")
     edges = client.get("/timeline", params={"a": w.ana}).json()["edges"]
-    messages = [e["counterpart"] for e in edges if e["counterpart"]["type"] == "Message"]
-    assert messages and all(c["name"] is None for c in messages)
+    assert {e["counterpart"]["name"] for e in edges if e["counterpart"]["type"] == "Message"} >= {"Acme plans"}
     people = [e["counterpart"] for e in edges if e["counterpart"]["type"] in ("Person", "Organization")]
     assert people and all(c["name"] for c in people)
-    monkeypatch.setattr(llm.settings, "llm_sources", "gmail")
-    edges = client.get("/timeline", params={"a": w.ana}).json()["edges"]
-    assert {e["counterpart"]["name"] for e in edges if e["counterpart"]["type"] == "Message"} >= {"Acme plans"}

@@ -378,10 +378,21 @@ def test_entity_names_normalize_and_drop_generic():
     assert _norm("Gloomhaven Night (session 4)") == "gloomhaven night"
     assert _norm("Igneous - weekly sync") == "igneous"
     assert _norm("Gloomhaven Night #12") == "gloomhaven night"
+    # An occurrence's number goes and its word stays.
+    assert _norm("Book club session 4") == "book club" and _norm("Book club week 2") == "book club week"
+    assert _norm("Sprint 23 planning") == _norm("Sprint 24 planning") == "sprint planning"
+    assert _norm("Day 2 of Lisbon trip") == "day of lisbon trip"
+    # A course code, a year, a version and a number that is a name's own are part of it.
+    assert _norm("CS 362 Database Systems") == "cs 362 database systems"
+    assert _norm("Lisbon 2025") == "lisbon 2025" and _norm("Python 3 migration") == "python 3 migration"
+    assert _norm("Demo Day 2026") == "demo day 2026" and _norm("Hack Day 2025") != _norm("Hack Day 2026")
+    assert _norm("No. 5 Club") == "no. 5 club"
     assert not _usable(_norm("Lunch"))
     assert not _usable(_norm("1:1"))
     assert not _usable("10/21")
-    assert _usable("acme robotics")
+    # A time, not a thing.
+    assert not any(_usable(_norm(n)) for n in ("Fall 2024", "Q3 2025", "Week 3", "Day 2"))
+    assert _usable("acme robotics") and _usable(_norm("Spring Break 2025"))
 
 
 def test_entity_screening_caches_model_verdicts(db, monkeypatch):

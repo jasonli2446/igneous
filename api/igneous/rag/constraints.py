@@ -164,13 +164,14 @@ def _name(value: object) -> str | None:
     return value if 0 < len(value) <= 80 and re.fullmatch(r"[^\W\d_][\w .'\u2019-]*", value) else None
 
 
-def _fallback(question: str) -> Constraints:
-    """The cheap model's reading of the question, validated; empty when nothing is opted in or anything fails."""
+def _fallback(question: str, model: bool = True) -> Constraints:
+    """The cheap model's reading of the question, validated: the cached one, else (with `model`) a new call; empty when
+    nothing is opted in or anything fails."""
     key = f"constraints:{FALLBACK_VERSION}:" + hashlib.sha256(question.encode()).hexdigest()
     try:
         raw = llm.cache_lookup(key)
         if raw is None:
-            if not llm.allowed_sources():  # with nothing opted in, not even the question leaves this computer
+            if not model or not llm.allowed_sources():  # nothing opted in: not even the question leaves this computer
                 return Constraints()
             raw, _ = llm.structured(_FALLBACK_SYSTEM, question, _FALLBACK_SCHEMA, max_tokens=400,
                                     model=settings.llm_cheap_model)
@@ -226,15 +227,15 @@ def _servable_mention(s: Session, person_id: int) -> bool:
     """), {"p": person_id, "human_name": HUMAN_NAME}).scalar())
 
 
-def apply(s: Session, question: str, filters: Filters | None = None) -> Filters:
+def apply(s: Session, question: str, filters: Filters | None = None, model: bool = True) -> Filters:
     """`filters` with what the question states filled in. A filter the caller set wins (a date range as a whole),
     except that a source restriction in the question narrows the caller's where they overlap. A name that matches no
     Person, or a mentioned person the records can't be searched for, adds no filter. `from_question` lists what the
-    question set."""
+    question set. Without `model`, only the rules and a reading the cheap model gave before are used: no model call."""
     base = filters or Filters()
     found = _rule_constraints(question)
     if not found:
-        found = _fallback(question)
+        found = _fallback(question, model)
     narrowed = tuple(sorted(set(base.sources) & set(found.sources))) if base.sources else found.sources
     person_id = resolve_person(s, found.correspondent) if not base.person_id else None
     mentions_id = resolve_person(s, found.mentioned) if not base.mentions_id else None

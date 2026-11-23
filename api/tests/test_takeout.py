@@ -310,8 +310,9 @@ def test_chat_people_and_meet_event_link(db, zpath):
 
 
 def test_search_joins_existing_project_after_rebuild(db, zpath):
-    """Done-when: a search mentioning an existing Project links to it. The Project comes from a synthetic
-    recurring calendar series named 'Gloomhaven Night' (3 occurrences)."""
+    """Done-when: a search mentioning an existing Project links to it, as its evidence (what you searched and browsed
+    shows it going on, never as one of its members). The Project comes from a synthetic recurring calendar series named
+    'Gloomhaven Night' (3 occurrences)."""
     from igneous.connectors.base import SourceItem, run_sync
     from igneous.graph import entities, spine
     from igneous.rag import chunking
@@ -336,7 +337,7 @@ def test_search_joins_existing_project_after_rebuild(db, zpath):
                 SELECT DISTINCT si.source FROM edges e
                 JOIN nodes p ON p.id = e.dst AND p.type = 'Project' AND p.name ILIKE 'gloomhaven night'
                 JOIN source_items si ON si.id = e.source_item_id
-                WHERE e.type = 'PART_OF' AND e.props->>'why' = 'mentions' AND si.source LIKE 'takeout\\_%'
+                WHERE e.type = 'RELATED_TO' AND e.props->>'role' = 'evidence' AND si.source LIKE 'takeout\\_%'
             """)).scalars().all()
         assert {"takeout_activity", "takeout_chrome"} <= set(linked)
     finally:

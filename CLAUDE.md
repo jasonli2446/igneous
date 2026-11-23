@@ -53,6 +53,8 @@ all run `sources.sync`.
 - Every source is **read-only**. Model calls go through `api/igneous/llm.py` only, and a prompt carries text only
   from sources `llm.allowed_sources()` returns and names only of nodes `llm.visible_nodes()` returns; everything
   else is a count (#179). A new model call gets a test in `api/tests/test_model_policy.py`.
+- An MCP tool's answer reaches the client's model, so it follows the same rule through `api/igneous/disclosure.py`;
+  a new tool gets a case in `api/tests/test_mcp_policy.py`.
 - Secrets (OAuth client JSON, tokens) live in git-ignored `data/` or encrypted in Postgres. Never in the repo,
   issues, PRs or logs.
 

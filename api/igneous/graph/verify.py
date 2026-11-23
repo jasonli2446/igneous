@@ -18,7 +18,8 @@ Some links need no model: a person in a thread's own group chat, or at its event
 lists them), so those links (props.direct) get a settled 'keep' (source 'evidence') whether or not a model may read
 anything. The user's corrections are verdicts too (source 'user'; graph/corrections.py): never judged again, and the
 model sees the user's most similar past corrections of the same claim as examples, so a kind of mistake corrected once
-is judged differently afterwards.
+is judged differently afterwards. Like a rejection (graph/derived.py), a link you confirmed holds for the Project its
+end was folded into since (a folder's Project that joined the thread it is about, a merge).
 
 `apply_verdicts` puts them on the graph: no derived link joins a pair you rejected (graph/derived.py), a link the
 verifier dropped moves to `edges_dropped` (one row per natural key, deleted with its verdict), and every other verdict
@@ -48,8 +49,15 @@ CLAIMS = {
                                 "the project). Asking about it, hearing about it afterwards, or planning a different "
                                 "one (another year) is NOT taking part",
     ("RELATED_TO", "threads"): "this person is connected to this thread (talked about it, helped, was told about it)",
+    ("RELATED_TO", "threads", "evidence"): "this record (A) shows that this thread of the person's life (B) happened: "
+                                           "it is about the thread itself while it was going on, like a booking, a "
+                                           "confirmation, a ticket or a notice for it, a search or a page about it, or a "
+                                           "visit to a place in it. A record that only shares a word with it is NOT",
     ("PART_OF", "entities"): "the item belongs to this project",
     ("INVOLVED_IN", "entities"): "this person works on or takes part in this project",
+    ("RELATED_TO", "entities", "evidence"): "this record (A) shows this project (B) going on: it is about the project "
+                                            "itself, like a notice or a confirmation for it, or a search or a page "
+                                            "about it. A record that only shares a word with it is NOT",
     ("WORKED_AT", "organizations"): "this person worked at / was a member of this organization",
     ("SAME_AS", "er"): "these two identities are the same human (judge from each one's name, identifier, who it "
                        "talks with and its topics; two addresses of one person rarely share messages)",
@@ -68,10 +76,15 @@ EXAMPLES = 4        # your past corrections shown as examples per call
 
 
 def claim_of(edge: dict) -> tuple:
-    """The claim an edge makes: (type, extractor), or its variant for the kind of node at A."""
-    if (edge["type"], edge["extractor"]) == ("PART_OF", "threads") and edge["src_type"] in ("Thread", "Event"):
-        return ("PART_OF", "threads", "group")
-    return (edge["type"], edge["extractor"])
+    """The claim an edge makes: (type, extractor), or its variant for the kind of node at A: a group chat or calendar
+    series about a thread, or a record that only shows a Project going on (its evidence: a notice, a search, a place;
+    every RELATED_TO the entities stage writes, and the threads stage's from anything but a person)."""
+    kind = (edge["type"], edge["extractor"])
+    if kind == ("PART_OF", "threads") and edge["src_type"] in ("Thread", "Event"):
+        return (*kind, "group")
+    if kind == ("RELATED_TO", "entities") or (kind == ("RELATED_TO", "threads") and edge["src_type"] != "Person"):
+        return (*kind, "evidence")
+    return kind
 
 
 def system(claim: tuple) -> str:
@@ -324,12 +337,13 @@ def run(s: Session, log=print, budget: int = BUDGET, progress=None) -> dict:
              "settled": 0}
     known = {(r[0], r[1], r[2], r[3]): (r[4], r[5], r[6]) for r in s.execute(text(
         "SELECT src_key, dst_key, type, extractor, evidence, source, verdict FROM edge_verdicts"))}
+    confirmed = {(y["a"], y["b"], y["t"], y["x"]) for y in _confirmed_folded(s)}
     edges = _edges(s)
     # 1. Direct evidence: the record itself lists them (a thread's group chat members, its events' attendees).
     settled, forget, rest = [], [], []
     for edge in edges:
         prior = known.get(_key(edge))
-        if prior and prior[1] == "user":
+        if (prior and prior[1] == "user") or _key(edge) in confirmed:
             continue  # you decided; never judged again
         if (edge["props"] or {}).get("direct"):
             if prior is None or prior[:2] != ("direct", "evidence"):
@@ -381,7 +395,8 @@ def run(s: Session, log=print, budget: int = BUDGET, progress=None) -> dict:
         else:
             todo.setdefault(claim, []).append((edge, desc, d))
     # What people see first is judged first: who's in a thread, what sits under an org, which identities merge;
-    # then the many item links. A run that hits its budget never leaves the people lists unchecked.
+    # then the many item links, and last the records that are only a Project's evidence, which are never drawn. A run
+    # that hits its budget never leaves the people lists unchecked.
     order = {"INVOLVED_IN": 0, "SAME_AS": 1, "RELATED_TO": 2, "WORKED_AT": 3, "PART_OF": 4, "INTRODUCED": 5}
     planned = sum(-(-len(v) // BATCH) for v in todo.values()) + sum(-(-len(v) // BATCH) for v in strong.values())
     total = min(budget, planned)
@@ -392,7 +407,8 @@ def run(s: Session, log=print, budget: int = BUDGET, progress=None) -> dict:
             progress(stats["calls"], total)
         return _judge_batch(s, claim, batch, sources, model)
 
-    for claim in sorted(set(todo) | set(strong), key=lambda c: (order.get(c[0], 9), c[1] != "hierarchy", c)):
+    for claim in sorted(set(todo) | set(strong),
+                        key=lambda c: (c[2:] == ("evidence",), order.get(c[0], 9), c[1] != "hierarchy", c)):
         items, again = todo.get(claim, []), list(strong.get(claim, []))
         for i in range(0, len(items), BATCH):
             if stats["calls"] >= budget:
@@ -425,19 +441,43 @@ def run(s: Session, log=print, budget: int = BUDGET, progress=None) -> dict:
     return stats
 
 
+def _confirmed_folded(s: Session) -> list[dict]:
+    """The links you said are right ('keep') whose Projects were folded since (a folder's Project that joined the thread
+    it is about, a thread found to be another, a merge of yours: graph/derived.py `merges`), as the same link between
+    the Projects they are now ({a, b, t, x, r}): what you confirmed about a Project holds for the one it became, as a
+    rejection does."""
+    from igneous.graph.derived import follow, merges
+
+    folded = merges(s)
+    out = {}
+    for a, b, t, x, r in s.execute(text("""
+            SELECT src_key, dst_key, type, extractor, reason FROM edge_verdicts WHERE source = 'user' AND verdict = 'keep'
+            ORDER BY src_key, dst_key, type, extractor""")) if folded else []:
+        key = (follow(folded, a), follow(folded, b), t, x)
+        if key != (a, b, t, x):
+            out[key] = {"a": key[0], "b": key[1], "t": t, "x": x, "r": r}
+    return [out[k] for k in sorted(out)]
+
+
+# Your confirmations through folds (`_confirmed_folded`), bound as :confirmed (JSON), as rows of a query.
+CONFIRMED = "jsonb_to_recordset(CAST(:confirmed AS jsonb)) AS y(a text, b text, t text, x text, r text)"
+
+
 def apply_verdicts(s: Session) -> int:
     """Put every verdict on the graph as it is now, and return how many links changed:
       - your rejections: no derived link joins a pair you said is wrong, under any of their identities;
       - the verifier's drops: the link moves to `edges_dropped` (kept for the why-view and undo, one row per natural
-        key), and a 'keep' of yours on a dropped link brings it back; a row whose verdict no longer drops it goes;
+        key), and a 'keep' of yours on a dropped link (or on the link it was before a fold: `_confirmed_folded`) brings
+        it back; a row whose verdict no longer drops it goes;
       - every other verdict rides on its link (props.verdict, reason, confidence, verified_by)."""
     from igneous.graph.derived import blocked_sql, rejections
 
     blocked = rejections(s).id_pairs()
+    confirmed = json.dumps(_confirmed_folded(s))
     removed = s.execute(text(f"""
         DELETE FROM edges e WHERE e.extractor <> ALL(:stated) AND {blocked_sql('e.src', 'e.dst')} RETURNING e.type
     """), {"stated": list(STATED), "blocked": blocked}).scalars().all() if blocked else []
-    moved = s.execute(text("""
+    moved = s.execute(text(f"""
         WITH doomed AS (
             SELECT e.id, a.type || ':' || a.key AS src_key, b.type || ':' || b.key AS dst_key, v.reason
             FROM edges e JOIN nodes a ON a.id = e.src JOIN nodes b ON b.id = e.dst
@@ -445,6 +485,8 @@ def apply_verdicts(s: Session) -> int:
                 AND v.type = e.type AND v.extractor = e.extractor
             WHERE v.verdict = 'drop' AND v.source = 'model' AND e.extractor <> ALL(:stated)
                 AND (e.type <> 'SAME_AS' OR v.confidence >= 0.8)
+                AND NOT EXISTS (SELECT 1 FROM {CONFIRMED} WHERE (y.a, y.b, y.t, y.x) = (v.src_key, v.dst_key, v.type,
+                                                                                         v.extractor))
         ), d AS (
             DELETE FROM edges e USING doomed WHERE e.id = doomed.id
             RETURNING e.*, doomed.src_key, doomed.dst_key, doomed.reason AS _reason)
@@ -459,26 +501,28 @@ def apply_verdicts(s: Session) -> int:
             confidence = EXCLUDED.confidence, source_item_id = EXCLUDED.source_item_id,
             span_start = EXCLUDED.span_start, span_end = EXCLUDED.span_end
         RETURNING type
-    """), {"stated": list(STATED)}).scalars().all()
+    """), {"stated": list(STATED), "confirmed": confirmed}).scalars().all()
     back = s.execute(text(f"""
         INSERT INTO edges (id, src, dst, type, props, valid_from, valid_to, extractor, extractor_version, model,
                            confidence, source_item_id, span_start, span_end)
         SELECT d.id, a.id, b.id, d.type, d.props - 'verdict' - 'reason', d.valid_from, d.valid_to, d.extractor,
                d.extractor_version, d.model, d.confidence, d.source_item_id, d.span_start, d.span_end
         FROM edges_dropped d
-        JOIN edge_verdicts v ON (v.src_key, v.dst_key, v.type, v.extractor) = (d.src_key, d.dst_key, d.type, d.extractor)
+        JOIN (SELECT src_key, dst_key, type, extractor FROM edge_verdicts WHERE source = 'user' AND verdict = 'keep'
+              UNION SELECT y.a, y.b, y.t, y.x FROM {CONFIRMED}) v
+            ON (v.src_key, v.dst_key, v.type, v.extractor) = (d.src_key, d.dst_key, d.type, d.extractor)
         JOIN nodes a ON a.type || ':' || a.key = d.src_key JOIN nodes b ON b.type || ':' || b.key = d.dst_key
-        WHERE v.source = 'user' AND v.verdict = 'keep'
-          AND (d.source_item_id IS NULL OR EXISTS (SELECT 1 FROM source_items si WHERE si.id = d.source_item_id))
+        WHERE (d.source_item_id IS NULL OR EXISTS (SELECT 1 FROM source_items si WHERE si.id = d.source_item_id))
           {f"AND NOT {blocked_sql('a.id', 'b.id')}" if blocked else ""}
         ON CONFLICT DO NOTHING RETURNING type
-    """), {"blocked": blocked}).scalars().all()
-    s.execute(text("""
+    """), {"blocked": blocked, "confirmed": confirmed}).scalars().all()
+    s.execute(text(f"""
         DELETE FROM edges_dropped d WHERE NOT EXISTS (
             SELECT 1 FROM edge_verdicts v
             WHERE (v.src_key, v.dst_key, v.type, v.extractor) = (d.src_key, d.dst_key, d.type, d.extractor)
               AND v.verdict = 'drop' AND v.source = 'model' AND (d.type <> 'SAME_AS' OR v.confidence >= 0.8))
-    """))
+          OR EXISTS (SELECT 1 FROM {CONFIRMED} WHERE (y.a, y.b, y.t, y.x) = (d.src_key, d.dst_key, d.type, d.extractor))
+    """), {"confirmed": confirmed})
     # Identities you said are not one person, still in one cluster (a trusted link joins them): split them now.
     together = s.execute(text("""
         SELECT EXISTS (SELECT 1 FROM edge_verdicts v
@@ -490,15 +534,21 @@ def apply_verdicts(s: Session) -> int:
     if together or "SAME_AS" in [*removed, *moved, *back]:
         from igneous.graph.resolve import refresh_canonical
         refresh_canonical(s)
-    return len(removed) + len(moved) + len(back) + s.execute(text("""
+    # Each link's verdict, yours first (one you gave a Project it was folded from included).
+    return len(removed) + len(moved) + len(back) + s.execute(text(f"""
+        WITH v AS (
+            SELECT DISTINCT ON (src_key, dst_key, type, extractor) * FROM (
+                SELECT src_key, dst_key, type, extractor, verdict, reason, confidence, source FROM edge_verdicts
+                UNION ALL SELECT y.a, y.b, y.t, y.x, 'keep', y.r, 1.0, 'user' FROM {CONFIRMED}) q
+            ORDER BY src_key, dst_key, type, extractor, source = 'user' DESC)
         UPDATE edges e SET props = e.props || jsonb_build_object('verdict', v.verdict, 'reason', v.reason,
                                                                   'confidence', v.confidence, 'verified_by', v.source)
-        FROM nodes a, nodes b, edge_verdicts v
+        FROM nodes a, nodes b, v
         WHERE a.id = e.src AND b.id = e.dst AND v.src_key = a.type || ':' || a.key
           AND v.dst_key = b.type || ':' || b.key AND v.type = e.type AND v.extractor = e.extractor
           AND e.extractor <> ALL(:stated)
           AND (e.props->>'verdict' IS DISTINCT FROM v.verdict OR e.props->>'reason' IS DISTINCT FROM v.reason)
-    """), {"stated": list(STATED)}).rowcount
+    """), {"stated": list(STATED), "confirmed": confirmed}).rowcount
 
 
 def record_correction(s: Session, src_key: str, dst_key: str, type_: str, extractor: str, verdict: str,

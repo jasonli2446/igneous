@@ -1,7 +1,10 @@
-"""Connector credentials (Google OAuth tokens, GitHub tokens), encrypted at rest in the `oauth_tokens` table.
+"""Credentials, encrypted at rest with a Fernet key in data/google/token.key (git-ignored, mode 600, created on first
+use): tokens saved under one key can't be read with another, so the data folder must stay the same (IGNEOUS_DATA_DIR).
 
-The Fernet key is data/google/token.key (git-ignored, mode 600), created on first use: tokens saved under one key
-can't be read with another, so the data folder must stay the same (IGNEOUS_DATA_DIR).
+- Connector tokens (Google OAuth, GitHub) belong to the database whose records they sync: the `oauth_tokens` table
+  (`save`, `load`, `accounts`, `delete`).
+- The hosted model's key belongs to this computer, whatever database a process opens: `data/secrets/<name>`
+  (`save_local`, `load_local`, `delete_local`).
 """
 import os
 from pathlib import Path
@@ -57,3 +60,30 @@ def delete(s: Session, provider: str, account: str) -> bool:
                      {"p": provider, "a": account}).rowcount
     s.commit()
     return bool(gone)
+
+
+def _local(name: str) -> Path:
+    return Path(settings.data_dir) / "secrets" / name
+
+
+def save_local(name: str, secret: str) -> None:
+    """Encrypt and store a secret of this computer's (the hosted model's key). Callers must never log ``secret``."""
+    path = _local(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_fernet().encrypt(secret.strip().encode()))
+    os.chmod(path, 0o600)
+
+
+def load_local(name: str) -> str | None:
+    """The decrypted secret saved under `name`, or None when there is none."""
+    path = _local(name)
+    return _fernet().decrypt(path.read_bytes()).decode() if path.exists() else None
+
+
+def delete_local(name: str) -> bool:
+    """Forget a secret of this computer's; whether there was one."""
+    path = _local(name)
+    if not path.exists():
+        return False
+    path.unlink()
+    return True

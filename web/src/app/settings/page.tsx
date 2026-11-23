@@ -236,8 +236,8 @@ function ModelPanel({ model }: { model: ModelStatus }) {
   if (!model.enabled) {
     state = "Hosted model calls are off (IGNEOUS_LLM_ENABLED=false). Search and the graph work; Ask is unavailable.";
   } else if (!model.configured) {
-    state = "No Bedrock key is set (AWS_BEARER_TOKEN_BEDROCK in the API's environment), so no model is called. "
-      + "Search and the graph work without it.";
+    state = "No Bedrock key is set, so no model is called: save one with `igneous connect bedrock`, or set "
+      + "AWS_BEARER_TOKEN_BEDROCK in the API's environment. Search and the graph work without it.";
   } else {
     state = "Ask, AI extraction, summaries, naming your life threads and projects, reading your resume, and the "
       + "checks on each connection send text to a model on Amazon Bedrock. They read only the sources opted in here; "

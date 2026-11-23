@@ -349,16 +349,17 @@ def _shared(s: Session, focus: Iterable[int], people: Iterable[int]) -> dict[tup
 # Why two things are linked.
 # ---------------------------------------------------------------------------------------------------------------
 
-def explain(s: Session, a: int, b: int, limit: int = 8) -> dict:
+def explain(s: Session, a: int, b: int, limit: int = 8, named: dict[str, str] | None = None) -> dict:
     """Why two nodes are connected: the conversations they share (message counts, dates, the latest excerpt), the
     events they both attended, their latest shared messages, the links between them (each with where it came from, its
     reason and evidence), or the shortest path when there are none, and the corrections you made to the pair. A person
-    is all of their identities. Raises identity.NotFound, and ValueError when a and b are one identity."""
+    is all of their identities; a phone number reads as its contact (`named`, `names` by default). Raises
+    identity.NotFound, and ValueError when a and b are one identity."""
     na, nb = identity.node(s, a), identity.node(s, b)
     if na["id"] == nb["id"]:
         raise ValueError("Those are the same node: pick two different things.")
     ids_a, ids_b = identity.members(s, na["id"]), identity.members(s, nb["id"])
-    named = names(s)
+    named = names(s) if named is None else named
     convo = s.execute(text(f"""
         WITH a AS (SELECT e.dst AS m FROM edges e WHERE e.src = ANY(:a) AND e.type = 'SENT'
                    UNION SELECT e.src FROM edges e WHERE e.dst = ANY(:a) AND e.type = 'RECEIVED'),
@@ -991,7 +992,8 @@ def _own_content(s: Session, node: int) -> list[int]:
 def fallback_neighbors(s: Session, node: int, exclude: set[int], k: int) -> list[int]:
     """The node's strongest connections when its own rules found too few: direct links first (a verifier keep or a
     stated link before an unchecked one, then by confidence), then what its records link to (an org's people, a file's
-    conversation). People are identity heads; nothing hidden, no service, no code file, never what it is part of."""
+    conversation). People are identity heads; nothing hidden, no service, no code file, never what it is part of, and
+    never a record that is only a project's evidence (a booking, a search: graph/threads.py `evidence`)."""
     if k <= 0:
         return []
     ntype = s.execute(text("SELECT type FROM nodes WHERE id = :n"), {"n": node}).scalar()
@@ -1000,9 +1002,11 @@ def fallback_neighbors(s: Session, node: int, exclude: set[int], k: int) -> list
             -- Never the node's own parent (what it's part of): opening the Lab must not list State University in it.
             SELECT e.dst AS o, e.props, e.extractor, e.confidence FROM edges e
             WHERE e.src = ANY(:ids) AND e.type NOT IN ('SAME_AS', 'HAS_CHUNK', 'PART_OF')
+              AND e.props->>'role' IS DISTINCT FROM 'evidence'
             UNION ALL
             SELECT e.src, e.props, e.extractor, e.confidence FROM edges e
             WHERE e.dst = ANY(:ids) AND e.type NOT IN ('SAME_AS', 'HAS_CHUNK')
+              AND e.props->>'role' IS DISTINCT FROM 'evidence'
               AND NOT (e.type = 'PART_OF' AND e.src = (SELECT (props->>'thread')::bigint FROM nodes WHERE id = :n))),
         direct AS MATERIALIZED (
             SELECT o, (CASE WHEN props->>'verdict' = 'keep' OR extractor IN ('user', 'profile', 'contacts', 'spine')
