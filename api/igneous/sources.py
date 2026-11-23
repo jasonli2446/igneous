@@ -283,10 +283,10 @@ SOURCES: list[dict] = [
      "cli": "igneous sync email", "build": _local(_email), "options": {"path", "mailboxes"}},
     {"id": "persona", "kind": "local", "name": "Synthetic persona", "group": "Demo",
      "reads": "Two invented years of Mira Castellanos, a computer science student at the fictional Lakeshore "
-              "University: her mailbox, Google Takeout (chat, tasks, Meet, Maps, My Activity, Chrome), LinkedIn and "
-              "ChatGPT exports, and a documents folder with her resumes, notes and a git checkout. Generated on this "
-              "computer from a seed, so every source and the trips, classes, job and project they make can be shown "
-              "without personal data. For demos and evaluation, in a database of its own.",
+              "University: her mailbox, Google Takeout (chat, tasks, Meet, Maps, My Activity, Chrome, Calendar), "
+              "LinkedIn and ChatGPT exports, and a documents folder with her resumes, notes and a git checkout. "
+              "Generated on this computer from a seed, so every source and the trips, classes, job and project they "
+              "make can be shown without personal data. For demos and evaluation, in a database of its own.",
      "steps": ["From the repository root run make persona. It writes the exports to data/persona, creates the database "
                "igneous_persona (make persona CLEAN=1 replaces it), reads each export through its own source on "
                "this page, and builds the graph.",
