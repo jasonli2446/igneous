@@ -105,8 +105,8 @@ def lexical(s: Session, q: str, f: Filters, n: int = POOL) -> list[int]:
 def dense(s: Session, q: str, f: Filters, n: int = POOL) -> list[int]:
     """The passages nearest the query's embedding, among vectors from the same model (IGNEOUS_EMBEDDING_MODEL; others
     wait for the embed stage); a negated word or phrase excludes the passages that contain it. Exact: the query is
-    compared with every vector the filters let through, nearest first and equal distances in chunk id order, so a
-    filter never leaves out a passage nearer than the ones returned."""
+    compared with every vector the filters let through, so those passages come back nearest first however many nearer
+    ones the filters leave out, and equal distances go in chunk id order."""
     positive, negation, negation_params = _negations(q)
     if not positive.strip():
         return []

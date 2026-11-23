@@ -113,10 +113,10 @@ at the same machine load. Rerun with
 ### Dense retrieval is exact
 
 Dense search compares the query with every vector the filters let through (`search.dense`). Every ranking puts equal
-scores in chunk id order: lexical, dense, their fusion and the cut at k, as graph expansion and the cross-encoder
-already did. A build numbers chunks in the order it stores them, and a rebuild of the same data repeats that order,
-so two builds of the same records give the same results. Dense search used to read an HNSW index (migration 0015 drops
-it), which answers approximately:
+scores in chunk id order: lexical, dense, their fusion and the cut at k, as graph expansion already did. The
+cross-encoder keeps the order of its pool for equal scores. A build numbers chunks in the order it stores them, and a
+rebuild of the same data repeats that order, so two builds of the same records give the same results. Dense search
+used to read an HNSW index (migration 0015 drops it), which answers approximately:
 
 - **Its graph is random,** so two builds found different passages.
 - **Re-ranking its candidates exactly changes only the order of ties.** pgvector already returns exact distances, in
