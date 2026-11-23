@@ -109,6 +109,9 @@ Open <http://localhost:3000/settings> (**Sources** in the top bar). Every source
 **Connected accounts** (Google, GitHub), **Exports you upload** (ChatGPT, Claude.ai, LinkedIn, Google Takeout, with the
 upload or path box inline) and **On this computer** (Messages, Contacts, Claude Code and Codex chats, local files, Apple
 Notes). Each entry says what it reads, shows its status and last sync or import, and lists the steps to connect it.
+Local files keeps absolute folder paths out of record ids and shows each root by its folder name. A repository
+contains its own checkout folder. Sync Local files and then Rebuild to refresh the folder hierarchy; a reader
+version change reads unchanged files once so their metadata stays current.
 Messages, Contacts and Apple Notes, the scheduled sync, and opening a local file from the reader work on macOS only.
 The page shows `GET /sources`, the registry in `api/igneous/sources.py`. That registry also builds each source's
 connector, so **Sync now**, `igneous sync` and the scheduled sync read a source the same way. Everything is read-only.

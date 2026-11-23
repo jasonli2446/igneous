@@ -254,3 +254,63 @@ def test_a_file_that_cannot_be_read_keeps_its_item_and_is_read_again(db, tmp_pat
     run_sync(db, FilesystemConnector([root]))
     body = db.execute(text("SELECT body_text FROM source_items WHERE source = 'fs'")).scalar_one()
     assert body == "second version"
+
+
+@pytest.mark.parametrize("relative", ["Projects/tidepool", "."])
+def test_a_repository_anchor_contains_its_checkout_only(db, tmp_path, relative):
+    from igneous.graph import spine
+
+    root = tmp_path / ("Documents" if relative != "." else "tidepool")
+    checkout = root / relative
+    write(checkout / ".git" / "config", '[remote "origin"]\n\turl = git@github.com:a/tidepool.git\n')
+    write(checkout / "README.md", "# Tidepool")
+    write(root / "notes.md", "Unrelated notes")
+    run_sync(db, FilesystemConnector(root))
+    spine.run(db)
+    key = _root_key(root)
+    expected = f"fs:{key}" + (f"/{relative}" if relative != "." else "")
+    assert db.execute(text("""
+        SELECT child.key FROM edges e JOIN nodes parent ON parent.id = e.src JOIN nodes child ON child.id = e.dst
+        WHERE parent.key = 'repo:tidepool' AND e.type = 'CONTAINS'
+    """)).scalars().all() == [expected]
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_the_configured_anchor_name_travels_without_its_absolute_path(db, tmp_path, nested):
+    import json
+
+    from igneous.graph import spine
+
+    root = tmp_path / "Documents"
+    child = root / "Projects"
+    write(child / "plan.md", "# Plan")
+    connector = FilesystemConnector(child if nested else root, anchors=[root])
+    (item,) = [e for e in emitted(connector) if isinstance(e, SourceItem)]
+    assert item.raw_meta["root_name"] == "Documents"
+    assert str(tmp_path) not in json.dumps(item.raw_meta)
+    run_sync(db, connector)
+    spine.run(db)
+    assert db.execute(text("SELECT name FROM nodes WHERE key = :k"), {"k": f"fs:{_root_key(root)}"}).scalar_one() \
+        == "Documents"
+
+
+def test_an_unchanged_file_is_refreshed_once_from_a_cursor_without_folder_names(db, tmp_path):
+    from igneous.connectors.base import save_cursor, store
+    from igneous.graph import spine
+
+    root = tmp_path / "Documents"
+    file = write(root / "notes.md", "Notes")
+    connector = FilesystemConnector(root)
+    (item,) = [e for e in emitted(connector) if isinstance(e, SourceItem)]
+    item.raw_meta.pop("root_name", None)
+    store(db, item)
+    spine.run(db)
+    assert db.execute(text("SELECT name FROM nodes WHERE type = 'Folder'")).scalar_one() == _root_key(root)
+    stat = file.stat()
+    cursor = {"files": {item.external_id: [stat.st_mtime_ns, stat.st_size]}}
+    save_cursor(db, "fs", "default", cursor)
+    assert run_sync(db, connector)["updated"] == 1
+    assert spine.run(db) == 1
+    assert db.execute(text("SELECT name FROM nodes WHERE type = 'Folder'")).scalar_one() == "Documents"
+    assert run_sync(db, connector)["unchanged"] == 0  # the current cursor never reopens this file
+    assert spine.run(db) == 0

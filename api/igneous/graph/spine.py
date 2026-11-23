@@ -939,7 +939,9 @@ def build_file(b: Builder, item) -> None:
         return
     child = fid
     for parent in reversed(folders):
-        folder = b.node("Folder", f"{item.source}:{parent}", parent.rsplit("/", 1)[-1], {"path": parent})
+        root_name = item.raw_meta.get("root_name") if item.source == "fs" and "/" not in parent else None
+        folder = b.node("Folder", f"{item.source}:{parent}", root_name or parent.rsplit("/", 1)[-1],
+                        {"path": parent}, rank=RANK_STATED if root_name else RANK_NAMED)
         b.edge(folder, child, "CONTAINS")
         child = folder
     # A discovered .git remote is a deterministic, source-backed hard link from its on-disk folder to the
@@ -948,7 +950,9 @@ def build_file(b: Builder, item) -> None:
         repo_name = item.raw_meta["repo"]
         repo = b.node("Folder", f"repo:{repo_name.lower()}", repo_name,
                       {"path": path, "kind": "repo", "remote": item.raw_meta.get("remote")})
-        b.edge(repo, child, "CONTAINS", item.occurred_at, record=True)
+        checkout_path = path.removesuffix("/.")
+        checkout = b.node("Folder", f"{item.source}:{checkout_path}", item.title, {"path": checkout_path})
+        b.edge(repo, checkout, "CONTAINS", item.occurred_at, record=True)
 
 
 def build_takeout_chat(b: Builder, item) -> None:

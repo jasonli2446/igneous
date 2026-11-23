@@ -249,7 +249,8 @@ SOURCES: list[dict] = [
      "cli": "igneous sync ai_chats", "build": _local(lambda o: ai_chats.AIChatConnector()), "options": set()},
     {"id": "fs", "kind": "local", "name": "Local files", "group": "On this computer",
      "reads": "Name, folder and size of every file in the folders you choose, the text of documents (PDF, .docx, "
-              f".xlsx, .pptx, text and code, up to {MAX_DOCUMENT_BYTES // 2**20} MB), and each git checkout. Key "
+              f".xlsx, .pptx, text and code, up to {MAX_DOCUMENT_BYTES // 2**20} MB), and each git checkout with its "
+              "own folder. Folders appear by name. Key "
               "and .env files are never read, and credentials in text are redacted. Search indexes the text on this "
               "computer; a hosted model reads it only if you opt it in (below).",
      "steps": ["Set IGNEOUS_FILESYSTEM_ROOTS to a comma-separated list of folders (in api/.env or the API's "
@@ -260,7 +261,7 @@ SOURCES: list[dict] = [
                "folders. Restart that app and the API. A folder it can't read is skipped and keeps what an earlier "
                "sync stored.",
                "Press Sync now. Each sync notices added, changed and deleted files in those folders without "
-               "reopening unchanged ones."],
+               "reopening unchanged ones. Press Rebuild to update the graph after syncing."],
      "cli": "igneous sync fs (or --path FOLDER for one folder, leaving the others as they are)",
      "build": _local(_fs), "options": {"path"}},
     {"id": "notes", "kind": "local", "name": "Apple Notes", "group": "On this computer",
