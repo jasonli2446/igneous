@@ -60,6 +60,13 @@ def _edge(s, src, dst, type_, extractor="spine", item=None) -> int:
         {"a": src, "b": dst, "t": type_, "x": extractor, "i": item}).scalar_one()
 
 
+def _named(s, node, item, name) -> None:
+    """Record that `item` gives `node` the name `name`, as the spine does for every person a record names (a mail
+    header's display name, a chat's handle)."""
+    s.execute(text("""INSERT INTO spine_node_support (node_id, source_item_id, name, rank) VALUES (:n, :i, :name, 3)
+                      ON CONFLICT DO NOTHING"""), {"n": node, "i": item, "name": name})
+
+
 def _item(s, source, external_id, title, body, when) -> int:
     return s.execute(text("""
         INSERT INTO source_items (source, external_id, content_hash, title, body_text, occurred_at)
@@ -90,12 +97,15 @@ def build() -> dict:
             gm = _node(s, "Message", f"gmail:g{i}", f"Robotics Lab: Atlas update {i}", item=gid)
             _edge(s, g["sam"], gm, "SENT", item=gid)
             _edge(s, gm, g["me"], "RECEIVED", item=gid)
+            _named(s, g["sam"], gid, "Sam Shared")
+            _named(s, g["me"], gid, "Me Myself")
             _edge(s, gm, thread, "PART_OF", "threads", item=gid)
             iid = _item(s, "imessage", f"i{i}", "Chat with Pat Private",
                         f"PRIVATEMARKER Robotics Lab and Atlas plans with Pat Private, day {i}", when)
             im = _node(s, "Message", f"imessage:i{i}", "Chat with Pat Private", item=iid)
             _edge(s, g["pat"], im, "SENT", item=iid)
             _edge(s, im, g["me"], "RECEIVED", item=iid)
+            _named(s, g["pat"], iid, "Pat Private")
             _edge(s, im, thread, "PART_OF", "threads", item=iid)
             _edge(s, im, g["pat_only"], "PART_OF", "threads", item=iid)
             s.execute(text("INSERT INTO chunks (source_item_id, node_id, ord, text, meta) VALUES "
@@ -108,6 +118,7 @@ def build() -> dict:
         m2 = _node(s, "Message", "gmail:g-other", "Hello from my other address", item=s2)
         _edge(s, g["sam2"], m2, "SENT", item=s2)
         _edge(s, m2, g["me"], "RECEIVED", item=s2)
+        _named(s, g["sam2"], s2, "Sam Shared")
         for person in ("sam", "pat"):
             _edge(s, g[person], g["atlas"], "INVOLVED_IN", "threads")
             _edge(s, g[person], g["platform"], "INVOLVED_IN", "threads")
@@ -133,3 +144,40 @@ def wipe() -> None:
         _wipe(s)
 
 
+
+
+def chat_only_name(s, folder) -> int:
+    """Ella Novak, named only by a Google Chat space she belongs to and never writes in, and reached by one opted-in
+    message by her address alone, each imported as its source imports it and built by the spine. Returns her node."""
+    import zipfile
+
+    from igneous.connectors import takeout
+    from igneous.connectors.base import SourceItem, run_sync
+    from igneous.graph import spine
+
+    me = {"name": "Mo Self", "email": "mo@x.test", "user_type": "Human"}
+    sam = {"name": "Sam Shared", "email": "sam@x.test", "user_type": "Human"}
+    ella = {"name": "Ella Novak", "email": "ella@x.test", "user_type": "Human"}
+    space = "Takeout/Google Chat/Groups/Space AAAAread"
+    export = folder / "takeout-20250201T000000Z-001.zip"
+    with zipfile.ZipFile(export, "w") as zf:
+        zf.writestr(f"{space}/group_info.json", json.dumps({"name": "Reading group", "members": [me, sam, ella]}))
+        zf.writestr(f"{space}/messages.json", json.dumps({"messages": [
+            {"creator": sam, "created_date": "Wednesday, January 15, 2025 at 7:00:00 PM UTC",
+             "text": "Chapter four next week.", "topic_id": "t", "message_id": "r1"}]}))
+        zf.writestr("Takeout/Google Chat/Users/User 1/user_info.json", json.dumps({"user": me}))
+    takeout.run_import(s, [export])
+
+    class Mail:
+        name = "mixed-mail"
+
+        def sync(self, cursor):
+            yield SourceItem(source="gmail", external_id="ella-1", title="Notes", body_text="Notes from today.",
+                             occurred_at=T0 + timedelta(days=1),
+                             raw_meta={"from": [{"email": "mo@x.test", "name": ""}],
+                                       "to": [{"email": "ella@x.test", "name": ""}], "fingerprint": "fp-ella-1",
+                                       "gmail_thread_id": "t-ella", "labels": ["SENT"]})
+
+    run_sync(s, Mail())
+    spine.run(s)
+    return s.execute(text("SELECT id FROM nodes WHERE type = 'Person' AND key = 'ella@x.test'")).scalar_one()

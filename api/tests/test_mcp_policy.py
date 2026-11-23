@@ -11,7 +11,7 @@ import sys
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
-from mixed_sources import PRIVATE, build, wipe
+from mixed_sources import PRIVATE, T0, _edge, _item, _named, _node, build, chat_only_name, wipe
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
@@ -79,6 +79,50 @@ def test_no_tool_discloses_text_or_names_outside_the_opt_in(graph):
     for tool, args in every_call(graph):
         answer = said(tool, **args)
         assert not [marker for marker in PRIVATE if marker in answer], (tool, args, answer)
+
+
+def test_a_link_you_add_never_names_its_ends(graph):
+    """Pat and Pat's trip, known only from texts, linked by you to opted-in mail: every tool still withholds them."""
+    g = graph
+    with SessionLocal() as s:
+        _edge(s, g["pat"], g["items"]["g0"], "RELATED_TO", "user")
+        _edge(s, g["items"]["g1"], g["pat_only"], "RELATED_TO", "user")
+        s.commit()
+    assert call("find", name="Pat")["results"] == []
+    assert call("why_connected", a=g["pat"], b=g["items"]["g0"])["a"]["name"] is None
+    for tool, args in every_call(g):
+        answer = said(tool, **args)
+        assert not [marker for marker in PRIVATE if marker in answer], (tool, args, answer)
+
+
+def test_a_name_only_a_record_outside_the_opt_in_gave_stays_withheld(graph):
+    """Ella, named only by a calendar invite (Calendar not opted in), in opted-in mail by address alone."""
+    with SessionLocal() as s:
+        ella = _node(s, "Person", "ella@x.test", "Ella Novak")
+        _named(s, ella, _item(s, "gcal", "cal/1", "Reading group", "Weekly reading group.", T0), "Ella Novak")
+        mail = _item(s, "gmail", "m-ella", "Notes", "Notes from today, as promised.", T0)
+        _edge(s, _node(s, "Message", "gmail:m-ella", "Notes", item=mail), ella, "RECEIVED", item=mail)
+        _named(s, ella, mail, "Ella")
+        s.commit()
+    found = call("find", name="Ella")
+    assert found["results"] == [] and found["withheld"]["nodes"] == {"Person": 1}
+    assert "Ella Novak" not in said("open_node", node_id=ella)
+
+
+def test_a_name_only_google_chat_gave_stays_withheld(committed_db, tmp_path, monkeypatch):
+    """Ella, named only by a Google Chat space (Takeout not opted in), in opted-in mail by her address alone: no tool
+    names her until Takeout is opted in."""
+    monkeypatch.setattr(settings, "llm_sources", "gmail")
+    try:
+        ella = chat_only_name(committed_db, tmp_path)
+        committed_db.commit()
+        found = call("find", name="Ella")
+        assert found["results"] == [] and found["withheld"]["nodes"] == {"Person": 1}
+        assert "Ella Novak" not in said("open_node", node_id=ella)
+        monkeypatch.setattr(settings, "llm_sources", "gmail,takeout")
+        assert [r["name"] for r in call("find", name="Ella")["results"]] == ["Ella Novak"]
+    finally:
+        wipe()
 
 
 def test_what_is_opted_in_is_shared_and_the_rest_is_counted(graph):
