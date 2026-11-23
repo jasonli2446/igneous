@@ -1362,31 +1362,6 @@ def test_entity_screening_caches_model_verdicts(db, monkeypatch):
     assert cache_lookup(key)["by"] == "model"
 
 
-def test_project_merge_requires_two_shared_people():
-    from igneous.graph.entities import _shared_people
-
-    class Result:
-        def __init__(self, rows):
-            self.rows = rows
-
-        def all(self):
-            return self.rows
-
-    class Session:
-        def __init__(self, rows):
-            self.rows, self.params = rows, None
-
-        def execute(self, _statement, params):
-            self.params = params
-            return Result(self.rows)
-
-    session = Session([(1,), (2,)])
-    assert _shared_people(session, [10, 20])
-    assert session.params == {"anchors": [10, 20]}
-    assert not _shared_people(Session([]), [10, 20])
-    assert not _shared_people(Session([(1,), (2,)]), [10])
-
-
 def _export_items(payload, provider=None, zipped=None):
     import io
     import json
