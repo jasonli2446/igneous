@@ -68,6 +68,8 @@ Export formats are sources too: add the entry to `SOURCES` and an inline form in
   (see PR #83 for the gcal case).
 - Tables and columns come only from Alembic migrations (`api/migrations/versions/`), never `CREATE`/`ALTER` in app
   code. The API, the CLI and the MCP server refuse to run on any schema but head (`db.schema_status`).
+- Adding, renaming or removing a setting in `api/igneous/config.py`, or changing its default, means the same edit in
+  `api/.env.example` (a one-line meaning, then the default, commented out); `tests/test_env_example.py` checks.
 
 ## Checks before any PR
 
