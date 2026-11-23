@@ -768,11 +768,15 @@ def umbrellas(s: Session, w: Writer) -> int:
     thread_names = {norm(n) for n in s.execute(text("""
         SELECT COALESCE(props->>'original_name', name) FROM nodes WHERE id = ANY(:ids)"""),
         {"ids": list(threads_)}).scalars()}
-    # Orgs from your resume already hold their threads (graph/backbone.py): a term that is part of one's name
-    # ("Reserve University" in Western Reserve University) is that org, not a new umbrella.
+    # Your orgs (organizations.YOUR_ORGS) already hold their threads (graph/backbone.py): a term that is part of one's
+    # name ("Reserve University" in Western Reserve University) is that org, not a new umbrella.
+    from igneous.graph.organizations import YOUR_ORGS
+
     org_names = [f" {norm(n)} " for n in s.execute(text("""
         SELECT o.name FROM edges e JOIN nodes o ON o.id = e.dst
-        WHERE e.type = 'WORKED_AT' AND e.extractor IN ('profile', 'user')""")).scalars()]
+        JOIN nodes me ON me.id = e.src AND COALESCE((me.props->>'self')::bool, false)
+        WHERE e.type = 'WORKED_AT' AND e.extractor = ANY(:yours) ORDER BY o.name"""),
+        {"yours": list(YOUR_ORGS)}).scalars()]
     sources = allowed_sources()
     names = nameable(s, {t for by_thread in share.values() for t in by_thread}, sources)  # what a prompt may name
     for term in sorted(share):

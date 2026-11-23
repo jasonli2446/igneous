@@ -1,23 +1,26 @@
 export const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export type GNode = {
-  id: number; type: string; name: string; key: string; degree: number; members?: number;
-  strength?: number; kind?: "seed" | "category" | "entity"; category?: string | null; total?: number; expandable?: boolean;
+  id: number; type: string; name: string; key: string; members?: number;
+  strength?: number; kind?: "seed" | "entity"; category?: string | null; expandable?: boolean;
 };
-export type GEdge = { id: number; src: number; dst: number; type: string; extractor: string; confidence: number | null; weight?: number };
+/** Where a link came from: read from your data, added by you or by an agent ("agent:<name>"), or inferred. */
+export type Origin = "stated" | "user" | "derived" | `agent:${string}`;
+/** A link on the graph. `stated`: a fact (read from your data or added by you), not an inference. */
+export type GEdge = { id: number; src: number; dst: number; type: string; weight?: number; origin: Origin; stated: boolean };
 export type Thing = { id: number; type: string; name: string; category: string | null; context: string; score: number };
+/** The node types Jump to and the pickers can look for. */
+export type ThingType = "Person" | "Project" | "Thread" | "Event" | "Organization" | "Place" | "Folder" | "File";
 export type NodeSummary = {
   summary: string;
   highlights: { id: number; name: string; type: string; category: string | null; why: string }[];
   sources: number[];
   generated_by: "model" | "fallback";
 };
-export type Subgraph = { nodes: GNode[]; edges: GEdge[]; categories?: GNode[] };
-export type GraphFilters = { source?: string; edgeTypes?: string[]; from?: string; to?: string };
-
-function graphParams(filters: GraphFilters = {}) {
-  return { source: filters.source, types: filters.edgeTypes, from: filters.from, to: filters.to };
-}
+export type Subgraph = { nodes: GNode[]; edges: GEdge[] };
+/** The opening view. With no one to open on it is `empty`, and says why: nothing is built yet, or no source says which
+ *  person is you (or nothing links you to anyone yet). */
+export type View = Subgraph & ({ seed: number; empty: false } | { seed: null; empty: true; reason: "nothing_built" | "no_owner" });
 
 export type Hit = {
   chunk_id: number;
@@ -107,7 +110,8 @@ export type Explanation = {
   a: { id: number; name: string };
   b: { id: number; name: string };
   messages: number;
-  conversations: { thread_id: number; thread: string; messages: number; people: number; first: string | null;
+  // thread_id is null for a one-on-one conversation: it is the relationship itself, not a node to open.
+  conversations: { thread_id: number | null; thread: string; messages: number; people: number; first: string | null;
     last: string | null; source: string; excerpt: string | null }[];
   events: { id: number; name: string; at: string | null }[];
   shared: SourceCard[];
@@ -126,24 +130,20 @@ export type ItemDetail = {
   id: number; source: string; title: string | null; occurred_at: string | null; text: string;
   meta: Record<string, unknown>; open_url: string | null; open_label: string | null; local_path: string | null;
 };
-/** One edge with the verifier's reason (when it has run) and the items it was derived from. */
+/** One edge with where it came from (`how`, in plain words), the verifier's reason (when it has run) and the items it
+ *  was derived from. Only an inferred one (`stated` false) can be called wrong. */
 export type WhyEdge = {
-  id: number; type: string; extractor: string; src: number; dst: number; src_name: string | null; dst_name: string | null;
+  id: number; type: string; origin: Origin; stated: boolean; how: string;
+  src: number; dst: number; src_name: string | null; dst_name: string | null;
   verdict: "keep" | "drop" | "unsure" | null; reason: string | null; why?: string | null; confidence: number | null; evidence: SourceCard[];
   from?: number; to?: number;
 };
 
-export type NodeDetail = GNode & {
+/** A node as the inspector shows it, with its own record (as the reader shows it) when it has one. */
+export type NodeDetail = {
+  id: number; type: string; key: string; name: string; category: string | null;
   props: Record<string, unknown>;
-  degree: Record<string, number>;
-  source_item: {
-    id: number;
-    source: string;
-    title: string | null;
-    body_text: string | null;
-    occurred_at: string | null;
-    raw_meta: Record<string, unknown>;
-  } | null;
+  source_item: ItemDetail | null;
 };
 
 export type EntityDetail = {
@@ -168,9 +168,7 @@ async function get<T>(
     if (v === undefined || v === "") continue;
     for (const x of Array.isArray(v) ? v : [v]) url.searchParams.append(k, String(x));
   }
-  const r = await fetch(url, { signal });
-  if (!r.ok) throw new Error(`${r.status} ${path}`);
-  return (await r.json()) as T;
+  return requestJson<T>(url, { signal });
 }
 
 function searchUrl(path: string, q: string, { sources, person, from, to, mode }: SearchOptions) {
@@ -287,20 +285,14 @@ export const api = {
   disconnect: (provider: "google" | "github", account: string) =>
     send<{ removed: string }>("DELETE", `/sources/${provider}/accounts/${encodeURIComponent(account)}`),
   googleConnectUrl: () => new URL("/sources/google/connect", API).toString(),
-  stats: () => get<{ source_items: Record<string, number>; nodes: Record<string, number>; edges: Record<string, number> }>("/stats", {}),
   search: (q: string, opts: SearchOptions = {}, signal?: AbortSignal) =>
     requestJson<{ hits: Hit[]; filters: AppliedFilters }>(searchUrl("/search", q, opts), { signal }),
   experts: (q: string, opts: SearchOptions = {}, signal?: AbortSignal) =>
     requestJson<{ experts: Expert[]; filters: AppliedFilters }>(searchUrl("/experts", q, opts), { signal }),
-  findThings: (q: string, seed?: number, signal?: AbortSignal) =>
-    get<{ results: Thing[] }>("/graph/find", { q, seed }, signal),
+  /** Things named like `q`, ranked by closeness to `seed` (default: you); `types` keeps only those. */
+  findThings: (q: string, { seed, types }: { seed?: number; types?: ThingType[] } = {}, signal?: AbortSignal) =>
+    get<{ results: Thing[] }>("/graph/find", { q, seed, types }, signal),
   nodeSummary: (id: number, signal?: AbortSignal) => get<NodeSummary>(`/graph/node/${id}/summary`, {}, signal),
-  findNodes: (q: string, type?: string) => get<{ nodes: GNode[] }>("/graph/search", { q, type }),
-  subgraph: (seed: number[], hops = 1, limit = 300, filters: GraphFilters = {}, signal?: AbortSignal) =>
-    get<Subgraph>("/graph/subgraph", { seed, hops, limit, ...graphParams(filters) }, signal),
-  people: (seed: number, limit = 60, signal?: AbortSignal) => get<Subgraph>("/graph/people", { seed, limit }, signal),
-  network: (seed: number, people = 50, hubs = 30, signal?: AbortSignal) =>
-    get<Subgraph>("/graph/network", { seed, people, hubs }, signal),
   ask: (question: string, use_graph = true) =>
     requestJson<AskResult>(new URL("/ask", API), {
       method: "POST",
@@ -309,39 +301,26 @@ export const api = {
     }),
   askSuggestions: () => get<string[]>("/ask/suggestions", {}),
   graphVersion: (signal?: AbortSignal) => get<{ version: string }>("/graph/version", {}, signal),
-  view: (seed?: number, signal?: AbortSignal) => get<Subgraph & { seed: number }>("/graph/view", { seed }, signal),
-  expandNode: (seed: number, node: number, visible: number[], offset = 0, signal?: AbortSignal) =>
-    get<Subgraph>("/graph/expand", { seed, node, visible, offset }, signal),
-  explain: (a: number, b: number) => get<Explanation>("/graph/explain", { a, b }),
+  view: (seed?: number, signal?: AbortSignal) => get<View>("/graph/view", { seed }, signal),
+  expandNode: (seed: number, node: number, visible: number[], signal?: AbortSignal) =>
+    get<Subgraph>("/graph/expand", { seed, node, visible }, signal),
+  explain: (a: number, b: number, signal?: AbortSignal) => get<Explanation>("/graph/explain", { a, b }, signal),
   edgeIsWrong: (edge: number) => send<{ removed: number; also_removed: number; edges: number[] }>("POST", "/graph/edge/wrong", { edge }),
   restoreEdges: (edges: number[]) => send<{ restored: number[] }>("POST", "/graph/edge/restore", { edges }),
-  linkOptions: (a: number, b: number) =>
-    get<{ options: { label: string; type: string; src: number; dst: number }[] }>("/graph/link/options", { a, b }),
+  linkOptions: (a: number, b: number, signal?: AbortSignal) =>
+    get<{ options: { label: string; type: string; src: number; dst: number }[] }>("/graph/link/options", { a, b }, signal),
   addLink: (src: number, dst: number, type: string, note?: string) =>
     send<{ id: number; src: number; dst: number; type: string }>("POST", "/graph/link", { src, dst, type, note }),
-  entity: (id: number) => get<EntityDetail>(`/graph/entity/${id}`, {}),
+  entity: (id: number, signal?: AbortSignal) => get<EntityDetail>(`/graph/entity/${id}`, {}, signal),
   renameEntity: (id: number, name: string) => send<Correction>("POST", `/graph/entity/${id}/rename`, { name }),
   hideEntity: (id: number) => send<Correction>("POST", `/graph/entity/${id}/hide`),
   mergeEntity: (id: number, other: number) => send<Correction>("POST", `/graph/entity/${id}/merge`, { other }),
   mergePeople: (id: number, other: number) => send<{ merged: number[]; person: number }>("POST", `/graph/person/${id}/merge`, { other }),
   unlinkFromEntity: (id: number, node: number) => send<Correction>("POST", `/graph/entity/${id}/unlink`, { node }),
   undoCorrection: (overrideId: number) => send<{ undone: number }>("DELETE", `/overrides/${overrideId}`),
-  node: (id: number) => get<NodeDetail>(`/graph/node/${id}`, {}),
+  node: (id: number, signal?: AbortSignal) => get<NodeDetail>(`/graph/node/${id}`, {}, signal),
   item: (id: number, signal?: AbortSignal) => get<ItemDetail>(`/items/${id}`, {}, signal),
   openItem: (id: number) => send<{ opened: string }>("POST", `/items/${id}/open`),
   nodeSources: (id: number, offset = 0, limit = 8, signal?: AbortSignal) =>
     get<{ items: SourceCard[]; more: boolean }>(`/graph/node/${id}/sources`, { offset, limit }, signal),
-};
-
-export const TYPE_COLORS: Record<string, string> = {
-  Person: "#2563eb",
-  Organization: "#7c3aed",
-  Thread: "#d97706",
-  Message: "#64748b",
-  File: "#059669",
-  Folder: "#0d9488",
-  Event: "#db2777",
-  Topic: "#ea580c",
-  Project: "#4f46e5",
-  Place: "#ca8a04",
 };

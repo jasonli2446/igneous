@@ -1,11 +1,10 @@
-"""Derived, evidence-backed commitments, introductions, and relationship history.
+"""Derived, evidence-backed commitments, decisions and introductions.
 
 This module never promotes an inference to a user fact.  Its rows are marked
 ``derived`` and retain the source item and verified text span that produced them.
 """
 import hashlib
 import json
-from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -246,48 +245,3 @@ def commitments(s: Session, status: str = "open", limit: int = 50, node_id: int 
              "derived": True, "origin": "model", "evidence": {"source_item_id": r["source_item_id"],
              "source": r["source"], "occurred_at": r["occurred_at"],
              "span": {"start": r["span_start"], "end": r["span_end"]}}} for r in rows]
-
-
-def decisions(s: Session, limit: int = 50) -> list[dict]:
-    """Return only model-derived decisions and their verified source spans."""
-    rows = s.execute(text("""
-        SELECT n.id, n.props, e.source_item_id, e.span_start, e.span_end, si.source, si.occurred_at
-        FROM nodes n JOIN edges e ON e.dst = n.id AND e.type = 'HAS_DECISION' AND e.extractor = :ex
-        JOIN source_items si ON si.id = e.source_item_id WHERE n.type = 'Decision'
-        ORDER BY si.occurred_at DESC NULLS LAST LIMIT :limit
-    """), {"ex": EXTRACTOR, "limit": limit}).mappings()
-    return [{"id": r["id"], "what": r["props"].get("what"), "derived": True, "origin": "model",
-             "evidence": {"source_item_id": r["source_item_id"], "source": r["source"],
-                          "occurred_at": r["occurred_at"],
-                          "span": {"start": r["span_start"], "end": r["span_end"]}}} for r in rows]
-
-
-def relationship_history(s: Session, person: int, before: datetime | None = None, days: int = 90, limit: int = 20) -> list[dict]:
-    """Rank people who shared dated message activity with ``person`` in one past window."""
-    end = before or datetime.now(UTC)
-    start = end - timedelta(days=days)
-    rows = s.execute(text("""
-        WITH head AS (SELECT COALESCE((SELECT canonical_id FROM canonical WHERE node_id = :person), :person) id),
-        mine AS (SELECT id FROM head UNION SELECT node_id FROM canonical WHERE canonical_id = (SELECT id FROM head)),
-        my_items AS (
-          SELECT DISTINCT e.source_item_id, COALESCE(e.valid_from, si.occurred_at) at
-          FROM edges e JOIN source_items si ON si.id = e.source_item_id
-          WHERE e.type IN ('SENT', 'RECEIVED') AND e.source_item_id IS NOT NULL
-            AND (e.src IN (SELECT id FROM mine) OR e.dst IN (SELECT id FROM mine))
-            AND COALESCE(e.valid_from, si.occurred_at) >= :start AND COALESCE(e.valid_from, si.occurred_at) < :end
-        ), shared AS (
-          SELECT COALESCE((SELECT canonical_id FROM canonical WHERE node_id =
-                     CASE WHEN e.type = 'SENT' THEN e.src ELSE e.dst END),
-                     CASE WHEN e.type = 'SENT' THEN e.src ELSE e.dst END) other, mi.source_item_id, mi.at
-          FROM my_items mi JOIN edges e ON e.source_item_id = mi.source_item_id
-          WHERE e.type IN ('SENT', 'RECEIVED')
-            AND (CASE WHEN e.type = 'SENT' THEN e.src ELSE e.dst END) NOT IN (SELECT id FROM mine)
-        )
-        SELECT n.id, n.name, count(DISTINCT shared.source_item_id) interactions,
-               array_agg(DISTINCT shared.source_item_id) FILTER (WHERE shared.source_item_id IS NOT NULL) evidence_ids
-        FROM shared JOIN nodes n ON n.id = shared.other WHERE n.type = 'Person'
-        GROUP BY n.id, n.name ORDER BY interactions DESC, n.name LIMIT :limit
-    """), {"person": person, "start": start, "end": end, "limit": limit}).mappings()
-    return [{"person": {"id": r["id"], "name": r["name"]}, "interactions": r["interactions"],
-             "window": {"from": start, "to": end}, "evidence_source_item_ids": (r["evidence_ids"] or [])[:5],
-             "derived": True} for r in rows]

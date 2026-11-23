@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { InlineError } from "@/components/ui";
-import { api, type GEdge, type GNode } from "@/lib/api";
+import { api, type GEdge, type GNode, type Thing } from "@/lib/api";
 import { useLiveSearch, useRequest } from "@/lib/hooks";
 
 type Option = { label: string; type: string; src: number; dst: number };
@@ -14,16 +14,16 @@ export default function ConnectTo({ id, name, onLinkedAction }: {
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
-  const [other, setOther] = useState<GNode | null>(null);
+  const [other, setOther] = useState<Thing | null>(null);
   const [choice, setChoice] = useState<Option | null>(null);
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const hits = useLiveSearch(open && !other ? q : "",
-    (text) => api.findNodes(text).then((r) => r.nodes.filter((n) => n.id !== id).slice(0, 8)));
+    (text, signal) => api.findThings(text, {}, signal).then((r) => r.results.filter((n) => n.id !== id).slice(0, 8)));
   // The kinds of link the API allows between these two; the first is picked until you pick another.
-  const options = useRequest(other ? `${id}-${other.id}` : null, () => api.linkOptions(id, other!.id));
+  const options = useRequest(other ? `${id}-${other.id}` : null, (signal) => api.linkOptions(id, other!.id, signal));
   const offered: Option[] = options.data?.options ?? [];
   const chosen = choice && offered.includes(choice) ? choice : offered[0] ?? null;
 
@@ -43,7 +43,8 @@ export default function ConnectTo({ id, name, onLinkedAction }: {
     setSaving(true);
     setError(null);
     api.addLink(chosen.src, chosen.dst, chosen.type, note.trim() || undefined).then((e) => {
-      onLinkedAction(other, { id: e.id, src: e.src, dst: e.dst, type: e.type, extractor: "user", confidence: 1 });
+      onLinkedAction({ id: other.id, type: other.type, name: other.name, key: "", category: other.category },
+        { id: e.id, src: e.src, dst: e.dst, type: e.type, origin: "user", stated: true });
       setDone(`Connected "${name}" to "${other.name}".`);
       reset();
     }).catch((err) => setError(`Couldn't connect them. (${String(err)})`)).finally(() => setSaving(false));

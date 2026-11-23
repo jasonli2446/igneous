@@ -6,10 +6,20 @@ are unchanged (`pipeline.GATED`), once per writing transaction. Such a stage rea
 while it runs stays for the next run, a failed run keeps them all, and no stage consumes another's changes.
 
 The graph version is bumped once each time a rebuild publishes (pipeline.publishing) and by each correction made
-through the API, so the explorer and the MCP server know when a cached view is stale.
+through the API, so the explorer and the MCP server know when a cached view is stale. `cached` keeps a reader's
+results, in the process that read them, for as long as the graph stays at the version they were read at.
 """
+import threading
+from collections import OrderedDict
+from collections.abc import Callable
+from typing import Any
+
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+CACHE_SIZE = 256  # results kept, least recently used first out
+_cache: OrderedDict[tuple, Any] = OrderedDict()
+_lock = threading.Lock()
 
 
 def mark(s: Session, node_ids: set[int], reason: str) -> None:
@@ -52,3 +62,25 @@ def touch(s: Session) -> None:
 
 def version(s: Session) -> int:
     return s.execute(text("SELECT version FROM graph_version WHERE id = true")).scalar_one()
+
+
+def cached(s: Session, key: tuple, compute: Callable[[], Any]) -> Any:
+    """`compute()`, remembered under `key` while the graph version stays what it is now, so a newer graph never gets
+    an older answer. Callers must not change what it returns."""
+    full = (version(s), *key)
+    with _lock:
+        if full in _cache:
+            _cache.move_to_end(full)
+            return _cache[full]
+    value = compute()
+    with _lock:
+        _cache[full] = value
+        while len(_cache) > CACHE_SIZE:
+            _cache.popitem(last=False)
+    return value
+
+
+def forget() -> None:
+    """Drop every cached result (a test's database starts over at the same version)."""
+    with _lock:
+        _cache.clear()
