@@ -11,11 +11,13 @@ identity (graph/resolve.py). A company's card (Apple's X-ABShowAs:COMPANY, or on
 names no one. The card's organization, title and postal addresses are in its text, which the reader shows; cards are
 never chunked or searched.
 
-A card is keyed by its UID (vCard's UID, or Apple's X-ABUID), else by its name and identifiers, so importing the same
-export again changes nothing, and a card in Takeout's Contacts and in Google Contacts' own export is one record. An
-import adds and updates cards and never removes one: an export doesn't say which address book it is, so a card that
-isn't in it may come from another one you imported. A card with no phone number and no email address names no
-identity, and is counted, not stored.
+A card is keyed by its UID (vCard's UID, or Apple's X-ABUID), else, as in Google Contacts' export, which has none, by
+the numbers and addresses it holds: what it identifies. So importing the same export again changes nothing, a contact
+renamed since the last export is the same card under its new name, and a card in Takeout's Contacts and in Google
+Contacts' own export is one record. Two cards of one import that hold exactly the same numbers and addresses are one:
+the first is kept, and the import counts the other. An import adds and updates cards and never removes one: an export
+doesn't say which address book it is, so a card that isn't in it may come from another one you imported. A card with
+no phone number and no email address names no identity, and is counted, not stored.
 """
 import hashlib
 import re
@@ -33,9 +35,16 @@ class VCardError(ValueError):
     """The input holds no contact cards; the message is safe to show to the user."""
 
 
-def _phone(p: Prop) -> str:
-    """A TEL value as written, without vCard 4's tel: scheme or an extension."""
-    return re.sub(r"^tel:", "", p.text.strip(), flags=re.I).split(";ext=")[0].strip()
+# An extension at the end of a number: vCard 4's ";ext=42", or as people write one ("ext. 42", "x42", "#42", ",42").
+EXTENSION = re.compile(r"\s*(?:;\s*ext\s*=|(?<![a-z])(?:extension|extn|ext|x)\.?:?|#|,)\s*(\d{1,8})\s*$", re.I)
+
+
+def _phone(p: Prop) -> tuple[str, str]:
+    """A TEL value as written, without vCard 4's tel: scheme, and its extension. The number alone is the key: an
+    extension reaches a person through a number others share, and Messages never writes one."""
+    value = re.sub(r"^tel:", "", p.text.strip(), flags=re.I).strip()
+    m = EXTENSION.search(value)
+    return (value[:m.start()].strip(), m.group(1)) if m else (value, "")
 
 
 def _name(c: Component, org: str) -> str | None:
@@ -60,9 +69,9 @@ def _types(p: Prop) -> str:
 def card(c: Component) -> SourceItem | None:
     """One VCARD as a record, or None when it names no phone number or email address."""
     emails = list(dict.fromkeys(a for p in c.all("EMAIL") if (a := contentlines.address(p.value))))
-    tels = [(p, _phone(p)) for p in c.all("TEL")]
+    tels = [(p, *_phone(p)) for p in c.all("TEL")]
     phones, seen = [], set()
-    for _p, number in tels:
+    for _p, number, _ext in tels:
         key = norm_phone(number) or number
         if number and key not in seen:
             seen.add(key)
@@ -82,13 +91,13 @@ def card(c: Component) -> SourceItem | None:
     lines = [name or "(no name)"]
     if orgs or titles:
         lines.append(", ".join(dict.fromkeys([*orgs[:1], *titles[:1]])))
-    lines += [f"Phone{_types(p)}: {number}" for p, number in tels if number in phones]
+    lines += [f"Phone{_types(p)}: {number}" + (f" ext. {ext}" if ext else "") for p, number, ext in tels
+              if number in phones]
     lines += [f"Email: {e}" for e in emails]
     lines += [f"Address{kind}: {place}" for place, kind in addresses]
     uid = c.text("UID") or c.text("X-ABUID")
     keys = sorted({*emails, *(norm_phone(p) or p for p in phones)})
-    external_id = f"uid/{uid}" if uid else "card/" + hashlib.sha1(
-        f"{(name or '').lower()}|{','.join(keys)}".encode()).hexdigest()[:20]
+    external_id = f"uid/{uid}" if uid else "card/" + hashlib.sha1(",".join(keys).encode()).hexdigest()[:20]
     return SourceItem(source="vcard", external_id=external_id, title=name, body_text="\n".join(dict.fromkeys(lines)),
                       mime="text/vcard",
                       raw_meta={"emails": emails, "phones": phones, "orgs": orgs, "titles": titles,
@@ -96,7 +105,8 @@ def card(c: Component) -> SourceItem | None:
 
 
 def cards(data: bytes | str) -> tuple[list[SourceItem], int]:
-    """The records of every card in one .vcf file, and how many cards named no phone number or email address."""
+    """The record of every card in one .vcf file, in its order, and how many cards named no phone number or email
+    address."""
     out, skipped = [], 0
     for c in contentlines.parse(data):
         if c.name != "VCARD":
@@ -109,44 +119,48 @@ def cards(data: bytes | str) -> tuple[list[SourceItem], int]:
     return out, skipped
 
 
-def _files(paths: list[Path]) -> Iterator[tuple[str, bytes]]:
-    """(name, bytes) of every .vcf among `paths`: files, folders (searched), and zips (an iCloud or Takeout download)."""
+def _files(paths: list[Path]) -> Iterator[tuple[str, Callable[[], bytes]]]:
+    """(name, its bytes when read) of every .vcf among `paths`: files, folders (searched), and zips (an iCloud or
+    Takeout download). Nothing is read until asked."""
     for p in paths:
         p = Path(p).expanduser()
         if not p.exists():
             raise VCardError(f"{p} does not exist.")
         if p.is_dir():
             for f in sorted(p.rglob("*")):
-                if f.is_file() and f.suffix.lower() == ".vcf":
-                    yield f.name, f.read_bytes()
+                if f.is_file() and f.suffix.lower() in (".vcf", ".vcard"):
+                    yield f.name, f.read_bytes
         elif zipfile.is_zipfile(p):
             with zipfile.ZipFile(p) as zf:
                 for name in sorted(zf.namelist()):
-                    if name.lower().endswith(".vcf") and not name.startswith("__MACOSX"):
-                        yield name.rsplit("/", 1)[-1], zf.read(name)
+                    if name.lower().endswith((".vcf", ".vcard")) and not name.startswith("__MACOSX"):
+                        yield name.rsplit("/", 1)[-1], lambda zf=zf, name=name: zf.read(name)
         elif p.suffix.lower() in (".vcf", ".vcard"):
-            yield p.name, p.read_bytes()
+            yield p.name, p.read_bytes
         else:
             raise VCardError(f"{p.name} is not a contacts export: expected a .vcf file, a folder of them, or a zip.")
 
 
 def read(paths: list[Path]) -> tuple[list[SourceItem], dict]:
     """(records, report): every card of every file, each once (a card in two files, as Takeout writes one per label, is
-    one record)."""
+    one record). `same_as_another`: cards that hold exactly the numbers and addresses of a different card read before
+    them, read as that card."""
     found: dict[str, SourceItem] = {}
-    skipped, files = 0, []
-    for name, data in _files(paths):
-        items, n = cards(data)
+    skipped = same = 0
+    files = []
+    for name, content in _files(paths):
+        items, n = cards(content())
         files.append(name)
         skipped += n
         for item in items:
-            found.setdefault(item.external_id, item)
+            first = found.setdefault(item.external_id, item)
+            same += first is not item and (first.title, first.body_text) != (item.title, item.body_text)
     if not files:
         raise VCardError("No .vcf file found. Export your contacts as vCard and give that file.")
     items = list(found.values())
     if not items and not skipped:
         raise VCardError("No contact cards found in the .vcf file.")
-    report = {"cards": len(items), "without_phone_or_email": skipped, "files": files,
+    report = {"cards": len(items), "without_phone_or_email": skipped, "same_as_another": same, "files": files,
               "phones": sum(len(i.raw_meta["phones"]) for i in items),
               "emails": sum(len(i.raw_meta["emails"]) for i in items)}
     return items, report
@@ -177,7 +191,8 @@ def resolve_paths(path: str | list[str] | None) -> list[Path]:
 
 
 def preflight(paths: list[Path]) -> dict:
-    """Cheap synchronous check: fail fast with a readable reason when there's nothing to read."""
+    """Cheap synchronous check (lists names, reads no card): fail fast with a readable reason when there's nothing to
+    read."""
     names = [name for name, _ in _files(paths)]
     if not names:
         raise VCardError("No .vcf file found. Export your contacts as vCard and give that file.")

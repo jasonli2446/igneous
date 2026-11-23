@@ -177,15 +177,72 @@ def test_phone_keyed_people_join_their_mail_identities_and_a_later_contacts_sync
     assert counts["vcard"] == 4 and counts["gcontacts"] == 1
 
 
-def test_takeout_contacts_are_the_same_cards(tmp_path):
+def test_takeout_contacts_are_the_same_cards_and_only_its_contacts_folder_is_read(tmp_path):
     z = tmp_path / "takeout-20250801T000000Z-001.zip"
     with zipfile.ZipFile(z, "w") as zf:
         zf.writestr("Takeout/Contacts/All Contacts/All Contacts.vcf", GOOGLE)
         zf.writestr("Takeout/Contacts/Work/Work.vcf", GOOGLE.split("END:VCARD")[0] + "END:VCARD\n")
+        zf.writestr("Takeout/Google Chat/Groups/DM abc/File-Ina.vcf", APPLE)  # a card someone shared in a chat
+        zf.writestr("Takeout/Drive/My Drive/old.vcf", V4)
     items, report = takeout.parse([z])
     direct = {i.external_id: i for i in vcard.cards(GOOGLE)[0]}
-    assert {i.external_id for i in items if i.source == "vcard"} == set(direct)  # Owen's card in two lists: once
-    assert report["parts"] == {"contacts": 3} and all(i.raw_meta["product"] == "Contacts" for i in items)
+    # Owen's card in two lists is one record, the very record Google Contacts' own export gives.
+    assert {i.external_id: (i.title, i.body_text, i.raw_meta) for i in items if i.source == "vcard"} == {
+        k: (i.title, i.body_text, i.raw_meta) for k, i in direct.items()}
+    assert report["parts"] == {"contacts": 3}
+
+
+def test_a_card_imported_through_takeout_and_its_own_export_is_one_record_that_stays_as_it_is(db, tmp_path):
+    z = tmp_path / "takeout-20250801T000000Z-001.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("Takeout/Contacts/All Contacts/All Contacts.vcf", GOOGLE)
+    export = tmp_path / "contacts.vcf"
+    export.write_text(GOOGLE)
+    assert takeout.run_import(db, [z])["inserted"] == 3
+    assert vcard.run_import(db, [export])["unchanged"] == 3
+    assert takeout.run_import(db, [z])["unchanged"] == 3
+    counts = {row["id"]: row["items"] for row in sources.describe(db)}
+    assert (counts["vcard"], counts["takeout"]) == (3, 0)  # cards count where cards are, however they came
+
+
+def test_extensions_vcard_21_and_two_cards_of_one_number_set(tmp_path):
+    export = """BEGIN:VCARD
+VERSION:2.1
+N;CHARSET=X-UNKNOWN;QUOTED-PRINTABLE:Mart=C3=ADnez;Luc=C3=ADa;;;
+TEL;WORK;VOICE:614-555-0103 ext. 42
+TEL;CELL:(614) 555-0177 x9
+END:VCARD
+BEGIN:VCARD
+VERSION:3.0
+FN:Lucy Martinez
+TEL;TYPE=CELL:+1 614 555 0177
+TEL;TYPE=WORK:614.555.0103
+END:VCARD
+"""
+    (lucia,), _ = vcard.cards(export[:export.index("END:VCARD") + len("END:VCARD")])
+    assert lucia.title == "Lucía Martínez" and lucia.raw_meta["phones"] == ["614-555-0103", "(614) 555-0177"]
+    assert card_keys(lucia.raw_meta) == ["+16145550103", "+16145550177"]  # an extension is never part of the key
+    assert "Phone (work): 614-555-0103 ext. 42" in lucia.body_text.splitlines()
+    # The same numbers on a second card of the same export: one card, the first, and the import counts the other.
+    (tmp_path / "contacts.vcf").write_text(export)
+    items, report = vcard.read([tmp_path / "contacts.vcf"])
+    assert [i.title for i in items] == ["Lucía Martínez"] and report["same_as_another"] == 1
+
+
+def test_preflight_lists_files_without_reading_them(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    (tmp_path / "contacts.vcf").write_text(GOOGLE)
+    with zipfile.ZipFile(tmp_path / "icloud.zip", "w") as zf:
+        zf.writestr("vCards.vcf", APPLE)
+
+    def unread(*args, **kwargs):
+        raise AssertionError("preflight read a file")
+
+    monkeypatch.setattr(Path, "read_bytes", unread)
+    monkeypatch.setattr(zipfile.ZipFile, "read", unread)
+    assert vcard.preflight([tmp_path / "contacts.vcf", tmp_path / "icloud.zip"]) == {"files": ["contacts.vcf",
+                                                                                              "vCards.vcf"]}
 
 
 def test_the_cli_imports_an_export(db, tmp_path, monkeypatch):
@@ -194,3 +251,25 @@ def test_the_cli_imports_an_export(db, tmp_path, monkeypatch):
     result = CliRunner().invoke(cli, ["import", "vcard", str(export)])
     assert result.exit_code == 0, result.output
     assert click.unstyle(result.output).startswith("contact cards: 1, phone numbers: 2, email addresses: 1; 1 new")
+
+
+def test_a_contact_renamed_between_exports_is_the_same_card_and_keeps_naming_its_numbers(db, tmp_path):
+    """Google's export has no UID: a card is keyed by what it identifies. A rename between two exports updates the
+    card, which goes on naming and joining its address and number (two cards would make both identifiers shared, and
+    neither card would name them)."""
+    from igneous.graph import spine
+
+    card = "BEGIN:VCARD\nVERSION:3.0\nFN:{name}\nN:{family};Dana;;;\nEMAIL;TYPE=INTERNET:dana@x.test\n" \
+           "TEL;TYPE=CELL:+1 440 555 0123\nCATEGORIES:myContacts\nEND:VCARD\n"
+    export = tmp_path / "contacts.vcf"
+    export.write_text(card.format(name="Dana Kimura", family="Kimura"))
+    vcard.run_import(db, [export])
+    export.write_text(card.format(name="Dana Kimura-Ito", family="Kimura-Ito"))
+    again = vcard.run_import(db, [export])
+    assert (again["inserted"], again["updated"]) == (0, 1)
+    db.commit()
+    spine.run(db)
+    people = dict(db.execute(text("SELECT key, name FROM nodes WHERE type = 'Person' AND key IN "
+                                  "('dana@x.test', '+14405550123')")).all())
+    assert people == {"dana@x.test": "Dana Kimura-Ito", "+14405550123": "Dana Kimura-Ito"}
+    assert db.execute(text("SELECT count(*) FROM edges WHERE type = 'SAME_AS' AND extractor = 'contacts'")).scalar() == 1

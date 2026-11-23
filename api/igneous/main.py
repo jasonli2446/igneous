@@ -223,7 +223,8 @@ async def import_linkedin(request: Request):
 async def import_vcard(request: Request):
     """Import a contacts export (vCard .vcf from Google Contacts, Apple Contacts or iCloud) as a background job; poll
     /jobs/{id}. Send multipart `file` parts (the .vcf files) or JSON/form `{"path": "<file, folder or zip>"}`. Its
-    result: {cards, phones, emails, without_phone_or_email, files, inserted, updated, unchanged, redactions}."""
+    result: {cards, phones, emails, without_phone_or_email, same_as_another, files, inserted, updated, unchanged,
+    redactions}."""
     from igneous.connectors import vcard
 
     req = await _import_request(request, "vcard")

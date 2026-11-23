@@ -165,7 +165,7 @@ def test_a_bad_upload_is_refused_and_leaves_nothing_behind(committed_db):
     before = staged_folders()
     client = TestClient(app, raise_server_exceptions=False)
     for content in (b"PK\x03\x04 not really a zip", damaged_zip()):
-        for route in ("/import/takeout", "/import/linkedin", "/import/ai-export"):
+        for route in ("/import/takeout", "/import/linkedin", "/import/ai-export", "/import/vcard"):
             response = client.post(route, files={"file": ("export.zip", content, "application/zip")})
             assert response.status_code == 422, (route, response.text)
     assert staged_folders() == before

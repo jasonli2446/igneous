@@ -192,9 +192,10 @@ def import_vcard(paths: list[Path] = typer.Argument(..., help="a contacts export
     t = time.time()
     with session() as s:
         result = vcard.run_import(s, resolved)
-    skipped = result["without_phone_or_email"]
+    skipped, same = result["without_phone_or_email"], result["same_as_another"]
     print(f"contact cards: {result['cards']}, phone numbers: {result['phones']}, email addresses: {result['emails']}"
           + (f", cards without either (skipped): {skipped}" if skipped else "")
+          + (f", cards with exactly another card's numbers and addresses (read as that one): {same}" if same else "")
           + f"; {_stats(result)} in {time.time() - t:.1f}s")
 
 

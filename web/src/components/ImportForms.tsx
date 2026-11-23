@@ -220,6 +220,14 @@ function VCardForm({ onDone }: { onDone: () => void }) {
                   + "no one here and were skipped."}
             </p>
           )}
+          {done.same_as_another > 0 && (
+            <p className="mt-3 text-xs leading-5 text-muted">
+              {done.same_as_another === 1
+                ? "1 card holds exactly the numbers and addresses of another card, so it was read as that card."
+                : `${nf.format(done.same_as_another)} cards hold exactly the numbers and addresses of another card, so `
+                  + "each was read as that card."}
+            </p>
+          )}
         </div>
       )}
     </div>

@@ -211,7 +211,8 @@ export type TakeoutResult = ImportStats & {
 };
 export type LinkedInResult = ImportStats & { connections: number; positions: number; education: number; profile: number };
 export type VCardResult = ImportStats & {
-  cards: number; phones: number; emails: number; without_phone_or_email: number; files: string[];
+  cards: number; phones: number; emails: number; without_phone_or_email: number; same_as_another: number;
+  files: string[];
 };
 
 export type Job = {
