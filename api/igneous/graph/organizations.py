@@ -42,6 +42,9 @@ PERSONAL_DOMAINS = frozenset({
     "aol.com", "gmail.com", "hotmail.com", "icloud.com", "live.com", "me.com",
     "msn.com", "outlook.com", "proton.me", "protonmail.com", "yahoo.com",
 })
+# The WORKED_AT edges from you that make an organization yours: your resume or LinkedIn profile (graph/profile.py),
+# what you said, and what this stage finds from your own mail.
+YOUR_ORGS = ("profile", "user", EXTRACTOR)
 
 
 def domain_of(value: str | None) -> str | None:
@@ -271,13 +274,15 @@ def _domain_names(s: Session, domains: set[str]) -> dict[str, tuple[str, str]]:
 
 def _organization(s: Session, key: str, name: str, named: str | None) -> int:
     """The Organization node for `key`: created when missing, its name refreshed when this stage names it (`named`)
-    and your resume didn't."""
+    and your resume didn't, and named when nothing else names it (it shows its key: the record that named it is
+    gone)."""
     props = {"kind": _kind(key, name), "inferred_by": EXTRACTOR, **({"named_from": named} if named else {})}
     return s.execute(text("""
         INSERT INTO nodes (type, key, name, props) VALUES ('Organization', :k, :n, CAST(:p AS jsonb))
         ON CONFLICT (type, key) DO UPDATE SET
-            name = CASE WHEN CAST(:named AS text) IS NULL OR nodes.props->>'named_by' = 'profile' THEN nodes.name
-                        ELSE EXCLUDED.name END,
+            name = CASE WHEN nodes.props->>'named_by' = 'profile' THEN nodes.name
+                        WHEN CAST(:named AS text) IS NOT NULL OR nodes.name = nodes.key THEN EXCLUDED.name
+                        ELSE nodes.name END,
             props = CASE WHEN CAST(:named AS text) IS NULL THEN nodes.props
                          ELSE nodes.props || jsonb_build_object('named_from', CAST(:named AS text)) END
         RETURNING id

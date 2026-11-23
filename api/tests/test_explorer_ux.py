@@ -31,17 +31,20 @@ def facts(sources=("email",)):
 
 
 def test_prompt_withholds_details_for_sources_not_opted_in():
-    prompt, used = summary.prompt_for(facts(), frozenset({"email"}), [])
+    prompt, used = summary.prompt_for(facts(), frozenset({"email"}), [], {1, 2, 3})
     assert "Bo Sample" in prompt
     assert "Secret Chat" not in prompt and "1 other thread connection" in prompt
     assert used == []
-    none_allowed, _ = summary.prompt_for(facts(), frozenset(), [])
+    none_allowed, _ = summary.prompt_for(facts(), frozenset(), [], {1, 2, 3})
     assert "Bo Sample" not in none_allowed
+    # A connection the model policy doesn't let it name is a count, whatever its sources.
+    unnamed, _ = summary.prompt_for(facts(), frozenset({"email", "imessage"}), [], {1})
+    assert "Bo Sample" not in unnamed and "1 other person connection" in unnamed
 
 
 def test_prompt_includes_only_supplied_snippets_and_reports_their_sources():
     snip = [{"id": 77, "occurred_at": None, "title": "Quarterly forecast"}]
-    prompt, used = summary.prompt_for(facts(), frozenset({"email"}), snip)
+    prompt, used = summary.prompt_for(facts(), frozenset({"email"}), snip, {1, 2})
     assert "Quarterly forecast" in prompt and used == [77]
 
 
@@ -53,7 +56,15 @@ def test_fallback_is_plain_language_with_names_not_ids():
     assert "no messages" in summary.fallback(empty)
 
 
+def named(monkeypatch):
+    """The model policy lets every node in facts() be named (it has no records in the test database)."""
+    from igneous import llm
+
+    monkeypatch.setattr(llm, "visible_nodes", lambda s, ids, sources=None: set(ids) if sources else set())
+
+
 def run(db, monkeypatch, *, enabled, sources, model):
+    named(monkeypatch)
     monkeypatch.setattr(summary, "gather", lambda s, n: facts())
     monkeypatch.setattr(summary, "snippets", lambda s, n, src: [])
     monkeypatch.setattr(summary.settings, "llm_enabled", enabled)
@@ -88,6 +99,7 @@ def test_summary_uses_model_and_caches_it(db, monkeypatch):
         calls.append(user)
         return "Ada talks mostly with Bo Sample."
 
+    named(monkeypatch)
     monkeypatch.setattr(summary, "gather", lambda s, n: facts())
     monkeypatch.setattr(summary, "snippets", lambda s, n, src: [])
     monkeypatch.setattr(summary.settings, "llm_enabled", True)

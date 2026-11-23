@@ -17,8 +17,8 @@ verdicts (graph/verify.py) are stored the moment they arrive.
   introductions       who introduced whom (merged people, never a service)
   topics, entities    topic merges, and the projects you return to with the people in them (never you)
   profile             your resume and LinkedIn (needs you)
-  threads, backbone   life threads, then threads under the orgs on your resume (needs profile and threads)
-  organizations       where people work (merged people)
+  organizations       where people work, you included (merged people, and the names your resume gives orgs)
+  threads, backbone   life threads, then threads under your orgs (needs profile, organizations and threads)
   verify              checks the derived links every stage above wrote
   corrections         re-applies every correction committed before it, so a correction always wins
 
@@ -30,22 +30,10 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from datetime import datetime
 
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
-
-
-def watermark(s: Session, stage: str) -> datetime:
-    s.execute(text("INSERT INTO pipeline_state (stage) VALUES (:s) ON CONFLICT DO NOTHING"), {"s": stage})
-    return s.execute(text("SELECT watermark FROM pipeline_state WHERE stage = :s"), {"s": stage}).scalar_one()
-
-
-def advance(s: Session, stage: str, to: datetime) -> None:
-    s.execute(text("UPDATE pipeline_state SET watermark = :t, updated_at = now() WHERE stage = :s"),
-              {"s": stage, "t": to})
-
 
 Progress = Callable[..., None]  # progress(state: dict, force: bool = False): the run's state, see `run`
 
@@ -165,9 +153,9 @@ STAGES: tuple[Stage, ...] = (
     Stage("topics", "Merging duplicate topics", _topics, derived=True),
     Stage("entities", "Finding the projects, groups and series you return to", _entities, derived=True),
     Stage("profile", "Reading your resume and LinkedIn", _profile, derived=True),
+    Stage("organizations", "Finding where people work", _organizations, derived=True),
     Stage("threads", "Finding trips, classes, jobs and projects", _threads, derived=True),
     Stage("backbone", "Placing them under your schools and workplaces", _backbone, derived=True),
-    Stage("organizations", "Finding where people work", _organizations, derived=True),
     Stage("verify", "Checking each connection against its sources", _verify, derived=True),
     Stage("corrections", "Applying your corrections", _corrections, derived=True),
 )

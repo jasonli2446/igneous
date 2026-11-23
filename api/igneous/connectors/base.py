@@ -303,11 +303,12 @@ def redact_stored(s: Session, batch: int = 500) -> dict:
     the pipeline's first step, so the spine and the chunks only ever read redacted text.
 
     Each item gets the transform `run_sync` gives new ones (`stored`). One whose title or text changes is rewritten
-    with its content hash, the spans graph edges hold into its text move with it, nodes named by its old title take
-    the new one, and `updated_at` moves so the spine and the chunk stage redo it (its chunks, and so their
-    embeddings, are made again; the spine records the change for the stages it concerns). Any other item only records
-    the version and the hash of its stored content, so syncing it again reads as unchanged. With every item current,
-    this is one index lookup.
+    with its content hash, the spans graph edges hold into its text move with it, and nodes named by its old title take
+    the new one. Its new content hash makes the spine and the chunk stage read it again, as any change of content does
+    (each stage reads a record whose hash differs from the one it last read): its chunks, and so their embeddings, are
+    made again, and the spine records the change for the stages it concerns. Any other item only records the version
+    and the hash of its stored content, so syncing it again reads as unchanged. With every item current, this is one
+    index lookup.
     """
     checked = changed = 0
     after = 0

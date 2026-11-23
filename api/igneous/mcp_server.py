@@ -98,9 +98,9 @@ def get_node(node_id: int) -> dict:
 def correspondents(person_node_id: int, limit: int = 20) -> list[dict]:
     """A person's real relationships, closest first: two-way, weighted toward recent contact, one-on-one and
     small-group talk counting most (a big group chat says little about any one member). Automated senders excluded."""
-    from igneous.graph.traversal import _canon_head, relationships
+    from igneous.graph.traversal import relationships
     with SessionLocal() as s:
-        head = _canon_head(s, person_node_id)
+        head = identity.head(s, person_node_id)
         rel = relationships(s, head, min(limit, 60))
         names = dict(s.execute(text("SELECT id, name FROM nodes WHERE id = ANY(:i)"), {"i": [p for p, _, _ in rel]}).all())
     return [{"node_id": p, "name": names.get(p), "closeness": st, "messages": r["msgs"], "weeks_in_touch": r["weeks"],
@@ -160,9 +160,6 @@ def ask(question: str) -> dict:
                           for c in r["citations"]]}
 
 
-_VIEW: dict = {}  # the big picture per (owner, graph version): it only changes when the graph does
-
-
 def _node_brief(s, ids: list[int]) -> list[dict]:
     """id, type, name and the one-line context (dates, size, kind) for each node, in the given order."""
     rows = {r["id"]: r for r in s.execute(text("""
@@ -195,12 +192,11 @@ def me() -> dict:
     same view the explorer opens on. Start here."""
     from igneous.graph.traversal import view
     with SessionLocal() as s:
-        seed = identity.self_id(s)
-        if seed is None:
-            return {"error": "no owner identified yet: run the pipeline"}
-        from igneous.graph import dirty
-        key = (seed, dirty.version(s))
-        g = _VIEW.get(key) or _VIEW.setdefault(key, view(s, seed))
+        g = view(s)  # kept per graph version, shared with the explorer
+        if g["empty"]:
+            return {"error": "no owner: no source says which person is the user (several people's mailboxes, or none "
+                             "of the user's own accounts connected), or nothing links them to anyone yet; use find to "
+                             "start from a person"}
         head = g["seed"]
         name = s.execute(text("SELECT name FROM nodes WHERE id = :i"), {"i": head}).scalar()
         cat = {n["id"]: n.get("category") for n in g["nodes"]}
@@ -265,7 +261,10 @@ def why_connected(a: int, b: int) -> dict:
     directly linked, the shortest path between them."""
     from igneous.graph.traversal import explain
     with SessionLocal() as s:
-        r = explain(s, a, b)
+        try:
+            r = explain(s, a, b)
+        except (identity.NotFound, ValueError) as e:
+            return {"error": str(e)}
 
     def link(e: dict) -> dict:
         return {"type": e["type"], "from": e.get("src_name"), "to": e.get("dst_name"), "made_by": e["extractor"],
@@ -288,14 +287,13 @@ def timeline(node_id: Annotated[int, Field(ge=1)], other_node_id: Annotated[int,
     """Dated activity for a node, or direct relationship history with `other_node_id`, newest first.
     Resolves merged identities; returns bounded graph metadata and source item ids, without source text.
     Use `read_item` on an evidence source_item_id for the underlying record."""
-    from igneous.timeline import EntityNotFoundError
     from igneous.timeline import timeline as _timeline
 
     with SessionLocal() as s:
         try:
             return _timeline(s, a=node_id, b=other_node_id, limit=limit)
-        except EntityNotFoundError as e:
-            return {"error": f"no node {e.args[0]}"}
+        except identity.NotFound as e:
+            return {"error": f"no node {e.node_id}"}
 
 
 @server.tool()
@@ -305,22 +303,21 @@ def commitments(node_id: Annotated[int, Field(ge=1)], status: Literal["open", "r
     For a person, includes messages they sent or received, not just promises they personally made: check `who`.
     Returns existing claims only, with status and verified source spans; never calls a model or changes data."""
     from igneous.graph.history import commitments as _commitments
-    from igneous.timeline import EntityNotFoundError
 
     with SessionLocal() as s:
         try:
             return {"node_id": node_id, "commitments": _commitments(s, status=status, limit=limit, node_id=node_id)}
-        except EntityNotFoundError as e:
-            return {"error": f"no node {e.args[0]}"}
+        except identity.NotFound as e:
+            return {"error": f"no node {e.node_id}"}
 
 
 @server.tool()
 def sources(node_id: int, limit: int = 10) -> list[dict]:
     """The records a node is made of, newest first (a person's messages with the user, a project's emails,
     chats, files and events, a message's own text), with item ids to cite and a snippet. Use `read_item` for full text."""
-    from igneous.items import node_sources
+    from igneous.items import sources_of
     with SessionLocal() as s:
-        r = node_sources(node_id, limit=min(limit, 30), offset=0, s=s)
+        r = sources_of(s, node_id, limit=min(limit, 30))
     return [{"item_id": c["id"], "source": c["source"], "title": c["title"],
              "date": str(c["date"])[:10] if c["date"] else None, "snippet": c["snippet"]} for c in r["items"]]
 

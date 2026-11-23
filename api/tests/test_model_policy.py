@@ -321,6 +321,30 @@ def test_node_summaries_carry_only_opted_in_records_and_names(graph, monkeypatch
     assert rec.leaked() == []
 
 
+def test_a_summary_names_a_connection_only_from_its_own_opted_in_evidence(graph, monkeypatch):
+    """Sam's mail is opted in; the organization only a LinkedIn record links him to is not. A summary of Sam never names
+    it: a connection carries the sources of its own evidence, never those of the person's mail."""
+    from igneous.graph.summary import summarize
+
+    g = graph
+    with SessionLocal() as s:
+        org = _node(s, "Organization", "org:secretcorp", "SecretCorp Holdings")
+        item = _item(s, "linkedin", "connections/sam", "LinkedIn connection", "Sam Shared, SecretCorp Holdings", T0)
+        _edge(s, g["sam"], org, "WORKED_AT", "linkedin", item=item)
+        s.commit()
+    rec = _record_prompts(monkeypatch, "gmail")
+    with SessionLocal() as s:
+        out = summarize(s, g["sam"])
+    assert len(rec.prompts) == 1 and "Item: Sam Shared" in rec.prompts[0]
+    assert "SecretCorp" not in rec.prompts[0] and "1 other organization connection" in rec.prompts[0]
+    assert "SecretCorp Holdings" in [h["name"] for h in out["highlights"]]  # the inspector on this computer shows it
+    # Nothing a summary of Pat may name: Pat appears only in texts, so no model is asked at all.
+    rec = _record_prompts(monkeypatch, "gmail")
+    with SessionLocal() as s:
+        assert summarize(s, g["pat"])["generated_by"] == "fallback"
+    assert rec.prompts == []
+
+
 def test_extraction_reads_only_opted_in_messages(graph, monkeypatch):
     from igneous.graph import extract
 

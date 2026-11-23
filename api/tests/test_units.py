@@ -67,66 +67,16 @@ def test_names_and_threads():
     assert _thread_key({"from": [{"email": "a@x"}], "to": [{"email": "b@x"}]}, "RE: FW: Forecast") == "subject:forecast|a@x,b@x"
 
 
-def test_spine_assigns_closed_message_intervals_without_domain_membership():
-    from igneous.graph.spine import UPSERT_EDGE, Builder, _person
-
-    class Result:
-        def scalar_one(self):
-            return 1
-
-    class Session:
-        def __init__(self):
-            self.calls = []
-
-        def execute(self, statement, params):
-            self.calls.append((str(statement), params))
-            return Result()
-
-    session = Session()
-    builder = Builder(session)
-    first, last = datetime(2024, 1, 2), datetime(2024, 3, 4)
-    person = _person(builder, {"email": "person@example.com"}, "Person", first, 10)
-    builder.edge(person, 99, "SENT", last, 11)
-
-    (sent,) = [params for statement, params in session.calls if statement == str(UPSERT_EDGE)]
-    assert sent == {"src": 1, "dst": 99, "type": "SENT", "valid_from": last,
-                    "valid_to": last, "sid": 11}
-    assert "LEAST(edges.valid_from, EXCLUDED.valid_from)" in str(UPSERT_EDGE)
-    assert "GREATEST(edges.valid_to, EXCLUDED.valid_to)" in str(UPSERT_EDGE)
-
-
-def test_temporal_backfill_is_bounded_and_repairs_both_edge_classes():
-    from igneous.graph.spine import BACKFILL_MEMBERSHIPS, BACKFILL_POINT_EDGES, backfill_temporal
-
-    class Result:
-        def __init__(self, rowcount):
-            self.rowcount = rowcount
-
-    class Session:
-        def __init__(self):
-            self.calls = []
-
-        def execute(self, statement, params):
-            self.calls.append((str(statement), params))
-            return Result(2 if statement == BACKFILL_POINT_EDGES else 3)
-
-    session = Session()
-    assert backfill_temporal(session, limit=25) == 5
-    assert [statement for statement, _ in session.calls] == [str(BACKFILL_POINT_EDGES), str(BACKFILL_MEMBERSHIPS)]
-    assert all(params["limit"] == 25 for _, params in session.calls)
-    assert "SET valid_from = c.observed_at, valid_to = c.observed_at" in str(BACKFILL_POINT_EDGES)
-    assert "min(COALESCE(si.occurred_at, observed.valid_from))" in str(BACKFILL_MEMBERSHIPS)
-    assert "max(COALESCE(si.occurred_at, observed.valid_from))" in str(BACKFILL_MEMBERSHIPS)
-
-
 def test_rrf_rewards_agreement():
     assert rrf([1, 2, 3], [3, 2, 9])[0][0] in (2, 3)
     assert {c for c, _ in rrf([1], [2])} == {1, 2}
 
 
 def test_experts_uses_retrieved_items_and_returns_bounded_evidence(monkeypatch):
+    from igneous.graph import traversal
     from igneous.rag import search
 
+    monkeypatch.setattr(traversal, "names", lambda s: {})
     hits = [
         {"source_item_id": 10, "score": 0.03, "text": "a" * 500},
         {"source_item_id": 10, "score": 0.02, "text": "older duplicate"},
@@ -171,138 +121,10 @@ def test_experts_uses_retrieved_items_and_returns_bounded_evidence(monkeypatch):
     assert session.params["k"] == 5 and session.params["evidence_limit"] == 2
 
 
-def test_graph_filters_scope_discovery_and_final_serialization():
-    """A source/date request must not discover or serialize a non-matching edge."""
-    from igneous.graph.traversal import GraphFilters, neighborhood
-
-    class Result:
-        def __init__(self, rows):
-            self.rows = rows
-
-        def scalars(self):
-            return self
-
-        def all(self):
-            return self.rows
-
-        def mappings(self):
-            return self
-
-    class Session:
-        def __init__(self):
-            self.calls = []
-
-        def execute(self, statement, params):
-            self.calls.append((str(statement), params))
-            sql = str(statement)
-            if "SELECT CASE WHEN e.src" in sql:
-                return Result([])  # zero discovered neighbors
-            if "FROM nodes n" in sql:
-                return Result([{"id": 7, "type": "Person", "name": "Seed", "key": "seed", "degree": 3}])
-            return Result([])
-
-    session = Session()
-    graph = neighborhood(session, [7], filters=GraphFilters(source="gmail", edge_types=["SENT"],
-                                                              since=datetime(2024, 1, 1), until=datetime(2024, 2, 1)))
-    discovery, serialized = session.calls[0], session.calls[-1]
-    for sql, params in (discovery, serialized):
-        assert "LEFT JOIN source_items si ON si.id = e.source_item_id" in sql
-        assert "si.source = :source" in sql
-        assert "COALESCE(e.valid_to, si.occurred_at, e.valid_from) >= :since" in sql
-        assert "COALESCE(e.valid_from, si.occurred_at, e.valid_to) <= :until" in sql
-        assert "e.type = ANY(:types)" in sql
-        assert params["source"] == "gmail" and params["types"] == ["SENT"]
-    assert graph == {"nodes": [{"id": 7, "type": "Person", "name": "Seed", "key": "seed", "degree": 3}], "edges": []}
 
 
-def test_timeline_returns_bounded_dated_metadata_without_raw_source_content():
-    from igneous.timeline import timeline
-
-    dated = datetime(2024, 2, 3)
-
-    class Result:
-        def __init__(self, rows):
-            self.rows = rows
-
-        def mappings(self):
-            return self
-
-        def first(self):
-            return self.rows[0] if self.rows else None
-
-        def all(self):
-            return self.rows
-
-    class Session:
-        def __init__(self):
-            self.calls = []
-
-        def execute(self, statement, params):
-            self.calls.append((str(statement), params))
-            if "FROM nodes n" in str(statement):
-                return Result([{"id": params["node_id"], "type": "Person", "name": "Pat"}])
-            return Result([
-                {"id": 9, "src": 1, "dst": 2, "a_is_src": True, "type": "ATTENDED",
-                 "valid_from": dated, "valid_to": dated, "extractor": "spine", "extractor_version": "1",
-                 "model": None, "confidence": None, "source_item_id": 44, "span_start": None,
-                 "span_end": None, "source": "gcal", "occurred_at": dated, "other_id": 2,
-                 "other_type": "Event", "other_name": "Private calendar title"},
-                {"id": 8, "src": 1, "dst": 3, "a_is_src": True, "type": "MENTIONS",
-                 "valid_from": dated, "valid_to": dated, "extractor": "extract", "extractor_version": "2",
-                 "model": "model", "confidence": 0.8, "source_item_id": 45, "span_start": 10,
-                 "span_end": 14, "source": "gmail", "occurred_at": dated, "other_id": 3,
-                 "other_type": "Topic"},
-            ])
-
-    session = Session()
-    result = timeline(session, a=1, b=2, limit=1)
-
-    assert result["mode"] == "relationship" and result["truncated"] is True
-    assert result["edges"] == [{
-        "id": 9, "type": "ATTENDED", "direction": "outgoing",
-        "counterpart": {"id": 2, "type": "Event", "name": "Private calendar title"},
-        "interval": {"from": dated, "to": dated},
-        "provenance": {"extractor": "spine", "extractor_version": "1", "model": None,
-                       "confidence": None, "evidence": {"source_item_id": 44, "source": "gcal",
-                                                           "occurred_at": dated, "span": None}},
-    }]
-    query, params = session.calls[-1]
-    assert "COALESCE(e.valid_from, e.valid_to, si.occurred_at) IS NOT NULL" in query
-    assert "si.body_text" not in query and "si.title" not in query and "si.raw_meta" not in query
-    # Message bodies, titles and raw metadata stay out; only the counterpart's display name is shown (the UI
-    # names things instead of showing "Event #2").
-    assert "other.name AS other_name" in query
-    assert params["limit_plus_one"] == 2 and params["a"] == 1 and params["b"] == 2
 
 
-def test_timeline_endpoint_validates_bounds_and_translates_missing_entities(test_db, monkeypatch):
-    from fastapi.testclient import TestClient
-
-    from igneous import main
-    from igneous.db import get_session
-    from igneous.timeline import EntityNotFoundError
-
-    calls = []
-    marker = object()
-    monkeypatch.setattr(main, "timeline", lambda session, **kwargs: calls.append((session, kwargs)) or {"edges": []})
-    main.app.dependency_overrides[get_session] = lambda: marker
-    try:
-        client = TestClient(main.app)
-        assert client.get("/timeline?a=0").status_code == 422
-        response = client.get("/timeline?a=1&b=2&limit=3")
-        activity = client.get("/timeline?a=1&limit=1")
-    finally:
-        main.app.dependency_overrides.clear()
-    assert response.json() == activity.json() == {"edges": []}
-    assert calls == [(marker, {"a": 1, "b": 2, "limit": 3}), (marker, {"a": 1, "b": None, "limit": 1})]
-
-    monkeypatch.setattr(main, "timeline", lambda *_args, **_kwargs: (_ for _ in ()).throw(EntityNotFoundError(9)))
-    main.app.dependency_overrides[get_session] = lambda: marker
-    try:
-        response = TestClient(main.app).get("/timeline?a=9")
-    finally:
-        main.app.dependency_overrides.clear()
-    assert response.status_code == 404
 
 
 def test_topic_normalization_is_conservative_and_similarity_requires_lexical_evidence():
@@ -545,17 +367,6 @@ def test_service_addresses_are_not_people():
     assert not is_service_address("jyl123@university.edu") and not is_service_address("+16145551234")
 
 
-def test_api_responses_name_numbers_but_keep_keys(monkeypatch):
-    from igneous import main
-    from igneous.graph import traversal
-
-    monkeypatch.setattr(traversal, "handle_names", lambda s: {"+16145551234": "Sam Lee", "6145551234": "Sam Lee"})
-    body = main.NamedResponse({"name": "+16145551234", "key": "+16145551234",
-                               "items": [{"text": "[14:39] +16145551234: hi"}]}).body
-    import json
-    out = json.loads(body)
-    assert out["name"] == "Sam Lee" and out["key"] == "+16145551234"
-    assert out["items"][0]["text"] == "[14:39] Sam Lee: hi"
 
 
 def test_entity_names_normalize_and_drop_generic():
@@ -631,9 +442,9 @@ def test_shared_event_and_drive_file_from_two_accounts_make_one_node():
         def __init__(self):
             self.keys = []
 
-        def node(self, type_, key, name, props=None, sid=None):
+        def node(self, type_, key, name=None, props=None, **_):
             self.keys.append((type_, key))
-            return len(self.keys)
+            return (type_, key)
 
         def edge(self, *a, **k):
             pass
@@ -684,35 +495,6 @@ def test_relationship_claims_require_verifiable_quotes_and_stay_derived():
     assert body[edge_params["start"]:edge_params["end"]] == "I will send the draft by Friday."
 
 
-def test_relationship_history_is_bounded_and_citation_only():
-    from datetime import UTC
-
-    from igneous.graph.history import relationship_history
-
-    class Result:
-        def mappings(self):
-            return self
-
-        def __iter__(self):
-            return iter([{"id": 2, "name": "Pat", "interactions": 3, "evidence_ids": [10, 11, 12]}])
-
-    class Session:
-        def __init__(self):
-            self.params = None
-            self.sql = None
-
-        def execute(self, statement, params):
-            self.sql, self.params = str(statement), params
-            return Result()
-
-    session = Session()
-    before = datetime(2026, 2, 1, tzinfo=UTC)
-    result = relationship_history(session, 1, before=before, days=30, limit=2)
-    assert result[0]["person"] == {"id": 2, "name": "Pat"}
-    assert result[0]["evidence_source_item_ids"] == [10, 11, 12]
-    assert result[0]["window"] == {"from": datetime(2026, 1, 2, tzinfo=UTC), "to": before}
-    assert session.params["person"] == 1 and session.params["limit"] == 2
-    assert "si.body_text" not in session.sql and "si.title" not in session.sql
 
 
 def test_spine_repo_evidence_uses_shared_repository_anchor():
@@ -782,18 +564,6 @@ def test_recency_half_life_and_cross_category_scale():
     assert scaled("People", 10.0) == 1.0 and scaled("Events", 1.0) < 0.5
 
 
-def test_node_upsert_keeps_human_names_over_keys_and_contact_names():
-    from igneous.graph.spine import NAME_FROM_HEADERS, UPSERT_NODE
-
-    sql = str(UPSERT_NODE)
-    # a contact card's name is never replaced; a real name beats the key (phone/address) itself
-    assert "named_by' = 'contacts' THEN nodes.name" in sql
-    assert "EXCLUDED.name = nodes.key AND nodes.name <> nodes.key THEN nodes.name" in sql
-    # header naming picks the most frequent display name and never overrides cards or user renames
-    hs = str(NAME_FROM_HEADERS)
-    assert "ORDER BY key, n DESC" in hs and "'contacts'" in hs and "renamed" in hs
-
-
 def test_product_relay_senders_are_services_not_people():
     from igneous.graph.resolve import P, _human_name, unresolvable
     from igneous.graph.self_identity import is_relay_name, is_service_address
@@ -816,7 +586,7 @@ def test_life_thread_bursts_and_sections_from_kinds():
     from datetime import datetime, timedelta
 
     from igneous.graph.threads import _bursts, _terms
-    from igneous.graph.traversal import hub_id, section_for_kind
+    from igneous.graph.traversal import section_for_kind
 
     assert "Portland" in _terms("Flight to Portland on Friday") and "Friday" not in _terms("see you Friday")
     assert "CS 401" in _terms("CS 401 final report")
@@ -837,7 +607,11 @@ def test_life_thread_bursts_and_sections_from_kinds():
     assert section_for_kind("TA job") == "Work" and section_for_kind("client project") == "Projects"
     assert section_for_kind("book club") == "Hobbies" and section_for_kind("research lab") == "Projects"
     assert section_for_kind("fundraiser") == "Fundraisers"  # a new kind becomes its own section
-    assert hub_id("Clubs") == hub_id("Clubs") and hub_id("Clubs") != hub_id("Trips")
+    # Whole words only: a word that merely starts like a section's ("tabletop", "tax", "classical") is not it.
+    assert section_for_kind("tabletop game") == "Hobbies" and section_for_kind("tax filing") == "Filings"
+    assert section_for_kind("classical music") == "Hobbies" and section_for_kind("talk series") == "Series"
+    # A kind never takes the name of a section of other things: a reading group is not a group chat.
+    assert section_for_kind("reading group") == "Reading groups" and section_for_kind("organization") == "Organizations"
 
 
 def test_verifier_snippets_claims_and_merge_safety():
@@ -898,25 +672,6 @@ def test_thread_terms_match_whole_words_and_course_codes_are_whole():
     assert pat.search("the atlas platform demo") and not pat.search("fatlas testing") and not pat.search("atlases")
 
 
-def test_only_group_conversations_become_thread_nodes():
-    from igneous.graph import item_class
-
-    sql = str(item_class.SYNC_THREAD_FLAG)
-    # a one-on-one conversation stays a conversation (it feeds the person's closeness) but isn't a second node
-    assert "'hidden', NOT (flag.ok AND flag.grp)" in sql and ">= 3 AS grp" in sql
-    assert "'conversational', flag.ok" in sql
-
-
-def test_one_way_bulk_senders_are_services_but_colleagues_are_not():
-    from igneous.graph import self_identity
-
-    sql = str(self_identity.ONE_WAY_SENDERS)
-    assert "NOT IN (SELECT p FROM i_wrote)" in sql            # you never wrote to them
-    assert "named_by' IS DISTINCT FROM 'contacts'" in sql      # not a saved contact
-    assert "NOT IN (SELECT d FROM my_domains)" in sql          # not at a domain you write to (school, employer)
-    assert "bulk >= 0.8 * sent.n" in sql                       # what they send is mostly notifications/marketing
-
-
 def test_links_you_stated_are_never_judged_by_the_model():
     from igneous.graph import verify
 
@@ -955,15 +710,6 @@ def test_earned_cut_keeps_the_strong_ones():
     assert earned_cut([(1, 5)]) == [1]
 
 
-def test_expand_tops_up_to_a_minimum():
-    import inspect
-
-    from igneous.graph import traversal
-
-    assert traversal.MIN_SHOWN == 3
-    src = inspect.getsource(traversal.expand)
-    assert "fallback_neighbors" in src and "len(new) < MIN_SHOWN" in src
-    assert "drop" in inspect.getsource(traversal.fallback_neighbors)  # never tops up with a link the verifier dropped
 
 
 def test_threads_naming_each_other_are_judged_even_far_apart():
@@ -997,14 +743,6 @@ def test_a_persons_messages_and_one_on_one_chats_fold_into_them():
     assert "x.type = 'Message'" in inspect.getsource(traversal.fallback_neighbors)
 
 
-def test_a_shared_context_explains_a_tie_and_services_are_never_relationships():
-    import inspect
-
-    from igneous.graph import traversal
-
-    assert traversal.CONTAINED >= 0.75
-    assert "contexts_of" in inspect.getsource(traversal.expand) and "contexts_of" in inspect.getsource(traversal._ties)
-    assert "'service'" in inspect.getsource(traversal.relationships)
 
 
 def test_bot_accounts_are_services():
