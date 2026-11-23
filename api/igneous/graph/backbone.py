@@ -193,7 +193,6 @@ def run(s: Session, log=print) -> dict:
                 _link(s, t["id"], org_thread[inside[0]["id"]], f"a class you took while at {inside[0]['name']}", 0.9, [])
                 placed.add(t["id"])
                 stats["classes"] = stats.get("classes", 0) + 1
-    s.commit()
     if log:
         log(json.dumps(stats))
     return stats

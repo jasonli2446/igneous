@@ -161,5 +161,4 @@ def run(s: Session) -> dict:
         """), {"a": a, "b": b, "ex": EXTRACTOR, "p": json.dumps({"signals": [signal]})})
         linked.setdefault(key, []).append(signal)
     services += s.execute(ONE_WAY_SENDERS, {"me": me}).rowcount
-    s.commit()
     return {"self_links": len(linked), "signals": sum(len(v) for v in linked.values()), "services": services}

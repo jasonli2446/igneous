@@ -222,11 +222,8 @@ def run(s: Session, threshold: float = THRESHOLD, rescore: bool = False) -> dict
                 ON CONFLICT (src, dst, type, extractor) DO NOTHING
             """), {"a": src, "b": dst, "p": json.dumps(f), "ex": EXTRACTOR, "v": VERSION, "c": sc})
             merged += 1
-    s.commit()
     clusters = refresh_canonical(s)
     dirty.consume(s, "resolve", changes)
-    dirty.touch(s)
-    s.commit()
     return {"same_as": merged, "clusters": clusters}
 
 
@@ -243,7 +240,7 @@ def _human_name(name: str, handles: set[str]) -> bool:
             and "(" not in name)
 
 
-def refresh_canonical(s: Session, *, commit: bool = True) -> int:
+def refresh_canonical(s: Session) -> int:
     """Union-find over Person SAME_AS edges; each cluster's canonical node is its best-connected member, so
     the explorer shows "Kenneth Lay" with all his addresses folded in. Scoped to Person nodes: rows for other
     node types (e.g. project merges) are left alone. The user's own cluster (props.self) is headed by the
@@ -311,13 +308,10 @@ def refresh_canonical(s: Session, *, commit: bool = True) -> int:
                 s.execute(text("UPDATE nodes SET name = :n WHERE id = :id"), {"n": named[0].name, "id": head})
     if rows:
         s.execute(text("INSERT INTO canonical (node_id, canonical_id) VALUES (:n, :c)"), rows)
-    if commit:
-        s.commit()
     return len(clusters)
 
 
 def undo(s: Session) -> int:
     n = s.execute(text("DELETE FROM edges WHERE type = 'SAME_AS' AND extractor = :ex"), {"ex": EXTRACTOR}).rowcount
     s.execute(text("DELETE FROM canonical WHERE node_id IN (SELECT id FROM nodes WHERE type = 'Person')"))
-    s.commit()
     return n

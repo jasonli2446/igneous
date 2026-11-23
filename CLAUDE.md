@@ -68,6 +68,9 @@ Export formats are sources too: add the entry to `SOURCES` and an inline form in
   (see PR #83 for the gcal case).
 - Tables and columns come only from Alembic migrations (`api/migrations/versions/`), never `CREATE`/`ALTER` in app
   code. The API, the CLI and the MCP server refuse to run on any schema but head (`db.schema_status`).
+- Derived stages (self through corrections, `api/igneous/pipeline.py`) publish in one transaction: never commit, roll
+  back or bump the graph version inside one. A correction endpoint takes `entity_api.correction_session`, so it never
+  runs while a rebuild publishes.
 
 ## Checks before any PR
 

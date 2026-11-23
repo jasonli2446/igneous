@@ -151,5 +151,4 @@ def run(s: Session, threshold: float = SIMILARITY_THRESHOLD, minimum: int = MIN_
             else:
                 skipped += 1
     related = _related(s, minimum)
-    s.commit()
     return {"topics_merged": merged, "merge_collisions_skipped": skipped, "related_to": related}

@@ -153,5 +153,4 @@ def run(s: Session) -> int:
                 INSERT INTO edge_evidence (edge_id, source_item_id, kind, detail)
                 VALUES (:edge, :sid, :kind, CAST(:detail AS jsonb))
             """), {"edge": edge, "sid": sid, "kind": why, "detail": json.dumps({"inferred_by": EXTRACTOR})})
-    s.commit()
     return len(grouped)

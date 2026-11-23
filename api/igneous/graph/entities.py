@@ -28,7 +28,6 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.config import settings
-from igneous.graph import dirty, overrides
 
 EXTRACTOR = "entities"
 VERSION = "1"
@@ -312,7 +311,4 @@ def run(s: Session, log=print) -> int:
                   item_ids[0] if item_ids else None, 0.8)
         built += 1
         log(f"  {c['display'][:40]:40s} anchors={len(c['anchors'])} mentions={mentioned}") if log else None
-    overrides.apply(s)  # corrections (rename / hide / merge / unlink) always win, so they survive every rebuild
-    dirty.touch(s)
-    s.commit()
     return built

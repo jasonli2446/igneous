@@ -202,12 +202,15 @@ def publishing(s: Session):
         raise
 
 
-def hold_off_publishing(s: Session, wait_seconds: int = 15) -> None:
+CORRECTION_WAIT_MS = 15_000  # how long a correction waits for a publishing rebuild before it gives up
+
+
+def hold_off_publishing(s: Session) -> None:
     """For a correction made through the API, before it reads or writes the graph: wait until no rebuild is
     publishing, and keep the next one from starting until the caller's transaction ends. The correction then never
     interleaves with a rebuild's writes (so neither can deadlock the other) and lands on the graph the rebuild just
-    published. Raises PublishBusy after `wait_seconds`."""
-    s.execute(text(f"SET LOCAL lock_timeout = '{int(wait_seconds)}s'"))
+    published. Raises PublishBusy after CORRECTION_WAIT_MS."""
+    s.execute(text(f"SET LOCAL lock_timeout = {int(CORRECTION_WAIT_MS)}"))
     try:
         s.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext('igneous:publish'))"))
     except OperationalError as e:
