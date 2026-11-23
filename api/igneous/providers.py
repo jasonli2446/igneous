@@ -1,7 +1,8 @@
 """Model access: local FastEmbed models for embeddings and reranking, and Claude on Amazon Bedrock for chat.
 
-Embedding and reranking run on this computer and send nothing anywhere. Chat is the one hosted call, and every caller
-reaches it through igneous/llm.py, which decides what a prompt may carry. A chat call fails in one of three ways:
+Embedding and reranking run on this computer and send nothing anywhere. Chat is the one hosted call, in two shapes: one
+answer (`chat`), and one turn of a conversation with tools (`tool_turn`, for the research agent). Every caller reaches
+them through igneous/llm.py, which decides what a prompt may carry. A hosted call fails in one of three ways:
 LLMDisabled (hosted calls are off or not configured), ProviderUnavailable (the model can't be reached or used now)
 and ProviderError (it gave no usable answer).
 """
@@ -36,6 +37,24 @@ class LLMDisabled(ProviderUnavailable):
 class ChatResult:
     text: str
     usage: dict[str, int]
+
+
+@dataclass(frozen=True)
+class TurnResult:
+    """One turn of a conversation with tools. `content` is the assistant message's blocks as the API sent them (text,
+    tool calls, thinking with its signature): the caller appends them to the conversation unchanged."""
+    content: list[dict]
+    stop_reason: str | None  # end_turn, tool_use, max_tokens, refusal, ...
+    usage: dict[str, int]
+
+    @property
+    def text(self) -> str:
+        return "".join(block.get("text", "") for block in self.content if block.get("type") == "text")
+
+    @property
+    def tool_calls(self) -> list[dict]:
+        """The tool_use blocks: {id, name, input}."""
+        return [block for block in self.content if block.get("type") == "tool_use"]
 
 
 class FastEmbedProvider:
@@ -111,6 +130,35 @@ def bedrock_key() -> str | None:
     return os.environ.get("AWS_BEARER_TOKEN_BEDROCK") or secrets.load_local("bedrock")
 
 
+TURNED_OFF = "model calls are turned off (IGNEOUS_LLM_ENABLED=false)"
+NO_KEY = "no Bedrock key: set AWS_BEARER_TOKEN_BEDROCK, or save one with `igneous connect bedrock`"
+
+
+def unavailable() -> str | None:
+    """Why no hosted call can be made now (they are turned off, or there is no key), or None: what a caller that
+    starts paid work in the background checks before it starts."""
+    if not settings.llm_enabled:
+        return TURNED_OFF
+    if not bedrock_key():
+        return NO_KEY
+    return None
+
+
+def strict(tool: dict) -> dict:
+    """A tool definition the model must call exactly as its schema says (`strict`): the schema made to fit strict tool
+    use, whose bounds (a maximum, a length) move into its description."""
+    return {"name": tool["name"], "description": tool.get("description") or "",
+            "input_schema": anthropic.transform_schema(tool["input_schema"]), "strict": True}
+
+
+def _usage(usage: Any) -> dict[str, int]:
+    out = {"input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens}
+    for cached in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+        if getattr(usage, cached, None):
+            out[cached] = getattr(usage, cached)
+    return out
+
+
 class BedrockProvider:
     """Claude on Amazon Bedrock through the Anthropic SDK. The SDK retries connection errors and 408, 409, 429 and
     5xx responses, with backoff, up to IGNEOUS_HOSTED_RETRIES times; nothing here retries again."""
@@ -122,12 +170,11 @@ class BedrockProvider:
 
     def _client(self) -> anthropic.AnthropicBedrock:
         if not settings.llm_enabled:
-            raise LLMDisabled("model calls are turned off (IGNEOUS_LLM_ENABLED=false)")
+            raise LLMDisabled(TURNED_OFF)
         if self._instance is None:
             token = bedrock_key()
             if not token:
-                raise LLMDisabled("no Bedrock key: set AWS_BEARER_TOKEN_BEDROCK, or save one with "
-                                  "`igneous connect bedrock`")
+                raise LLMDisabled(NO_KEY)
             self._instance = anthropic.AnthropicBedrock(aws_region=os.environ.get("AWS_REGION", "us-east-1"),
                                                         api_key=token, max_retries=self.max_retries)
         return self._instance
@@ -147,9 +194,41 @@ class BedrockProvider:
             kwargs["output_config"] = output_config
         if system:
             kwargs["system"] = system
+        response = self._send(kwargs)
+        if response.stop_reason == "refusal":
+            raise ProviderError(f"{model_id} declined to answer")
+        if response.stop_reason == "max_tokens":
+            raise ProviderError(f"{model_id}'s answer was cut off at max_tokens={max_tokens}")
+        text = "".join(block.text for block in response.content if block.type == "text")
+        if not text.strip():
+            raise ProviderError(f"{model_id} returned no text (stop reason: {response.stop_reason})")
+        return ChatResult(text, {"input_tokens": response.usage.input_tokens,
+                                 "output_tokens": response.usage.output_tokens})
+
+    def tool_turn(self, system: str, messages: list[dict[str, Any]], tools: list[dict], *, max_tokens: int = 16000,
+                  effort: str = "medium", model: str | None = None, timeout: float | None = None) -> TurnResult:
+        """One turn of a conversation with `tools`, each made strict, and the choice of whether to call one left to
+        the model (tool_choice auto: current models refuse a forced choice). The turn comes back whatever its stop
+        reason, a cut-off or a refusal included: what that means for a conversation is the caller's to decide.
+        `timeout` bounds this request in seconds (each of the SDK's attempts)."""
+        model_id = model or self.model_name
+        kwargs: dict[str, Any] = {"model": model_id, "max_tokens": max_tokens, "system": system,
+                                  "messages": messages, "tools": [strict(tool) for tool in tools],
+                                  "tool_choice": {"type": "auto"}}
+        if accepts_effort(model_id):
+            kwargs["output_config"] = {"effort": effort}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        response = self._send(kwargs)
+        return TurnResult([block.to_dict(mode="json") for block in response.content], response.stop_reason,
+                          _usage(response.usage))
+
+    def _send(self, kwargs: dict[str, Any]):
+        """messages.create, its failures as the provider's errors."""
+        model_id = kwargs["model"]
         client = self._client()
         try:
-            response = client.messages.create(**kwargs)
+            return client.messages.create(**kwargs)
         except anthropic.APIConnectionError as e:  # timeouts included; the SDK has already retried
             raise ProviderUnavailable(f"couldn't reach {model_id} on Bedrock: {e}") from e
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError, anthropic.NotFoundError) as e:
@@ -163,15 +242,6 @@ class BedrockProvider:
             raise ProviderError(f"Bedrock rejected the request to {model_id} ({e.status_code}): {e.message}") from e
         except anthropic.APIError as e:  # a response the SDK couldn't read
             raise ProviderError(f"unreadable response from {model_id}: {e}") from e
-        if response.stop_reason == "refusal":
-            raise ProviderError(f"{model_id} declined to answer")
-        if response.stop_reason == "max_tokens":
-            raise ProviderError(f"{model_id}'s answer was cut off at max_tokens={max_tokens}")
-        text = "".join(block.text for block in response.content if block.type == "text")
-        if not text.strip():
-            raise ProviderError(f"{model_id} returned no text (stop reason: {response.stop_reason})")
-        return ChatResult(text, {"input_tokens": response.usage.input_tokens,
-                                 "output_tokens": response.usage.output_tokens})
 
 
 @lru_cache(maxsize=1)
@@ -195,6 +265,10 @@ def embed(texts: list[str], *, query: bool = False) -> list[list[float]]:
 
 def chat(messages: list[dict[str, Any]], schema: dict | None = None, **options: Any) -> ChatResult:
     return _chat_model().chat(messages, schema, **options)
+
+
+def tool_turn(system: str, messages: list[dict[str, Any]], tools: list[dict], **options: Any) -> TurnResult:
+    return _chat_model().tool_turn(system, messages, tools, **options)
 
 
 def rerank(query: str, docs: list[str]) -> list[float]:

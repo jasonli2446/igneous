@@ -7,8 +7,8 @@ the server reads the database's password from api/.env and the model key from th
 
 `check` starts that same command as a client would, calls each tool once over the protocol with arguments it takes from
 the answers before (the owner from `me`, their closest node, a record of it), and reports each call's time and outcome.
-`ask` calls a paid model, so it runs only when asked for. The calls also bring what the tools read into the database's
-memory, so the first question of a demo doesn't wait on the disk.
+`ask` and `research` call a paid model (`PAID`), so they run only when asked for. The calls also bring what the tools
+read into the database's memory, so the first question of a demo doesn't wait on the disk.
 """
 import asyncio
 import json
@@ -18,6 +18,8 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+PAID = frozenset({"ask", "research"})  # the tools that call the hosted model
 
 
 def command(database: str | None = None, sources: str | None = None) -> list[str]:
@@ -70,7 +72,7 @@ def _note(answer: dict) -> str:
     return ", ".join(parts) or "ok"
 
 
-async def _calls(target, ask: bool, query: str | None) -> list[Call]:
+async def _calls(target, paid: bool, query: str | None) -> list[Call]:
     from mcp import Client
 
     out: list[Call] = []
@@ -107,15 +109,16 @@ async def _calls(target, ask: bool, query: str | None) -> list[Call]:
             if owner:
                 await call("correspondents", person_node_id=owner, limit=10)
         await call("search", query=query or "meeting", k=5)
-        if ask:
+        if paid:
             await call("ask", question=query or "What happened most recently?")
+            await call("research", question=f"Brief me on {query}." if query else "What am I working on now?")
         called = {c.tool for c in out}
-        for tool in sorted(listed - called - ({"ask"} if not ask else set())):
+        for tool in sorted(listed - called - (set() if paid else PAID)):
             out.append(Call(tool, {}, 0.0, None, "not called: no node or record is shared to call it with"))
     return out
 
 
-def check(target=None, database: str | None = None, sources: str | None = None, ask: bool = False,
+def check(target=None, database: str | None = None, sources: str | None = None, paid: bool = False,
           query: str | None = None) -> list[Call]:
     """Call every tool once through `target` (an in-process server in tests), else the server `command` starts."""
     if target is None:
@@ -123,4 +126,4 @@ def check(target=None, database: str | None = None, sources: str | None = None, 
 
         exe, *args = command(database, sources)
         target = StdioServerParameters(command=exe, args=args)
-    return asyncio.run(_calls(target, ask, query))
+    return asyncio.run(_calls(target, paid, query))

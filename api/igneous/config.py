@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     rerank_batch_size: int = 64
     # Kill switch for every outbound model call (CO-1). Search and the graph still work without it.
     llm_enabled: bool = True
-    # Comma-separated source ids (the Sources page shows them) whose records a hosted model may read: Ask,
+    # Comma-separated source ids (the Sources page shows them) whose records a hosted model may read: Ask, research,
     # extraction, link checks, thread naming. Empty, the default, sends nothing.
     llm_sources: str = ""
     llm_model: str = "us.anthropic.claude-sonnet-5-5"

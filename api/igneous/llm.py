@@ -2,8 +2,9 @@
 
 Every hosted call follows the same policy: a prompt carries text only from records in opted-in sources
 (`allowed_sources`), names only of people and things that appear in such records under a name grounded in them
-(`nameable`, `visible_nodes`), and counts for everything else. A cached model result may be reused whatever the
-policy says now: it discloses nothing new.
+(`nameable`, `visible_nodes`), and counts for everything else. A tool result in an agent's conversation
+(`agent_turn`) is part of its prompt and follows the same rule (igneous/disclosure.py). A cached model result may be
+reused whatever the policy says now: it discloses nothing new.
 """
 import json
 
@@ -13,10 +14,20 @@ from sqlalchemy.orm import Session
 from igneous import source_catalog
 from igneous.config import settings
 from igneous.graph.identity import members_sql as identity_members
-from igneous.providers import LLMDisabled, ProviderError, ProviderUnavailable, bedrock_key, chat
+from igneous.providers import (
+    LLMDisabled,
+    ProviderError,
+    ProviderUnavailable,
+    TurnResult,
+    bedrock_key,
+    chat,
+    tool_turn,
+    unavailable,
+)
 
-__all__ = ["LLMDisabled", "ProviderError", "ProviderUnavailable", "allowed_sources", "cache_lookup", "cache_store",
-           "complete", "model_status", "nameable", "require_whole_corpus", "structured", "visible_nodes"]
+__all__ = ["LLMDisabled", "ProviderError", "ProviderUnavailable", "TurnResult", "agent_turn", "allowed_sources",
+           "cache_lookup", "cache_store", "complete", "model_status", "nameable", "require_whole_corpus", "structured",
+           "unavailable", "visible_nodes"]
 
 LOCAL_SOURCES = source_catalog.LOCAL_TEXT  # also need IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED
 
@@ -44,6 +55,20 @@ def complete(messages: list[dict], max_tokens: int = 2000, effort: str = "low", 
     such as another engine answering from an export of the graph. `messages` are {role, content} with an optional
     system message; their content follows the same rule as every prompt. Raises the providers' errors."""
     return chat(messages, max_tokens=max_tokens, effort=effort, model=model).text
+
+
+def agent_turn(system: str, history: list[dict], tools: list[dict], max_tokens: int = 16000, effort: str = "medium",
+               model: str | None = None, timeout: float | None = None) -> TurnResult:
+    """One turn of an agent's conversation with tools (on `model`, else IGNEOUS_LLM_MODEL): the model answers `history`
+    with text, tool calls or both. Every tool is strict (its calls match its schema) and whether to call one is the
+    model's choice (tool_choice auto).
+
+    `history` is append-only: the caller appends the turn's `content` unchanged, then one user message with a result
+    for each tool call, and never edits an earlier message (the model's thinking is tied to the conversation it was
+    made in). Everything in it follows the rule above: the user's question, and tool results that went through
+    igneous/disclosure.py. Raises the providers' errors; a turn cut off at max_tokens, or declined, comes back with that
+    stop_reason."""
+    return tool_turn(system, history, tools, max_tokens=max_tokens, effort=effort, model=model, timeout=timeout)
 
 
 def cache_lookup(key: str) -> dict | None:

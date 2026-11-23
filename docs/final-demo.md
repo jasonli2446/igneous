@@ -48,12 +48,12 @@ What is in them, so you know what to click:
    make web                         # :3000
    ```
 6. **Register the MCP server once** (user scope, so every new Claude Code session has it), and a second one on the
-   Enron database for Ask at scale (prompt 7):
+   Enron database for Ask at scale (prompt 8):
    ```bash
    cd api
    uv run igneous mcp install --database igneous_persona --sources email,fs,takeout,linkedin,ai_chats
    uv run igneous mcp install --name igneous-enron --database igneous --sources email
-   uv run igneous connect bedrock     # for `ask` only: the model key, saved where the server finds it
+   uv run igneous connect bedrock     # for `ask` and `research`: the model key, saved where the server finds it
    claude mcp list | grep igneous     # -> ✔ Connected, twice
    ```
    The persona's documents also need `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true` in `api/.env` (step 2). Nothing
@@ -62,8 +62,9 @@ What is in them, so you know what to click:
    (for example a stale `figma` entry) shows as one failed "waiting for MCP servers" step at the start of the session.
    Remove or disable it before recording.
 8. **Check it.** `uv run igneous mcp check --database igneous_persona --sources email,fs,takeout,linkedin,ai_chats`
-   starts the server as Claude Code does and calls every tool once (add `--ask` to try `ask`, which costs a model
-   call). It also brings what the tools read into the database's memory, so the first prompt doesn't wait on the disk.
+   starts the server as Claude Code does and calls every tool once (add `--paid` to try `ask` and `research`, which
+   cost model calls). It also brings what the tools read into the database's memory, so the first prompt doesn't wait
+   on the disk.
 
 ## 1. What Igneous is (1–1.5 min)
 
@@ -115,6 +116,7 @@ What is in them, so you know what to click:
 | `timeline`, `commitments` | Dated activity or a pair's history, and the promises found in a node's records |
 | `search` | Keyword + semantic search over the shared records (skips browsing history unless asked) |
 | `ask` | A cited answer from the text, or "can't answer" |
+| `research` | A cited briefing: Igneous's own agent reads the graph with the tools above, then writes people and their parts, a timeline and open items, every statement citing records it read |
 
 Everything a tool returns reaches the agent's model, so it carries text and names only from the sources opted in
 (here, everything the persona came through); the rest would show as counts.
@@ -164,7 +166,17 @@ Pick 3–4. Each needs no setup beyond registration. Speak as Mira: the server's
    Expect: `find` and `search` come back empty for Tokyo, and it says there's no record of it, with no invented
    citations.
 
-7. **Ask at scale** (the Enron corpus, `igneous-enron`):
+7. **Research** (shows Igneous's own agent; needs the model key, about two minutes the first time):
+   > Using igneous, research: brief me on the Tidepool project.
+
+   Expect, from what the persona's records hold: Rafael Ortiz, who builds it with Mira, and Hannah Brooks of the city's
+   parks department, who piloted it; a timeline from its start in February 2025 through the CSV importer (March 2025),
+   the city's sampling data (September 2025) and the 2026 pilot; what is still open; every statement citing item_ids,
+   and `checked` showing nothing cited that the agent didn't read. Asked again, it answers at once from the stored
+   briefing. `uv run igneous research "Brief me on the Tidepool project"` prints each step as it happens. This prompt
+   has not been run with the model yet: run it once before recording.
+
+8. **Ask at scale** (the Enron corpus, `igneous-enron`):
    > Using igneous-enron, ask: what is the deadline for Phillip, Tim and Yevgeny to respond with approval on the revised high level design?
 
    Expect: `ask` answers "COB 10/23" and cites the email it comes from: question q002 of the Enron gold set

@@ -11,7 +11,7 @@ from igneous.providers import ChatResult
 
 PRIVATE = ("PRIVATEMARKER", "Pat Private", "+15550001111")
 T0 = datetime(2025, 1, 15, tzinfo=UTC)
-TABLES = ("chunks", "edge_evidence", "canonical", "edges", "nodes", "source_items", "llm_cache")
+TABLES = ("chunks", "edge_evidence", "canonical", "edges", "nodes", "source_items", "llm_cache", "research")
 
 
 def _minimal(schema: dict):
@@ -131,5 +131,28 @@ def build() -> dict:
 def wipe() -> None:
     with SessionLocal() as s:
         _wipe(s)
+
+
+def every_call(g: dict) -> list[tuple[str, dict]]:
+    """Each MCP read tool on each node and record of the graph it takes, and on the pairs that cross the two sources:
+    what an MCP client, or the research agent, could ask."""
+    with SessionLocal() as s:
+        nodes = s.execute(text("SELECT id FROM nodes ORDER BY id")).scalars().all()
+        items = s.execute(text("SELECT id FROM source_items ORDER BY id")).scalars().all()
+    people = [g["me"], g["sam"], g["sam2"], g["pat"]]
+    calls = [("me", {})]
+    calls += [("find", {"name": q}) for q in ("Pat", "Private", "Sam", "Atlas", "Robotics", "Chat")]
+    calls += [("search", {"query": q}) for q in ("PRIVATEMARKER", "Atlas plans", "Pat Private", "texts from Pat")]
+    calls += [("search", {"query": "Atlas", "person_node_id": p}) for p in people]
+    calls += [("correspondents", {"person_node_id": p}) for p in people]
+    calls += [("read_item", {"item_id": i}) for i in items]
+    for n in nodes:
+        calls += [("open_node", {"node_id": n}), ("timeline", {"node_id": n}), ("sources", {"node_id": n}),
+                  ("commitments", {"node_id": n, "status": "all"})]
+    pairs = [(g["me"], g["pat"]), (g["sam"], g["pat"]), (g["atlas"], g["pat"]), (g["pat"], g["pat_only"]),
+             (g["me"], g["sam"]), (g["atlas"], g["platform"]), (g["items"]["i0"], g["items"]["g0"])]
+    calls += [("why_connected", {"a": a, "b": b}) for a, b in pairs]
+    calls += [("timeline", {"node_id": a, "other_node_id": b}) for a, b in pairs]
+    return calls
 
 

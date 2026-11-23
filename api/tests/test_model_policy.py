@@ -8,7 +8,7 @@ import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from mixed_sources import T0, Recorder, _edge, _item, _node, build, wipe
+from mixed_sources import PRIVATE, T0, Recorder, _edge, _item, _node, build, every_call, wipe
 from sqlalchemy import text
 
 from igneous import llm
@@ -429,3 +429,43 @@ def test_naming_a_domain_reads_only_its_peoples_opted_in_mail(db, monkeypatch):
     assert organizations.model_name(db, "acme.test") is None  # the recorder answers with an empty name
     assert len(rec.prompts) == 1 and "Domain: acme.test" in rec.prompts[0] and "Acme Robotics" in rec.prompts[0]
     assert rec.leaked() == []
+
+
+def test_the_research_agent_reads_only_opted_in_records_and_names(graph, monkeypatch):
+    """The research agent (scripted: no key) calls every tool it has on every node and record, and on the pairs that
+    cross the two sources. A tool result is part of its prompt: no turn's prompt and not the briefing's carries text or
+    a name from outside the opt-in, while the opted-in mail and names do reach them."""
+    from scripted_model import ScriptedAgent, ScriptedWriter
+
+    from igneous.agent import research
+
+    # A model writes only what it was shown, so no call it makes names a marker.
+    calls = [(t, a) for t, a in every_call(graph) if not any(m in json.dumps(a) for m in PRIVATE)]
+    turns = [calls[i:i + 30] for i in range(0, len(calls), 30)]
+    agent, writer = ScriptedAgent(lambda t, _r: turns[t - 1] if t <= len(turns) else "done"), ScriptedWriter()
+    rec = _record_prompts(monkeypatch, "gmail")
+    monkeypatch.setattr(llm, "tool_turn", agent)
+    monkeypatch.setattr(llm, "structured", writer)
+    budget = research.Budget(turns=len(turns) + 1, tool_calls=len(calls), seconds=3600, unproductive=len(turns) + 1)
+    out = research.brief("Who works on Atlas, and what did they say?", budget=budget)
+    assert out["usage"]["tool_calls"] == len(calls) and out["report"]["sources"]
+    prompts = agent.prompts() + writer.prompts + rec.prompts
+    assert not [marker for p in prompts for marker in PRIVATE if marker in p]
+    assert "Atlas status from the Robotics Lab" in writer.prompts[0] and "Sam Shared" in agent.prompts()[-1]
+    assert not [marker for marker in PRIVATE if marker in json.dumps(out)]
+
+
+def test_with_nothing_opted_in_research_calls_no_model(graph, monkeypatch):
+    from igneous.agent import research
+
+    def no_model(*_args, **_kwargs):
+        raise AssertionError("no model call with nothing opted in")
+
+    rec = _record_prompts(monkeypatch, "")
+    monkeypatch.setattr(llm, "tool_turn", no_model)
+    monkeypatch.setattr(llm, "structured", no_model)
+    with pytest.raises(research.NothingShared, match="IGNEOUS_LLM_SOURCES"):
+        research.run("Who works on Atlas?")
+    assert rec.prompts == []
+    with SessionLocal() as s:
+        assert s.execute(text("SELECT count(*) FROM research")).scalar() == 0

@@ -49,16 +49,21 @@ def _alive(pid: int) -> bool:
     return True
 
 
-def _dead(job) -> bool:
-    """Whether a running job's process is gone. Only a process on this host can be checked; a job without an owner
-    predates owners and outlived its process."""
-    if job.owner_pid is None:
+def gone(owner_host: str | None, owner_pid: int | None, started_here: bool) -> bool:
+    """Whether the process running a row (a job, a research run) is gone. Only a process on this host can be checked;
+    a row without an owner predates owners and outlived its process. `started_here`: this process started the row."""
+    if owner_pid is None:
         return True
-    if job.owner_host != HOST:
+    if owner_host != HOST:
         return False
-    if job.owner_pid == os.getpid():  # this pid, but not this process's job: a process before it had the pid
-        return job.id not in _MINE
-    return not _alive(job.owner_pid)
+    if owner_pid == os.getpid():  # this pid, but not this process's row: a process before it had the pid
+        return not started_here
+    return not _alive(owner_pid)
+
+
+def _dead(job) -> bool:
+    """Whether a running job's process is gone."""
+    return gone(job.owner_host, job.owner_pid, job.id in _MINE)
 
 
 def fail_interrupted(s: Session) -> int:

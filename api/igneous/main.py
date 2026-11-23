@@ -37,12 +37,15 @@ from igneous.timeline import timeline
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Refuse to serve a database whose schema isn't the code's; fail the running jobs whose process died, and remove
-    the uploads they left."""
+    """Refuse to serve a database whose schema isn't the code's; fail the running jobs and research whose process
+    died, and remove the uploads they left."""
+    from igneous.agent import research
+
     if problem := schema_status():
         raise RuntimeError(problem)
     with SessionLocal() as s:
         jobs.fail_interrupted(s)
+        research.fail_interrupted(s)
     uploads.sweep()
     yield
 
@@ -346,6 +349,41 @@ def ask(body: AskBody, s: Session = Depends(get_session)):
         raise HTTPException(503, str(e)) from e
     except ProviderError as e:
         raise HTTPException(502, str(e)) from e
+
+
+class ResearchBody(BaseModel):
+    question: str = Field(min_length=1, max_length=2000, pattern=r"\S")  # whom or what to brief on, or a question
+
+
+@app.post("/research")
+def start_research(body: ResearchBody):
+    """Brief me: the research agent reads the graph through the MCP tools (at most 12 model turns, 30 tool calls, 200k
+    tokens and two minutes), then writes who is involved and how, what happened when and what is still open, every
+    statement citing records it read (igneous/agent/). Answers at once with the run: a briefing already made for this
+    question on this graph (`cached`), the run under way for it, or a new one in the background. Poll
+    GET /research/{id}: its `trace` grows step by step. 422 when no source is opted in to the hosted model, 503 when
+    the model is off or has no key."""
+    from igneous.agent import research
+
+    try:
+        return research.start(body.question)
+    except research.NothingShared as e:
+        raise HTTPException(422, str(e)) from e
+    except ProviderUnavailable as e:
+        raise HTTPException(503, str(e)) from e
+
+
+@app.get("/research/{run_id}")
+def get_research(run_id: str = PathParam(min_length=1, max_length=64), s: Session = Depends(get_session)):
+    """A research run: `status` (running, succeeded, failed), its `trace` so far, and once it succeeds the `report`
+    (summary, people, timeline, open_items, each entry with `cites`; `sources`, the records cited; `checked`) and
+    `usage`; `error` when it failed. 404 for an unknown id."""
+    from igneous.agent import research
+
+    run = research.get(s, run_id)
+    if run is None:
+        raise HTTPException(404, "No such research run")
+    return run
 
 
 @app.get("/ask/suggestions")

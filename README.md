@@ -83,8 +83,9 @@ export AWS_BEARER_TOKEN_BEDROCK=...   # your Bedrock API key
 export AWS_REGION=us-east-1           # default if unset
 ```
 
-Without the key, `/ask` returns 503 and extraction is skipped; everything else works. The default chat model is
-`us.anthropic.claude-sonnet-5-5` (`IGNEOUS_LLM_MODEL`), with `IGNEOUS_LLM_CHEAP_MODEL` for high-volume yes/no judgments.
+Without the key, `/ask` and `/research` return 503 and extraction is skipped; everything else works. The default chat
+model is `us.anthropic.claude-sonnet-5-5` (`IGNEOUS_LLM_MODEL`), with `IGNEOUS_LLM_CHEAP_MODEL` for high-volume yes/no
+judgments.
 Embeddings and the reranker run locally (FastEmbed) for every source, so the first search or pipeline run downloads
 small model files into `data/models` (`IGNEOUS_MODEL_CACHE_DIR` moves them). A hosted model reads only the sources in
 `IGNEOUS_LLM_SOURCES` ([Model calls](#model-calls)); local documents and Apple Notes also need
@@ -198,6 +199,7 @@ uv run igneous pipeline                             # read what is new and rebui
 uv run igneous pipeline --extract 200               # also LLM-extract up to 200 newest messages (costs money)
 uv run igneous pipeline --stage resolve             # only some stages (in pipeline order); --help lists them
 uv run igneous schedule install                     # macOS: incremental sync every 30 minutes
+uv run igneous research "Brief me on Tidepool"      # a cited briefing from the research agent (calls the model)
 ```
 
 The Google steps (the OAuth client file) are under [Google](#google-gmail-drive-calendar-contacts) below.
@@ -239,10 +241,11 @@ subject, a file's name, a conversation's name). When the chunk layout changes (`
 | `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `constraints.py` the filters a question states, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
 | `api/igneous/llm.py` | structured model calls and the rule for what a model may read (`allowed_sources`, `visible_nodes`); `providers.py` talks to Bedrock |
 | `api/igneous/mcp_server.py` | the MCP tools; `disclosure.py` applies the model rule to what they return; `mcp_client.py` is `igneous mcp install` and `check` |
+| `api/igneous/agent/` | the research agent: `research.py` its loop, budget and runs; `tools.py` the MCP tools it reads through and the ledger of what it read; `report.py` the cited briefing |
 | `api/igneous/persona/` | the synthetic persona: the cast and its storylines (`school.py`, `work.py`, `trips.py`, `project.py`, `everyday.py`, `routine.py`), the export formats (`formats.py`), loading it into its own database (`load.py`), and its gold set (`gold/`) |
 | `api/eval/` | gold questions, ER labels, harnesses, results (see `api/eval/README.md`); `persona_eval.py` scores the persona's gold set |
 | `api/igneous/pipeline.py` | the stage list in dependency order and the one runner `igneous pipeline` and Rebuild share; spine and chunk read only the records whose content changed since they read them, so every stage is safe to re-run |
-| `api/igneous/main.py` | FastAPI app: search, ask, the explorer's `/graph/*` routes, sources, sync and import jobs (the full list at <http://localhost:8000/docs>) |
+| `api/igneous/main.py` | FastAPI app: search, ask, research, the explorer's `/graph/*` routes, sources, sync and import jobs (the full list at <http://localhost:8000/docs>) |
 | `api/migrations/` | the whole schema, as plain SQL migrations (`0001_core_schema.py` onward); app code never creates tables |
 | `web/` | Next.js: the 3D explorer (`Graph3D.tsx`, 3d-force-graph) with the inspector and why-view, Ask, Search, and the Sources page |
 
@@ -308,7 +311,7 @@ All model access goes through `api/igneous/providers.py`: local FastEmbed embedd
 cross-encoder reranker, which send nothing anywhere, and Claude on Bedrock for chat (`IGNEOUS_LLM_MODEL`, and
 `IGNEOUS_LLM_CHEAP_MODEL` for high-volume checks). The Anthropic SDK retries a failed call `IGNEOUS_HOSTED_RETRIES`
 times (2 by default). `IGNEOUS_LLM_ENABLED=false` turns off hosted model calls (search and the graph keep working;
-`/ask` returns 503).
+`/ask` and `/research` return 503).
 
 **What a model may read.** Only the sources listed in `IGNEOUS_LLM_SOURCES`: the comma-separated ids the Sources
 page shows (`gmail,ai_chats`; `takeout` covers every Takeout product, `ai_chats` every AI chat import). Every hosted
@@ -343,9 +346,32 @@ then sends one paid, schema-constrained request to each hosted model (`IGNEOUS_L
 `IGNEOUS_LLM_CHEAP_MODEL`), the way every model call goes, so a model that rejects the request fails there first. The
 test suite never runs it.
 
+## Research agent
+
+"Brief me on the Tidepool project": the research agent (`api/igneous/agent/`) answers with a cited briefing, who is
+involved and the part each plays, what happened when, and what is still open. Ask it from the command line
+(`uv run igneous research "Brief me on the Tidepool project"`), through the API (`POST /research`, then
+`GET /research/{id}`), or from an MCP client (`research`). It calls the hosted model, so it needs the key and an
+opted-in source.
+
+- **How it researches.** The model works in turns. Each turn it calls the MCP server's read tools (`find`,
+  `open_node`, `why_connected`, `sources`, `read_item`, `search`, `commitments`, `timeline`, `correspondents`, `me`),
+  and the conversation only grows (append-only), until it has what it needs. Its budget is 12 turns, 30 tool calls,
+  200,000 tokens and 120 seconds, and it stops after two turns in a row that turn up nothing new. A second call then
+  writes the briefing from the records it read.
+- **Citations.** Every statement cites records the agent saw text of: a search excerpt, a snippet, a record read in
+  full. A citation of any other record is removed, and a statement left without one is dropped, so every citation in
+  a briefing is valid. `checked` counts what was kept and dropped.
+- **What it reads.** Its tools are the MCP tools, so its prompts follow the same rule as every model call: text only
+  from the opted-in sources, names only of what those records name. With nothing opted in it doesn't run.
+- **Live and cached.** A run's trace is stored as it happens: each turn, each tool call with what it found, and why it
+  stopped. `GET /research/{id}` shows it live. The same question on an unchanged graph (the same graph version and
+  opted-in sources) is answered from the stored briefing, with no model call. A rebuild or a correction makes the
+  next one new.
+
 ## MCP server (use the graph from Claude Code, Claude Desktop, Cursor)
 
-Eleven tools, each calling the readers the explorer and the API use, through a read-only database session:
+Twelve tools, each calling the readers the explorer and the API use, through a read-only database session:
 
 | Tool | What it returns |
 |---|---|
@@ -359,13 +385,16 @@ Eleven tools, each calling the readers the explorer and the API use, through a r
 | `read_item(item_id, offset, max_chars)` | One record in full, in pages |
 | `correspondents(person_node_id, limit)` | Someone's real relationships, closest first (two-way, recency-weighted) |
 | `search(query, person_node_id, include_browsing, k)` | Hybrid keyword and semantic passages, with the filters the query states |
-| `ask(question)` | A cited answer from the hosted model, or "can't answer"; the one paid tool |
+| `ask(question)` | A cited answer from the hosted model, or "can't answer" (paid) |
+| `research(question)` | A cited briefing on a person, project, organization or question: people and their parts, a timeline, open items, every statement citing records the [research agent](#research-agent) read (paid, a minute or two) |
 
 **What leaves through MCP.** A tool's answer goes to the model the client runs, so it follows the rule a hosted model's
 prompt follows (`api/igneous/disclosure.py`, [Model calls](#model-calls)): text only from the sources in
 `IGNEOUS_LLM_SOURCES`, names only of the people and things those records name, and counts (`withheld`) for the rest.
-With nothing opted in, the default, the tools return the graph's structure and counts only. Only `ask` calls a model,
-and like every model call it keeps the model's reading of the question in the model cache; nothing else writes.
+With nothing opted in, the default, the tools return the graph's structure and counts only. Only `ask` and `research`
+call a model: `ask` keeps the model's reading of the question in the model cache, like every model call, and
+`research` keeps its run (its trace and its briefing) to answer the same question again on an unchanged graph. Nothing
+else writes.
 
 Register it with Claude Code, at user scope so every session has it:
 
@@ -373,8 +402,9 @@ Register it with Claude Code, at user scope so every session has it:
 cd api
 uv run igneous mcp install                 # the database and opt-ins api/.env names
 uv run igneous mcp install --name igneous-enron --database igneous --sources email   # a second one, on the Enron demo
-uv run igneous mcp check                   # start it as a client does and call each tool once; --ask also calls ask
-uv run igneous connect bedrock             # for ask only: save the model key where the server finds it
+uv run igneous mcp check                   # start it as a client does and call each tool once; --paid also calls
+                                           # ask and research
+uv run igneous connect bedrock             # for ask and research: save the model key where the server finds it
 ```
 
 `install` registers this checkout's `api/.venv/bin/igneous mcp` (it starts in about two seconds) and puts no credential

@@ -9,9 +9,11 @@ goes through igneous/disclosure.py: text only from the sources opted in to hoste
 only of the people and things those records name, and counts of the rest (`withheld`). With nothing opted in, the
 default, the tools return the graph's structure and counts only.
 
-`ask` is the one tool that calls a hosted model (Claude on Bedrock, which costs money): it answers from opted-in
-records as Ask does and, like every model call, keeps the model's reading of the question in the model cache. No other
-tool writes anything.
+`ask` and `research` are the tools that call a hosted model (Claude on Bedrock, which costs money). `ask` answers from
+opted-in records as Ask does and, like every model call, keeps the model's reading of the question in the model cache.
+`research` runs the research agent (igneous/agent/), which reads the graph through these same tools, so everything its
+model reads went through disclosure.py too; it stores the run, trace and briefing, to answer the same question again
+while the graph stays as it is. No other tool writes anything.
 
 Arguments are checked against each tool's schema before any database work. A tool given the id of nothing, or asked
 for something it can't do, fails with a message (the result's `isError`): the one error shape.
@@ -21,7 +23,7 @@ from contextlib import contextmanager
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 from sqlalchemy import text
@@ -48,8 +50,9 @@ server = MCPServer(
         "explains a link with the records behind it; `sources` and `read_item` read those records; `correspondents` "
         "ranks someone's relationships; `timeline` gives dated activity; `commitments` gives cited promises. Answer "
         "questions about structure (who went, who's on it, what's under it) with these, usually in 2-4 calls. Use "
-        "`search` or `ask` only for what was said. Cite node_ids and item_ids. A result's `withheld` counts the records "
-        "and names the user hasn't opted in to share with you: never guess at them. Everything is read-only."
+        "`search` or `ask` only for what was said, and `research` for a cited briefing that needs many reads. Cite "
+        "node_ids and item_ids. A result's `withheld` counts the records and names the user hasn't opted in to share "
+        "with you: never guess at them. Everything is read-only."
     ),
 )
 
@@ -385,6 +388,56 @@ def ask(question: Annotated[str, Field(min_length=1, max_length=2000)]) -> dict:
                                         "chunk_id": c["chunk_id"], "source": c["source"], "title": c["title"],
                                         "date": _day(c["occurred_at"])} for c in cited],
                          "filters": _filters(d, r.get("filters") or {})})
+
+
+def _step(step: dict) -> str:
+    """A research trace step in one line, for the client's progress display."""
+    if step["kind"] == "tool":
+        return f"{step['tool']}({', '.join(f'{k}={v!r}' for k, v in step['args'].items())}): {step['note']}"
+    if step["kind"] == "turn":
+        return f"turn {step['turn']}: {step['calls']} tool calls"
+    if step["kind"] == "stop":
+        return f"stopped: {step['reason']}"
+    return f"briefing: {step.get('kept', 0)} statements citing {step.get('records_cited', 0)} records"
+
+
+@server.tool()
+def research(question: Annotated[str, Field(min_length=1, max_length=2000,
+                                            description="whom or what to brief on, or a question")],
+             ctx: Context) -> dict:
+    """A cited briefing on a person, project, organization or question: an agent reads the graph with these tools (at
+    most 12 model turns, 30 tool calls and two minutes), then writes who is involved and the part each plays, what
+    happened when, and what is still open, every statement citing records it read (`cites`: item_ids, listed in
+    `sources`). The same question on an unchanged graph is answered from the last briefing. Calls a paid model many
+    times and takes a minute or two: prefer the graph tools for anything a few calls answer."""
+    import anyio.from_thread
+
+    from igneous.agent import research as agent
+    from igneous.llm import ProviderError
+
+    done = 0
+
+    def progress(step: dict) -> None:  # best effort: a client that asked for progress sees each step
+        nonlocal done
+        done += 1
+        try:
+            anyio.from_thread.run(ctx.report_progress, done, None, _step(step))
+        except Exception:
+            pass
+
+    try:
+        r = agent.run(question, on_step=progress)
+    except agent.NothingShared as e:
+        raise ToolError(str(e)) from e
+    except ProviderError as e:  # off, or no key
+        raise ToolError(f"research is unavailable: {e}. The graph tools don't need the model.") from e
+    if r["status"] == "running":
+        raise ToolError(f"research on this question is still running (run {r['id']}); ask again in a minute")
+    if r["status"] == "failed":
+        raise ToolError(f"research failed: {r['error']}")
+    usage = r["usage"] or {}
+    return {"question": r["question"], "run_id": r["id"], "cached": r["cached"], **r["report"],
+            "research": {k: usage.get(k) for k in ("turns", "tool_calls", "seconds", "stopped")}}
 
 
 def main(database: str | None = None, sources: str | None = None) -> None:

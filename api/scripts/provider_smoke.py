@@ -5,8 +5,10 @@
 
 Local: one embedding and one reranking, on this computer. --hosted: one schema-constrained request to each hosted
 model Igneous uses (IGNEOUS_LLM_MODEL for answers, IGNEOUS_LLM_CHEAP_MODEL for high-volume checks), sent the way every
-model call is (llm.structured), so a model that rejects the request's shape (its effort setting, the JSON schema)
-fails here first. It sends no record, only the instruction below. Exits non-zero if anything fails.
+model call is (llm.structured), and one turn with a tool to IGNEOUS_LLM_MODEL, sent the way the research agent's turns
+are (llm.agent_turn: a strict tool, the choice left to the model), so a model that rejects the request's shape (its
+effort setting, the JSON schema, the tool) fails here first. It sends no record, only the instructions below. Exits
+non-zero if anything fails.
 """
 import argparse
 import os
@@ -21,6 +23,9 @@ SCHEMA = {
     "required": ["ok", "word"],
     "additionalProperties": False,
 }
+TOOL = {"name": "record_word", "description": "Record one word.",
+        "input_schema": {"type": "object", "properties": {"word": {"type": "string", "maxLength": 40}},
+                         "required": ["word"]}}
 
 
 def main() -> None:
@@ -51,6 +56,20 @@ def main() -> None:
         failed += not good
         print(f"{role} model {model}: {'ok' if good else 'unexpected answer'} {out} "
               f"({usage['input_tokens']} tokens in, {usage['output_tokens']} out)")
+    try:
+        turn = llm.agent_turn("Answer by calling the record_word tool.", [
+            {"role": "user", "content": "Record the word 'igneous'."}], [TOOL], max_tokens=4096)
+    except llm.ProviderError as error:
+        failed += 1
+        print(f"research agent's turn on {settings.llm_model}: FAILED: {error}")
+    else:
+        calls = turn.tool_calls
+        good = bool(calls) and calls[0]["name"] == "record_word" and \
+            str(calls[0]["input"].get("word", "")).strip().lower() == "igneous"
+        failed += not good
+        print(f"research agent's turn on {settings.llm_model}: {'ok' if good else 'unexpected turn'} "
+              f"(stop reason {turn.stop_reason}, calls {calls}, {turn.usage['input_tokens']} tokens in, "
+              f"{turn.usage['output_tokens']} out)")
     if failed:
         raise SystemExit(1)
 

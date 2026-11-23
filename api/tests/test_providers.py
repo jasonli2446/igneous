@@ -141,6 +141,9 @@ def test_module_functions_reach_the_configured_models(monkeypatch):
         def chat(self, messages, schema=None, **options):
             return providers.ChatResult(json.dumps({"options": options}), {})
 
+        def tool_turn(self, system, messages, tools, **options):
+            return providers.TurnResult([{"type": "text", "text": system}], "end_turn", options)
+
     monkeypatch.setattr(providers, "_embedder", Fake)
     monkeypatch.setattr(providers, "_reranker", Fake)
     monkeypatch.setattr(providers, "_chat_model", Fake)
@@ -148,6 +151,79 @@ def test_module_functions_reach_the_configured_models(monkeypatch):
     assert providers.rerank("q", ["short", "longer"]) == [5.0, 6.0]
     assert json.loads(providers.chat([{"role": "user", "content": "hi"}], max_tokens=12).text) == {
         "options": {"max_tokens": 12}}
+    turn = providers.tool_turn("S", [{"role": "user", "content": "hi"}], [], timeout=5)
+    assert turn.text == "S" and turn.usage == {"timeout": 5}
+
+
+FIND = {"name": "find", "description": "a name to nodes", "input_schema": {
+    "type": "object", "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 200}}, "required": ["name"]}}
+
+
+def _turn(*blocks, stop="tool_use", **usage):
+    return SimpleNamespace(stop_reason=stop, content=list(blocks),
+                           usage=anthropic.types.Usage(input_tokens=5, output_tokens=7, **usage))
+
+
+def test_a_tool_turn_sends_strict_tools_and_leaves_the_choice_to_the_model(bedrock):
+    """Every tool strict, its schema made to fit strict tool use (bounds move into the description), tool_choice auto
+    (current models refuse a forced choice), effort where the model takes it; the turn's blocks come back as sent, the
+    thinking block's signature included, for the caller to append unchanged."""
+    thinking = anthropic.types.ThinkingBlock(type="thinking", thinking="", signature="opaque-signature")
+    call = anthropic.types.ToolUseBlock(type="tool_use", id="toolu_1", name="find", input={"name": "Dana"})
+    said = anthropic.types.TextBlock(type="text", text="Looking her up.")
+    sent = bedrock.connect(_turn(thinking, said, call, cache_read_input_tokens=3), _turn(said, stop="end_turn")).sent
+    history = [{"role": "user", "content": "Brief me on Dana"}]
+    turn = bedrock.tool_turn("S", history, [FIND], max_tokens=99, timeout=42)
+    assert sent[0] == {"model": SONNET, "max_tokens": 99, "system": "S", "messages": history,
+                       "tools": [{"name": "find", "description": "a name to nodes", "strict": True, "input_schema": {
+                           "type": "object", "properties": {"name": {"type": "string",
+                                                                     "description": "{minLength: 1, maxLength: 200}"}},
+                           "required": ["name"], "additionalProperties": False}}],
+                       "tool_choice": {"type": "auto"}, "output_config": {"effort": "medium"}, "timeout": 42}
+    assert turn.content == [{"type": "thinking", "thinking": "", "signature": "opaque-signature"},
+                            {"type": "text", "text": "Looking her up."},
+                            {"type": "tool_use", "id": "toolu_1", "name": "find", "input": {"name": "Dana"}}]
+    assert turn.text == "Looking her up." and turn.tool_calls == [turn.content[2]] and turn.stop_reason == "tool_use"
+    assert turn.usage == {"input_tokens": 5, "output_tokens": 7, "cache_read_input_tokens": 3}
+    assert bedrock.tool_turn("S", history, [FIND], model=HAIKU_4_5).tool_calls == []
+    assert "output_config" not in sent[1] and "timeout" not in sent[1] and sent[1]["model"] == HAIKU_4_5
+
+
+@pytest.mark.parametrize("stop", ["max_tokens", "refusal", "end_turn"])
+def test_a_tool_turn_comes_back_whatever_stopped_it(bedrock, stop):
+    bedrock.connect(_turn(anthropic.types.TextBlock(type="text", text="partial"), stop=stop))
+    assert bedrock.tool_turn("S", [{"role": "user", "content": "q"}], [FIND]).stop_reason == stop
+
+
+def test_a_tool_turn_fails_as_a_chat_call_does(bedrock):
+    bedrock.connect(_status(anthropic.RateLimitError, 429), _status(anthropic.BadRequestError, 400))
+    with pytest.raises(ProviderUnavailable, match="rate-limiting"):
+        bedrock.tool_turn("S", [{"role": "user", "content": "q"}], [FIND])
+    with pytest.raises(ProviderError, match="rejected"):
+        bedrock.tool_turn("S", [{"role": "user", "content": "q"}], [FIND])
+
+
+def test_agent_turn_reaches_the_provider_with_its_options(monkeypatch):
+    calls = []
+
+    def tool_turn(system, messages, tools, **options):
+        calls.append((system, messages, tools, options))
+        return providers.TurnResult([], "end_turn", {})
+
+    monkeypatch.setattr(llm, "tool_turn", tool_turn)
+    llm.agent_turn("S", [{"role": "user", "content": "q"}], [FIND], timeout=30)
+    assert calls == [("S", [{"role": "user", "content": "q"}], [FIND],
+                      {"max_tokens": 16000, "effort": "medium", "model": None, "timeout": 30})]
+
+
+def test_unavailable_says_why_no_hosted_call_can_be_made(monkeypatch):
+    monkeypatch.setattr(providers.settings, "llm_enabled", False)
+    assert "IGNEOUS_LLM_ENABLED" in providers.unavailable()
+    monkeypatch.setattr(providers.settings, "llm_enabled", True)
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+    assert "no Bedrock key" in providers.unavailable()
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "dummy-not-a-real-token")
+    assert providers.unavailable() is None and llm.unavailable is providers.unavailable
 
 
 def test_the_key_comes_from_the_environment_else_from_what_connect_saved(monkeypatch):

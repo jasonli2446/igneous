@@ -476,9 +476,10 @@ def mcp_install(name: str = typer.Option("igneous", help="the name Claude Code l
 def mcp_check(database: str = typer.Option(None, help=DATABASE_HELP),
               sources: str = typer.Option(None, help=SOURCES_HELP),
               query: str = typer.Option(None, help="a name for `find` and words for `search` (default: from `me`)"),
-              ask: bool = typer.Option(False, "--ask", help="also call `ask`, which calls the paid hosted model")):
+              paid: bool = typer.Option(False, "--paid", help="also call `ask` and `research`, which call the paid "
+                                                              "hosted model")):
     """Start the server as a client would, call each tool once, and report each call's time and outcome. Exits 1 if
-    a tool fails. Paid tools run only when asked for."""
+    a tool fails. The paid tools run only when asked for."""
     from igneous import db, mcp_client
 
     if database:
@@ -486,7 +487,7 @@ def mcp_check(database: str = typer.Option(None, help=DATABASE_HELP),
     if problem := db.schema_status():
         typer.echo(f"igneous: {problem}", err=True)
         raise typer.Exit(code=2)
-    calls = mcp_client.check(database=database, sources=sources, ask=ask, query=query)
+    calls = mcp_client.check(database=database, sources=sources, paid=paid, query=query)
     for c in calls:
         outcome = {True: "ok", False: "FAILED", None: "-"}[c.ok]
         print(f"{c.tool:15s} {c.seconds * 1000:8.0f} ms  {outcome:6s}  {c.note}")
@@ -518,6 +519,51 @@ def search(q: str = typer.Argument(..., help="what to find; -word leaves a word 
                                                         default=str))
         for h in hybrid(s, q, f, k=k, mode=mode):
             print(f"{h['score']:.4f} {','.join(h['matched']):14s} {h['title']!r} [{h['external_id']}]")
+
+
+def _research_step(step: dict) -> str:
+    if step["kind"] == "turn":
+        say = (step.get("say") or "").splitlines()
+        return f"turn {step['turn']}" + (f": {say[0][:100]}" if say else "")
+    if step["kind"] == "tool":
+        args = ", ".join(f"{k}={v!r}" for k, v in step["args"].items())
+        return f"  {step['tool']}({args}) -> {step['note']}  {step['seconds']:.1f} s"
+    if step["kind"] == "stop":
+        return f"stopped: {step['reason']}" + (f" ({step['detail']})" if step.get("detail") else "")
+    return f"briefing: {step['kept']} statements kept of {step['statements']}"
+
+
+@app.command()
+def research(question: str = typer.Argument(..., help="whom or what to brief on, or a question"),
+             as_json: bool = typer.Option(False, "--json", help="print the whole run (trace, briefing, usage) as "
+                                                                "JSON")):
+    """Brief me: the research agent reads the graph through the MCP tools (at most 12 model turns, 30 tool calls and
+    two minutes), then writes who is involved and how, what happened when and what is still open, every statement
+    citing records it read. It calls the paid hosted model and reads only the sources opted in to it
+    (IGNEOUS_LLM_SOURCES); the same question on an unchanged graph is answered from the last briefing. Each step
+    prints as it happens."""
+    from igneous import llm
+    from igneous.agent import report
+    from igneous.agent import research as agent
+
+    _require_schema()
+    try:
+        run = agent.run(question, on_step=None if as_json else lambda step: print(_research_step(step), flush=True))
+    except (agent.NothingShared, llm.ProviderError) as e:
+        typer.echo(f"igneous: {e}", err=True)
+        raise typer.Exit(code=1) from e
+    if as_json:
+        print(json.dumps(run, default=str, indent=2))
+    elif run["status"] == "succeeded":
+        if run["cached"]:
+            print(f"(made at {run['finished_at']:%Y-%m-%d %H:%M} on the graph as it is now)")
+        print(report.as_text(run["report"]))
+    if run["status"] == "running":
+        typer.echo(f"igneous: research on this question is still running (run {run['id']}); ask again later", err=True)
+        raise typer.Exit(code=1)
+    if run["status"] == "failed":
+        typer.echo(f"igneous: research failed: {run['error']}", err=True)
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

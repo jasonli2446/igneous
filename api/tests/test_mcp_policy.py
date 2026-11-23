@@ -11,7 +11,7 @@ import sys
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
-from mixed_sources import PRIVATE, build, wipe
+from mixed_sources import PRIVATE, build, every_call, wipe
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
@@ -36,28 +36,6 @@ def call(tool: str, **args) -> dict:
     result = asyncio.run(mcp_server.server.call_tool(tool, args))
     assert not result.is_error, result.content[0].text
     return json.loads(result.content[0].text)
-
-
-def every_call(g: dict) -> list[tuple[str, dict]]:
-    """Each tool on each node and record of the graph it takes, and on the pairs that cross the two sources."""
-    with SessionLocal() as s:
-        nodes = s.execute(text("SELECT id FROM nodes ORDER BY id")).scalars().all()
-        items = s.execute(text("SELECT id FROM source_items ORDER BY id")).scalars().all()
-    people = [g["me"], g["sam"], g["sam2"], g["pat"]]
-    calls = [("me", {})]
-    calls += [("find", {"name": q}) for q in ("Pat", "Private", "Sam", "Atlas", "Robotics", "Chat")]
-    calls += [("search", {"query": q}) for q in ("PRIVATEMARKER", "Atlas plans", "Pat Private", "texts from Pat")]
-    calls += [("search", {"query": "Atlas", "person_node_id": p}) for p in people]
-    calls += [("correspondents", {"person_node_id": p}) for p in people]
-    calls += [("read_item", {"item_id": i}) for i in items]
-    for n in nodes:
-        calls += [("open_node", {"node_id": n}), ("timeline", {"node_id": n}), ("sources", {"node_id": n}),
-                  ("commitments", {"node_id": n, "status": "all"})]
-    pairs = [(g["me"], g["pat"]), (g["sam"], g["pat"]), (g["atlas"], g["pat"]), (g["pat"], g["pat_only"]),
-             (g["me"], g["sam"]), (g["atlas"], g["platform"]), (g["items"]["i0"], g["items"]["g0"])]
-    calls += [("why_connected", {"a": a, "b": b}) for a, b in pairs]
-    calls += [("timeline", {"node_id": a, "other_node_id": b}) for a, b in pairs]
-    return calls
 
 
 def said(tool: str, **args) -> str:
@@ -121,6 +99,27 @@ def test_ask_answers_from_opted_in_records_and_cites_ids_to_follow(graph, monkey
     assert not [marker for marker in PRIVATE if marker in json.dumps(r)]
 
 
+def test_research_shares_only_opted_in_records_and_names(graph, monkeypatch):
+    """The research tool's agent calls every read tool on every node and record (scripted: no key); its briefing,
+    written from what came back, carries nothing from outside the opt-in, and cites opted-in mail."""
+    from scripted_model import ScriptedAgent, ScriptedWriter
+
+    from igneous.agent import research
+
+    calls = [(t, a) for t, a in every_call(graph) if not any(m in json.dumps(a) for m in PRIVATE)]
+    turns = [calls[i:i + 30] for i in range(0, len(calls), 30)]
+    monkeypatch.setattr(research, "BUDGET", research.Budget(turns=len(turns) + 1, tool_calls=len(calls),
+                                                            seconds=3600, unproductive=len(turns) + 1))
+    monkeypatch.setattr(llm, "unavailable", lambda: None)
+    monkeypatch.setattr(llm, "tool_turn", ScriptedAgent(lambda t, _r: turns[t - 1] if t <= len(turns) else "done"))
+    monkeypatch.setattr(llm, "structured", ScriptedWriter())
+    answer = said("research", question="Brief me on Atlas and the people in it")
+    briefing = json.loads(answer)
+    assert briefing["sources"] and {s["source"] for s in briefing["sources"]} == {"gmail"}
+    assert briefing["research"]["tool_calls"] == len(calls)
+    assert not [marker for marker in PRIVATE if marker in answer]
+
+
 def test_ask_without_the_model_fails_with_the_reason(graph, monkeypatch):
     def unavailable(*_args, **_kwargs):
         raise llm.LLMDisabled("no Bedrock key")
@@ -162,7 +161,8 @@ def test_unknown_ids_are_errors_not_empty_answers(graph):
     ("read_item", {"item_id": 1, "max_chars": 10}), ("read_item", {"item_id": 0}),
     ("correspondents", {"person_node_id": 1, "limit": 61}), ("why_connected", {"a": 1}),
     ("timeline", {"node_id": 1, "limit": 201}), ("commitments", {"node_id": 1, "status": "late"}),
-    ("ask", {"question": ""}), ("open_node", {"node_id": "seven"}),
+    ("ask", {"question": ""}), ("open_node", {"node_id": "seven"}), ("research", {"question": ""}),
+    ("research", {"question": "x" * 2001}),
 ])
 def test_arguments_are_checked_before_any_database_work(monkeypatch, tool, args):
     def forbidden():
@@ -175,8 +175,29 @@ def test_arguments_are_checked_before_any_database_work(monkeypatch, tool, args)
 
 def test_check_calls_every_tool_through_the_protocol(graph):
     calls = mcp_client.check(target=mcp_server.server, query="Atlas")
-    assert {c.tool for c in calls} == {t.name for t in asyncio.run(mcp_server.server.list_tools())} - {"ask"}
+    assert {c.tool for c in calls} == {t.name for t in asyncio.run(mcp_server.server.list_tools())} - mcp_client.PAID
     assert all(c.ok for c in calls), [(c.tool, c.note) for c in calls if not c.ok]
+
+
+def test_check_calls_the_paid_tools_when_asked(graph, monkeypatch):
+    from scripted_model import ScriptedAgent, ScriptedWriter
+
+    writer = ScriptedWriter()
+
+    def structured(system, user, schema, **options):
+        if "answerable" in schema["properties"]:  # ask's
+            return {"answerable": True, "answer": "Next steps.", "cited": [int(user.split("[c", 1)[1].split("]")[0])]}, {}
+        return writer(system, user, schema, **options)
+
+    monkeypatch.setattr(settings, "reranker_enabled", False)
+    monkeypatch.setattr(llm, "unavailable", lambda: None)
+    monkeypatch.setattr(llm, "structured", structured)
+    monkeypatch.setattr(llm, "tool_turn", ScriptedAgent(
+        lambda turn, _r: [("find", {"name": "Atlas"}), ("sources", {"node_id": graph["atlas"]})] if turn == 1 else "x"))
+    calls = {c.tool: c for c in mcp_client.check(target=mcp_server.server, query="Atlas", paid=True)}
+    assert set(calls) == {t.name for t in asyncio.run(mcp_server.server.list_tools())}
+    assert calls["ask"].ok and calls["research"].ok, (calls["ask"].note, calls["research"].note)
+    assert calls["research"].args == {"question": "Brief me on Atlas."} and writer.prompts
 
 
 def test_install_registers_the_command_and_no_credential(tmp_path, monkeypatch):
