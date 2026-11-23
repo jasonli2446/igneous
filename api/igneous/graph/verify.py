@@ -428,8 +428,9 @@ def run(s: Session, log=print, budget: int = BUDGET, progress=None) -> dict:
 def apply_verdicts(s: Session) -> int:
     """Put every verdict on the graph as it is now, and return how many links changed:
       - your rejections: no derived link joins a pair you said is wrong, under any of their identities;
-      - the verifier's drops: the link moves to `edges_dropped` (kept for the why-view and undo, one row per natural
-        key), and a 'keep' of yours on a dropped link brings it back; a row whose verdict no longer drops it goes;
+      - the verifier's drops: the link moves to `edges_dropped` (one row per natural key), and a 'keep' of yours on a
+        dropped link ('This is right' that lands while a rebuild drops it) brings it back; a row whose verdict no
+        longer drops it goes;
       - every other verdict rides on its link (props.verdict, reason, confidence, verified_by)."""
     from igneous.graph.derived import blocked_sql, rejections
 

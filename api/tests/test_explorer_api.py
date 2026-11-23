@@ -226,9 +226,21 @@ def test_a_suggestion_names_each_end_as_the_explorer_shows_it(world, client, db)
                                                       confidence, source)
                            VALUES (:a, :b, :t, :x, 'e1', 'unsure', 'the records don''t say', 0.5, 'model')"""),
                    {"a": a, "b": b, "t": kind, "x": extractor})
-    suggested = client.get("/graph/suggestions").json()["suggestions"]
-    assert [(x["edge"], x["src"], x["src_name"], x["dst"], x["dst_name"]) for x in suggested] == [
+    answer = client.get("/graph/suggestions").json()
+    assert [(x["edge"], x["src"], x["src_name"], x["dst"], x["dst_name"]) for x in answer["suggestions"]] == [
         (w.intro, w.ana, "Ana Ames", w.sam, "Sam Lee")]
+    assert answer["total"] == 1 and "total" not in answer["suggestions"][0]
+    # A page of them says how many there are in all.
+    for person in (w.ana, w.bo):
+        db.execute(text("""INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, reason,
+                                                      confidence, source)
+                           SELECT a.type || ':' || a.key, b.type || ':' || b.key, e.type, e.extractor, 'e2', 'unsure',
+                                  'the records don''t say', 0.4, 'model'
+                           FROM edges e JOIN nodes a ON a.id = e.src JOIN nodes b ON b.id = e.dst
+                           WHERE e.src = :p AND e.type = 'WORKED_AT'"""), {"p": person})
+    page = client.get("/graph/suggestions", params={"limit": 1}).json()
+    assert len(page["suggestions"]) == 1 and page["total"] == 3
+    assert len(client.get("/graph/suggestions").json()["suggestions"]) == 3
 
 
 def test_the_opening_view_shows_your_org_once_and_never_a_pair_you_rejected(world, client):

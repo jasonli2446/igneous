@@ -106,6 +106,9 @@ def test_a_failed_rebuild_publishes_nothing_and_keeps_what_the_model_was_paid_fo
         verdicts = reader.execute(text("SELECT count(*) FROM edge_verdicts WHERE source = 'model'")).scalar()
         screened = reader.execute(text("SELECT count(*) FROM llm_cache WHERE cache_key LIKE 'entities-screen:%'"))
         assert verdicts > 0 and screened.scalar() > 0
+    # What a page waiting for it sees: no rebuild running, and the version it had.
+    from igneous.main import app
+    assert TestClient(app).get("/graph/version").json() == {"version": str(before["version"]), "rebuilding": False}
 
 
 def test_each_publish_bumps_the_graph_version_once(db):
@@ -208,6 +211,31 @@ def test_a_correction_made_while_a_rebuild_derives_is_saved_at_once_and_lands_in
     assert published(project) == "Game Night"
 
 
+def test_while_a_rebuild_runs_the_version_says_so_and_a_correction_names_its_pairs_without_guessing(
+        committed_db, monkeypatch):
+    """GET /graph/version says a rebuild is running until it publishes. A link taken out meanwhile answers on_publish
+    with the pair it touches and nothing yet about what joins it (still_linked null: the rebuild decides), and it is
+    gone once the version moves."""
+    from igneous.main import app
+
+    s = committed_db
+    first_build(s)
+    kai = """SELECT e.id FROM edges e JOIN nodes a ON a.id = e.src JOIN nodes b ON b.id = e.dst
+             WHERE e.type = 'INVOLVED_IN' AND a.key = 'kai@y.test' AND b.name = 'Gloomhaven Night'"""
+    edge = s.execute(text(kai)).scalar_one()
+    client = TestClient(app)
+    before = client.get("/graph/version").json()
+    assert before["rebuilding"] is False
+    with Rebuild(monkeypatch, organizations, "run") as rebuild:
+        assert client.get("/graph/version").json() == {**before, "rebuilding": True}
+        wrong = client.post("/graph/edge/wrong", json={"edge": edge}).json()
+        assert wrong["applied"] == "on_publish" and [p["still_linked"] for p in wrong["pairs"]] == [None]
+        rebuild.finish()
+    after = client.get("/graph/version").json()
+    assert after == {"version": str(int(before["version"]) + 1), "rebuilding": False}
+    assert s.execute(text(kai)).first() is None
+
+
 def test_a_correction_made_during_the_final_step_waits_for_it_then_applies_now(committed_db, monkeypatch):
     """The final step holds the publish lock until its commit: a correction recorded meanwhile waits (it would be
     missed otherwise), then applies in place to the graph the rebuild published."""
@@ -268,7 +296,7 @@ def test_a_correction_gives_up_a_lock_wait_rather_than_wait_out_another_writer(c
     with engine.connect() as other:
         other.execute(text("SELECT 1 FROM nodes WHERE id = :p FOR UPDATE"), {"p": project})
         answer = TestClient(app).post(f"/graph/entity/{project}/rename", json={"name": "Game Night"}).json()
-        assert answer["applied"] == "on_publish"
+        assert answer["applied"] == "next_rebuild" and "next rebuild" in answer["note"]
         other.rollback()
     assert published(project) == "Gloomhaven Night"
     pipeline.run(s)

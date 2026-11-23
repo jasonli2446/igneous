@@ -2,16 +2,18 @@
 
 Reads: GET /graph/entity/{id} (with the corrections that shape it, for undo), GET /graph/suggestions (links the
 verifier was unsure about). Corrections: rename, hide, merge and unlink a Project (POST /graph/entity/{id}/...), "This
-is wrong" and "This is right" on any derived link (POST /graph/edge/wrong, /graph/edge/confirm), bring removed links
-back (POST /graph/edge/restore), "same person" and "not the same person" (POST /graph/person/{id}/merge, /split), a
-connection you add or take out again (POST /graph/link, DELETE /graph/link/{id}), and undo (DELETE /overrides/{id}).
-Two people become one only through "same person", never through an added connection.
+is wrong" and "This is right" on any derived link (POST /graph/edge/wrong, /graph/edge/confirm), "same person" and
+"not the same person" (POST /graph/person/{id}/merge, /split), a connection you add or take out again (POST
+/graph/link, DELETE /graph/link/{id}), and undo of any of them (DELETE /overrides/{id}). Two people become one only
+through "same person", never through an added connection.
 
 Each correction is an intent (graph/corrections.py): recorded at once by natural keys, then applied to the published
-graph in place, or by the final step of a rebuild that is running. Every answer says which: {"applied": "now"}, or
-{"applied": "on_publish", "note": ...}, and carries the override id that undoes it. Those that remove or bring back
-links, and their undos, say per node pair they touched (each end an identity head, as the explorer shows it) whether
-a link still joins the two (`pairs`: [{a, b, still_linked}]). No correction is refused because a rebuild is running.
+graph in place, or by the final step of a rebuild. Every answer says which: {"applied": "now"}; {"applied":
+"on_publish", "note": ...} while a rebuild runs (it applies when that rebuild publishes, which GET /graph/version
+shows); or {"applied": "next_rebuild", "note": ...} when it couldn't apply now and no rebuild is running. It carries
+the override id that undoes it. Those that add, remove or bring back links, and their undos, say per node pair they
+touched (each end an identity head, as the explorer shows it) whether a link joins the two once they apply (`pairs`:
+[{a, b, still_linked}], still_linked null until then). No correction is refused because a rebuild is running.
 """
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
@@ -175,7 +177,7 @@ def undo(override_id: int = Path(ge=1), s: Session = Depends(get_session)):
         except LookupError as e:
             raise HTTPException(404, str(e)) from e
     applied = apply_now(s)
-    pairs = corrections.outcome(s, corrections.node_pairs(s, row["pairs"]))
+    pairs = corrections.outcome(s, corrections.node_pairs(s, row["pairs"]), applied=applied["applied"] == "now")
     s.rollback()
     return {"undone": override_id, "op": row["op"], "pairs": pairs, **applied}
 
@@ -186,9 +188,9 @@ class EdgeBody(BaseModel):
 
 def _settled(s: Session, result: dict) -> dict:
     """Apply a recorded correction now if it can be, and answer with it: when it applies, and per node pair it
-    touched whether a link still joins the two."""
+    touched whether a link joins the two once it has (unknown until then)."""
     applied = apply_now(s)
-    pairs = corrections.outcome(s, result.pop("pairs", []))
+    pairs = corrections.outcome(s, result.pop("pairs", []), applied=applied["applied"] == "now")
     s.rollback()
     return {**result, "pairs": pairs, **applied}
 
@@ -225,16 +227,17 @@ def edge_is_right(body: EdgeBody, s: Session = Depends(get_session)):
 @router.get("/graph/suggestions")
 def suggestions(limit: int = Query(50, ge=1, le=200), s: Session = Depends(get_session)):
     """Links the verifier was unsure about, for you to answer: 'This is right' (POST /graph/edge/confirm) or 'This is
-    wrong' (POST /graph/edge/wrong). Each answer becomes a label the verifier learns from. Most confident first. Each
-    end is shown as the explorer shows it: a person as their identity head, named as everywhere else, and never a
-    hidden node or a service; a link between two identities of one person is not asked here (the person's panel
-    lists their identities, each of which can be split off)."""
+    wrong' (POST /graph/edge/wrong). Each answer becomes a label the verifier learns from. Most confident first, the
+    first `limit` of `total`. Each end is shown as the explorer shows it: a person as their identity head, named as
+    everywhere else, and never a hidden node or a service; a link between two identities of one person is not asked
+    here (the person's panel lists their identities, each of which can be split off)."""
     from igneous.graph.traversal import label, names
     from igneous.graph.verify import CLAIMS, claim_of
 
     rows = s.execute(text(f"""
         SELECT e.id AS edge, e.type, e.extractor, a.type AS src_type, b.type AS dst_type,
-               ha.id AS src, ha.name AS src_name, hb.id AS dst, hb.name AS dst_name, v.reason, v.confidence
+               ha.id AS src, ha.name AS src_name, hb.id AS dst, hb.name AS dst_name, v.reason, v.confidence,
+               count(*) OVER () AS total
         FROM edges e JOIN nodes a ON a.id = e.src JOIN nodes b ON b.id = e.dst
         JOIN edge_verdicts v ON v.src_key = a.type || ':' || a.key AND v.dst_key = b.type || ':' || b.key
             AND v.type = e.type AND v.extractor = e.extractor
@@ -244,9 +247,11 @@ def suggestions(limit: int = Query(50, ge=1, le=200), s: Session = Depends(get_s
         ORDER BY v.confidence DESC NULLS LAST, e.id LIMIT :n
     """), {"n": limit}).mappings().all()
     named = names(s)
+    shown_rows = [{k: v for k, v in r.items() if k != "total"} for r in rows]
     return {"suggestions": [{**r, "src_name": label(r["src_name"], r["src_type"], named),
                              "dst_name": label(r["dst_name"], r["dst_type"], named),
-                             "claim": CLAIMS.get(claim_of(r), "")} for r in map(dict, rows)]}
+                             "claim": CLAIMS.get(claim_of(r), "")} for r in shown_rows],
+            "total": rows[0]["total"] if rows else 0}
 
 
 class SamePersonBody(BaseModel):
@@ -275,43 +280,25 @@ def merge_people(node_id: int, body: SamePersonBody, s: Session = Depends(get_se
 
 
 class SplitBody(BaseModel):
-    # The other identity's key (an address, a number, a profile), as GET /graph/node/{id} lists a person's identities:
-    # an identity merged into someone is never named by its node id.
+    # One of the person's other identities (an address, a number, a profile) by its key, as GET /graph/node/{id}
+    # lists them under `identities`: an identity merged into someone is never named by its node id.
     key: str = Field(min_length=1, max_length=500)
 
 
 @router.post("/graph/person/{node_id}/split")
 def split_people(body: SplitBody, node_id: int = Path(ge=1), s: Session = Depends(get_session)):
-    """"These are not the same person": your verdict, which keeps the person `node_id` and the identity `key` in
-    separate identities on every rebuild whatever joins them (a contact card, an address match, a 'same person' you
-    said before, which it takes out). Undo (DELETE /overrides/{override_id}) joins them again."""
-    other = s.execute(text("SELECT id FROM nodes WHERE type = 'Person' AND key = :k"), {"k": body.key}).scalar()
+    """"These are not the same person": your verdict, which keeps the person `node_id` and one of their other
+    identities (`key`) apart on every rebuild whatever joins them (a contact card, an address match, a 'same person'
+    you said before, which it takes out). Undo (DELETE /overrides/{override_id}) joins them again. 404 unless `key` is
+    one of this person's other identities."""
+    from igneous.graph import identity
+
+    other = next((i["id"] for i in identity.others(s, node_id) if i["key"] == body.key), None)
     if other is None:
-        raise HTTPException(404, "No person has that address, number or profile")
+        raise HTTPException(404, "That isn't one of this person's other addresses, numbers or profiles")
     with recording(s):
-        try:
-            result = corrections.split(s, node_id, other)
-        except LookupError as e:
-            raise HTTPException(400, str(e)) from e
+        result = corrections.split(s, identity.head(s, node_id), other)
     return _settled(s, result)
-
-
-class RestoreBody(BaseModel):
-    edges: list[int]
-
-
-@router.post("/graph/edge/restore")
-def restore_edges(body: RestoreBody, s: Session = Depends(get_session)):
-    """Undo "This is wrong": bring the removed links back and forget the verdicts that removed them (a link the
-    verifier dropped comes back with your 'keep'). `restored`: those of them in the graph now."""
-    with recording(s):
-        result = corrections.restore_links(s, body.edges)
-    applied = apply_now(s)
-    restored = list(s.execute(text("SELECT id FROM edges WHERE id = ANY(:i) ORDER BY id"),
-                              {"i": result.pop("edges")}).scalars())
-    pairs = corrections.outcome(s, corrections.node_pairs(s, result.pop("pairs")))
-    s.rollback()
-    return {"restored": restored, **result, "pairs": pairs, **applied}
 
 
 # How two kinds of thing can be connected, in plain words (the add-a-connection menu), and the edge each means.
@@ -360,7 +347,8 @@ def add_link(body: LinkBody, s: Session = Depends(get_session)):
     on every rebuild by natural keys (a Project under a Project is stated hierarchy, which the threads stage builds
     on). Only what the menu offers: two people become one through POST /graph/person/{id}/merge, never a link. `id`:
     the link in the graph once applied (null until then); `override_id` undoes it (null for a Project under a
-    Project, which DELETE /graph/link/{id} takes out)."""
+    Project, which DELETE /graph/link/{id} takes out); `pairs`: the two ends, joined once it applies, as every
+    correction that adds or takes out links answers."""
     if body.src == body.dst:
         raise HTTPException(422, "Pick two different things to connect")
     with recording(s):
@@ -379,8 +367,10 @@ def add_link(body: LinkBody, s: Session = Depends(get_session)):
     applied = apply_now(s)
     eid = s.execute(text("SELECT id FROM edges WHERE src = :a AND dst = :b AND type = :t AND extractor = 'user'"),
                     {"a": body.src, "b": body.dst, "t": body.type}).scalar()
+    pairs = corrections.outcome(s, [(body.src, body.dst)], applied=applied["applied"] == "now")
     s.rollback()
-    return {"id": eid, "src": body.src, "dst": body.dst, "type": body.type, "override_id": oid, **applied}
+    return {"id": eid, "src": body.src, "dst": body.dst, "type": body.type, "override_id": oid, "pairs": pairs,
+            **applied}
 
 
 @router.delete("/graph/link/{edge_id}")

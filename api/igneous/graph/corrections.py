@@ -10,8 +10,11 @@ A correction made through the API (rename, hide, merge, "This is wrong", a conne
      published graph in place, under the exclusive publish lock (it waits for intents still being recorded, as a
      final step does), in a transaction whose lock timeout is below the deadlock timeout, so it always loses a lock
      race and never aborts a rebuild. When a rebuild is running, its final step applies it instead (`apply_all`
-     under the exclusive publish lock), and the answer says so. No correction is refused because a rebuild is
-     running.
+     under the exclusive publish lock), and the answer says so; when it loses a lock race, the next rebuild or the
+     next correction that applies does. No correction is refused because a rebuild is running.
+
+Every time the graph version moves (a rebuild publishes, or a correction applies in place), every correction recorded
+before then is on the graph.
 
 A pair rejection ("This is wrong" on a link, or removing something from a project) is your 'drop' verdict on the
 pair (graph/verify.py record_correction): no derived link of any type joins the two again, in either direction, under
@@ -32,7 +35,7 @@ from igneous.graph.derived import STATED
 APPLIED = {"applied": "now"}
 ON_PUBLISH = {"applied": "on_publish",
               "note": "A rebuild is running: your correction is saved and applies when it publishes."}
-NEXT_REBUILD = {"applied": "on_publish", "note": "Your correction is saved and applies with the next rebuild."}
+NEXT_REBUILD = {"applied": "next_rebuild", "note": "Your correction is saved and applies with the next rebuild."}
 
 
 @contextmanager
@@ -56,9 +59,10 @@ def apply_all(s: Session) -> dict:
 
 
 def apply_now(s: Session) -> dict:
-    """Apply every recorded correction to the published graph now, unless a rebuild is reading sources or deriving
-    (then its final step applies them). Returns what to tell the user: {applied: 'now'} or {applied: 'on_publish',
-    note}.
+    """Apply every recorded correction to the published graph now, unless a rebuild is reading sources or deriving.
+    Returns what to tell the user: {applied: 'now'}; {applied: 'on_publish', note} when a rebuild is running (its
+    final step applies them); or {applied: 'next_rebuild', note} when applying gave up a lock wait (the next rebuild's
+    final step, or the next correction that applies, applies them).
 
     While it applies, it holds the sources and deriving locks shared, so no rebuild starts meanwhile. It takes them
     without waiting, as session locks on its own transaction's connection that it releases before that transaction
@@ -216,27 +220,32 @@ def remove_link(s: Session, edge_id: int) -> dict:
     return {"removed": edge_id, "override_id": oid, "pairs": [tuple(sorted((edge["src"], edge["dst"])))]}
 
 
-def outcome(s: Session, pairs) -> list[dict]:
+def outcome(s: Session, pairs, applied: bool = True) -> list[dict]:
     """For each node pair a correction touched, as the explorer shows the two (each end its identity head): whether
-    any link still joins them now, under any of their identities and in either direction, so a view removes or
-    restores exactly those pairs. A pair that is one person now (two identities of one head) joins nothing on screen
-    and is left out."""
-    from igneous.graph import identity
+    a link the explorer draws joins them now, so a view takes apart or joins again exactly those pairs. That is any
+    link under any of their identities, in either direction, that no verdict dropped; between a pair you rejected,
+    only a link you or an agent added, since the explorer draws nothing else between it. A pair that is one person
+    now (two identities of one head) joins nothing on screen and is left out. While the correction waits for a
+    rebuild (`applied` false), what joins a pair once it applies isn't known yet: `still_linked` is None."""
+    from igneous.graph import identity, visibility
 
     head = identity.heads(s, {x for p in pairs for x in p})
     pairs = sorted({tuple(sorted((head[a], head[b]))) for a, b in pairs if head[a] != head[b]})
-    if not pairs:
-        return []
-    linked = {tuple(r) for r in s.execute(text("""
+    if not pairs or not applied:
+        return [{"a": a, "b": b, "still_linked": None} for a, b in pairs]
+    linked = {(a, b): added for a, b, added in s.execute(text("""
         WITH q AS (SELECT * FROM jsonb_to_recordset(CAST(:p AS jsonb)) AS q(a bigint, b bigint)),
         ends AS (SELECT q.a, q.b, x.id AS x, y.id AS y FROM q
                  CROSS JOIN LATERAL (SELECT q.a AS id UNION SELECT node_id FROM canonical WHERE canonical_id = q.a) x
                  CROSS JOIN LATERAL (SELECT q.b AS id UNION SELECT node_id FROM canonical WHERE canonical_id = q.b) y)
-        SELECT DISTINCT ends.a, ends.b FROM ends
+        SELECT ends.a, ends.b, bool_or(e.extractor = 'user' OR e.extractor LIKE 'agent:%') FROM ends
         JOIN edges e ON (e.src = ends.x AND e.dst = ends.y) OR (e.src = ends.y AND e.dst = ends.x)
         WHERE COALESCE(e.props->>'verdict', '') <> 'drop'
+        GROUP BY ends.a, ends.b
     """), {"p": json.dumps([{"a": a, "b": b} for a, b in pairs])})}
-    return [{"a": a, "b": b, "still_linked": (a, b) in linked} for a, b in pairs]
+    rejected = visibility.rejected(s)
+    return [{"a": a, "b": b, "still_linked": (a, b) in linked and (linked[a, b] or frozenset((a, b)) not in rejected)}
+            for a, b in pairs]
 
 
 def node_pairs(s: Session, keys) -> list[tuple[int, int]]:
@@ -328,31 +337,6 @@ def undo(s: Session, override_id: int) -> dict:
         pairs |= {(v["a"], v["b"]) for v in data.get("verdicts", [])}
         pairs |= {(e["src_key"], e["dst_key"]) for e in data.get("edges", [])}
     return {"id": row["id"], "op": row["op"], "pairs": sorted(pairs)}
-
-
-def restore_links(s: Session, edge_ids: list[int]) -> dict:
-    """Record "bring these links back": the rejections of yours that removed them are undone, and a link the
-    verifier dropped gets your 'keep' (a label it learns from), which brings it back from edges_dropped. Returns
-    {undone: [override ids], kept: n, edges: every link id they bring back, pairs: their node pairs by natural key}."""
-    groups = s.execute(text("""
-        SELECT id FROM overrides WHERE op = 'unlink' AND undone_at IS NULL AND data->>'pair_correction' = 'true'
-            AND EXISTS (SELECT 1 FROM jsonb_array_elements(data->'edges') e WHERE (e->>'id')::bigint = ANY(:i))
-        ORDER BY id DESC
-    """), {"i": edge_ids}).scalars().all()
-    grouped = {int(e) for (e,) in s.execute(text("""
-        SELECT (e->>'id')::bigint FROM overrides o, jsonb_array_elements(o.data->'edges') e WHERE o.id = ANY(:g)
-    """), {"g": list(groups)})}
-    for oid in groups:
-        undo(s, oid)
-    dropped = s.execute(text("""
-        SELECT src_key, dst_key, type, extractor FROM edges_dropped WHERE id = ANY(:i) ORDER BY 1, 2, 3, 4
-    """), {"i": [i for i in edge_ids if i not in grouped]}).all()
-    for a, b, kind, extractor in dropped:
-        verify.record_correction(s, a, b, kind, extractor, "keep", "you said this connection is right")
-    keys = {(e["src_key"], e["dst_key"]) for (e,) in s.execute(text("""
-        SELECT e FROM overrides o, jsonb_array_elements(o.data->'edges') e WHERE o.id = ANY(:g)"""), {"g": list(groups)})}
-    return {"undone": list(groups), "kept": len(dropped), "edges": sorted(grouped | set(edge_ids)),
-            "pairs": sorted(keys | {(a, b) for a, b, _t, _x in dropped})}
 
 
 def confirm(s: Session, edge_id: int) -> dict:

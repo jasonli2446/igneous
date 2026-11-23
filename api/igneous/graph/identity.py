@@ -74,6 +74,15 @@ def members(s: Session, node_id: int) -> list[int]:
     return sorted({node_id, *ids})
 
 
+def others(s: Session, node_id: int) -> list[dict]:
+    """The other identities of `node_id`'s person, each {id, key, name}, by key: every identity in its cluster but
+    the head, which the person is shown as ([] for a node that isn't merged)."""
+    return [dict(r) for r in s.execute(text(f"""
+        SELECT m.id, m.key, m.name FROM canonical c JOIN nodes m ON m.id = c.node_id
+        WHERE c.canonical_id = {head_sql(':id')} AND c.node_id <> c.canonical_id ORDER BY m.key"""),
+        {"id": node_id}).mappings()]
+
+
 def known(s: Session) -> dict[int, int]:
     """The identities known to be one person before any scoring: each Person with a trusted SAME_AS link (TRUSTED) ->
     the smallest id in its cluster of such links. A stage that runs before entity resolution folds identities by

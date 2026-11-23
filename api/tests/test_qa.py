@@ -230,9 +230,14 @@ def test_ask_route_maps_provider_failures_and_validates_its_body(mailbox, model,
     def off(*_args, **_kwargs):
         raise LLMDisabled("AWS_BEARER_TOKEN_BEDROCK is not set")
 
+    # Calls off or no key saved is a state to set up, answered like nothing opted in: no failure, and how to fix it.
     monkeypatch.setattr(llm, "chat", off)
     r = client.post("/ask", json={"question": QUESTION, "mode": "lexical"})
-    assert r.status_code == 503 and "AWS_BEARER_TOKEN_BEDROCK" in r.json()["detail"]
+    assert r.status_code == 200 and r.json()["reason"] == "model_not_set_up" and r.json()["answerable"] is False
+    assert "AWS_BEARER_TOKEN_BEDROCK" in r.json()["answer"] and r.json()["citations"] == r.json()["evidence"] == []
+    # Without the model, a question nothing matches is still answered.
+    r = client.post("/ask", json={"question": "zzqx vbnm", "mode": "lexical"})
+    assert r.status_code == 200 and r.json()["answer"] == "No matching evidence." and "reason" not in r.json()
 
     def busy(*_args, **_kwargs):
         raise ProviderUnavailable("Bedrock is rate-limiting the model; try again shortly")

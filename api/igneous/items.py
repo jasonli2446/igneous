@@ -132,9 +132,7 @@ def node_detail(s: Session, node_id: int) -> dict:
                         {"i": n["source_item_id"]}).mappings().first()
         item = item_view(dict(row), named) if row else None
     props = n["props"] or {}
-    identities = [{"key": r["key"], "name": label(r["name"], "Person", named)} for r in s.execute(text("""
-        SELECT m.key, m.name FROM canonical c JOIN nodes m ON m.id = c.node_id
-        WHERE c.canonical_id = :h AND c.node_id <> :h ORDER BY m.key"""), {"h": n["id"]}).mappings()
+    identities = [{"key": r["key"], "name": label(r["name"], "Person", named)} for r in identity.others(s, n["id"])
                   ] if n["type"] == "Person" else []
     return {"id": n["id"], "type": n["type"], "key": n["key"], "name": label(n["name"], n["type"], named),
             "category": category(n["type"], props.get("kind")), "props": props, "source_item": item,

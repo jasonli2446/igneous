@@ -28,7 +28,7 @@ from igneous.graph.history import commitments
 from igneous.graph.summary import summarize
 from igneous.graph.traversal import expand, explain, view
 from igneous.items import router as items_router
-from igneous.llm import ProviderError, ProviderUnavailable, model_status
+from igneous.llm import LLMDisabled, ProviderError, ProviderUnavailable, model_status
 from igneous.rag import qa
 from igneous.rag.constraints import apply, describe, person_by_address_or_name
 from igneous.rag.search import Filters, experts, hybrid
@@ -337,12 +337,15 @@ class AskBody(BaseModel):
 @app.post("/ask")
 def ask(body: AskBody, s: Session = Depends(get_session)):
     """A cited answer from the sources opted in to the hosted model (IGNEOUS_LLM_SOURCES), or `answerable: false`;
-    `filters` says what narrowed the search, as in /search. 503 when the hosted model is off, not configured or
-    can't be used now (unreachable, rate-limited, refusing the credentials); 502 when it gives no usable answer (a
-    refusal, a cut-off or empty response, a rejected request). `detail` says which."""
+    `filters` says what narrowed the search, as in /search. When nothing was asked of the model, `reason` says why
+    and `answer` what to do: `no_opted_in_sources`, or `model_not_set_up` (hosted calls are off or no key is saved).
+    503 when the hosted model can't be used now (unreachable, rate-limited, refusing the credentials); 502 when it
+    gives no usable answer (a refusal, a cut-off or empty response, a rejected request). `detail` says which."""
     f = _request_filters(s, None, body.person, None, None)
     try:
         return qa.answer(s, body.question, f, use_graph=body.use_graph, mode=body.mode)
+    except LLMDisabled as e:  # a state to set up, like nothing opted in, not a failure of the model
+        return qa.not_set_up(s, str(e), f)
     except ProviderUnavailable as e:
         raise HTTPException(503, str(e)) from e
     except ProviderError as e:
@@ -366,9 +369,14 @@ def relationship_timeline(a: int = Query(..., ge=1), b: int | None = Query(None,
 
 @app.get("/graph/version")
 def graph_version(s: Session = Depends(get_session)):
-    """Cheap change token for clients to refresh an open graph without polling its data."""
+    """Cheap change token for clients to refresh an open graph without polling its data, and whether a rebuild is
+    running (`rebuilding`): a correction answered {"applied": "on_publish"} is on the graph once the version moves,
+    and still waits for the next rebuild if the rebuild stops without a new version."""
+    from igneous import pipeline
     from igneous.graph import dirty
-    return {"version": str(dirty.version(s))}
+
+    running = pipeline.rebuilding(s)  # before the version: a rebuild publishes its version as it lets go of its lock
+    return {"version": str(dirty.version(s)), "rebuilding": running}
 
 
 @app.get("/commitments")

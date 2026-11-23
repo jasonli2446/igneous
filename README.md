@@ -85,11 +85,11 @@ export AWS_BEARER_TOKEN_BEDROCK=...   # your Bedrock API key
 export AWS_REGION=us-east-1           # default if unset
 ```
 
-Without the key, `/ask` returns 503 and extraction is skipped; everything else works. The default chat model is
-`us.anthropic.claude-sonnet-5-5` (`IGNEOUS_LLM_MODEL`), with `IGNEOUS_LLM_CHEAP_MODEL` for high-volume yes/no judgments.
-Embeddings and the reranker run locally (FastEmbed) for every source, so the first search or pipeline run downloads
-small model files into `data/models` (`IGNEOUS_MODEL_CACHE_DIR` moves them). A hosted model reads only the sources in
-`IGNEOUS_LLM_SOURCES` ([Model calls](#model-calls)); local documents and Apple Notes also need
+Without the key, Ask says the hosted model isn't set up and extraction is skipped; everything else works. The default
+chat model is `us.anthropic.claude-sonnet-5-5` (`IGNEOUS_LLM_MODEL`), with `IGNEOUS_LLM_CHEAP_MODEL` for high-volume
+yes/no judgments. Embeddings and the reranker run locally (FastEmbed) for every source, so the first search or
+pipeline run downloads small model files into `data/models` (`IGNEOUS_MODEL_CACHE_DIR` moves them). A hosted model
+reads only the sources in `IGNEOUS_LLM_SOURCES` ([Model calls](#model-calls)); local documents and Apple Notes also need
 `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true` for that, while search indexes them on this computer either way.
 
 ### 4. Start the API and the web app
@@ -313,7 +313,7 @@ All model access goes through `api/igneous/providers.py`: local FastEmbed embedd
 cross-encoder reranker, which send nothing anywhere, and Claude on Bedrock for chat (`IGNEOUS_LLM_MODEL`, and
 `IGNEOUS_LLM_CHEAP_MODEL` for high-volume checks). The Anthropic SDK retries a failed call `IGNEOUS_HOSTED_RETRIES`
 times (2 by default). `IGNEOUS_LLM_ENABLED=false` turns off hosted model calls (search and the graph keep working;
-`/ask` returns 503).
+Ask says the hosted model isn't set up).
 
 **What a model may read.** Only the sources listed in `IGNEOUS_LLM_SOURCES`: the comma-separated ids the Sources
 page shows (`gmail,ai_chats`; `takeout` covers every Takeout product, `ai_chats` every AI chat import). Every hosted
@@ -339,8 +339,9 @@ messages nearest to it in time in its thread, and the local cross-encoder scores
 keeps the best 8. With `IGNEOUS_RERANKER_ENABLED=false`, or when its model files can't load (Q&A logs a warning),
 the 8 follow retrieval order but 3 places go to graph neighbours of the top hits, so a reply that answers without
 the question's words still reaches the model. An answer cites its evidence (chunk, source item and node ids); when
-the model can't answer from it, Ask says so and cites nothing. A failed model call is a 502 and an unavailable
-model a 503, each with a message.
+the model can't answer from it, Ask says so and cites nothing. With hosted calls off or no key saved, `/ask` answers
+`reason: model_not_set_up` and how to set it up, as it answers `no_opted_in_sources` when nothing is opted in; a
+failed model call is a 502 and a model that can't be used now (unreachable, rate-limited) a 503, each with a message.
 
 To verify providers without credentials, run `cd api && uv run python scripts/provider_smoke.py`. It exercises the
 local embedding and reranking models only. Add `--hosted` only with an explicit real `AWS_BEARER_TOKEN_BEDROCK`: it
