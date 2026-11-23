@@ -36,6 +36,10 @@ Upgrading to migration 0012 from an earlier one (0012 tracks which records each 
 Rebuild or `igneous pipeline` reads every record into the graph once more, about a minute for the six Enron baseline
 mailboxes (26k records), and then deletes what no record supports. Chunks and embeddings are kept.
 
+Upgrading to migration 0013 (people's names in the order they are read, "Ina Rangel" for Outlook's "Rangel, Ina"): the
+next Rebuild or `igneous pipeline` reads again the records that gave someone a name with a comma, about 4k of the
+baseline's 26k records (15 seconds), and everything that shows a person's name follows.
+
 Tests (`make test`) never use that database or your personal one, nor your `api/.env` or model credentials: each
 run creates, migrates and finally drops its own `igneous_test_<pid>` database on the same server
 (`api/tests/conftest.py`), so two runs can share a server.
@@ -198,7 +202,7 @@ subject, a file's name, a conversation's name). When the chunk layout changes (`
 | Path | What |
 |---|---|
 | `api/igneous/connectors/` | `base.py` connector contract + resumable sync runner, which stores every item's title, text and metadata text with the credentials `redact.py` matches replaced by `[REDACTED:<kind>]` (and `redact_stored`, the pipeline's first step, which brings items stored under an older version of those rules up to date); one module per source (`gmail.py`, `gcal.py`, `drive.py`, `github.py`, `imessage.py`, `ai_chats.py`, `filesystem.py`, `takeout.py`, `linkedin.py`, ...) |
-| `api/igneous/graph/` | `spine.py` the graph read from record metadata, recording which records support each node and edge and what each says about it; `extract.py` model mentions with span provenance; `entities.py`, `threads.py`, `resolve_threads.py`, `profile.py`, `backbone.py` derived projects, life threads and your orgs; `resolve.py` entity resolution; `verify.py` checks every derived link; `traversal.py` what the explorer shows; `invariants.py` `igneous check-graph` |
+| `api/igneous/graph/` | `spine.py` the graph read from record metadata, recording which records support each node and edge and what each says about it; `names.py` a person's name in the order it is read; `extract.py` model mentions with span provenance; `entities.py`, `threads.py`, `resolve_threads.py`, `profile.py`, `backbone.py` derived projects, life threads and your orgs; `resolve.py` entity resolution; `verify.py` checks every derived link; `traversal.py` what the explorer shows; `invariants.py` `igneous check-graph` |
 | `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `constraints.py` the filters a question states, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
 | `api/igneous/llm.py` | structured model calls and the rule for what a model may read (`allowed_sources`, `visible_nodes`); `providers.py` talks to Bedrock |
 | `api/eval/` | gold questions, ER labels, harnesses, results (see `api/eval/README.md`) |
