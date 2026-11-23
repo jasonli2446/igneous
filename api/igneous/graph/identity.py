@@ -96,9 +96,9 @@ def known(s: Session) -> dict[int, int]:
 
 
 def card_keys(meta: dict) -> list[str]:
-    """The Person keys a contact card (raw_meta of a gcontacts or maccontacts item) names, each once: its addresses
-    lowercased, as mail addresses are keyed, and its phone numbers normalized the way phone handles are keyed, so
-    '(614) 555-0199' finds +16145550199."""
+    """The Person keys a contact card (raw_meta of a record of source_catalog.CONTACTS) names, each once: its
+    addresses lowercased, as mail addresses are keyed, and its phone numbers normalized the way phone handles are
+    keyed, so '(614) 555-0199' finds +16145550199."""
     from igneous.connectors.mac_contacts import norm_phone
 
     keys = [e.strip().lower() for e in meta.get("emails") or [] if e and e.strip()]

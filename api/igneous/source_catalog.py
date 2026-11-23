@@ -29,6 +29,7 @@ CATALOG: tuple[Stored, ...] = (
     Stored("takeout_meet", "takeout", "calendar"),
     Stored("gcontacts", "gcontacts", "contacts"),
     Stored("maccontacts", "maccontacts", "contacts"),
+    Stored("vcard", "vcard", "contacts"),
     Stored("drive", "drive", "document"),
     Stored("fs", "fs", "document", local_text=True),
     Stored("notes", "notes", "document", local_text=True),
@@ -60,3 +61,4 @@ def of_connector(connector: str) -> tuple[str, ...]:
 CONTENT = values(CONTENT_KINDS)
 LIFE = values(LIFE_KINDS)
 LOCAL_TEXT = tuple(s.value for s in CATALOG if s.local_text)
+CONTACTS = values({"contacts"})  # contact cards, whichever source they came from: the spine builds people from them

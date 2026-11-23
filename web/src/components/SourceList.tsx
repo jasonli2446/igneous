@@ -7,7 +7,8 @@ import { formatDay } from "@/lib/dates";
 import { useRequest } from "@/lib/hooks";
 
 const SOURCE_LABEL: Record<string, string> = {
-  gmail: "Gmail", email: "Email", gcal: "Calendar", gcontacts: "Contacts", maccontacts: "Contacts", drive: "Drive",
+  gmail: "Gmail", email: "Email", gcal: "Calendar", gcontacts: "Contacts", maccontacts: "Contacts", vcard: "Contacts",
+  drive: "Drive",
   github: "GitHub", fs: "Files", notes: "Notes", imessage: "Messages", ai_chats: "AI chat", takeout: "Takeout", linkedin: "LinkedIn",
 };
 export const sourceLabel = (s: string) =>

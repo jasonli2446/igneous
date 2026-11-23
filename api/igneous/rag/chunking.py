@@ -12,6 +12,8 @@ import re
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous import source_catalog
+
 MAX_CHARS = 2000  # ~500 tokens
 OVERLAP = 200
 # Recorded in each chunk's meta. An item chunked under an older layout is chunked again once; an item whose chunks
@@ -157,7 +159,7 @@ def run(s: Session) -> int:
         for item in rows:
             # Contact cards carry no text worth searching; a duplicate copy (the same email in two Enron folders) is
             # searched through the record its node points at.
-            if item.node_id is None or item.source in ("gcontacts", "maccontacts"):
+            if item.node_id is None or item.source in source_catalog.CONTACTS:
                 if item.id in existing:
                     s.execute(text("DELETE FROM chunks WHERE source_item_id = :id"), {"id": item.id})
                 continue

@@ -8,6 +8,8 @@
                                                     Connections (connectors/linkedin.py)
   chatgpt-export-<date>.zip                         conversations.json and the rest of OpenAI's export
                                                     (connectors/ai_exports.py)
+  contacts.vcf                                      her phone's contacts, as Google Contacts exports them
+                                                    (connectors/vcard.py)
   Documents/                                        notes, resumes, spreadsheets, slides and a git checkout
                                                     (connectors/filesystem.py, parsers.py)
 
@@ -30,12 +32,24 @@ from email.message import EmailMessage
 from email.utils import format_datetime, formataddr
 from pathlib import Path
 
-from igneous.persona.cast import EXPORTED, LAST_DAY, LINKEDIN_ONLY, ME, PEOPLE, PLACES, Person, local
+from igneous.persona.cast import (
+    CARD_PLACES,
+    EXPORTED,
+    LAST_DAY,
+    LINKEDIN_ONLY,
+    ME,
+    NUMBER_ONLY,
+    PEOPLE,
+    PLACES,
+    Person,
+    local,
+)
 from igneous.persona.life import Life, Mail, address_of, name_of
 from igneous.persona.profile import EDUCATION, HEADLINE, LANGUAGES, POSITIONS, PROJECTS, SKILLS, SUMMARY
 
 MAILBOX = "mira"
 DOCUMENTS = "Documents"
+CONTACTS = "contacts.vcf"
 STAMP = EXPORTED.strftime("%Y%m%dT%H%M%SZ")
 TAKEOUT = f"takeout-{STAMP}-001.zip"
 LINKEDIN = f"Complete_LinkedInDataExport_{EXPORTED:%m-%d-%Y}.zip"
@@ -393,6 +407,40 @@ def write_takeout(life: Life, path: Path) -> dict[str, dict]:
                        .encode()))
     write_file(path, zip_bytes([(f"Takeout/{name}", data) for name, data in members], EXPORTED), EXPORTED)
     return keys
+
+
+# ---- contacts ----
+
+def _vcard_text(s: str) -> str:
+    return s.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+def contacts_vcf() -> tuple[bytes, int]:
+    """Her phone's contacts as Google Contacts exports them (Export, vCard): a card for everyone she has a number for,
+    and how many."""
+    lines = []
+    people = sorted((x for x in PEOPLE.values() if x.phone and x is not ME), key=lambda x: x.name)
+    for x in people:
+        first, last = x.name.split(" ", 1)
+        lines += ["BEGIN:VCARD", "VERSION:3.0", f"FN:{_vcard_text(x.name)}",
+                  f"N:{_vcard_text(last)};{_vcard_text(first)};;;"]
+        if x.key not in NUMBER_ONLY:
+            lines.append(f"EMAIL;TYPE=INTERNET;TYPE={'WORK' if x.org == 'northwind' else 'HOME'}:{x.email}")
+        lines.append(f"TEL;TYPE=CELL:{x.phone}")
+        if x.key in CARD_PLACES:
+            street, city = PLACES[CARD_PLACES[x.key]].address.split(", ", 1)
+            kind = "WORK" if x.org == "northwind" else "HOME"
+            lines.append(f"ADR;TYPE={kind}:;;{_vcard_text(street)};{_vcard_text(city)};;;")
+        if x.org == "northwind":
+            lines += [f"ORG:{_vcard_text(x.company)}", f"TITLE:{_vcard_text(x.position)}"]
+        lines += ["CATEGORIES:myContacts", "END:VCARD"]
+    return ("\r\n".join(_fold(line) for line in lines) + "\r\n").encode(), len(people)
+
+
+def write_contacts(path: Path) -> int:
+    data, cards = contacts_vcf()
+    write_file(path, data, EXPORTED)
+    return cards
 
 
 # ---- LinkedIn ----

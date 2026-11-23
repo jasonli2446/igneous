@@ -1,10 +1,14 @@
 {
- "about": "The persona's identities that are one person, and pairs that are two different people, by Person key: an address, a LinkedIn profile (linkedin:<slug>), or you (me). True by construction: the generator gave each person these identities.",
+ "about": "The persona's identities that are one person, and pairs that are two different people, by Person key: an address, a phone number (+1...), a LinkedIn profile (linkedin:<slug>), or you (me). True by construction: the generator gave each person these identities.",
  "people": [
   {"name": "Mira Castellanos", "identities": ["me", "mcastellanos@lakeshore.example.edu"],
    "why": "you: the address that sent the mail in the archive's Sent folder"},
-  {"name": "Dana Kimura", "identities": ["dkimura@lakeshore.example.edu", "dana.kimura@inbox.example.net", "linkedin:dana-kimura-wq41"],
-   "why": "a school and a personal address, both on threads with the landlord and Sofia, and a LinkedIn profile without an address"},
+  {"name": "Dana Kimura", "identities": ["dkimura@lakeshore.example.edu", "dana.kimura@inbox.example.net", "linkedin:dana-kimura-wq41", "+14405550123"],
+   "why": "a school and a personal address, both on threads with the landlord and Sofia, a LinkedIn profile without an address, and her number on a contact card with the school address"},
+  {"name": "Elena Castellanos", "identities": ["elena.castellanos@post.example.org", "+14405550110"],
+   "why": "her mother's contact card holds her number and her address"},
+  {"name": "Nico Castellanos", "identities": ["nico.c@mailbox.example.com", "+14405550139"],
+   "why": "her brother's contact card holds only his number and his name"},
   {"name": "Rafael Ortiz", "identities": ["rortiz@lakeshore.example.edu", "linkedin:rafael-ortiz-dev"]},
   {"name": "Sofia Lindgren", "identities": ["slindgren@lakeshore.example.edu", "linkedin:sofia-lindgren-8b"]},
   {"name": "Theo Marsh", "identities": ["theo.marsh@inbox.example.net", "linkedin:theo-marsh-data"]},
@@ -16,8 +20,10 @@
   {"name": "Kevin Osei", "identities": ["kosei@lakeshore.example.edu", "linkedin:kevin-osei-3c8a10"]},
   {"name": "Ruth Adeyemi", "identities": ["radeyemi@lakeshore.example.edu", "linkedin:ruth-adeyemi-7f3k2q"]},
   {"name": "Martin Kowalski", "identities": ["mkowalski@lakeshore.example.edu", "linkedin:martin-kowalski-p2x9"]},
-  {"name": "Owen Brandt", "identities": ["owen@northwind.example.com", "linkedin:owen-brandt-nw"]},
-  {"name": "Priya Raman", "identities": ["priya@northwind.example.com", "linkedin:priya-raman-5d2e"]},
+  {"name": "Owen Brandt", "identities": ["owen@northwind.example.com", "linkedin:owen-brandt-nw", "+14405550181"],
+   "why": "his contact card holds his number and his work address"},
+  {"name": "Priya Raman", "identities": ["priya@northwind.example.com", "linkedin:priya-raman-5d2e", "+14405550162"],
+   "why": "her contact card holds only her number and her name"},
   {"name": "Jonah Feld", "identities": ["jonah@northwind.example.com", "linkedin:jonah-feld-ops"]},
   {"name": "Lucia Moretti", "identities": ["lucia@northwind.example.com", "linkedin:lucia-moretti-hr"]},
   {"name": "Hannah Brooks", "identities": ["hbrooks@parks.portavalon.example.org", "linkedin:hannah-brooks-pa"]}
@@ -29,6 +35,8 @@
   ["elena.castellanos@post.example.org", "roberto.castellanos@post.example.org"],
   ["elena.castellanos@post.example.org", "nico.c@mailbox.example.com"],
   ["dana.kimura@inbox.example.net", "theo.marsh@inbox.example.net"],
-  ["me", "elena.castellanos@post.example.org"]
+  ["me", "elena.castellanos@post.example.org"],
+  ["+14405550110", "roberto.castellanos@post.example.org"],
+  ["+14405550139", "me"]
  ]
 }

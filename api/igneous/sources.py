@@ -219,17 +219,31 @@ SOURCES: list[dict] = [
     {"id": "takeout", "kind": "import", "name": "Google Takeout", "group": "Exports you upload",
      "reads": "Your Google My Activity (Search, YouTube, Maps, Gemini and the rest), Chrome history and bookmarks, "
               "Maps places and visits, Google Chat (each space by its name, each direct message by who is in it), "
-              "Tasks, Meet call history, and Calendar: every event, and each occurrence of a repeating one. Gemini "
-              "chats are part of My Activity (a Gemini-only export works too). Calendar events are stored as Google "
-              "Calendar's, so connecting Google Calendar later doesn't add them again.",
+              "Tasks, Meet call history, Calendar (every event, and each occurrence of a repeating one) and Contacts. "
+              "Gemini chats are part of My Activity (a Gemini-only export works too). Calendar events are stored as "
+              "Google Calendar's and contacts as a contacts export's cards, so connecting Google Calendar later "
+              "doesn't add the events again.",
      "steps": ["Go to takeout.google.com and click Deselect all.",
-               "Tick My Activity, Chrome, Maps (your places), Calendar, Google Chat, Tasks and Google Meet. If you see "
-               "Location History (Timeline), tick it too.",
+               "Tick My Activity, Chrome, Maps (your places), Calendar, Contacts, Google Chat, Tasks and Google Meet. "
+               "If you see Location History (Timeline), tick it too.",
                "On My Activity click Multiple formats and change Activity records from HTML to JSON. HTML is not read.",
                "Click Next step, keep one-time export and .zip, then Create export. It usually takes hours and may "
                "arrive as several zips.",
                "Download every zip. In the box below choose Scan Downloads for takeout-*.zip, give a path, or upload them."],
      "cli": "igneous import takeout ~/Downloads/takeout-*.zip"},
+    {"id": "vcard", "kind": "import", "name": "Contacts export (vCard)", "group": "Exports you upload",
+     "reads": "The contact cards in a .vcf export from Google Contacts, Apple Contacts or iCloud: names, phone numbers, "
+              "email addresses, organizations and postal addresses. Each number and address on a card becomes the "
+              "person the card names, so a number in Messages and the same person's email are one person, and a "
+              "card with only a name and a number joins the mail of that name. Syncing Google Contacts or Contacts "
+              "later adds no one twice.",
+     "steps": ["Google Contacts: open contacts.google.com, select the contacts to export (none selected exports them "
+               "all), then click Export, choose vCard (for iOS Contacts), and Export.",
+               "Apple: in Contacts on a Mac select All Contacts, then File, Export, Export vCard. On icloud.com open "
+               "Contacts, select them, then Export vCard from the menu.",
+               "In the box below upload the .vcf file, or give its path. A Google Takeout export with Contacts ticked "
+               "works too: import it under Google Takeout."],
+     "cli": "igneous import vcard ~/Downloads/contacts.vcf"},
     {"id": "imessage", "kind": "local", "name": "Messages", "group": "On this computer",
      "reads": "iMessage and SMS conversations on this Mac, grouped into one entry per conversation per day. "
               + MAC_ONLY,
@@ -284,9 +298,10 @@ SOURCES: list[dict] = [
     {"id": "persona", "kind": "local", "name": "Synthetic persona", "group": "Demo",
      "reads": "Two invented years of Mira Castellanos, a computer science student at the fictional Lakeshore "
               "University: her mailbox, Google Takeout (chat, tasks, Meet, Maps, My Activity, Chrome, Calendar), "
-              "LinkedIn and ChatGPT exports, and a documents folder with her resumes, notes and a git checkout. "
-              "Generated on this computer from a seed, so every source and the trips, classes, job and project they "
-              "make can be shown without personal data. For demos and evaluation, in a database of its own.",
+              "LinkedIn, ChatGPT and contacts (vCard) exports, and a documents folder with her resumes, notes and a "
+              "git checkout. Generated on this computer from a seed, so every source and the trips, classes, job and "
+              "project they make can be shown without personal data. For demos and evaluation, in a database of its "
+              "own.",
      "steps": ["From the repository root run make persona. It writes the exports to data/persona, creates the database "
                "igneous_persona (make persona CLEAN=1 replaces it), reads each export through its own source on "
                "this page, and builds the graph.",
@@ -298,12 +313,13 @@ SOURCES: list[dict] = [
      "build": _persona, "options": {"path"}},
 ]
 # The persona's records are stored under the sources its exports come through (its Takeout calendar as gcal).
-PERSONA_STORED = ("email", "fs", *source_catalog.of_connector("takeout"), "gcal", "linkedin", "ai_chats")
+PERSONA_STORED = ("email", "fs", *source_catalog.of_connector("takeout"), "gcal", "linkedin", "ai_chats", "vcard")
 # Records an export stores under another source, as that source stores them (Takeout's calendar events are Google
-# Calendar's): source -> the Takeout product its records from the export name. They count for the export.
-VIA_TAKEOUT = {"gcal": "Calendar"}
+# Calendar's, its contacts a contacts export's cards): source -> the Takeout product its records from the export name.
+# They count for the export.
+VIA_TAKEOUT = {"gcal": "Calendar", "vcard": "Contacts"}
 # The IGNEOUS_LLM_SOURCES ids that cover all of the persona.
-PERSONA_IDS = "email,fs,takeout,gcal,linkedin,ai_chats"
+PERSONA_IDS = "email,fs,takeout,gcal,linkedin,ai_chats,vcard"
 BY_ID = {s["id"]: s for s in SOURCES}
 SYNCABLE = tuple(s["id"] for s in SOURCES if "build" in s)  # in page order
 IMPORT_TOOL = {"chatgpt", "gemini", "claude_ai"}  # raw_meta.tool values stored under source 'ai_chats'
@@ -328,15 +344,16 @@ def model_use(sid: str, allowed: frozenset[str]) -> dict:
         note = f"Opted in: a hosted model may read it (IGNEOUS_LLM_SOURCES lists {mid})."
     elif state == "partly":
         note = f"Partly opted in: IGNEOUS_LLM_SOURCES lists some of it. Add {mid} to opt in all of it."
-    elif sid in ("gcontacts", "maccontacts"):
+    elif mid in source_catalog.CONTACTS:
         note = ("Cards are never sent to a model. Names from them label people in the records of opted-in "
                 f"sources. To opt the cards in, add {mid} to IGNEOUS_LLM_SOURCES.")
     else:
         note = (f"Never sent to a hosted model. To allow it, add {mid} to IGNEOUS_LLM_SOURCES"
                 + (" and set IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true" if mid in source_catalog.LOCAL_TEXT else "")
                 + (" (that covers all AI chat history)" if mid != sid else "") + ", then restart the API.")
-    if sid == "takeout":  # stored with the other AI chats and calendars, not under a takeout_* source
-        note += " Its Gemini chats count as AI chats (ai_chats), its calendar events as Google Calendar's (gcal)."
+    if sid == "takeout":  # stored with the other AI chats, calendars and cards, not under a takeout_* source
+        note += (" Its Gemini chats count as AI chats (ai_chats), its calendar events as Google Calendar's (gcal), its "
+                 "contacts as a contacts export's (vcard).")
     return {"id": mid, "allowed": state, "note": note}
 
 
@@ -427,8 +444,12 @@ def describe(s: Session) -> list[dict]:
         SELECT raw_meta->>'tool', max(updated_at) FROM source_items WHERE source = 'ai_chats' GROUP BY 1""")).all())
     # Takeout's records stored under another source (VIA_TAKEOUT) count for Takeout, not for that source.
     via_takeout = {r.source: r for r in s.execute(text("""
-        SELECT source, count(*) AS n, max(updated_at) AS at FROM source_items
-        WHERE source = ANY(:s) AND raw_meta->>'product' = CAST(:products AS jsonb)->>source GROUP BY 1
+        SELECT source, count(*) FILTER (WHERE ours) AS n, max(updated_at) FILTER (WHERE ours) AS at,
+               max(updated_at) FILTER (WHERE NOT ours) AS own_at
+        FROM (SELECT source, updated_at,
+                     COALESCE(raw_meta->>'product' = CAST(:products AS jsonb)->>source, false) AS ours
+              FROM source_items WHERE source = ANY(:s)) x
+        GROUP BY 1
     """), {"s": list(VIA_TAKEOUT), "products": json.dumps(VIA_TAKEOUT)})}
     states: dict[str, list[tuple[str, object]]] = {}
     for connector, account, updated in s.execute(text("SELECT connector, account, updated_at FROM sync_state")):
@@ -449,8 +470,8 @@ def describe(s: Session) -> list[dict]:
                      + sum(r.n for r in via_takeout.values()))
         elif sid in via_takeout:
             count = counts.get(sid, 0) - via_takeout[sid].n
-        elif sid == "linkedin":
-            count = counts.get("linkedin", 0)
+        elif kind == "import" and sid in source_catalog.BY_VALUE:  # stored under its own name: linkedin, vcard
+            count = counts.get(sid, 0)
         elif kind == "import":
             count = export_counts.get(sid, 0)
         elif sid == "ai_chats":
@@ -468,9 +489,13 @@ def describe(s: Session) -> list[dict]:
         elif sid == "email":
             last = max((u for a, u in states.get(sid, []) if a != dict(persona.ACCOUNTS)["email"]), default=None)
         if kind == "import":  # imports have no sync checkpoint: last import = newest item they wrote
-            stamps = ([t for k, t in latest_item.items() if k.startswith("takeout_")] + [latest_export.get("gemini")]
-                      + [r.at for r in via_takeout.values()]
-                      if sid == "takeout" else [latest_item.get(sid) if sid == "linkedin" else latest_export.get(sid)])
+            if sid == "takeout":
+                stamps = ([t for k, t in latest_item.items() if k.startswith("takeout_")] + [latest_export.get("gemini")]
+                          + [r.at for r in via_takeout.values()])
+            elif sid in via_takeout:
+                stamps = [via_takeout[sid].own_at]
+            else:
+                stamps = [latest_item.get(sid) if sid in source_catalog.BY_VALUE else latest_export.get(sid)]
             last = max((t for t in stamps if t), default=None)
         ok, message = check_requirements(sid) if kind in ("google", "local") else (True, None)
         accounts = []

@@ -210,6 +210,9 @@ export type TakeoutResult = ImportStats & {
   places: number; parts: Record<string, number>; counts: Record<string, number>; notes: string[];
 };
 export type LinkedInResult = ImportStats & { connections: number; positions: number; education: number; profile: number };
+export type VCardResult = ImportStats & {
+  cards: number; phones: number; emails: number; without_phone_or_email: number; files: string[];
+};
 
 export type Job = {
   id: string;
@@ -276,6 +279,8 @@ export const api = {
     startImport("/import/linkedin", input, onProgress),
   importAiExport: (input: ImportInput, onProgress?: (fraction: number) => void) =>
     startImport("/import/ai-export", input, onProgress),
+  importVcard: (input: ImportInput, onProgress?: (fraction: number) => void) =>
+    startImport("/import/vcard", input, onProgress),
   job: (id: string, signal?: AbortSignal) => get<Job>(`/jobs/${id}`, {}, signal),
   sources: (signal?: AbortSignal) => get<{ sources: SourceInfo[]; model: ModelStatus }>("/sources", {}, signal),
   jobs: (signal?: AbortSignal) => get<{ jobs: Job[] }>("/jobs", {}, signal),

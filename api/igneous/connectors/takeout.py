@@ -25,13 +25,15 @@ What is read (names are matched case-insensitively and tolerate a missing "Takeo
   Google Meet/ConferenceHistory/conference_history_records.csv   one item per call
   Calendar/<calendar>.ics                     one Google Calendar record per occurrence, keyed as a Google Calendar
                                               sync keys the same event (connectors/ical.py)
+  Contacts/<label>/<label>.vcf                one contact card per contact (a card in several labels is one), the
+                                              records a contacts export (vCard) import makes (connectors/vcard.py)
 Formats are not guaranteed by Google and change without notice, so every field is read defensively and a
 file that fails to parse is reported in `notes` rather than aborting the import.
 
 Everything stored passes through redact(), and URLs lose tracking parameters. The sources below stay out of
 every model call unless named in IGNEOUS_LLM_SOURCES (`takeout` names them all; see igneous/llm.py). Gemini chats
-are stored as AI chats (`ai_chats`) and calendar events as Google Calendar's (`gcal`), the way their own import and
-sync store them, so they follow those sources' opt-ins.
+are stored as AI chats (`ai_chats`), calendar events as Google Calendar's (`gcal`) and contacts as a contacts export's
+(`vcard`), the way their own imports and sync store them, so they follow those sources' opt-ins.
 """
 import csv
 import io
@@ -52,7 +54,7 @@ import ijson
 from sqlalchemy import text
 
 from igneous import source_catalog
-from igneous.connectors import ical
+from igneous.connectors import ical, vcard
 from igneous.connectors.ai_chats import _ts
 from igneous.connectors.ai_exports import export_items, gemini_conversations
 from igneous.connectors.base import Checkpoint, SourceItem
@@ -61,8 +63,8 @@ from igneous.connectors.redact import redact
 TAKEOUT_SOURCES = source_catalog.of_connector("takeout")
 # Products read into another source's records, stored as that source's own import or sync stores them: the part of
 # the report each is counted under.
-PART = {"ai_chats": "gemini", "gcal": "calendar"}
-EXPECTED = "My Activity, Chrome, Maps, Location History, Google Chat, Tasks, Google Meet or Calendar"
+PART = {"ai_chats": "gemini", "gcal": "calendar", "vcard": "contacts"}
+EXPECTED = "My Activity, Chrome, Maps, Location History, Google Chat, Tasks, Google Meet, Calendar or Contacts"
 # My Activity products that are advertising/analytics telemetry, not things you did.
 SKIP_PRODUCTS = {"ads", "google analytics", "takeout"}
 MAX_LINES = 1000  # per item; a day with more than this is almost certainly a script, not you
@@ -289,6 +291,8 @@ def classify(path: str) -> tuple[str, str | None] | None:
         return "tasks", None
     if name.endswith(".ics"):  # Calendar/<calendar>.ics
         return "calendar", Path(parts[-1]).stem
+    if name.endswith(".vcf"):  # Contacts/<label>/<label>.vcf
+        return "contacts", None
     if name == "conference_history_records.csv":
         return "meet", None
     stem = Path(parts[-1]).stem
@@ -418,6 +422,7 @@ class _Import:
         self.chat_user: str | None = None  # you, as Chat's export names you
         self.calendars: list[ical.Calendar] = []
         self.calendar_report = ical.Report()
+        self.cards: dict[str, SourceItem] = {}  # external id -> card: Takeout writes a card once per label
         self.tasks: list[dict] = []
         self.meet: list[dict] = []
         self.notes: list[str] = []
@@ -495,6 +500,16 @@ class _Import:
                 cal = ical.read(fh.read(), name)
             if cal is not None:
                 self.calendars.append(cal)
+        self._safe(m, go)
+
+    def read_contacts(self, m: Member):
+        def go():
+            with m.open() as fh:
+                cards, skipped = vcard.cards(fh.read())
+            for card in cards:
+                card.raw_meta["product"] = "Contacts"
+                self.cards.setdefault(card.external_id, card)
+            self.counts["contacts_without_phone_or_email"] += skipped
         self._safe(m, go)
 
     def read_tasks(self, m: Member):
@@ -755,6 +770,7 @@ class _Import:
                                            "redactions": red[0]})
         if self.calendars:
             yield from ical.items(self.calendars, ical.account(self.calendars, self.chat_user), self.calendar_report)
+        yield from self.cards.values()
 
     def _bookmark_item(self) -> Iterator[SourceItem]:
         if not self.bookmarks:
@@ -799,6 +815,8 @@ def parse(paths: list[Path], progress: Callable[[dict], None] | None = None) -> 
                 imp.read_chat_user(m)
             elif kind == "calendar":
                 imp.read_calendar(m, hint or "Calendar")
+            elif kind == "contacts":
+                imp.read_contacts(m)
             elif kind == "tasks":
                 imp.read_tasks(m)
             elif kind == "meet":
@@ -826,6 +844,11 @@ def parse(paths: list[Path], progress: Callable[[dict], None] | None = None) -> 
             imp.note(note)
         if imp.calendars:
             imp.counts["calendar_events"] = imp.calendar_report.events
+        if imp.cards:
+            imp.counts["contact_cards"] = len(imp.cards)
+        if skipped := imp.counts.get("contacts_without_phone_or_email"):
+            imp.note(f"{skipped} contact cards have no phone number or email address: they name no one we could "
+                     "key, so they were skipped.")
     if not items:
         raise TakeoutError("Found Takeout files but nothing readable in them." + (
             " My Activity is in HTML format; re-export it as JSON (Multiple formats, Activity records: JSON)."

@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 
 from igneous import llm, persona, pipeline, sources
 from igneous.cli import app as cli
-from igneous.connectors import ai_exports, linkedin, takeout
+from igneous.connectors import ai_exports, linkedin, takeout, vcard
 from igneous.connectors.base import SourceItem
 from igneous.connectors.email_maildir import MaildirConnector
 from igneous.connectors.filesystem import FilesystemConnector
@@ -103,6 +103,11 @@ def test_every_importer_reads_every_file_it_is_given(full):
     convs = list(ai_exports.conversations(full / ex["chatgpt"]))
     assert len(convs) == counts["chatgpt_conversations"] and {kind for kind, _ in convs} == {"chatgpt"}
     assert all(turns and turns[0]["role"] == "me" for kind, (meta, turns) in convs)
+
+    cards, report = vcard.read([full / ex["contacts"]])
+    assert report["cards"] == counts["contact_cards"] == len(cards) and report["without_phone_or_email"] == 0
+    assert all(c.title and len(c.raw_meta["phones"]) == 1 for c in cards)  # a number on every card, and a name
+    assert sum(not c.raw_meta["emails"] for c in cards) == 2  # two hold only a number
 
     docs = [x for x in FilesystemConnector(full / ex["documents"]).sync({}) if isinstance(x, SourceItem)]
     on_disk = [p for p in (full / ex["documents"]).rglob("*") if p.is_file() and ".git" not in p.parts]
@@ -210,7 +215,8 @@ def test_a_slice_builds_its_graph_through_the_sources_registry_and_the_pipeline(
     manifest = persona.generate(root, until=SLICE)
     result = sources.sync("persona", db, opts=sources.SyncOptions(path=root))
     stored = dict(db.execute(text("SELECT source, count(*) FROM source_items GROUP BY 1")).all())
-    assert set(result["accounts"]) == {"mail", "documents", "takeout", "linkedin", "chatgpt"}
+    assert set(result["accounts"]) == {"mail", "documents", "takeout", "linkedin", "chatgpt", "contacts"}
+    assert stored["vcard"] == manifest["counts"]["contact_cards"]
     assert result["accounts"]["mail"]["inserted"] == stored["email"] == manifest["counts"]["mail"]
     assert stored["linkedin"] == manifest["counts"]["linkedin_connections"] + 1  # the profile and each connection
     assert {s["id"]: s["items"] for s in sources.describe(db)}["persona"] == sum(stored.values())
@@ -231,8 +237,12 @@ def test_a_slice_builds_its_graph_through_the_sources_registry_and_the_pipeline(
     def cluster(key: str) -> int:
         return db.execute(text("SELECT COALESCE(c.canonical_id, n.id) FROM nodes n LEFT JOIN canonical c "
                                "ON c.node_id = n.id WHERE n.type = 'Person' AND n.key = :k"), {"k": key}).scalar_one()
-    for identities in (("dkimura@lakeshore.example.edu", "dana.kimura@inbox.example.net", "linkedin:dana-kimura-wq41"),
-                       ("owen@northwind.example.com", "linkedin:owen-brandt-nw")):
+    # Phone numbers from her contacts export: Owen's card ties his number to his address; Priya's holds only her
+    # number and name, which resolution joins to her mail.
+    for identities in (("dkimura@lakeshore.example.edu", "dana.kimura@inbox.example.net", "linkedin:dana-kimura-wq41",
+                        "+14405550123"),
+                       ("owen@northwind.example.com", "linkedin:owen-brandt-nw", "+14405550181"),
+                       ("priya@northwind.example.com", "+14405550162")):
         assert len({cluster(k) for k in identities}) == 1, identities
 
     def thread(name: str):  # the threads stage's (the entities stage may name a calendar series the same: #237)

@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous import source_catalog
 from igneous.config import settings
 from igneous.graph import identity
 from igneous.graph.derived import Writer
@@ -174,9 +175,9 @@ def _mail_facts(s: Session) -> list[Fact]:
 def _card_facts(s: Session) -> list[Fact]:
     """The company on each contact card, for the person on it (every address and phone number on the card)."""
     cards = s.execute(text("""
-        SELECT id, raw_meta FROM source_items WHERE source IN ('gcontacts', 'maccontacts')
+        SELECT id, raw_meta FROM source_items WHERE source = ANY(:cards)
           AND jsonb_array_length(COALESCE(raw_meta->'orgs', '[]'::jsonb)) > 0 ORDER BY id
-    """)).all()
+    """), {"cards": list(source_catalog.CONTACTS)}).all()
     keys = {sid: identity.card_keys(meta) for sid, meta in cards}
     heads = dict(s.execute(text("""
         SELECT p.key, COALESCE(c.canonical_id, p.id) FROM nodes p LEFT JOIN canonical c ON c.node_id = p.id
@@ -196,9 +197,8 @@ def _own_words(s: Session, domains: set[str]) -> dict[str, Counter]:
     words: dict[str, Counter] = defaultdict(Counter)
     for source, meta in s.execute(text("""
         SELECT source, raw_meta FROM source_items
-        WHERE source IN ('gcontacts', 'maccontacts')
-           OR (source = 'linkedin' AND raw_meta->>'kind' = 'connection')
-    """)):
+        WHERE source = ANY(:cards) OR (source = 'linkedin' AND raw_meta->>'kind' = 'connection')
+    """), {"cards": list(source_catalog.CONTACTS)}):
         if source == "linkedin":
             addresses, companies = [meta.get("email") or ""], [meta.get("company") or ""]
         else:

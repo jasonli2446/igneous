@@ -218,6 +218,23 @@ async def import_linkedin(request: Request):
     return await _start_import("linkedin", req, prepare)
 
 
+@app.post("/import/vcard")
+async def import_vcard(request: Request):
+    """Import a contacts export (vCard .vcf from Google Contacts, Apple Contacts or iCloud) as a background job; poll
+    /jobs/{id}. Send multipart `file` parts (the .vcf files) or JSON/form `{"path": "<file, folder or zip>"}`. Its
+    result: {cards, phones, emails, without_phone_or_email, files, inserted, updated, unchanged, redactions}."""
+    from igneous.connectors import vcard
+
+    req = await _import_request(request, "vcard")
+
+    def prepare():
+        resolved = vcard.resolve_paths([*req.paths, *map(str, req.staged.files)])
+        vcard.preflight(resolved)
+        return lambda sess, progress: vcard.run_import(sess, resolved, progress)
+
+    return await _start_import("vcard", req, prepare)
+
+
 def _start_job(kind: str, source: str, runner, account: str | None = None):
     try:
         return sources.job_view(jobs.start(kind, source, runner, account))
