@@ -18,9 +18,10 @@ GENERATIONAL = frozenset({"jr", "sr", "ii", "iii", "iv"})
 
 # Words that say a comma doesn't separate a surname from given names: a credential after a name ("Smith, PhD"), a
 # company form ("Acme, Inc."), and the words of roles, departments and shared mailboxes ("Manager, Sales", "Desk,
-# Help"). Words that are also surnames (Head, Dean, Judge) are left out.
+# Help"). Words that are also names (Head, Dean, Judge, and Md, short for Mohammad) are left out; a credential in
+# capitals ("Smith, MD") doesn't read as a name anyway.
 NOT_A_NAME = frozenset({
-    "phd", "md", "dds", "dvm", "esq", "cpa", "cfa", "cfp", "mba", "rn",
+    "phd", "dds", "dvm", "esq", "cpa", "cfa", "cfp", "mba", "rn",
     "inc", "llc", "ltd", "llp", "plc", "corp", "co", "company", "corporation", "incorporated", "limited", "gmbh",
     "group", "holdings", "partners", "associates",
     "manager", "director", "president", "chairman", "officer", "chief", "executive", "assistant", "coordinator",

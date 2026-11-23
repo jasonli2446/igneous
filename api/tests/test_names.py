@@ -25,6 +25,7 @@ T0 = datetime(2001, 5, 14, 16, tzinfo=UTC)
     ("McLaughlin Jr., Errol", "Errol McLaughlin Jr."),   # Outlook writes a suffix with the surname
     ("Nowlan Jr., John L.", "John L. Nowlan Jr."),
     ("Smith, John III", "John Smith III"),
+    ("Rahman, Md", "Md Rahman"),
     ("Rangel,Ina", "Ina Rangel"),
     ("Ina Rangel", "Ina Rangel"),                         # already in that order
     ("Pallen", "Pallen"),
@@ -36,7 +37,7 @@ def test_a_name_written_surname_first_reads_first_name_first(written, read):
 
 @pytest.mark.parametrize("name", [
     "Smith, Jr.", "Jones, III",                           # a suffix after the comma
-    "Robert W. Huntley, CFP", "Smith, PhD",               # a credential
+    "Robert W. Huntley, CFP", "Smith, PhD", "Smith, MD",  # a credential
     "Acme, Inc.", "Foo, LLC", "Globex, Corp.",            # a company
     "Manager, Sales", "Desk, Help", "CApipeline, Team",   # a role, a department, a shared mailbox
     "Smith, John, Jr.", "Houston, TX, USA",               # more than one comma
