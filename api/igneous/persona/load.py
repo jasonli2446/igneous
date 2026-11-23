@@ -39,7 +39,7 @@ def connectors(s: Session, folder: Path) -> list[tuple[str, Callable]]:
     """The persona's exports as (name, connector factory), each read the way the Sources page reads its format: the
     maildir as `igneous sync email --path --mailbox` does, the documents folder as `igneous sync fs --path` does (both
     built by their entries in sources.SOURCES), and the other exports by the connectors their imports run. A persona
-    generated before it had a contacts export is read without one."""
+    folder whose manifest names no contacts export is read without one."""
     from igneous import sources
     from igneous.connectors.ai_exports import ExportConnector, preflight
     from igneous.connectors.linkedin import LinkedInConnector

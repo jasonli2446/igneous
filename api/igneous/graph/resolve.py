@@ -30,7 +30,7 @@ from igneous.graph.organizations import PERSONAL_DOMAINS
 from igneous.graph.self_identity import NAME_PARTICLES
 
 EXTRACTOR = "er"
-VERSION = "2"      # links in place from another version are scored again
+VERSION = "3"      # links in place from another version are scored again
 THRESHOLD = 0.5    # chosen on AI-reviewed labels (eval/README.md)
 SHARED_FULL = 3.0  # rarity-weighted shared correspondents that count as full corroboration
 SAME_BEARER = 0.5  # rarity-weighted shared correspondents that make two same-name identities one bearer
@@ -131,11 +131,12 @@ def split_name(name: str, key: str) -> tuple[str, str]:
 
 def unresolvable(p: P) -> bool:
     """Exchange-mangled stubs ("e-mail <.john@enron.com>"), role mailboxes, product relays ("Sam Lee (Google Docs)",
-    which carries someone else's name) and automated senders can't be one person."""
+    which carries someone else's name) and automated senders can't be one person. A role is in a mailbox's name, never
+    its domain: someone at mailbox.org is a person."""
     from igneous.graph.self_identity import is_relay_name, is_service_address
     return (p.service or p.local.startswith(".") or p.name.lower() in ROLE_WORDS or p.local in ROLE_WORDS
-            or bool(ROLE_PATTERN.search(p.key)) or not p.last or is_relay_name(p.name)
-            or ("@" in p.key and is_service_address(p.key)))
+            or bool(ROLE_PATTERN.search(f"{p.local}@" if p.is_email else p.key)) or not p.last
+            or is_relay_name(p.name) or ("@" in p.key and is_service_address(p.key)))
 
 
 # SAME_AS from these sources is ground truth (a contact card, the signed-in account, a user correction, a
