@@ -2,7 +2,7 @@
 name = "igneous"
 version = "0.1.0"
 description = "A creation layer for personal knowledge graphs"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",

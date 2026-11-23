@@ -9,7 +9,8 @@ provenance-tracked graph in Postgres + pgvector, then search and explore it. Bac
 
 - **Docker**: runs Postgres 16 with pgvector (`pgvector/pgvector:pg16`, see `docker-compose.yml`). If you bring your
   own Postgres it must be 16+ with the `vector` and `pg_trgm` extensions available; the migrations create both.
-- **[uv](https://docs.astral.sh/uv/)**: installs Python 3.12 and the API dependencies.
+- **[uv](https://docs.astral.sh/uv/)**: installs the API dependencies and Python 3.12, the version `api/.python-version`
+  names and CI and the API image run (any Python from 3.12 on works).
 - **Node 22** and npm for the web app (CI and the web image run 22; Next 16 needs at least 20.9).
 - Optional: an AWS Bedrock API key for Ask and AI extraction (step 3). Search and the graph work without it.
 
