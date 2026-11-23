@@ -120,18 +120,18 @@ class ImportRequest:
 
 async def _import_request(request: Request, prefix: str) -> ImportRequest:
     """A JSON body {"path" | "paths", "scan_downloads", "provider"}, or a multipart form with the same fields and
-    `file` parts, whose files are copied off the event loop."""
+    `file` parts, whose files are copied off the event loop (the form's own temporary files close once copied)."""
     if request.headers.get("content-type", "").startswith("application/json"):
         body = await request.json()
         raw = body.get("path") or body.get("paths") or []
         return ImportRequest([raw] if isinstance(raw, str) else [str(p) for p in raw], uploads.Staged(None, []),
                              bool(body.get("scan_downloads")), body.get("provider") or None)
-    form = await request.form()
-    files = [f for f in form.getlist("file") if hasattr(f, "file")]
-    return ImportRequest([str(p) for p in form.getlist("path") if isinstance(p, str) and p.strip()],
-                         await uploads.stage(files, prefix),
-                         str(form.get("scan_downloads", "")).lower() in ("1", "true", "on"),
-                         str(form.get("provider") or "") or None)
+    async with request.form() as form:
+        files = [f for f in form.getlist("file") if hasattr(f, "file")]
+        return ImportRequest([str(p) for p in form.getlist("path") if isinstance(p, str) and p.strip()],
+                             await uploads.stage(files, prefix),
+                             str(form.get("scan_downloads", "")).lower() in ("1", "true", "on"),
+                             str(form.get("provider") or "") or None)
 
 
 # An input that can't be imported: the reason goes back with 422.
@@ -317,7 +317,8 @@ def get_job(job_id: str, s: Session = Depends(get_session)):
 
 @app.post("/pipeline/run")
 def run_pipeline():
-    """Build the graph from whatever is new (spine, chunk, embed, topics, entities, self, resolve; not extract)."""
+    """Rebuild as a background job: every pipeline stage except extract (igneous/pipeline.py), the derived graph
+    published at once at the end; poll /jobs/{id} for the stage, step and counts."""
     return _start_job("pipeline", "pipeline", sources.run_pipeline)
 
 
@@ -458,7 +459,7 @@ def graph_view(seed: int | None = None, per: int = Query(6, le=20), s: Session =
         if seed is None:
             raise HTTPException(404, "No self node yet: run `igneous pipeline --stage self`.")
     # Ranking every relationship takes seconds on a large mailbox; the result only changes when the graph does,
-    # so cache it per (seed, per) and graph version (bumped by every pipeline stage that changes the graph).
+    # so cache it per (seed, per) and graph version (bumped once per published rebuild and by every correction).
     from igneous.graph import dirty
     key = (seed, per, dirty.version(s))
     hit = _VIEW_CACHE.get(key)

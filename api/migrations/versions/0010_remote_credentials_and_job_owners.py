@@ -13,13 +13,13 @@ downgrade leaves the remotes as they are.
 A job (kind sync, import or pipeline; source a Sources page id or 'pipeline') records the host and process that run
 it, so a process starting up fails only the running jobs whose process died, never one another process still runs.
 
-Revision ID: 0009
-Revises: 0008
+Revision ID: 0010
+Revises: 0009
 """
 from alembic import op
 
-revision = "0009"
-down_revision = "0008"
+revision = "0010"
+down_revision = "0009"
 
 # scheme://anything-without-a-slash@ at the start of the URL; scp-style remotes (git@host:path) have no scheme.
 USERINFO = r"^([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]*@"

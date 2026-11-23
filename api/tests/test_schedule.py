@@ -45,6 +45,10 @@ def test_a_run_reports_each_sources_outcome_and_errors(db, monkeypatch, tmp_path
                                   "error": "No Claude Code or Codex sessions found on this Mac."}
     assert result["pipeline"]["status"] == "succeeded" and ran == [1]  # never rebuilt before
     assert schedule.run(db)["pipeline"] == {"skipped": "nothing new since the last rebuild"}
+    from igneous.graph import dirty
+
+    dirty.mark_rebuild(db)  # a deletion no rebuild has covered yet
+    assert schedule.run(db)["pipeline"]["status"] == "succeeded" and ran == [1, 1]
 
 
 def running(s, job_id: str, kind: str, host: str | None, pid: int | None) -> None:

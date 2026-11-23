@@ -190,7 +190,6 @@ def test_items_stored_before_the_rules_are_redacted_and_chunked_again(committed_
         s.execute(text("""INSERT INTO edges (src, dst, type, extractor, source_item_id, span_start, span_end)
                           VALUES (:a, :b, 'MENTIONS', 'llm', :i, :s, :e)"""),
                   {"a": file_node, "b": topic, "i": item, "s": start, "e": start + len(page2)})
-        s.execute(text("DELETE FROM dirty_rebuild"))
         s.commit()
         before = item_row(s, item)
 
@@ -205,8 +204,8 @@ def test_items_stored_before_the_rules_are_redacted_and_chunked_again(committed_
         span = s.execute(text("SELECT span_start, span_end FROM edges WHERE source_item_id = :i"), {"i": item}).one()
         assert text_[span.span_start:span.span_end] == page2  # the model's span still points at its words
         assert s.execute(text("SELECT name FROM nodes WHERE id = :n"), {"n": file_node}).scalar_one() == after["title"]
-        assert s.execute(text("SELECT count(*) FROM dirty_rebuild")).scalar_one() == 1
 
+        assert spine.run(s) == 1  # the spine reads the redacted item again
         chunking.run(s)
         chunks = s.execute(text("SELECT text, embedding IS NULL AS fresh FROM chunks WHERE source_item_id = :i"),
                            {"i": item}).all()
@@ -259,14 +258,16 @@ def test_an_item_redacted_in_place_reads_as_unchanged_when_synced_again(db):
 
 
 def test_the_pipeline_redacts_before_anything_reads_the_items():
-    from igneous.pipeline import stages
+    from igneous import pipeline
 
-    assert list(stages())[:2] == ["redact", "spine"]
+    assert pipeline.NAMES[:2] == ("redact", "spine")
+    assert not pipeline.STAGES[0].derived  # it commits as it goes, like the other source stages
+    assert [st.name for st in pipeline.plan()][:2] == ["redact", "spine"]  # Rebuild runs it too
 
 
 def test_the_remote_scrub_migration_strips_stored_credentials(db):
-    spec = importlib.util.spec_from_file_location(
-        "m0009", API / "migrations" / "versions" / "0009_remote_credentials_and_job_owners.py")
+    (path,) = (API / "migrations" / "versions").glob("*_remote_credentials_and_job_owners.py")
+    spec = importlib.util.spec_from_file_location("remote_scrub", path)
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
     leaky, plain = f"https://jane:{GH}@github.com/a/b.git", "git@github.com:a/c.git"

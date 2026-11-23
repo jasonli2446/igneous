@@ -29,7 +29,9 @@ def stored(s, source: str) -> set[str]:
 
 
 def rebuild_marked(s) -> bool:
-    return s.execute(text("SELECT count(*) FROM dirty_rebuild")).scalar_one() == 1
+    """The deletion is recorded for the stages that skip work while nothing changed (graph/dirty.py)."""
+    return s.execute(text("SELECT EXISTS (SELECT 1 FROM pipeline_changes WHERE reason = 'source records deleted')")
+                     ).scalar_one()
 
 
 def test_a_completed_scan_deletes_only_unobserved_items_inside_its_scopes(db):

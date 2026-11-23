@@ -14,17 +14,22 @@ services:
 
   api:
     build: ./api
-    command: sh -c "alembic upgrade head && uvicorn igneous.main:app --host 0.0.0.0 --port 8000 --reload"
+    # Development: migrate, then serve the mounted source with --reload. exec hands compose's stop signal to uvicorn.
+    command: sh -c "alembic upgrade head && exec uvicorn igneous.main:app --host 0.0.0.0 --port 8000 --reload"
+    # api/.env applies as in a local run, except the two settings below: the stack serves the Enron demo database.
+    env_file: [{ path: ./api/.env, required: false }]
     environment:
       IGNEOUS_DATABASE_URL: postgresql+psycopg://igneous:igneous@db:5432/igneous
       IGNEOUS_DATA_DIR: /data
     ports: ["8000:8000"]
-    volumes: [./api/igneous:/app/igneous, ./api/migrations:/app/migrations, ./data:/data, models:/root/.cache]
+    # The data folder holds the Google OAuth client, the token key, the Enron mailboxes and the model cache.
+    volumes: [./api/igneous:/app/igneous, ./api/migrations:/app/migrations, ./data:/data]
     depends_on: { db: { condition: service_healthy } }
 
   web:
     build: ./web
     environment:
+      # `next dev` reads it when it compiles in the container; the browser on the host calls the API there.
       NEXT_PUBLIC_API_URL: http://localhost:8000
     ports: ["3000:3000"]
     volumes: [./web/src:/app/src]
@@ -32,4 +37,3 @@ services:
 
 volumes:
   pgdata:
-  models:

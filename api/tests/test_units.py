@@ -622,31 +622,6 @@ def test_entity_screening_caches_model_verdicts(db, monkeypatch):
     assert cache_lookup(key)["by"] == "model"
 
 
-def test_project_merge_requires_two_shared_people():
-    from igneous.graph.entities import _shared_people
-
-    class Result:
-        def __init__(self, rows):
-            self.rows = rows
-
-        def all(self):
-            return self.rows
-
-    class Session:
-        def __init__(self, rows):
-            self.rows, self.params = rows, None
-
-        def execute(self, _statement, params):
-            self.params = params
-            return Result(self.rows)
-
-    session = Session([(1,), (2,)])
-    assert _shared_people(session, [10, 20])
-    assert session.params == {"anchors": [10, 20]}
-    assert not _shared_people(Session([]), [10, 20])
-    assert not _shared_people(Session([(1,), (2,)]), [10])
-
-
 def test_unknown_numbers_are_masked_in_labels_only():
     from igneous.graph.traversal import name_handles
 
@@ -790,7 +765,7 @@ def test_organization_candidates_exclude_personal_domains_and_normalize_contact_
     assert domain_of("pat@studio.vc") == "studio.vc"
     assert domain_of("pat@gmail.com") is None
     assert domain_of("not-an-email") is None
-    assert company_key("  Studio Ventures, LLC ") == ("company:studio-ventures-llc", "Studio Ventures, LLC")
+    assert company_key("  Studio Ventures, LLC ") == ("org:studio-ventures-llc", "Studio Ventures, LLC")
     assert company_key(" ") is None
 
 

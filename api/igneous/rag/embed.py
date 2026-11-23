@@ -1,4 +1,6 @@
 """Embedding backfill through the configured model provider."""
+from collections.abc import Callable
+
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -17,16 +19,20 @@ def embed_query(q: str) -> list[float]:
     return embed([q], query=True)[0]
 
 
-def run(s: Session, log=print) -> int:
-    total = 0
+PENDING = """
+    FROM chunks c JOIN source_items si ON si.id = c.source_item_id
+    WHERE c.embedding IS NULL AND (:local_models OR si.source <> ALL(CAST(:local AS text[])))
+"""
+
+
+def run(s: Session, progress: Callable[[int, int], None] | None = None) -> int:
+    """Embed every chunk that has no vector yet, a batch per transaction; `progress(done, total)` after each batch.
+    Returns how many chunks it embedded."""
+    params = {"local_models": settings.local_sources_model_enabled, "local": list(source_catalog.LOCAL_TEXT)}
+    total = s.execute(text(f"SELECT count(*) {PENDING}"), params).scalar_one()
+    done = 0
     while True:
-        rows = s.execute(text("""
-            SELECT c.id, c.text FROM chunks c JOIN source_items si ON si.id = c.source_item_id
-            WHERE c.embedding IS NULL
-              AND (:local_models OR si.source <> ALL(CAST(:local AS text[])))
-            ORDER BY c.id LIMIT :n
-        """), {"n": BATCH, "local_models": settings.local_sources_model_enabled,
-              "local": list(source_catalog.LOCAL_TEXT)}).all()
+        rows = s.execute(text(f"SELECT c.id, c.text {PENDING} ORDER BY c.id LIMIT :n"), {**params, "n": BATCH}).all()
         if not rows:
             break
         vecs = embed_texts([r.text for r in rows])
@@ -36,7 +42,7 @@ def run(s: Session, log=print) -> int:
             FROM unnest(CAST(:ids AS bigint[]), CAST(:vs AS text[])) AS u(id, v) WHERE c.id = u.id
         """), {"ids": [r.id for r in rows], "vs": [str(v) for v in vecs]})
         s.commit()
-        total += len(rows)
-        if total % (BATCH * 10) == 0:
-            log(f"  embedded {total}")
-    return total
+        done += len(rows)
+        if progress:
+            progress(done, max(total, done))
+    return done

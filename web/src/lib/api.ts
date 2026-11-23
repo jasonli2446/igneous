@@ -170,7 +170,10 @@ export type Job = {
   started_at: string;
   finished_at: string | null;
   progress: {
-    items?: number; items_total?: number; stage?: string | null; step?: number; steps?: number;
+    items?: number; items_total?: number;
+    // Rebuild: the stage running, what it does, which step of how many, and counts within a long stage.
+    stage?: string | null; label?: string | null; step?: number; steps?: number;
+    count?: number | null; total?: number | null; note?: string | null;
     file?: string; files_done?: number; files_total?: number;
     conversations?: number; account?: string;
   };

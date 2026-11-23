@@ -1,12 +1,14 @@
 import json
 import sys
 import time
+from enum import Enum
 from pathlib import Path
 
 import typer
 
 from igneous import sources
 from igneous.db import SessionLocal
+from igneous.pipeline import STAGES
 
 app = typer.Typer(no_args_is_help=True)
 schedule_app = typer.Typer(no_args_is_help=True, help="macOS: sync the sources you have set up and rebuild the "
@@ -233,41 +235,78 @@ def disconnect(provider: str = typer.Argument(..., metavar="PROVIDER", help="goo
     print("disconnected", account)
 
 
-@app.command()
-def pipeline(stage: list[str] = typer.Option(None, help="spine, chunk, embed, extract, topics, entities, self, resolve; "
-                                                           "default all"),
-             extract: int = typer.Option(0, help="LLM-extract up to N newest messages (costs money; 0 = skip)")):
-    """Build the graph and index from whatever is new since the last run. Every stage is incremental."""
-    from igneous.pipeline import stages as pipeline_stages
+StageName = Enum("StageName", [(st.name, st.name) for st in STAGES], type=str)
 
-    stages = pipeline_stages(extract)
+
+class _Printer:
+    """`igneous pipeline` progress: a line per finished stage, its notes, and counts within a long stage at most
+    every few seconds. Flushed, so a pipe or a log file shows it as it happens."""
+
+    def __init__(self):
+        self.printed: set[str] = set()
+        self.notes: set[str] = set()
+        self.counted = 0.0
+
+    def __call__(self, state: dict, force: bool = False) -> None:
+        for name, done in state["results"].items():
+            if name not in self.printed:
+                self.printed.add(name)
+                result = done["result"]
+                shown = result if isinstance(result, int) else json.dumps(result, default=str)
+                print(f"{name:13s} {shown:>8}  {done['seconds']:6.1f}s", flush=True)
+        if state.get("note") and (state["stage"], state["note"]) not in self.notes:
+            self.notes.add((state["stage"], state["note"]))
+            print(f"  {state['stage'] or 'pipeline'}: {state['note']}", flush=True)
+        if state.get("count") is not None and time.monotonic() - self.counted >= 5:
+            self.counted = time.monotonic()
+            total = f" of {state['total']:,}" if state.get("total") else ""
+            print(f"  {state['stage']}: {state['count']:,}{total}", flush=True)
+
+
+def _run_stages(names: list[str] | None, extract: int = 0) -> None:
+    from igneous import pipeline as runner
+
+    try:
+        runner.plan(names, extract)
+    except ValueError as e:
+        raise typer.BadParameter(str(e), param_hint="--stage") from e
     with SessionLocal() as s:
-        for name in stage or stages:
-            t = time.time()
-            n = stages[name](s)
-            # Stages return a count or a stats dict; print either.
-            shown = n if isinstance(n, int) else json.dumps(n, default=str)
-            print(f"{name:7s} {shown:>8} items  {time.time() - t:6.1f}s")
+        runner.run(s, names, extract=extract, progress=_Printer())
 
 
 @app.command()
-def extract(limit: int = typer.Option(200, help="max messages to process this run")):
-    """Stage two: LLM extraction of MENTIONS / ABOUT with span provenance. Costs money; selective by default."""
-    from igneous.graph import extract as ex
-
-    t = time.time()
-    with SessionLocal() as s:
-        n = ex.run(s, limit=limit)
-    print(f"extract {n:>6} items  {time.time() - t:6.1f}s")
+def pipeline(stage: list[StageName] = typer.Option(
+                 None, help="run only this stage (repeatable); stages run in pipeline order, a run that reads your "
+                            "sources starts with redact, and every run ends with corrections, which publishes. "
+                            "Default: every stage except extract"),
+             extract: int = typer.Option(0, min=0, help="also read up to N newest messages with the model for "
+                                                        "people, topics and promises (costs money; 0 = skip)")):
+    """Build the graph: read what is new in your sources, then recompute everything derived from it and publish it
+    at once (Rebuild on the Sources page does the same, without extract). Readers keep the previous graph until the
+    new one is published."""
+    _run_stages([st.value for st in stage] if stage else None, extract)
 
 
 @app.command()
-def resolve(undo: bool = typer.Option(False, help="delete every SAME_AS merge")):
-    """Entity resolution: write SAME_AS edges between Person nodes that are the same human."""
+def extract(limit: int = typer.Option(200, min=1, help="max messages to read with the model this run")):
+    """Read the newest messages of opted-in sources with the model: people and organizations mentioned (MENTIONS),
+    topics (ABOUT), promises and decisions, each with the quoted span. Costs money."""
+    _run_stages(["extract"], limit)
+
+
+@app.command()
+def resolve(undo: bool = typer.Option(False, help="instead, delete the merges entity resolution scored (SAME_AS "
+                                                  "with extractor 'er'), recompute identity clusters from the links "
+                                                  "that remain (contact cards, your accounts, merges you made) and "
+                                                  "publish; the next `igneous resolve` scores them again")):
+    """Entity resolution: score which people are the same human (SAME_AS, extractor 'er'), recompute identity
+    clusters and publish."""
+    from igneous import pipeline as runner
     from igneous.graph import resolve as er
 
-    with SessionLocal() as s:
-        print(f"removed {er.undo(s)} merges" if undo else er.run(s))
+    with SessionLocal() as s, runner.publishing(s):
+        result = {"removed": er.undo(s)} if undo else er.run(s, rescore=True)
+    print(json.dumps(result), flush=True)
 
 
 @app.command()

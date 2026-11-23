@@ -193,6 +193,19 @@ RETURNING (xmax = 0) AS inserted
 """)
 
 
+def store(s: Session, item: SourceItem) -> tuple[str, SourceItem]:
+    """Store one item as a connector read it: `stored(item)` (what is kept of it), upserted unless the content hash
+    stored for it is the same. Returns "inserted", "updated" or "unchanged", and the item as stored."""
+    item = stored(item)
+    row = s.execute(UPSERT, {
+        "source": item.source, "external_id": item.external_id, "content_hash": item.content_hash,
+        "mime": item.mime, "title": item.title, "body_text": item.body_text,
+        "raw_meta": json.dumps(item.raw_meta, default=str), "occurred_at": item.occurred_at,
+        "redaction_version": rules.VERSION,
+    }).first()
+    return ("unchanged" if row is None else "inserted" if row.inserted else "updated"), item
+
+
 def load_cursor(s: Session, connector: str, account: str) -> dict:
     row = s.execute(text("SELECT cursor FROM sync_state WHERE connector = :c AND account = :a"),
                     {"c": connector, "a": account}).first()
@@ -235,8 +248,8 @@ def _delete(s: Session, tombstone: Tombstone) -> int:
 
 
 def _deleted(s: Session, n: int) -> int:
-    """Deleted items can't reach the spine, so the stages that derive from evidence rebuild. The marker joins the
-    deleting transaction: no deletion commits without it."""
+    """Deleted items can't reach the spine, so the deletion is recorded for the stages that skip work while nothing
+    changed (graph/dirty.py). The record joins the deleting transaction: no deletion commits without it."""
     if n:
         from igneous.graph import dirty
         dirty.mark_rebuild(s)
@@ -268,19 +281,8 @@ def run_sync(s: Session, connector: Connector, account: str = "default", limit: 
             if limit is not None and seen >= limit:
                 break
             continue
-        item = stored(obj)
-        row = s.execute(UPSERT, {
-            "source": item.source, "external_id": item.external_id, "content_hash": item.content_hash,
-            "mime": item.mime, "title": item.title, "body_text": item.body_text,
-            "raw_meta": json.dumps(item.raw_meta, default=str), "occurred_at": item.occurred_at,
-            "redaction_version": rules.VERSION,
-        }).first()
-        if row is None:
-            stats["unchanged"] += 1
-        elif row.inserted:
-            stats["inserted"] += 1
-        else:
-            stats["updated"] += 1
+        outcome, item = store(s, obj)
+        stats[outcome] += 1
         stats["redactions"] += _count(item.raw_meta.get("redactions"))
         seen += 1
     s.commit()
@@ -303,12 +305,10 @@ def redact_stored(s: Session, batch: int = 500) -> dict:
     Each item gets the transform `run_sync` gives new ones (`stored`). One whose title or text changes is rewritten
     with its content hash, the spans graph edges hold into its text move with it, nodes named by its old title take
     the new one, and `updated_at` moves so the spine and the chunk stage redo it (its chunks, and so their
-    embeddings, are made again); a rebuild is marked in the same transaction. Any other item only records the version
-    and the hash of its stored content, so syncing it again reads as unchanged. With every item current, this is one
-    index lookup.
+    embeddings, are made again; the spine records the change for the stages it concerns). Any other item only records
+    the version and the hash of its stored content, so syncing it again reads as unchanged. With every item current,
+    this is one index lookup.
     """
-    from igneous.graph import dirty
-
     checked = changed = 0
     after = 0
     while True:
@@ -347,7 +347,5 @@ def redact_stored(s: Session, batch: int = 500) -> dict:
         """), {"v": rules.VERSION, "ids": list(current), "hashes": list(current.values())})
         checked += len(rows)
         after = rows[-1].id
-        if changed:
-            dirty.mark_rebuild(s)
         s.commit()
     return {"checked": checked, "redacted": changed}

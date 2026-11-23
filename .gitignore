@@ -7,7 +7,16 @@ __pycache__/
 .env
 .DS_Store
 .playwright-cli/
+.coverage
+.coverage.*
+htmlcov/
+# The API's Python is pinned in api/.python-version; one at the root is someone's local pin.
+/.python-version
 
 # OAuth client + tokens (CO-5): never commit
 client_secret*.json
 *token*.json
+# Tokenizer files that ship with local models are not credentials.
+!tokenizer*.json
+!special_tokens_map.json
+!added_tokens.json

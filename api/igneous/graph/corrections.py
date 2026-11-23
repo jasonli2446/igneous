@@ -112,7 +112,7 @@ def restore(s: Session, row: dict) -> list[int]:
     verify.apply_verdicts(s)
     if any(e["type"] == "SAME_AS" for e in data["edges"]):
         from igneous.graph.resolve import refresh_canonical
-        refresh_canonical(s, commit=False)
+        refresh_canonical(s)
     return list(s.execute(text("SELECT id FROM edges WHERE id=ANY(:ids) ORDER BY id"), {"ids": restored}).scalars())
 
 

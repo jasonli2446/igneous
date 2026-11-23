@@ -9,8 +9,9 @@ provenance-tracked graph in Postgres + pgvector, then search and explore it. Bac
 
 - **Docker**: runs Postgres 16 with pgvector (`pgvector/pgvector:pg16`, see `docker-compose.yml`). If you bring your
   own Postgres it must be 16+ with the `vector` and `pg_trgm` extensions available; the migrations create both.
-- **[uv](https://docs.astral.sh/uv/)**: installs Python 3.12 and the API dependencies.
-- **Node 20+** and npm for the web app.
+- **[uv](https://docs.astral.sh/uv/)**: installs the API dependencies and Python 3.12, the version `api/.python-version`
+  names and CI and the API image run (any Python from 3.12 on works).
+- **Node 22** and npm for the web app (CI and the web image run 22; Next 16 needs at least 20.9).
 - Optional: an AWS Bedrock API key for Ask and AI extraction (step 3). Search and the graph work without it.
 
 ```bash
@@ -20,7 +21,7 @@ git clone https://github.com/jasonli2446/igneous.git && cd igneous
 ### 2. Database and migrations
 
 ```bash
-make db                                  # docker compose up -d db  (Postgres on :5432, user/password/db: igneous)
+make db                                  # docker compose up -d --wait db  (Postgres on :5432, user/password/db: igneous)
 cd api && uv sync                        # create api/.venv
 uv run alembic upgrade head              # create the schema (or `make migrate` from the repo root)
 ```
@@ -34,11 +35,15 @@ a database behind the code, one migrated by newer code, no schema yet, or Postgr
 Tests (`make test`) never use that database or your personal one, nor your `api/.env` or model credentials: each
 run creates, migrates and finally drops its own `igneous_test_<pid>` database on the same server
 (`api/tests/conftest.py`), so two runs can share a server.
+`make check` runs the checks every pull request must pass: ruff and the tests for the API, then `next typegen`, `tsc`
+and the production build for the web app. CI runs them too, and audits the locked dependencies (`make audit`).
 
 ### 3. Configuration (`api/.env`)
 
 Every API setting is an environment variable with the prefix `IGNEOUS_`; you can put them in `api/.env`
-(git-ignored; read wherever a command starts, and an environment variable overrides it). A minimal file:
+(git-ignored; read wherever a command starts, and an environment variable overrides it). `api/.env.example` lists
+every setting with its default and what it means, all commented out: `cp api/.env.example api/.env`, then
+uncomment what you change. The ones most setups touch:
 
 ```bash
 # Which database to use. Omit for the Enron demo DB "igneous". Use a separate DB for your own data (see below).
@@ -77,8 +82,8 @@ make web    # terminal 2: cd web && npm install && npm run dev                 (
 ```
 
 Always run the API with `--reload`; otherwise you test stale code. Both Make targets already do. The web app talks to
-`http://localhost:8000` unless `NEXT_PUBLIC_API_URL` is set. `docker compose up` runs the API and web in containers
-instead (against the `igneous` database).
+`http://localhost:8000` unless `NEXT_PUBLIC_API_URL` is set (`web/.env.example`). `docker compose up` runs the API and
+web in containers instead, against the `igneous` database; the API container reads `api/.env` for its other settings.
 
 ### 5. Open the Sources page and follow it
 
@@ -91,8 +96,9 @@ The page shows `GET /sources`, the registry in `api/igneous/sources.py`. That re
 connector, so **Sync now**, `igneous sync` and the scheduled sync read a source the same way. Everything is read-only.
 
 Connect or import at least one source, then press **Rebuild** under "Build the graph". Rebuild runs the same pipeline as
-`igneous pipeline`: it reads your sources into people, threads and events, chunks and embeds text, finds topics and
-entities, works out which person is you, and merges duplicates. It is incremental, so it is safe to press again after
+`igneous pipeline` (without model extraction): it reads what is new in your sources into people, conversations and
+events, chunks and embeds text, then works out which person is you, merges duplicate people, and finds your projects,
+life threads and organizations again, publishing them all at once when it finishes. It is safe to press again after
 each sync or import; the first run takes a few minutes (embedding is the slow part). Then open **Graph**, **Ask** and
 **Search**.
 
@@ -146,8 +152,9 @@ uv run igneous import takeout ~/Downloads/takeout-*.zip     # or --downloads to 
 uv run igneous import linkedin ~/Downloads/Basic_LinkedInDataExport.zip   # a zip or an extracted folder
 uv run igneous import ai-export ~/Downloads/chatgpt-export.zip            # ChatGPT or Claude.ai, zip or JSON
 
-uv run igneous pipeline                             # build the graph from whatever is new (same as Rebuild)
+uv run igneous pipeline                             # read what is new and rebuild the graph (same as Rebuild)
 uv run igneous pipeline --extract 200               # also LLM-extract up to 200 newest messages (costs money)
+uv run igneous pipeline --stage resolve             # only some stages (in pipeline order); --help lists them
 uv run igneous schedule install                     # macOS: incremental sync every 30 minutes
 ```
 
@@ -164,14 +171,18 @@ Re-run it safely to restore the exact fixture, or validate an existing output wi
 cd api && uv run igneous verify-synthetic-corpus ../data/synthetic-cross-source
 ```
 
-`igneous pipeline` runs redact -> spine -> chunk -> embed -> extract -> topics -> entities -> profile -> threads -> backbone
--> self -> resolve -> organizations -> verify (`api/igneous/pipeline.py`, the same list Rebuild runs); redact applies the
-current credential rules to items stored under older ones, before anything reads them. The topics stage lowercases and
-conservatively lemmatizes keys, merges only high-similarity local-embedding duplicates, and adds `RELATED_TO` after
-three shared messages; moved `ABOUT` edges keep their original provenance. Extraction, like every model call,
-reads only sources listed in `IGNEOUS_LLM_SOURCES`; set it to `email` before `make demo`, then use `EXTRACT=0` to
-skip calls or `EXTRACT=500` to process more. Everything is incremental: re-running only processes what changed.
-`docker compose up` also runs the api and web in containers.
+`igneous pipeline` runs redact -> spine -> chunk -> embed -> extract -> self -> resolve -> thread_flags -> introductions
+-> topics -> entities -> profile -> threads -> backbone -> organizations -> verify -> corrections
+(`api/igneous/pipeline.py`, the same list Rebuild runs, without extract). The order is what each stage reads: redact
+applies the current credential rules to items stored under older ones before anything reads them, who you are and
+which identities are one person come before everything that counts people, your resume before the threads placed
+under it, the verifier after every link it checks, and your corrections last, so they always win. The source stages
+(redact through extract) only read what is new; the stages after them recompute what is derived. The topics stage
+lowercases and conservatively lemmatizes keys, merges only high-similarity local-embedding duplicates, and adds
+`RELATED_TO` after three shared messages; moved `ABOUT` edges keep their original provenance. Extraction, like every
+model call, reads only sources listed in `IGNEOUS_LLM_SOURCES`; set it to `email` before `make demo`, then use
+`EXTRACT=0` to skip calls or `EXTRACT=500` to process more. `docker compose up` also runs the api and web in
+containers.
 
 ## Layout
 
@@ -182,7 +193,7 @@ skip calls or `EXTRACT=500` to process more. Everything is incremental: re-runni
 | `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
 | `api/igneous/llm.py` | structured model calls and the rule for what a model may read (`allowed_sources`, `visible_nodes`); `providers.py` talks to Bedrock |
 | `api/eval/` | gold questions, ER labels, harnesses, results (see `api/eval/README.md`) |
-| `api/igneous/pipeline.py` | per-stage watermarks; every stage is incremental and safe to re-run |
+| `api/igneous/pipeline.py` | the stage list in dependency order and the one runner `igneous pipeline` and Rebuild share |
 | `api/igneous/main.py` | FastAPI app: search, ask, the explorer's `/graph/*` routes, sources, sync and import jobs (the full list at <http://localhost:8000/docs>) |
 | `api/migrations/` | the whole schema, as plain SQL migrations (`0001_core_schema.py` onward); app code never creates tables |
 | `web/` | Next.js: the 3D explorer (`Graph3D.tsx`, 3d-force-graph) with the inspector and why-view, Ask, Search, and the Sources page |
@@ -208,7 +219,12 @@ cd api && uv run igneous sync imessage && uv run igneous pipeline
   Then add its entry to `SOURCES` in `api/igneous/sources.py`, with the `build` that makes it (the CLI, the Sources
   page and the scheduler all use that one) and the steps to set it up; each value it stores in
   `source_items.source` to `source_catalog.py`; and how the spine turns its items into nodes (`graph/spine.py`).
-- **Pipeline stage:** read rows newer than `watermark(s, STAGE)`, write, then `advance(...)`. See `rag/chunking.py`.
+- **Pipeline stage:** add it to `STAGES` in `api/igneous/pipeline.py`, after every stage whose output it reads, with
+  the label the Sources page shows while it runs. A source stage (redact, spine, chunk, embed, extract) reads only what
+  is new and commits as it goes. A derived stage runs inside the publishing transaction: it never commits, rolls back
+  or bumps the graph version, rebuilds only the rows it owns (its extractor), stores paid model results with
+  `llm.cache_store` as they arrive, and leaves corrections to the last step. `igneous pipeline --stage NAME` runs it
+  alone, then publishes.
 
 ## Known gaps in the baseline
 

@@ -1,0 +1,5 @@
+# The image installs node_modules with `npm ci` for its own platform and compiles .next itself, so the host's
+# copies, and local settings (they can hold secrets), stay out of it.
+node_modules
+.next
+.env*

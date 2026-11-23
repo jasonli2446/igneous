@@ -469,8 +469,8 @@ class _Import:
 
     def read_meet(self, m: Member):
         def go():
-            with m.open() as fh:
-                for r in csv.DictReader(io.TextIOWrapper(fh, encoding="utf-8-sig", errors="replace")):
+            with m.open() as raw, io.TextIOWrapper(raw, encoding="utf-8-sig", errors="replace") as fh:
+                for r in csv.DictReader(fh):
                     start = _meet_ts(r.get("Start Time"))
                     cid = r.get("Conference Id") or r.get("Item Id")
                     if not start or not cid:
@@ -582,8 +582,8 @@ class _Import:
         self._safe(m, go)
 
     def read_saved_csv(self, m: Member, stem: str):
-        with m.open() as fh:
-            for row in csv.DictReader(io.TextIOWrapper(fh, encoding="utf-8-sig", errors="replace")):
+        with m.open() as raw, io.TextIOWrapper(raw, encoding="utf-8-sig", errors="replace") as fh:
+            for row in csv.DictReader(fh):
                 red = [0]
                 name = row.get("Title") or row.get("Name")
                 key = place_key(None, name, None, None)

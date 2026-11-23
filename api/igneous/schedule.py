@@ -70,8 +70,8 @@ def due(s: Session) -> list[dict]:
 
 
 def _pipeline_due(s: Session, changed: bool) -> bool:
-    """Whether to rebuild: a sync changed something, the last rebuild didn't finish, or items changed (or were
-    deleted) since it started."""
+    """Whether to rebuild: a sync changed something, the last rebuild didn't finish, items changed since it started,
+    or a change (such as a deletion) is still pending for a stage (graph/dirty.py)."""
     if changed:
         return True
     last = s.execute(text("SELECT status, started_at FROM jobs WHERE source = 'pipeline' "
@@ -79,7 +79,7 @@ def _pipeline_due(s: Session, changed: bool) -> bool:
     if last is None or last.status != "succeeded":
         return True
     return bool(s.execute(text("SELECT EXISTS (SELECT 1 FROM source_items WHERE updated_at > :t) "
-                               "OR EXISTS (SELECT 1 FROM dirty_rebuild)"), {"t": last.started_at}).scalar())
+                               "OR EXISTS (SELECT 1 FROM pipeline_changes)"), {"t": last.started_at}).scalar())
 
 
 def _outcome(job: dict) -> dict:

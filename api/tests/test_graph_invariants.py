@@ -83,7 +83,7 @@ def test_a_spine_build_of_every_message_source_passes_check_graph(test_db):
     ]
     with SessionLocal() as s:
         s.execute(text("TRUNCATE source_items, nodes, edges, edge_evidence, chunks, canonical, pipeline_state, "
-                       "dirty_nodes, dirty_rebuild RESTART IDENTITY CASCADE"))
+                       "pipeline_changes RESTART IDENTITY CASCADE"))
         for source, external_id, title, meta in items:
             s.execute(text("""
                 INSERT INTO source_items (source, external_id, content_hash, title, body_text, raw_meta, occurred_at)
@@ -95,7 +95,7 @@ def test_a_spine_build_of_every_message_source_passes_check_graph(test_db):
         assert {"gmail", "email", "imessage", "takeout_chat", "ai_chats", "github"} <= types
         assert [v.as_dict() for v in invariants.check_graph(s)] == []
         s.execute(text("TRUNCATE source_items, nodes, edges, edge_evidence, chunks, canonical, pipeline_state, "
-                       "dirty_nodes, dirty_rebuild RESTART IDENTITY CASCADE"))
+                       "pipeline_changes RESTART IDENTITY CASCADE"))
         s.commit()
 
 

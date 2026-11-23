@@ -486,19 +486,11 @@ def sync(source_id: str, s: Session, account: str | None = None, opts: SyncOptio
 
 
 def run_pipeline(s: Session, progress: Progress) -> dict:
-    """The stages `igneous pipeline` runs by default, minus extract (it costs money)."""
-    from igneous.pipeline import stages
+    """Rebuild: what `igneous pipeline` runs, every stage but extract (it costs money), published at the end
+    (igneous/pipeline.py). Progress names each stage as it starts and counts within long ones."""
+    from igneous import pipeline
 
-    todo = [(name, fn) for name, fn in stages().items() if name != "extract"]
-    done: dict[str, int] = {}
-    for i, (name, fn) in enumerate(todo):
-        progress({"stage": name, "step": i + 1, "steps": len(todo), "done": done}, force=True)
-        t = time.time()
-        done[name] = fn(s)
-        s.commit()
-        done[f"{name}_seconds"] = round(time.time() - t, 1)
-    progress({"stage": None, "step": len(todo), "steps": len(todo), "done": done}, force=True)
-    return done
+    return pipeline.run(s, progress=progress)
 
 
 # ---- Google sign-in from the browser ----

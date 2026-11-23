@@ -500,11 +500,9 @@ def run(s: Session, log=print) -> int:
     2. New candidates (name seeds for long-running things, bursts for the rest), skipping records known threads
        already cover: judged once; kept ones join the registry, rejected ones are remembered.
     3. Resolve duplicates / link related threads; umbrellas over them. Pinned threads are never dropped."""
-    from igneous.graph import overrides
-
     items = _items(s)
     items_by_id = {r.id: r for r in items}
-    # Your stated links ('user') are never deleted: viewers mid-rebuild must not see the Lab lose its projects.
+    # Only this stage's own links: yours ('user') are not its to delete.
     s.execute(text("DELETE FROM edges WHERE extractor IN (:x, 'hierarchy', 'thread-resolution')"), {"x": EXTRACTOR})
     keep_keys: list[str] = []
     claimed: set[int] = set()
@@ -518,7 +516,6 @@ def run(s: Session, log=print) -> int:
         if span:
             s.execute(text("UPDATE thread_registry SET span_start = :a, span_end = :b WHERE key = :k"),
                       {"a": span[0], "b": span[1], "k": row.key})
-    s.commit()
     registry = s.execute(text("SELECT * FROM thread_registry WHERE status = 'active' ORDER BY pinned DESC, key")).all()
     members_by_key = _registered_all(registry, items)
     for row in registry:
@@ -569,13 +566,11 @@ def run(s: Session, log=print) -> int:
         keep_keys.append(key)
         claimed |= {r.id for r in members}
         built += 1
-        s.commit()
 
     # 3. Clean up, resolve duplicates / related, umbrellas. Pinned threads are never dropped.
     s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'
                       AND NOT COALESCE((props->>'umbrella')::bool, false) AND NOT (key = ANY(:keep))
                       AND NOT COALESCE((props->>'pinned')::bool, false)"""), {"keep": keep_keys})
-    s.commit()
     from igneous.graph import resolve_threads
     resolve_threads.run(s, log=None)
     keep_keys[:] = s.execute(text("SELECT key FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'")).scalars().all()
@@ -589,8 +584,6 @@ def run(s: Session, log=print) -> int:
     s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = 'threads'
                       AND NOT (key = ANY(:keep)) AND NOT COALESCE((props->>'pinned')::bool, false)"""),
               {"keep": keep_keys})
-    overrides.apply(s)
-    s.commit()
     return built
 
 

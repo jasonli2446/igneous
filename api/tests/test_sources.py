@@ -3,6 +3,7 @@ No network: Google and GitHub are faked, and jobs run fake connectors against th
 import json
 import time
 
+import click
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -117,8 +118,9 @@ def test_the_cli_and_the_api_sync_through_the_registry(db, monkeypatch, tmp_path
 
 
 def said(result) -> str:
-    """CLI output as one line of words: the error box wraps at the terminal's width."""
-    return " ".join(result.output.replace("│", " ").split())
+    """CLI output as one line of plain words: Rich styles it (Typer forces a terminal under CI) and its error box
+    wraps at the terminal's width."""
+    return " ".join(click.unstyle(result.output).replace("│", " ").split())
 
 
 def test_igneous_sync_validates_the_source_and_lists_the_choices(test_db):
@@ -150,7 +152,7 @@ def test_igneous_connect_github_reads_the_token_from_stdin(db, monkeypatch):
     seen = []
     monkeypatch.setattr(github, "account_for", lambda token: seen.append(token) or "octo")
     result = CliRunner().invoke(cli, ["connect", "github"], input="github_pat_" + "t" * 30 + "\n")
-    assert result.exit_code == 0 and "connected octo" in result.output
+    assert result.exit_code == 0 and "connected octo" in said(result)
     assert secrets.accounts(db, "github") == ["octo"] and secrets.load(db, "github", "octo")[1] == "github_pat_" + "t" * 30
     monkeypatch.setattr(github, "account_for", lambda token: (_ for _ in ()).throw(github.GithubError("rejected")))
     assert CliRunner().invoke(cli, ["connect", "github"], input="x").exit_code == 2
@@ -161,7 +163,7 @@ def test_igneous_import_ai_export(db, tmp_path):
     export.write_text(json.dumps([{"uuid": "u1", "name": "Plan", "chat_messages": [
         {"sender": "human", "text": "hello", "created_at": "2025-04-01T10:00:00Z"}]}]))
     result = CliRunner().invoke(cli, ["import", "ai-export", str(export)])
-    assert result.exit_code == 0 and "claude_ai: 1 conversations; 1 new" in result.output
+    assert result.exit_code == 0 and "claude_ai: 1 conversations; 1 new" in said(result)
     assert db.execute(text("SELECT external_id FROM source_items")).scalars().all() == ["claude_ai/u1/2025-04-01"]
 
 
