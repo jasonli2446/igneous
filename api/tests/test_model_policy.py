@@ -8,7 +8,7 @@ import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from mixed_sources import T0, Recorder, _edge, _item, _node, build, wipe
+from mixed_sources import T0, Recorder, _edge, _item, _named, _node, build, wipe
 from sqlalchemy import text
 
 from igneous import llm
@@ -52,6 +52,38 @@ def test_visible_nodes_are_those_grounded_in_opted_in_records(graph):
         assert g["pat"] in llm.visible_nodes(s, ids, frozenset({"imessage"}))
 
 
+def test_a_link_you_add_never_lets_a_prompt_name_its_ends(graph):
+    """A connection you add is your word, not a record's: linking Pat (known only from texts) and Pat's trip to
+    opted-in mail changes nothing a prompt may name."""
+    g = graph
+    with SessionLocal() as s:
+        ids = s.execute(text("SELECT id FROM nodes")).scalars().all()
+        before = llm.nameable(s, ids, frozenset({"gmail"}))
+        _edge(s, g["pat"], g["items"]["g0"], "RELATED_TO", "user")
+        _edge(s, g["items"]["g1"], g["pat_only"], "RELATED_TO", "user")
+        assert llm.nameable(s, ids, frozenset({"gmail"})) == before
+        assert g["pat"] not in before and g["pat_only"] not in before
+        s.rollback()
+
+
+def test_a_name_only_a_record_outside_the_opt_in_gave_is_never_named(db):
+    """Ella is named only by a calendar invite (Calendar not opted in) and appears in opted-in mail by address alone:
+    no prompt may name her until an opted-in record holds the name, or Calendar is opted in."""
+    ella = _node(db, "Person", "ella@x.test", "Ella Novak")
+    invite = _item(db, "gcal", "cal/1", "Reading group", "Weekly reading group.", T0)
+    _named(db, ella, invite, "Ella Novak")
+    mail = _item(db, "gmail", "m1", "Notes", "Notes from today, as promised.", T0)
+    message = _node(db, "Message", "gmail:m1", "Notes", item=mail)
+    _edge(db, message, ella, "RECEIVED", item=mail)
+    _named(db, ella, mail, "Ella")  # the address's local part: the mail has no display name
+    assert llm.nameable(db, [ella], frozenset({"gmail"})) == {}
+    assert llm.nameable(db, [ella], frozenset({"gmail", "gcal"})) == {ella: "Ella Novak"}
+    thanks = _item(db, "gmail", "m2", "Re: Notes", "Thanks, Ella Novak!", T0)
+    reply = _node(db, "Message", "gmail:m2", "Re: Notes", item=thanks)
+    _edge(db, reply, ella, "RECEIVED", item=thanks)
+    assert llm.nameable(db, [ella], frozenset({"gmail"})) == {ella: "Ella Novak"}
+
+
 def test_a_person_is_named_from_any_identitys_records_when_they_hold_the_name(db):
     """A person whose opted-in records all sit under another of their addresses (the cluster's head has none of its
     own) is named when those records hold the name, and only then."""
@@ -88,6 +120,8 @@ def test_a_name_from_outside_opted_in_records_never_reaches_a_prompt(db, monkeyp
             sid = _item(db, "gmail", ref, title, f"{title}: as attached.", T0 + timedelta(days=i))
             m = _node(db, "Message", f"gmail:{ref}", title, item=sid)
             _edge(db, who, m, "SENT", item=sid)
+            if who == sam:
+                _named(db, sam, sid, "Sam Shared")  # his mail's From header names him
             _edge(db, m, me, "RECEIVED", item=sid)
             _edge(db, m, project, "PART_OF", "threads", item=sid)
     _edge(db, quinn, zephyr, "INVOLVED_IN", "threads")
