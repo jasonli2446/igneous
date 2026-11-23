@@ -41,8 +41,8 @@ next Rebuild or `igneous pipeline` reads again the records that gave someone a n
 26k records, about 15 seconds), and everything that shows a person's name follows.
 
 Tests (`make test`) never use that database or your personal one, nor your `api/.env` or model credentials: each
-run creates, migrates and finally drops its own `igneous_test_<pid>` database on the same server
-(`api/tests/conftest.py`), so two runs can share a server.
+run creates, migrates and finally drops its own `igneous_test_<pid>_<key>` database on the same server
+(`api/tests/conftest.py`), so two runs can share a server, from any process namespace (a container, a sandbox).
 `make check` runs the checks every pull request must pass: ruff and the tests for the API, then `next typegen`, `tsc`,
 ESLint and the production build for the web app. CI runs them too, and audits the locked dependencies (`make audit`).
 `web/README.md` covers the explorer walkthrough (`npm run walkthrough`), a browser check run against the demo database.
