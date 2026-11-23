@@ -6,7 +6,7 @@ owns only its rows, so manual edges and entity corrections survive rebuilds.
 """
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -130,11 +130,16 @@ def run(s: Session) -> int:
         DELETE FROM nodes n WHERE type = 'Organization' AND key = ANY(:personal)
           AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id OR e.dst = n.id)
     """), {"personal": sorted(PERSONAL_DOMAINS)})
-    grouped: dict[tuple[int, str, str], list[tuple[int, object, str]]] = defaultdict(list)
+    # One fact per person and organization key, whatever spellings name it ("Acme Inc" on one card, "Acme Inc." on
+    # another), shown by its most common spelling.
+    grouped: dict[tuple[int, str], list[tuple[int, object, str]]] = defaultdict(list)
+    spellings: dict[tuple[int, str], Counter] = defaultdict(Counter)
     for person, key, name, sid, at, why in _observations(s):
-        grouped[(person, key, name)].append((sid, at, why))
+        grouped[(person, key)].append((sid, at, why))
+        spellings[(person, key)][name] += 1
 
-    for (person, key, name), evidence in grouped.items():
+    for (person, key), evidence in grouped.items():
+        name = max(spellings[(person, key)].items(), key=lambda kv: (kv[1], len(kv[0]), kv[0]))[0]
         org = _upsert_org(s, key, name)
         dates = [at for _sid, at, _why in evidence if at is not None]
         edge = s.execute(text("""
@@ -142,6 +147,10 @@ def run(s: Session) -> int:
                                source_item_id)
             VALUES (:person, :org, 'WORKED_AT', CAST(:props AS jsonb), :start, :end, :extractor, :version, :confidence,
                     :sid)
+            ON CONFLICT (src, dst, type, extractor) DO UPDATE SET props = EXCLUDED.props,
+                valid_from = LEAST(edges.valid_from, EXCLUDED.valid_from),
+                valid_to = GREATEST(edges.valid_to, EXCLUDED.valid_to),
+                confidence = GREATEST(edges.confidence, EXCLUDED.confidence)
             RETURNING id
         """), {"person": person, "org": org, "start": min(dates) if dates else None,
                "end": max(dates) if dates else None, "extractor": EXTRACTOR, "version": VERSION,

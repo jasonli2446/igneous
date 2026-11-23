@@ -260,3 +260,38 @@ def test_thread_namer_sees_only_terms_its_shown_records_contain(monkeypatch):
     threads._judge(session, c)
     assert len(rec.prompts) == 1 and "Shared terms: Atlas\n" in rec.prompts[0]
     assert "Zephyr" not in rec.prompts[0] and rec.leaked() == []
+
+
+def test_commitment_checks_read_only_opted_in_messages(db, monkeypatch):
+    """The promise and a reply are mail (opted in); a text in the same thread never is, nor is a promise made in one."""
+    from types import SimpleNamespace
+
+    from igneous.graph import history
+    from igneous.rag import embed
+
+    def no_local_model(_query):
+        raise RuntimeError("no local model")
+
+    thread = _node(db, "Thread", "t:deck", "Deck")
+    nodes = {}
+    for ref, source, body, days in (("promise", "gmail", "I will send the deck by Monday.", 0),
+                                    ("reply", "gmail", "Deck received, thanks.", 1),
+                                    ("text", "imessage", "PRIVATEMARKER the deck is late again", 2),
+                                    ("texted", "imessage", "PRIVATEMARKER I will call Pat Private tonight.", 3)):
+        item = _item(db, source, ref, "Deck", body, T0 + timedelta(days=days))
+        nodes[ref] = (item, _node(db, "Message", f"{source}:{ref}", "Deck", item=item), body)
+        _edge(db, nodes[ref][1], thread, "IN_THREAD", item=item)
+    for ref, what in (("promise", "send the deck"), ("texted", "call Pat Private")):
+        item, node, body = nodes[ref]
+        history.store_claims(db, SimpleNamespace(id=item, node_id=node, occurred_at=T0), body,
+                             {"commitments": [{"who": "sender", "what": what, "by_when": None,
+                                               "quote": body.removeprefix("PRIVATEMARKER ")}], "decisions": []}, "m")
+    rec = Recorder()
+    monkeypatch.setattr(llm, "chat", rec)
+    monkeypatch.setattr(llm.settings, "llm_enabled", True)
+    monkeypatch.setattr(llm.settings, "llm_sources", "gmail")
+    monkeypatch.setattr(embed, "embed_query", no_local_model)
+    history.refresh_commitment_status(db)
+    assert len(rec.prompts) == 1
+    assert "send the deck" in rec.prompts[0] and "Deck received" in rec.prompts[0]
+    assert rec.leaked() == []

@@ -6,7 +6,7 @@ from pipeline_data import card, day, event, linkedin_profile, local_models, mail
 from sqlalchemy import text
 from typer.testing import CliRunner
 
-from igneous import cli, pipeline
+from igneous import cli, llm, pipeline
 from igneous.graph import overrides
 
 pytestmark = pytest.mark.usefixtures("local_models")  # embeddings without a model download, no hosted calls
@@ -154,6 +154,38 @@ def test_corrections_apply_after_the_last_stage_that_writes_projects(db):
     pipeline.run(db)
     assert db.execute(text("SELECT name FROM nodes WHERE key = 'backbone:org:acme-robotics'")).scalar() \
         == "The Robot Shop"
+
+
+def test_pipeline_with_extract_completes_with_a_stubbed_model(db, monkeypatch):
+    """`make demo EXTRACT=N`: read messages with the model, then every stage, and resolve the promise it found."""
+    promise = "I will send the budget report by Friday"
+    first = (f"Hi Kai, thanks for the update on the Atlas launch. {promise} so we can close the quarter. Let me "
+             "know if the vendor list changes before then, and whether the launch date still holds. Best, Mo")
+    reply = ("Thanks Mo, the budget report arrived this morning and it looks complete. The Atlas launch is on "
+             "track, the vendor list did not change, and the launch date still holds. Talk soon, Kai")
+    mail(db, "b1", ME, ["kai@y.test"], "Atlas budget", day(0), sent=True, body=first, thread="atlas")
+    mail(db, "b2", "kai@y.test", [ME], "Re: Atlas budget", day(2), body=reply, thread="atlas")
+    db.commit()
+
+    def model(system, user, schema, **_options):
+        props = schema["properties"]
+        if "commitments" in props:  # extraction
+            claims = [{"who": "sender", "what": "send the budget report", "by_when": "Friday", "quote": promise}]
+            return ({"people": [], "organizations": [], "topics": ["Atlas launch"], "decisions": [],
+                     "commitments": claims if promise in user else []}, {"input_tokens": 10, "output_tokens": 5})
+        if "resolved" in props:
+            return {"resolved": True}, {}
+        return {k: {"array": [], "boolean": False, "number": 0, "integer": 0}.get(v.get("type"), "")
+                for k, v in props.items()}, {}
+
+    monkeypatch.setattr(llm, "structured", model)
+    monkeypatch.setattr(llm.settings, "llm_sources", "gmail")
+    out = CliRunner().invoke(cli.app, ["pipeline", "--extract", "5"])
+    assert out.exit_code == 0, out.output
+    printed = [line.split()[0] for line in out.output.splitlines() if not line.startswith(" ")]
+    assert printed == list(pipeline.NAMES)
+    assert db.execute(text("SELECT props->>'status' FROM nodes WHERE type = 'Commitment'")).scalar() == "resolved"
+    assert db.execute(text("SELECT name FROM nodes WHERE type = 'Topic'")).scalars().all() == ["Atlas launch"]
 
 
 def test_rebuild_runs_the_same_stages_and_reports_them(db):
