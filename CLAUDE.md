@@ -68,15 +68,23 @@ Export formats are sources too: add the entry to `SOURCES` and an inline form in
   (see PR #83 for the gcal case).
 - Tables and columns come only from Alembic migrations (`api/migrations/versions/`), never `CREATE`/`ALTER` in app
   code. The API, the CLI and the MCP server refuse to run on any schema but head (`db.schema_status`).
+- Adding, renaming or removing a setting in `api/igneous/config.py`, or changing its default, means the same edit in
+  `api/.env.example` (a one-line meaning, then the default, commented out); `tests/test_env_example.py` checks.
 - Derived stages (self through corrections, `api/igneous/pipeline.py`) publish in one transaction: never commit, roll
   back or bump the graph version inside one. A correction endpoint takes `entity_api.correction_session`, so it never
   runs while a rebuild publishes.
 
 ## Checks before any PR
 
-`cd api && uv run ruff check . && uv run pytest -q` and `cd web && npx next typegen && npx tsc --noEmit && npm run build`.
+`make check` runs them: `cd api && uv run ruff check . && uv run pytest -q` and
+`cd web && npx next typegen && npx tsc --noEmit && npm run build`.
 pytest is hermetic (`api/tests/conftest.py`): settings start from their defaults, no model credentials reach it,
 and each run uses its own `igneous_test_<pid>` database, so parallel runs are safe. DB-backed tests request `db` (an
 empty graph rolled back after the test; every `SessionLocal` session joins it) or `committed_db` (for code that
-commits from other threads or processes).
+commits from other threads or processes). A warning fails the test that raised it (`filterwarnings = ["error"]` in
+`api/pyproject.toml`): fix its cause, such as a file or connection left open; only a dependency's warning gets an
+`ignore` entry there, naming it exactly, with the reason.
+CI also fails on known advisories in the locked dependencies (`make audit` runs the same audit). Upgrade the affected
+package (`uv lock --upgrade-package <name>`; `npm update <name>`, or its version in `web/package.json`) rather than
+ignore the advisory.
 For UI changes, verify in the browser with `playwright-cli`.

@@ -9,8 +9,9 @@ provenance-tracked graph in Postgres + pgvector, then search and explore it. Bac
 
 - **Docker**: runs Postgres 16 with pgvector (`pgvector/pgvector:pg16`, see `docker-compose.yml`). If you bring your
   own Postgres it must be 16+ with the `vector` and `pg_trgm` extensions available; the migrations create both.
-- **[uv](https://docs.astral.sh/uv/)**: installs Python 3.12 and the API dependencies.
-- **Node 20+** and npm for the web app.
+- **[uv](https://docs.astral.sh/uv/)**: installs the API dependencies and Python 3.12, the version `api/.python-version`
+  names and CI and the API image run (any Python from 3.12 on works).
+- **Node 22** and npm for the web app (CI and the web image run 22; Next 16 needs at least 20.9).
 - Optional: an AWS Bedrock API key for Ask and AI extraction (step 3). Search and the graph work without it.
 
 ```bash
@@ -20,7 +21,7 @@ git clone https://github.com/jasonli2446/igneous.git && cd igneous
 ### 2. Database and migrations
 
 ```bash
-make db                                  # docker compose up -d db  (Postgres on :5432, user/password/db: igneous)
+make db                                  # docker compose up -d --wait db  (Postgres on :5432, user/password/db: igneous)
 cd api && uv sync                        # create api/.venv
 uv run alembic upgrade head              # create the schema (or `make migrate` from the repo root)
 ```
@@ -34,11 +35,15 @@ a database behind the code, one migrated by newer code, no schema yet, or Postgr
 Tests (`make test`) never use that database or your personal one, nor your `api/.env` or model credentials: each
 run creates, migrates and finally drops its own `igneous_test_<pid>` database on the same server
 (`api/tests/conftest.py`), so two runs can share a server.
+`make check` runs the checks every pull request must pass: ruff and the tests for the API, then `next typegen`, `tsc`
+and the production build for the web app. CI runs them too, and audits the locked dependencies (`make audit`).
 
 ### 3. Configuration (`api/.env`)
 
 Every API setting is an environment variable with the prefix `IGNEOUS_`; you can put them in `api/.env`
-(git-ignored; read wherever a command starts, and an environment variable overrides it). A minimal file:
+(git-ignored; read wherever a command starts, and an environment variable overrides it). `api/.env.example` lists
+every setting with its default and what it means, all commented out: `cp api/.env.example api/.env`, then
+uncomment what you change. The ones most setups touch:
 
 ```bash
 # Which database to use. Omit for the Enron demo DB "igneous". Use a separate DB for your own data (see below).
@@ -77,8 +82,8 @@ make web    # terminal 2: cd web && npm install && npm run dev                 (
 ```
 
 Always run the API with `--reload`; otherwise you test stale code. Both Make targets already do. The web app talks to
-`http://localhost:8000` unless `NEXT_PUBLIC_API_URL` is set. `docker compose up` runs the API and web in containers
-instead (against the `igneous` database).
+`http://localhost:8000` unless `NEXT_PUBLIC_API_URL` is set (`web/.env.example`). `docker compose up` runs the API and
+web in containers instead, against the `igneous` database; the API container reads `api/.env` for its other settings.
 
 ### 5. Open the Sources page and follow it
 
