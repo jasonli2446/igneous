@@ -286,9 +286,6 @@ SOURCES: list[dict] = [
                "this page, and builds the graph.",
                "Point the API at it: set IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/"
                "igneous_persona in api/.env (or the API's environment) and restart the API.",
-               "Press Rebuild once (or run igneous pipeline). The first build finds Lakeshore University and Northwind "
-               "Robotics by their email domains only after it has placed threads, so the second puts the classes and "
-               "the job's threads under them.",
                "Sync now reads data/persona into this database again. It refuses a database that holds anything "
                "else, so the persona never mixes with your data or the Enron demo."],
      "cli": "make persona (igneous persona generate ../data/persona, then igneous sync persona)",

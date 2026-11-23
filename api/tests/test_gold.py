@@ -134,6 +134,7 @@ def test_thread_gold_names_records_by_key_and_says_what_sits_under_nothing(db, t
                                "RETURNING id"), {"t": type_, "k": key, "n": name, "i": item}).scalar_one()
     sent, inbox = _item(db, "mira/Sent/cur/1.", "fp-trip"), _item(db, "mira/INBOX/cur/2.", "fp-hostel")
     first, second = node("Message", "fp-trip", "Lisbon?", sent), node("Message", "fp-hostel", "Hostel booked", inbox)
+    node("Project", "backbone:org:u", "Lakeshore University")  # the school again, with nothing under it
     school = node("Project", "backbone:u", "Lakeshore University")
     trip = node("Project", "thread:lisbon", "Lisbon · Jan-Mar 2025")
     folder = node("Project", "project:lisbon", "Lisbon 2025")  # the same trip again, named by its folder
@@ -145,7 +146,7 @@ def test_thread_gold_names_records_by_key_and_says_what_sits_under_nothing(db, t
                          "must_include": [_key("mira/Sent/cur/1.", "fp-trip"), _key("mira/INBOX/cur/2.", "fp-hostel")]}]}
     report = tools.threads.score(gold)
     school_row, lisbon = report["threads"]
-    assert school_row["records"] == 1  # a school holds what the threads under it hold
+    assert (school_row["records"], school_row["duplicates"]) == (1, 1)  # it holds what its threads hold
     assert (lisbon["found"], lisbon["duplicates"], lisbon["include_recall"]) == ("Lisbon 2025", 1, 1.0)
     assert lisbon["parent_ok"] is False  # its duplicate sits under the school, and a trip isn't part of it
     assert (report["summary"]["hierarchy_ok"], report["summary"]["hierarchy_of"]) == (0, 1)

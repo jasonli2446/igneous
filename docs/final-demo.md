@@ -33,13 +33,12 @@ What is in them, so you know what to click:
    IGNEOUS_LLM_SOURCES=email,fs,takeout,linkedin,ai_chats   # the sources the persona came through
    IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true                 # its documents (resumes, notes) too
    ```
-3. **Rebuild once**: start the API and press **Rebuild** on the Sources page (or run `cd api && uv run igneous
-   pipeline`). The first build finds Lakeshore University and Northwind Robotics by their email domains only after
-   it has placed threads, so nothing sits under them until the second. With `AWS_BEARER_TOKEN_BEDROCK` in the API's
-   shell, the model also names the threads ("Lisbon trip", "CS 452") and says what kind each is, reads the resumes
-   for where Mira studied and worked, and checks every derived link. Without a key the graph still builds and every
-   section below works, but threads keep their fallback names ("Lisbon · Jan-Mar 2025", kind "thread", all under
-   Projects) and nothing checks where they were placed (see the last table).
+3. **Let the model read it** (needs `AWS_BEARER_TOKEN_BEDROCK` in the API's shell): start the API and press
+   **Rebuild** on the Sources page once (or run `cd api && uv run igneous pipeline`). The model names the threads
+   ("Lisbon trip", "CS 452") and says what kind each is, reads the resumes for where Mira studied and worked, and
+   checks every derived link, the placements under her school and job among them. Without a key the graph still
+   builds and every section below works, but threads keep their fallback names ("Lisbon · Jan-Mar 2025", kind
+   "thread", all under Projects) and nothing checks where they were placed (see the last table).
 4. **Freeze the graph.** Don't press Rebuild or run the pipeline during the demo: the explorer keeps the previous
    graph while a rebuild runs, then switches to the new one when it publishes, and trips and their members can change
    under you. Finish any rebuild first.
@@ -196,7 +195,6 @@ in a fresh session before recording: times depend on the model and on the warm c
 | `make persona` says the database exists | Use it as it is, or rebuild from scratch: `make persona CLEAN=1`. |
 | Sync now on the persona says it never mixes with other records | The API points at another database. Set `IGNEOUS_DATABASE_URL` to `igneous_persona` and restart the API. |
 | Threads are named like "Lisbon · Jan-Mar 2025" and all sit under Projects | The model hasn't read the persona: set `AWS_BEARER_TOKEN_BEDROCK` and the opt-ins (step 2), then Rebuild once. |
-| Lakeshore University and Northwind Robotics open to nothing | Only one build has run: Rebuild once more (step 3). |
 | Lakeshore University also opens to a trip or Tidepool | They were placed by email domain (most of their people write from the school's address). The model's checker judges each placement; without it nothing does. Either way it's the moment for **This is wrong**. |
 | Search shows two Lisbons (or two Icelands, two Tidepools, a class twice) | The other one is a documents folder made a project ("Lisbon 2025"): it takes in every record that mentions Lisbon, fare newsletters and her mother's mail included. Open the trip thread ("Lisbon · Jan-Mar 2025" without the model). |
 | Search shows Lakeshore University or Northwind Robotics twice | One is the company her LinkedIn connections list, the other the organization found by its email domain. The one on Mira's first ring holds the threads: open it from there. |

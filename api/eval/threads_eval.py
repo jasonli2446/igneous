@@ -45,19 +45,22 @@ def _records(s, given: list) -> set[int]:
     return ids.union(*found)
 
 
-def _held(projects: dict[int, dict], parents: set[tuple[int, int]], top: int) -> set[int]:
-    """A project's records with those of every project under it, however deep."""
+def _held(projects: dict[int, dict], parents: set[tuple[int, int]]) -> dict[int, set[int]]:
+    """Each project's records with those of every project under it, however deep."""
     children: dict[int, set[int]] = {}
     for child, parent in parents:
         children.setdefault(parent, set()).add(child)
-    held, seen, todo = set(), set(), [top]
-    while todo:
-        pid = todo.pop()
-        if pid not in seen:
-            seen.add(pid)
-            held |= projects[pid]["items"] if pid in projects else set()
-            todo.extend(children.get(pid, ()))
-    return held
+    out = {}
+    for top in projects:
+        held, seen, todo = set(), set(), [top]
+        while todo:
+            pid = todo.pop()
+            if pid not in seen:
+                seen.add(pid)
+                held |= projects[pid]["items"] if pid in projects else set()
+                todo.extend(children.get(pid, ()))
+        out[top] = held
+    return out
 
 
 def score(gold: dict) -> dict:
@@ -68,6 +71,7 @@ def score(gold: dict) -> dict:
             "AND dst IN (SELECT id FROM nodes WHERE type='Project')"))}
         records = [(_records(s, g.get("must_include") or []), _records(s, g.get("must_exclude") or []))
                    for g in gold["threads"]]
+    held = _held(projects, parents)
     report, found_ids, same_ids = [], {}, {}
     for g, (inc, exc) in zip(gold["threads"], records, strict=True):
         terms = [t.lower() for t in g["terms"]]
@@ -79,16 +83,17 @@ def score(gold: dict) -> dict:
         word = re.compile(r"\b(" + "|".join(usable) + r")\b") if usable else None  # no terms: no name matches
         named = [p for p in projects.values() if word.search((p["name"] or "").lower())] if word else []
         matches = by_name or named
-        best = max(matches, key=lambda p: (p in by_name, len(p["items"] & inc), len(p["items"])), default=None)
-        dups = [p for p in named if p is not best and not p["umbrella"]]
+        best = max(matches, key=lambda p: (p in by_name, len(held[p["id"]] & inc), len(held[p["id"]])), default=None)
+        dups = [p for p in by_name + named if p is not best and not p["umbrella"]]
+        dups = list({p["id"]: p for p in dups}.values())  # a Project named exactly like it and by its terms is one
         found_ids[g["name"]] = best["id"] if best else None
         same_ids[g["name"]] = {best["id"], *(p["id"] for p in dups)} if best else set()
-        held = _held(projects, parents, best["id"]) if best else set()
+        mine = held[best["id"]] if best else set()
         report.append({
             "name": g["name"], "found": best["name"] if best else None, "duplicates": len(dups),
-            "dup_names": [p["name"] for p in dups][:4], "records": len(held),
-            "include_recall": round(len(held & inc) / len(inc), 2) if best and inc else None,
-            "exclude_leaks": len(held & exc),
+            "dup_names": [p["name"] for p in dups][:4], "records": len(mine),
+            "include_recall": round(len(mine & inc) / len(inc), 2) if best and inc else None,
+            "exclude_leaks": len(mine & exc),
             "kind": best["kind"] if best else None})
     # Who took part: names the person gave (match by first name, so "Tara" finds her contact under any name).
     with SessionLocal() as s:

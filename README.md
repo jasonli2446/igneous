@@ -145,13 +145,12 @@ make persona CLEAN=1  # the same, replacing an igneous_persona that exists
 
 Each export goes through its own source on the Sources page (the "Synthetic persona" entry in the Demo group says
 how), never with raw inserts, and the persona's sync refuses any database other than `igneous_persona` that already
-holds records, so it never mixes with Enron or your own data. The first build places no thread under Lakeshore
-University or Northwind Robotics (it finds their email domains after placing threads); a Rebuild does. Without a
-model, threads are named by their term and month ("Lisbon · Jan-Mar 2025"); with `AWS_BEARER_TOKEN_BEDROCK` set and
-its sources opted in (`IGNEOUS_LLM_SOURCES=email,fs,takeout,linkedin,ai_chats`,
-`IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`), the Rebuild also names them and checks where each was placed. Its gold
-set (threads, the identities that are one person, Ask questions) makes it an eval too: `api/eval/README.md`.
-`docs/final-demo.md` runs on it.
+holds records, so it never mixes with Enron or your own data. The build places the classes and the job's threads
+under Lakeshore University and Northwind Robotics by their email domains. Without a model, threads are named by their
+term and month ("Lisbon · Jan-Mar 2025"); with `AWS_BEARER_TOKEN_BEDROCK` set and its sources opted in
+(`IGNEOUS_LLM_SOURCES=email,fs,takeout,linkedin,ai_chats`, `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`), a Rebuild
+also names them and checks where each was placed. Its gold set (threads, the identities that are one person, Ask
+questions) makes it an eval too: `api/eval/README.md`. `docs/final-demo.md` runs on it.
 
 Your own data goes in a separate database. Create it, migrate it, and point the API and CLI at it:
 
