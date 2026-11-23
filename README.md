@@ -263,8 +263,9 @@ cd api && uv run igneous sync imessage && uv run igneous pipeline
 ## Adding a stage or connector
 
 - **Connector:** a class whose `sync(cursor)` yields `SourceItem`s, a `Checkpoint` whenever what came before may be
-  committed, and a `Tombstone` for each item a change feed reports removed, or a final `CompletedScan` (with the
-  scopes it listed) when it listed everything (`connectors/base.py`; `run_sync` redacts and stores what it yields).
+  committed, and a `Tombstone` for each item a change feed reports removed, a `CompletedWindow` for a scope it listed
+  completely from a date on (a calendar's first listing), or a final `CompletedScan` (with the scopes it listed) when it
+  listed everything (`connectors/base.py`; `run_sync` redacts and stores what it yields).
   Then add its entry to `SOURCES` in `api/igneous/sources.py`, with the `build` that makes it (the CLI, the Sources
   page and the scheduler all use that one) and the steps to set it up; each value it stores in
   `source_items.source` to `source_catalog.py`; and how the spine turns its items into nodes (`graph/spine.py`'s
