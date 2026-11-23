@@ -1,8 +1,13 @@
 """Google connectors (Drive, Calendar, Contacts, Gmail) against in-memory API fakes. No network."""
+import errno
+import http.client
+import ssl
 import time
 
+import httplib2
 import pytest
 from fakes import FakeCalendar, FakeDrive, FakeGmail, FakePeople, Request, http_error
+from google.auth.exceptions import TransportError
 from googleapiclient.errors import HttpError
 
 from igneous.connectors import gmail, google_api
@@ -300,17 +305,21 @@ def test_a_google_call_retries_what_passes_and_gives_up_on_the_rest(monkeypatch)
                 raise outcome
             return outcome
 
-    passing = Flaky(ConnectionResetError("reset"), TimeoutError("timed out"), http_error(429), http_error(503),
-                    {"ok": True})
-    assert google_api.call("drive", passing) == {"ok": True} and passing.executed == 5
+    dropped = [ConnectionResetError("reset"), TimeoutError("timed out"), ssl.SSLEOFError("EOF in violation of protocol"),
+               httplib2.ServerNotFoundError("Unable to find the server"), http.client.IncompleteRead(b"{"),
+               OSError(errno.ECONNREFUSED, "refused"), TransportError("token refresh: connection dropped")]
+    passing = Flaky(*dropped, http_error(429), http_error(503), {"ok": True})
+    assert google_api.call("drive", passing, attempts=10) == {"ok": True} and passing.executed == 10
     down = Flaky(*[http_error(500, "backendError")] * 3)
     with pytest.raises(HttpError):
         google_api.call("drive", down, attempts=3)
     assert down.executed == 3
-    refused = Flaky(http_error(403, "insufficientPermissions"))
-    with pytest.raises(HttpError):
-        google_api.call("drive", refused)
-    assert refused.executed == 1
+    for answer in (http_error(403, "insufficientPermissions"), ssl.SSLCertVerificationError("unknown issuer"),
+                   OSError(errno.ENOSPC, "no space left")):
+        refused = Flaky(answer)
+        with pytest.raises(type(answer)):
+            google_api.call("drive", refused)
+        assert refused.executed == 1, answer
 
 
 def test_a_drive_change_that_makes_a_file_unreadable_removes_it():

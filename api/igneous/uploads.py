@@ -7,6 +7,7 @@ died is removed the next time the API starts (`sweep`).
 """
 import os
 import shutil
+import stat
 import tempfile
 import uuid
 from collections.abc import Callable
@@ -14,8 +15,25 @@ from pathlib import Path
 
 from starlette.concurrency import run_in_threadpool
 
-ROOT = Path(tempfile.gettempdir()) / "igneous-uploads"
+# This user's own folder in the system's temporary folder, which other users of the computer may share.
+ROOT = Path(tempfile.gettempdir()) / f"igneous-uploads-{os.getuid()}"
 _MINE: set[Path] = set()  # folders this process staged and has not removed
+
+
+def _root() -> Path:
+    """ROOT, readable by this user only. Exports are personal data: a ROOT another user made first, or a link in its
+    place, would let them read or redirect what is staged, so it is refused."""
+    try:
+        ROOT.mkdir(mode=0o700, exist_ok=True)
+    except FileExistsError:
+        pass  # something that isn't a folder: refused below
+    info = ROOT.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise PermissionError(f"{ROOT} is not a folder of this user's, so uploads can't be staged in it: remove it "
+                              "and upload again.")
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        ROOT.chmod(0o700)
+    return ROOT
 
 
 class Staged:
@@ -51,9 +69,8 @@ class Staged:
 
 
 def _copy(uploads: list, prefix: str) -> Staged:
-    folder = ROOT / f"{os.getpid()}-{prefix}-{uuid.uuid4().hex[:8]}"
-    ROOT.mkdir(parents=True, exist_ok=True)
-    folder.mkdir(mode=0o700)  # exports are personal data, and the temp folder may be shared with other users
+    folder = _root() / f"{os.getpid()}-{prefix}-{uuid.uuid4().hex[:8]}"
+    folder.mkdir(mode=0o700)
     _MINE.add(folder)
     staged = Staged(folder, [])
     try:
@@ -80,8 +97,12 @@ def sweep() -> int:
     was left by an earlier process with the same pid (a restarted container)."""
     from igneous.jobs import _alive
 
+    try:
+        root = _root()
+    except OSError:
+        return 0  # not this user's folder: nothing in it is
     removed = 0
-    for folder in ROOT.glob("*-*") if ROOT.is_dir() else []:
+    for folder in root.glob("*-*"):
         pid = folder.name.split("-", 1)[0]
         if not pid.isdigit() or folder in _MINE:
             continue

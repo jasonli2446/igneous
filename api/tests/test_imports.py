@@ -187,18 +187,38 @@ def test_uploads_are_copied_off_the_event_loop(monkeypatch):
 
 
 def test_staged_uploads_are_this_users_alone_and_named_inside_their_folder(tmp_path, monkeypatch):
-    """Exports are personal data, and the system's temporary folder may be shared: only this user can open the
-    staged copy. An upload's name can't place it outside its folder."""
+    """Exports are personal data, and the system's temporary folder may be shared: only this user can open what is
+    staged, and a staging folder another user made first, or a link put in its place, is refused. An upload's name
+    can't place it outside its folder."""
     import stat
     from types import SimpleNamespace
 
-    monkeypatch.setattr(uploads, "ROOT", tmp_path / "igneous-uploads")
-    staged = uploads._copy([SimpleNamespace(filename="../../export.zip", file=io.BytesIO(b"PK"))], "takeout")
+    def upload() -> list:
+        return [SimpleNamespace(filename="../../export.zip", file=io.BytesIO(b"PK"))]
+
+    root = tmp_path / "igneous-uploads"
+    root.mkdir()
+    root.chmod(0o777)  # this user's, but open to everyone: it is closed
+    monkeypatch.setattr(uploads, "ROOT", root)
+    staged = uploads._copy(upload(), "takeout")
     try:
-        assert stat.S_IMODE(staged.folder.stat().st_mode) == 0o700
+        assert stat.S_IMODE(root.stat().st_mode) == stat.S_IMODE(staged.folder.stat().st_mode) == 0o700
         assert [(p.parent, p.name) for p in staged.files] == [(staged.folder, "0-export.zip")]
     finally:
         staged.remove()
+
+    monkeypatch.setattr(uploads.os, "getuid", lambda: root.stat().st_uid + 1)  # as if another user made it
+    with pytest.raises(PermissionError, match="not a folder of this user's"):
+        uploads._copy(upload(), "takeout")
+    assert uploads.sweep() == 0
+    monkeypatch.setattr(uploads.os, "getuid", os.getuid)
+    theirs = tmp_path / "theirs"
+    theirs.mkdir()
+    (tmp_path / "linked").symlink_to(theirs)
+    monkeypatch.setattr(uploads, "ROOT", tmp_path / "linked")
+    with pytest.raises(PermissionError, match="not a folder of this user's"):
+        uploads._copy(upload(), "takeout")
+    assert not list(theirs.iterdir())
 
 
 def test_folders_of_processes_that_died_are_swept(tmp_path, monkeypatch):

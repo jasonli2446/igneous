@@ -21,7 +21,7 @@ git clone https://github.com/jasonli2446/igneous.git && cd igneous
 ### 2. Database and migrations
 
 ```bash
-make db                                  # docker compose up -d --wait db  (Postgres on :5432, user/password/db: igneous)
+make db                                  # docker compose up -d --wait db  (Postgres on localhost:5432, user/password/db: igneous)
 cd api && uv sync                        # create api/.venv
 uv run alembic upgrade head              # create the schema (or `make migrate` from the repo root)
 ```
@@ -100,6 +100,8 @@ make web    # terminal 2: cd web && npm install && npm run dev                 (
 Always run the API with `--reload`; otherwise you test stale code. Both Make targets already do. The web app talks to
 `http://localhost:8000` unless `NEXT_PUBLIC_API_URL` is set (`web/.env.example`). `docker compose up` runs the API and
 web in containers instead, against the `igneous` database; the API container reads `api/.env` for its other settings.
+The stack publishes Postgres, the API and the web app on this computer only (127.0.0.1): no other device on your
+network can reach them.
 
 ### 5. Open the Sources page and follow it
 
