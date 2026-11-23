@@ -194,23 +194,25 @@ On the default seed with the model off (2026-11-23), after `make persona` (one p
 | | One run | Two runs |
 |---|---|---|
 | Gold threads found | 12 of 12 | 12 of 12 |
-| Found twice or more (another Project for the same thing) | 3 | 2 |
+| Found twice or more (another Project for the same thing) | 2 | 1 |
 | Records that must not be in their thread, but are | 0 | 0 |
 | Placed right (under its school or job, or under nothing) | 7 of 10 | 7 of 10 |
 | Who took part: missing or wrongly there | 0 | 0 |
 | Identities: clusters P / R | 1.00 / 0.94 | 1.00 / 0.94 |
 | Identities: pairs ≥ 0.5, P / R | 1.00 / 0.83 | 1.00 / 0.83 |
-| Ask retrieval, recall@10 over 13 answerable questions: hybrid / dense / lexical | 0.92 / 0.92 / 0.85 | the same |
+| Ask retrieval, recall@10 over 13 answerable questions: hybrid / dense / lexical | 0.85 / 0.85 / 0.85 | the same |
 
+- Each class is one thread: its code in the titles of its own mail seeds it over its term (the longest run of records
+  naming it), and what is found under another name while most of its records name the class (CS 481's project
+  "Harborline" and its "Demo Day") is its part, a facet whose name is an alias of "CS 481 · Jan-May 2026".
 - A folder, series or group chat a thread is about joins that thread (graph/entities.py) when most of its records are
-  the thread's, so the documents folder's "Lisbon 2025", "CS 341 Operating Systems" and "tidepool" are part of their
-  threads, not Projects beside them. The duplicates left: CS 481 split in two threads ("Harborline", "Demo Day"), with
-  its folder "CS 481 Senior Capstone" a Project of its own beside them since no thread is named by its code; and
-  Northwind Robotics as four Projects: the hiring thread ("Northwind · Dec-Jan 2025"), the documents folder "Northwind"
-  (three of its six files are from the hiring months, the others from the job after, so it joins no thread), and the
-  backbone's own "Northwind Robotics" thread for each of the organization's two nodes (below), since the backbone takes
-  a thread for an organization's own only when it is named like the organization. On the first run, Lakeshore
-  University's second node has a thread too.
+  the thread's, so the documents folder's "Lisbon 2025", "CS 341 Operating Systems", "CS 481 Senior Capstone" and
+  "tidepool" are part of their threads, not Projects beside them. The duplicate left is Northwind Robotics, as four
+  Projects: the hiring thread ("Northwind · Dec-Jan 2025"), the documents folder "Northwind" (three of its six files
+  are from the hiring months, the others from the job after, so it joins no thread), and the backbone's own "Northwind
+  Robotics" thread for each of the organization's two nodes (below), since the backbone takes a thread for an
+  organization's own only when it is named like the organization. On the first run, Lakeshore University's second
+  node has a thread too.
 - Each organization is two nodes: the company LinkedIn's connections name (`org:lakeshore-university`) and the one
   found by email domain (`lakeshore.example.edu`). The first run ties Mira's LinkedIn positions to the company nodes,
   so the backbone gives both nodes a thread, and only the domain's holds anything; the second run ties the school to
@@ -225,8 +227,9 @@ On the default seed with the model off (2026-11-23), after `make persona` (one p
 - The only identity left apart is classmate Alex Chen's LinkedIn profile: two people share the name, so the name
   alone joins neither.
 - Retrieval moves by a question or two between builds of the same seed (hybrid recall@10 from 0.77 to 0.92 over
-  four builds): lexical search orders equal scores by however the rows were stored, and the vector index (HNSW) is
-  approximate.
+  four builds), and between two restores of one database (dense from 0.62 to 0.92): lexical search orders equal
+  scores by however the rows were stored, and the vector index (HNSW) is approximate, its graph built anew on each
+  restore.
 - With the model off, threads keep their fallback names ("Lisbon · Jan-Mar 2025", kind "thread"). `--qa` needs the
   model.
 
