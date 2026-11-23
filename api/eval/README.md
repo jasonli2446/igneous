@@ -206,10 +206,9 @@ after a second run:
 - Most duplicates are a Project the entities stage named from a folder ("Lisbon 2025", "CS 341 Operating Systems",
   "tidepool") beside the thread the threads stage found for the same thing; CS 481 is also split in two threads
   ("Harborline", "Demo Day").
-- Each organization is two nodes: the company LinkedIn's connections name (`org:lakeshore-university`) and the one
-  found by email domain (`lakeshore.example.edu`). The first run ties Mira's LinkedIn positions to the company nodes,
-  so the backbone gives both nodes a thread, and only the domain's holds anything; the second run ties the school to
-  its domain node (the one with more links by then), and its empty thread goes.
+- Each organization is one node from the first run on: the company Mira's LinkedIn and her connections name
+  (`org:lakeshore-university`), which holds the email domain its people write from (`lakeshore.example.edu`), with
+  her LinkedIn link and the one her mail shows. A second run changes no organization node or link.
 - The placements are by email domain: the classes, the Heron field trials and the hiring thread go under the right
   organization, and the Lisbon and Iceland trips and Tidepool under Lakeshore University too, since most of their
   people write from the school's domain.

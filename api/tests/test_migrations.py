@@ -176,6 +176,100 @@ def test_corrections_become_intents_and_dropped_links_one_row_each(test_db, monk
         admin.dispose()
 
 
+def test_a_domain_organization_its_company_holds_takes_the_company_key_and_corrections_follow(test_db, monkeypatch):
+    """Migration 0015 on a database the code before it built: acme.test, named by its people's own words, gives its
+    links to the LinkedIn company Acme Robotics and goes; state.edu, which your resume named, takes the key of the
+    company its people name; a domain only the model named, for a company nothing else names, stays. Its backbone
+    thread follows, and so do your rejection, your rename, the verifier's verdict and the link it dropped."""
+    from alembic import command
+    from alembic.config import Config
+
+    revision = next(r for r in dbm._script().walk_revisions() if (r.doc or "").startswith("One organization, one key"))
+    name = f"{TEST_DB}_companies"
+    url = make_url(settings.database_url).set(database=name).render_as_string(hide_password=False)
+    admin = create_engine(make_url(settings.database_url).set(database="postgres"), isolation_level="AUTOCOMMIT")
+    config = Config(str(API / "alembic.ini"))
+    config.set_main_option("script_location", str(API / "migrations"))
+    monkeypatch.setattr(settings, "database_url", url)  # migrations/env.py connects to settings.database_url
+    try:
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+            c.execute(text(f'CREATE DATABASE "{name}"'))
+        command.upgrade(config, revision.down_revision)
+        engine = create_engine(url)
+        with engine.begin() as c:
+            c.execute(text("""
+                INSERT INTO source_items (source, external_id, title, raw_meta, content_hash) VALUES
+                    ('gcontacts', 'acct/people/1', 'Cy', '{"emails": ["cy@state.edu"], "orgs": ["State University"]}',
+                     'h1')
+            """))
+            ids = dict(c.execute(text("""
+                INSERT INTO nodes (type, key, name, props) VALUES
+                    ('Person', 'ana@acme.test', 'Ana', '{}'), ('Person', 'bo@acme.test', 'Bo', '{}'),
+                    ('Organization', 'acme.test', 'Acme Robotics',
+                     '{"inferred_by": "organizations", "named_from": "their own words"}'),
+                    ('Organization', 'org:acme-robotics', 'Acme Robotics', '{"kind": "employer", "source": "linkedin"}'),
+                    ('Organization', 'state.edu', 'State U', '{"named_by": "profile"}'),
+                    ('Organization', 'initech.test', 'Initech',
+                     '{"inferred_by": "organizations", "named_from": "how its people sign"}'),
+                    ('Project', 'backbone:acme.test', 'Acme Robotics', '{"derived": "backbone"}'),
+                    ('Project', 'thread:x', 'Heron', '{"derived": "threads"}')
+                RETURNING key, id""")).all())
+            c.execute(text("UPDATE nodes SET props = props || jsonb_build_object('thread', :t) WHERE id = :o"),
+                      {"t": ids["backbone:acme.test"], "o": ids["acme.test"]})
+            c.execute(text("""
+                INSERT INTO edges (src, dst, type, extractor) VALUES
+                    (:ana, :acme, 'WORKED_AT', 'organizations'), (:ana, :company, 'MEMBER_OF', 'linkedin'),
+                    (:x, :thread, 'PART_OF', 'backbone')"""),
+                      {"ana": ids["ana@acme.test"], "acme": ids["acme.test"], "company": ids["org:acme-robotics"],
+                       "x": ids["thread:x"], "thread": ids["backbone:acme.test"]})
+            c.execute(text("""
+                INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, confidence, source)
+                VALUES ('Person:ana@acme.test', 'Organization:acme.test', 'WORKED_AT', 'organizations', '', 'drop', 1,
+                        'user'),
+                       ('Person:bo@acme.test', 'Organization:acme.test', 'WORKED_AT', 'organizations', 'd', 'drop', 0.9,
+                        'model'),
+                       ('Project:thread:x', 'Project:backbone:acme.test', 'PART_OF', 'backbone', 'd', 'keep', 0.9,
+                        'model')"""))
+            c.execute(text("""
+                INSERT INTO edges_dropped (src, dst, type, extractor, src_key, dst_key)
+                VALUES (:bo, :acme, 'WORKED_AT', 'organizations', 'Person:bo@acme.test', 'Organization:acme.test')"""),
+                      {"bo": ids["bo@acme.test"], "acme": ids["acme.test"]})
+            c.execute(text("""INSERT INTO overrides (op, node_keys, value) VALUES
+                              ('rename', ARRAY['Project:backbone:acme.test'], 'Acme (mine)')"""))
+        command.upgrade(config, revision.revision)
+        with engine.connect() as c:
+            orgs = c.execute(text("""SELECT key, name, props->'domains', (props->>'thread')::bigint FROM nodes
+                                     WHERE type = 'Organization' ORDER BY key""")).all()
+            links = c.execute(text("""SELECT a.key, e.type, b.key FROM edges e JOIN nodes a ON a.id = e.src
+                                      JOIN nodes b ON b.id = e.dst ORDER BY 1, 2, 3""")).all()
+            thread = c.execute(text("""SELECT id, (props->>'org')::bigint FROM nodes
+                                       WHERE type = 'Project' AND key = 'backbone:org:acme-robotics'""")).one()
+            verdicts = c.execute(text("""SELECT src_key, dst_key, verdict, source FROM edge_verdicts
+                                         ORDER BY 1, 2""")).all()
+            dropped = c.execute(text("SELECT src_key, dst_key FROM edges_dropped")).all()
+            renamed = c.execute(text("SELECT node_keys FROM overrides WHERE op = 'rename'")).scalar_one()
+        engine.dispose()
+        assert [tuple(r) for r in orgs] == [
+            ("initech.test", "Initech", None, None),
+            ("org:acme-robotics", "Acme Robotics", ["acme.test"], thread[0]),
+            ("org:state-university", "State U", ["state.edu"], None)]
+        assert [tuple(r) for r in links] == [("ana@acme.test", "MEMBER_OF", "org:acme-robotics"),
+                                             ("ana@acme.test", "WORKED_AT", "org:acme-robotics"),
+                                             ("thread:x", "PART_OF", "backbone:org:acme-robotics")]
+        assert thread[1] == ids["org:acme-robotics"]
+        assert [tuple(r) for r in verdicts] == [
+            ("Person:ana@acme.test", "Organization:org:acme-robotics", "drop", "user"),
+            ("Person:bo@acme.test", "Organization:org:acme-robotics", "drop", "model"),
+            ("Project:thread:x", "Project:backbone:org:acme-robotics", "keep", "model")]
+        assert [tuple(r) for r in dropped] == [("Person:bo@acme.test", "Organization:org:acme-robotics")]
+        assert renamed == ["Project:backbone:org:acme-robotics"]
+    finally:
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
 def test_schema_status_is_none_at_head(test_db):
     assert dbm.schema_status() is None
 

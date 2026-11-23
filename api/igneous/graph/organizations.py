@@ -10,12 +10,18 @@
 Each person and organization gets one fact, carrying every reason and evidence item behind it; its dates
 (valid_from, valid_to) are the first and last activity behind it (a contact card has none).
 
-Organizations are keyed by domain (acme.com) or, for a company name, `org:<slug>` (as LinkedIn companies and the
-organizations on your resume are), so one company is one node. A domain is named in its people's own words where the
-data has them (the companies on their contact cards and LinkedIn connections), else by one cached cheap-model call per
-domain reading how its people sign their mail in opted-in sources, else by the domain itself; a name your resume gave
-it always stays. The stage owns only its own rows, written through graph/derived.py's Writer: a person and an
-organization you said aren't connected never are again.
+One organization is one node, whichever stage or record meets it first. A company is keyed by its name, `org:<slug>`,
+as LinkedIn, contact cards, model mentions and your resume key it, and its email domains are its `props.domains`. A
+domain belongs to a company: the one your resume gives it (graph/profile.py records the claim), else the company its
+own people name on their contact cards and LinkedIn connections, else the one named by a cached cheap-model call per
+domain reading how its people sign their mail in opted-in sources, when your records name that company too (LinkedIn,
+a card, a mention, your resume). A domain no company claims is an organization of its own, keyed by the domain and
+named by the model or by the domain itself. Which key a domain takes depends on the records alone, never on what an
+earlier build left, so two builds of the same data give the same organizations. A name your resume gave an
+organization always stays, and so does the name a company's own records give it.
+
+The stage owns its own rows, written through graph/derived.py's Writer (a person and an organization you said aren't
+connected never are again), and `props.domains` on every organization.
 """
 import json
 import re
@@ -75,8 +81,9 @@ def company_key(name: str | None) -> tuple[str, str] | None:
     return f"org:{key}", display
 
 
-def _kind(key: str, name: str) -> str:
-    school = re.search(r"(^|\.)(edu|ac)(\.[a-z]{2})?$", key) or re.search(
+def _kind(domains: list[str], name: str) -> str:
+    """'school' for an organization at an academic domain or named like one, else 'employer'."""
+    school = any(re.search(r"(^|\.)(edu|ac)(\.[a-z]{2})?$", d) for d in domains) or re.search(
         r"\b(university|college|school|institute|academy)\b", name, re.I)
     return "school" if school else "employer"
 
@@ -254,16 +261,52 @@ def model_name(s: Session, domain: str) -> str | None:
     return name if name and len(name) <= 80 and (answer.get("confidence") or 0) >= NAME_CONFIDENCE else None
 
 
-def _domain_names(s: Session, domains: set[str]) -> dict[str, tuple[str, str]]:
+def company_for(s: Session, name: str, domain: str = "") -> tuple[str, str] | None:
+    """(key, name) of the organization your resume calls `name`, at `domain` when it gives one: the company that
+    domain's own people name on their contact cards and LinkedIn connections, so your resume, their records and the
+    domain are one node, else the company `name` is. Named as you name it; None for text that can't be a company's
+    name."""
+    company = company_key(name)
+    if company is None:
+        return None
+    words = _own_words(s, {domain}).get(domain) if domain else None
+    if words and (theirs := company_key(max(words.items(), key=lambda kv: (kv[1], len(kv[0]), kv[0]))[0])):
+        return theirs[0], company[1]
+    return company
+
+
+def _resume_claims(s: Session) -> dict[str, tuple[str, str]]:
+    """domain -> (organization key, name) for each domain your resume gives an organization: the profile stage, which
+    runs first, marks its WORKED_AT link to that organization with the domain (props.domain)."""
+    claims: dict[str, tuple[str, str]] = {}
+    for domain, key, name in s.execute(text("""
+        SELECT lower(e.props->>'domain'), o.key, o.name FROM edges e JOIN nodes o ON o.id = e.dst
+        WHERE e.type = 'WORKED_AT' AND e.extractor = 'profile' AND COALESCE(e.props->>'domain', '') <> ''
+        ORDER BY e.id
+    """)):
+        if domain_of(f"x@{domain}") == domain:
+            claims.setdefault(domain, (key, name))
+    return claims
+
+
+def _companies(s: Session) -> set[str]:
+    """The companies your records name (`org:<slug>` keys) apart from this stage's own findings: a LinkedIn company or
+    model mention the spine or extraction made, your resume's organizations, a connection you added. This stage's
+    links are gone when it reads them, so an organization it alone made in an earlier build doesn't count."""
+    return set(s.execute(text("""
+        SELECT n.key FROM nodes n WHERE n.type = 'Organization' AND n.key LIKE 'org:%'
+          AND (EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id) OR EXISTS (SELECT 1 FROM edges e WHERE e.dst = n.id)
+               OR EXISTS (SELECT 1 FROM spine_node_support x WHERE x.node_id = n.id))
+    """)).scalars())
+
+
+def _domain_names(s: Session, domains: set[str], claims: dict[str, tuple[str, str]]) -> dict[str, tuple[str, str]]:
     """domain -> (name, where it came from): your resume, people's own words, the model, or the domain itself."""
-    resume = dict(s.execute(text("""
-        SELECT key, name FROM nodes WHERE type = 'Organization' AND key = ANY(:d) AND props->>'named_by' = 'profile'
-    """), {"d": sorted(domains)}).all())
-    words = _own_words(s, domains - set(resume))
+    words = _own_words(s, domains - set(claims))
     names = {}
     for domain in sorted(domains):
-        if domain in resume:
-            names[domain] = (resume[domain], "your resume")
+        if domain in claims:
+            names[domain] = (claims[domain][1], "your resume")
         elif words.get(domain):
             names[domain] = (max(words[domain].items(), key=lambda kv: (kv[1], len(kv[0]), kv[0]))[0],
                              "their own words")
@@ -274,44 +317,74 @@ def _domain_names(s: Session, domains: set[str]) -> dict[str, tuple[str, str]]:
     return names
 
 
-def _organization(s: Session, key: str, name: str, named: str | None) -> int:
-    """The Organization node for `key`: created when missing, its name refreshed when this stage names it (`named`)
-    and your resume didn't, and named when nothing else names it (it shows its key: the record that named it is
-    gone)."""
-    props = {"kind": _kind(key, name), "inferred_by": EXTRACTOR, **({"named_from": named} if named else {})}
+def _owners(names: dict[str, tuple[str, str]], claims: dict[str, tuple[str, str]],
+            companies: set[str]) -> dict[str, str]:
+    """domain -> the key of the organization it belongs to: the organization your resume gives it; the company its
+    people name; the company the model names, when your records name it too; else the domain itself."""
+    owners = {}
+    for domain, (name, how) in sorted(names.items()):
+        company = company_key(name) if how != "its domain" else None
+        if domain in claims:
+            owners[domain] = claims[domain][0]
+        elif company and (how == "their own words" or company[0] in companies):
+            owners[domain] = company[0]
+        else:
+            owners[domain] = domain
+    return owners
+
+
+def _organization(s: Session, key: str, name: str, named: str | None, kind: str) -> int:
+    """The Organization node for `key`, of `kind`: created when missing, its name refreshed when this stage names it
+    (`named`: a domain of its own) and your resume didn't, and named when nothing else names it (it shows its key: the
+    record that named it is gone)."""
+    props = {"kind": kind, "inferred_by": EXTRACTOR, **({"named_from": named} if named else {})}
     return s.execute(text("""
         INSERT INTO nodes (type, key, name, props) VALUES ('Organization', :k, :n, CAST(:p AS jsonb))
         ON CONFLICT (type, key) DO UPDATE SET
             name = CASE WHEN nodes.props->>'named_by' = 'profile' THEN nodes.name
                         WHEN CAST(:named AS text) IS NOT NULL OR nodes.name = nodes.key THEN EXCLUDED.name
                         ELSE nodes.name END,
-            props = CASE WHEN CAST(:named AS text) IS NULL THEN nodes.props
-                         ELSE nodes.props || jsonb_build_object('named_from', CAST(:named AS text)) END
+            props = nodes.props || jsonb_build_object('kind', CAST(:kind AS text))
+                    || CASE WHEN CAST(:named AS text) IS NULL THEN '{}'::jsonb
+                            ELSE jsonb_build_object('named_from', CAST(:named AS text)) END
         RETURNING id
-    """), {"k": key, "n": name, "p": json.dumps(props), "named": named}).scalar_one()
+    """), {"k": key, "n": name, "p": json.dumps(props), "named": named, "kind": kind}).scalar_one()
 
 
 def run(s: Session) -> dict:
-    """Rebuild this stage's WORKED_AT edges from evidence, one per person and organization, and name the domains
-    they point at. Returns {worked_at, organizations}."""
+    """Rebuild this stage's WORKED_AT edges from evidence, one per person and organization, key each domain to the
+    organization it belongs to (props.domains), and name the domains that are organizations of their own. Returns
+    {worked_at, organizations}."""
     s.execute(text("DELETE FROM edges WHERE extractor = :x"), {"x": EXTRACTOR})
     w = Writer(s, EXTRACTOR, VERSION)
     mail = _mail_facts(s)
-    names = _domain_names(s, {f.key for f in mail})
-    # A company on a card that names one of these domains ("Acme Robotics" for acme.com) is that domain's node.
-    named_domains = {slug(name): domain for domain, (name, how) in names.items() if how != "its domain"}
-    cards = [Fact(f.person, named_domains.get(f.key.removeprefix("org:"), f.key), f.why, f.sid, f.at, f.confidence,
-                  f.spelling) for f in _card_facts(s)]
+    cards = _card_facts(s)
+    claims = _resume_claims(s)
+    names = _domain_names(s, {f.key for f in mail} | set(claims), claims)
+    owners = _owners(names, claims, _companies(s) | {f.key for f in cards})
+    domains: dict[str, list[str]] = defaultdict(list)  # organization key -> its domains
+    for domain, key in sorted(owners.items()):
+        domains[key].append(domain)
     grouped: dict[tuple[int, str], list[Fact]] = defaultdict(list)
-    for fact in mail + cards:
+    for fact in mail:
+        grouped[(fact.person, owners[fact.key])].append(fact)
+    for fact in cards:
         grouped[(fact.person, fact.key)].append(fact)
 
     orgs: dict[str, tuple[int, str]] = {}  # key -> (node, kind)
     for (person, key), facts in sorted(grouped.items()):
         if key not in orgs:
-            # A domain by the name found for it; a company by its most common spelling on the cards.
-            name, named = names.get(key) or (Counter(f.spelling for f in facts).most_common(1)[0][0], None)
-            orgs[key] = (_organization(s, key, name, named), _kind(key, name))
+            # A domain of its own by the name found for it; a company by the name a domain of its was found by (its
+            # own records' name or your resume's stays), else by its most common spelling on the cards.
+            named_by = [names[d] for d in domains.get(key, []) if names[d][1] != "its domain"]
+            if key in names:
+                name, named = names[key]
+            elif named_by:
+                name, named = named_by[0][0], None
+            else:
+                name, named = Counter(f.spelling for f in facts if f.spelling).most_common(1)[0][0], None
+            kind = _kind(domains.get(key, []), name)
+            orgs[key] = (_organization(s, key, name, named, kind), kind)
         dates = [f.at for f in facts if f.at is not None]
         latest: dict[int, datetime | None] = {}
         for f in facts:
@@ -326,9 +399,19 @@ def run(s: Session) -> dict:
                valid_to=max(dates, default=None),
                evidence=[(sid, why, {"inferred_by": EXTRACTOR})
                          for sid, why in sorted({(f.sid, f.why) for f in facts if f.sid in kept})])
-    # Organizations this stage made that nothing points at any more (their evidence is gone).
+    # Each organization's domains: the ones it has now, and none on an organization that has none any more.
+    s.execute(text("""UPDATE nodes SET props = props - 'domains' WHERE type = 'Organization' AND props ? 'domains'
+                      AND NOT (key = ANY(:k))"""), {"k": sorted(domains)})
+    for key, ds in sorted(domains.items()):
+        s.execute(text("""UPDATE nodes SET props = props || jsonb_build_object('domains', CAST(:d AS jsonb))
+                          WHERE type = 'Organization' AND key = :k AND props->'domains' IS DISTINCT FROM CAST(:d AS jsonb)"""),
+                  {"k": key, "d": json.dumps(ds)})
+    # Organizations a derived stage made (this one, or your resume's reading) that nothing points at any more: their
+    # evidence is gone, or their domain now belongs to a company.
     s.execute(text("""
-        DELETE FROM nodes n WHERE n.type = 'Organization' AND n.props->>'inferred_by' = :x
-          AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id OR e.dst = n.id)
+        DELETE FROM nodes n WHERE n.type = 'Organization'
+          AND (n.props->>'inferred_by' = :x OR n.props->>'named_by' = 'profile')
+          AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id) AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.dst = n.id)
+          AND NOT EXISTS (SELECT 1 FROM spine_node_support x WHERE x.node_id = n.id)
     """), {"x": EXTRACTOR})
     return {"worked_at": len(grouped), "organizations": len(orgs)}
