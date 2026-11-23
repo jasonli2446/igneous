@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     # its model can't load, Ask keeps retrieval order and holds places for graph neighbours (rag/qa.py).
     reranker_enabled: bool = True
     reranker_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
-    reranker_pool_size: int = 32
+    reranker_pool_size: int = 16  # as deep as evidence recall still rose on the baseline (eval/README.md)
     rerank_batch_size: int = 64
     # Kill switch for every outbound model call (CO-1). Search and the graph still work without it.
     llm_enabled: bool = True

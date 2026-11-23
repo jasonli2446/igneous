@@ -11,6 +11,9 @@ from igneous.providers import rerank as score_documents
 
 log = logging.getLogger(__name__)
 _load_failure: Exception | None = None
+# The cross-encoder reads each passage's title and opening, this many characters: on the Enron baseline it chooses the
+# same evidence as reading whole passages, in less time (eval/README.md).
+SCORED_CHARS = 1000
 
 
 def rerank(question: str, items: list[dict], keep: int) -> list[dict] | None:
@@ -26,7 +29,7 @@ def rerank(question: str, items: list[dict], keep: int) -> list[dict] | None:
     if not items:
         return []
     try:
-        scores = score_documents(question, [item["text"] for item in items])
+        scores = score_documents(question, [item["text"][:SCORED_CHARS] for item in items])
     except Exception as exc:  # A model download, ONNX or dependency failure must not break Q&A.
         _load_failure = exc
         log.warning("Cross-encoder reranker unavailable; Q&A chooses evidence without it: %s", exc)
