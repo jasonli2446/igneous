@@ -6,14 +6,14 @@ Every hosted call follows the same policy: a prompt carries text only from recor
 policy says now: it discloses nothing new.
 """
 import json
-import os
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous import source_catalog
 from igneous.config import settings
-from igneous.providers import LLMDisabled, ProviderError, ProviderUnavailable, chat
+from igneous.graph.identity import members_sql as identity_members
+from igneous.providers import LLMDisabled, ProviderError, ProviderUnavailable, bedrock_key, chat
 
 __all__ = ["LLMDisabled", "ProviderError", "ProviderUnavailable", "allowed_sources", "cache_lookup", "cache_store",
            "complete", "model_status", "nameable", "require_whole_corpus", "structured", "visible_nodes"]
@@ -127,21 +127,25 @@ def _named_elsewhere(type_: str, props: dict, own_record_allowed: bool) -> bool:
 def nameable(s: Session, ids, sources: frozenset[str] | None = None) -> dict[int, str]:
     """The nodes among `ids` a prompt may name, each with the name it may use. A node qualifies when it appears in a
     record from an allowed source (the record is the node itself, the node at the other end of one of its edges, or
-    that edge's evidence) and its name is grounded in such records: read from them (a sender's display name, a
-    calendar title, a term found in them) or given by a model that read only them (a judged thread). A name that
-    came from elsewhere (`_named_elsewhere`) must itself appear in one of them, in any identity's records for a
-    person; failing that, a Project you renamed is named as it was derived."""
+    that edge's evidence; for a person, any of their identities' records) and its name is grounded in such records:
+    read from them (a sender's display name, a calendar title, a term found in them) or given by a model that read
+    only them (a judged thread). A name that came from elsewhere (`_named_elsewhere`), or a person's that only another
+    of their identities' records hold, must itself appear in one of them, in any identity's records for a person;
+    failing that, a Project you renamed is named as it was derived."""
     ids = sorted({int(i) for i in ids if i is not None})
     allowed = sorted(allowed_sources() if sources is None else sources)
     if not ids or not allowed:
         return {}
     rows = s.execute(text(f"""
-        SELECT n.id, n.type, n.name, n.props, COALESCE(own.source = ANY(CAST(:src AS text[])), false) AS own
-        FROM nodes n LEFT JOIN source_items own ON own.id = n.source_item_id
-        WHERE n.id = ANY(CAST(:ids AS bigint[])) AND EXISTS (
-            SELECT 1 FROM (SELECT n.id AS m) q WHERE {_APPEARS.format(match='')})
+        WITH c AS (SELECT n.*, EXISTS (SELECT 1 FROM (SELECT n.id AS m) q WHERE {_APPEARS.format(match='')}) AS direct
+                   FROM nodes n WHERE n.id = ANY(CAST(:ids AS bigint[])))
+        SELECT c.id, c.type, c.name, c.props, c.direct,
+               COALESCE(own.source = ANY(CAST(:src AS text[])), false) AS own
+        FROM c LEFT JOIN source_items own ON own.id = c.source_item_id
+        WHERE c.direct OR (c.type = 'Person' AND EXISTS (
+            SELECT 1 FROM ({identity_members('c.id')}) q(m) WHERE {_APPEARS.format(match='')}))
     """), {"ids": ids, "src": allowed}).all()
-    out = {r.id: r.name for r in rows if not _named_elsewhere(r.type, r.props or {}, r.own)}
+    out = {r.id: r.name for r in rows if r.direct and not _named_elsewhere(r.type, r.props or {}, r.own)}
     check = {r.id: r for r in rows if r.id not in out}
     if not check:
         return out
@@ -179,5 +183,5 @@ def require_whole_corpus(s: Session) -> None:
 
 def model_status() -> dict:
     """What the Sources page says about hosted model use."""
-    return {"enabled": settings.llm_enabled, "configured": bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK")),
+    return {"enabled": settings.llm_enabled, "configured": bool(bedrock_key()),
             "sources": sorted(allowed_sources()), "local_sources": settings.local_sources_model_enabled}

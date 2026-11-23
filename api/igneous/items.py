@@ -135,11 +135,12 @@ def node_detail(s: Session, node_id: int) -> dict:
             "category": category(n["type"], props.get("kind")), "props": props, "source_item": item}
 
 
-def sources_of(s: Session, node_id: int, limit: int = 10, offset: int = 0) -> dict:
+def sources_of(s: Session, node_id: int, limit: int = 10, offset: int = 0,
+               named: dict[str, str] | None = None) -> dict:
     """The records a node is made of, newest first: its own record (a message, file or event), the records filed under
     a project or conversation, or, for a person, the messages between you and them (all of their identities) and the
-    events they attended; when they share nothing with you, their own. {items: [card], more}. Raises
-    identity.NotFound."""
+    events they attended; when they share nothing with you, their own. {items: [card], more}. A phone number in a
+    snippet reads as its contact (`named`, traversal.names by default). Raises identity.NotFound."""
     from igneous.graph.traversal import names
 
     n = identity.node(s, node_id)
@@ -173,18 +174,25 @@ def sources_of(s: Session, node_id: int, limit: int = 10, offset: int = 0) -> di
                     WHERE e.src = ANY(:ids) OR e.dst = ANY(:ids))
             SELECT {CARD_COLS} FROM sid JOIN source_items si ON si.id = sid.id
             ORDER BY si.occurred_at DESC NULLS LAST, si.id LIMIT :lim OFFSET :off"""), params).mappings().all()
-    named = names(s)
+    named = names(s) if named is None else named
     return {"items": [item_card(dict(r), named) for r in rows[:limit]], "more": len(rows) > limit}
+
+
+def read(s: Session, item_id: int, named: dict[str, str] | None = None) -> dict | None:
+    """One record as the reader shows it (`item_view`), or None when there is none. A chat's handles read as their
+    contacts (`named`, traversal.names by default)."""
+    from igneous.graph.traversal import names
+
+    row = s.execute(text(f"SELECT {ITEM_COLS} FROM source_items WHERE id = :i"), {"i": item_id}).mappings().first()
+    return item_view(dict(row), names(s) if named is None else named) if row else None
 
 
 @router.get("/items/{item_id}")
 def get_item(item_id: int = PathParam(ge=1), s: Session = Depends(get_session)):
-    from igneous.graph.traversal import names
-
-    r = s.execute(text(f"SELECT {ITEM_COLS} FROM source_items WHERE id = :i"), {"i": item_id}).mappings().first()
-    if not r:
+    item = read(s, item_id)
+    if item is None:
         raise HTTPException(404, "No such item")
-    return item_view(dict(r), names(s))
+    return item
 
 
 @router.post("/items/{item_id}/open")
