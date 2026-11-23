@@ -173,6 +173,9 @@ def test_requirements_report_missing_client_secret_and_blocked_messages(monkeypa
     (tmp_path / "google" / "client_secret.json").write_text("{}")
     assert sources.check_requirements("gmail") == (True, None)
 
+    monkeypatch.setattr(sources.sys, "platform", "linux")
+    assert sources.check_requirements("notes") == (False, "Apple Notes is read on macOS only.")
+    monkeypatch.setattr(sources.sys, "platform", "darwin")
     monkeypatch.setattr(sources.imessage, "DEFAULT_DB", tmp_path / "missing.db")
     ok, message = sources.check_requirements("imessage")
     assert not ok and "not found" in message
@@ -273,3 +276,33 @@ def test_a_saved_github_token_is_an_account(db):
     github = next(r for r in sources.describe(db) if r["id"] == "github")
     assert [a["account"] for a in github["accounts"]] == ["octo"] and github["can_sync"] is True
     assert MessagesConnector  # imported for the build test above
+
+
+def test_accounts_can_be_disconnected_from_the_page_and_the_cli(db):
+    secrets.save(db, "google", "me@x.com", "{}")
+    secrets.save(db, "github", "octo", "github_pat_" + "x" * 30)
+    client = TestClient(app)
+    assert client.delete("/sources/google/accounts/me@x.com").json() == {"removed": "me@x.com"}
+    assert client.delete("/sources/google/accounts/me@x.com").status_code == 404
+    rows = {r["id"]: r for r in sources.describe(db)}
+    assert rows["gmail"]["accounts"] == [] and rows["gmail"]["status"] == "not_set_up"
+    result = CliRunner().invoke(cli, ["disconnect", "github", "octo"])
+    assert result.exit_code == 0 and secrets.accounts(db, "github") == []
+    assert CliRunner().invoke(cli, ["disconnect", "github", "octo"]).exit_code == 2
+
+
+def test_connecting_google_without_a_client_file_comes_back_to_the_page(monkeypatch, tmp_path):
+    monkeypatch.setattr(sources.settings, "data_dir", str(tmp_path))
+    response = TestClient(app).get("/sources/google/connect", follow_redirects=False)
+    assert response.status_code == 307
+    location = response.headers["location"]
+    assert location.startswith(f"{sources.settings.web_url}/settings?connect_error=") and "client_secret.json" in location
+
+
+def test_the_page_describes_what_the_build_does():
+    """The copy names the same numbers the connectors use, so the two can't disagree."""
+    imessage, email = sources.BY_ID["imessage"], sources.BY_ID["email"]
+    assert f"reads the last {sources.FIRST_SYNC_DAYS['imessage']} days" in " ".join(imessage["steps"])
+    assert all(box in email["reads"] for box in sources.DEMO_MAILBOXES)
+    assert "Files and Folders" in " ".join(sources.BY_ID["fs"]["steps"])
+    assert "--path" not in sources.BY_ID["fs"]["cli"].split(" (")[0]  # the default command reads the configured folders

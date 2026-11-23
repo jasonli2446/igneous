@@ -154,7 +154,7 @@ def test_a_long_ai_chat_turn_is_redacted_before_it_is_shortened():
 # ---- items stored before the current rules ----
 
 def old_row(s, source: str, external_id: str, title: str, body: str | None, meta: dict, content_hash: str = "old") -> int:
-    """A row as it was stored before redaction was versioned: as read, at version 0."""
+    """A row stored as read, under no version of the rules (version 0)."""
     return s.execute(text("""
         INSERT INTO source_items (source, external_id, content_hash, title, body_text, raw_meta, mime)
         VALUES (:s, :e, :h, :t, :b, CAST(:m AS jsonb), 'text/plain') RETURNING id

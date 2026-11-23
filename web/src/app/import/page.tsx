@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 
-// Import was merged into the Sources page.
+// Exports are imported on the Sources page; this path sends old links there.
 export default function ImportPage() {
   redirect("/settings");
 }

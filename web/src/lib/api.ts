@@ -180,7 +180,7 @@ export type Job = {
 
 export type SourceInfo = {
   id: string;
-  kind: "google" | "local" | "remote" | "import" | "planned";
+  kind: "google" | "local" | "remote" | "import";
   name: string;
   group: string;
   reads: string;
@@ -193,9 +193,8 @@ export type SourceInfo = {
   accounts: { account: string; last_sync: string | null }[];
   requirements_ok: boolean;
   can_sync: boolean;
-  coming_soon: boolean;
   job: Job | null;
-  // Whether a hosted model may read this source, and how to change that (#179).
+  // Whether a hosted model may read this source, and how to change that.
   model: { id: string; allowed: "yes" | "partly" | "no"; note: string };
 };
 
@@ -229,7 +228,9 @@ export const api = {
   jobs: (signal?: AbortSignal) => get<{ jobs: Job[] }>("/jobs", {}, signal),
   syncSource: (id: string, account?: string) => send<Job>("POST", `/sources/${id}/sync`, undefined, account ? { account } : {}),
   runPipeline: () => send<Job>("POST", "/pipeline/run"),
-  saveGithubToken: (token: string) => send<{ stored: boolean }>("POST", "/sources/github/token", { token }),
+  saveGithubToken: (token: string) => send<{ stored: boolean; account: string }>("POST", "/sources/github/token", { token }),
+  disconnect: (provider: "google" | "github", account: string) =>
+    send<{ removed: string }>("DELETE", `/sources/${provider}/accounts/${encodeURIComponent(account)}`),
   googleConnectUrl: () => new URL("/sources/google/connect", API).toString(),
   stats: () => get<{ source_items: Record<string, number>; nodes: Record<string, number>; edges: Record<string, number> }>("/stats", {}),
   search: (q: string, opts: { source?: string; person?: string; from?: string; to?: string; mode?: string } = {}) =>

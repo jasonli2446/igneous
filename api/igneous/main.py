@@ -239,26 +239,49 @@ def sync_source(source_id: str, account: str | None = None):
                                                                               progress=progress), account)
 
 
+def _back_to_sources(**params: str) -> RedirectResponse:
+    """Back to the Sources page, which shows `connected` or `connect_error`."""
+    query = "&".join(f"{k}={quote(v)}" for k, v in params.items())
+    return RedirectResponse(f"{settings.web_url.rstrip('/')}/settings?{query}")
+
+
 @app.get("/sources/google/connect")
 def google_connect(request: Request):
-    """Redirect to Google's consent screen; Google sends the browser back to /sources/google/callback."""
+    """Redirect to Google's consent screen; Google sends the browser back to /sources/google/callback. Without an
+    OAuth client file, back to the Sources page with what to do."""
     try:
         url = sources.google_authorization_url(str(request.url_for("google_callback")))
-    except FileNotFoundError as e:
-        raise HTTPException(422, str(e)) from e
+    except FileNotFoundError:
+        return _back_to_sources(connect_error="No Google OAuth client yet: save its JSON as "
+                                              "data/google/client_secret.json (step 1 under Gmail), then connect.")
     return RedirectResponse(url)
 
 
 @app.get("/sources/google/callback")
 def google_callback(state: str = "", code: str = "", error: str = "", s: Session = Depends(get_session)):
-    back = f"{settings.web_url.rstrip('/')}/settings"
     if error or not code:
-        return RedirectResponse(f"{back}?connect_error={quote(error or 'Google sign-in was cancelled.')}")
+        return _back_to_sources(connect_error=error or "Google sign-in was cancelled.")
     try:
         email = sources.google_finish(s, state, code)
     except Exception as e:
-        return RedirectResponse(f"{back}?connect_error={quote(str(e)[:200] or 'Google sign-in failed.')}")
-    return RedirectResponse(f"{back}?connected={quote(email)}")
+        return _back_to_sources(connect_error=str(e)[:200] or "Google sign-in failed.")
+    return _back_to_sources(connected=email)
+
+
+@app.delete("/sources/google/accounts/{account}")
+def google_disconnect(account: str, s: Session = Depends(get_session)):
+    """Forget a Google account's token, so nothing syncs it. What it synced stays; connecting it again resumes."""
+    if not secrets.delete(s, "google", account):
+        raise HTTPException(404, f"No Google account {account} is connected.")
+    return {"removed": account}
+
+
+@app.delete("/sources/github/accounts/{account}")
+def github_disconnect(account: str, s: Session = Depends(get_session)):
+    """Forget a GitHub account's token, so nothing syncs it. What it synced stays."""
+    if not secrets.delete(s, "github", account):
+        raise HTTPException(404, f"No GitHub token is saved for {account}.")
+    return {"removed": account}
 
 
 class GithubToken(BaseModel):
@@ -267,7 +290,8 @@ class GithubToken(BaseModel):
 
 @app.post("/sources/github/token")
 def github_token(body: GithubToken, s: Session = Depends(get_session)):
-    """Store a fine-grained read-only token encrypted at rest; it is never returned or logged."""
+    """Store a fine-grained read-only token encrypted at rest; it is never returned or logged. A token for an account
+    that already has one replaces it."""
     from igneous.connectors.github import GithubError, account_for
 
     try:

@@ -12,6 +12,7 @@ inside the functions that use them.
 import glob
 import os
 import sqlite3
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -39,10 +40,12 @@ FDA_STEPS = [
 ]
 GOOGLE_STEPS = [
     "One-time: create a Google OAuth client of type Desktop app and save its JSON as data/google/client_secret.json "
-    "(README: Google). The page will say when it finds the file.",
+    "(the README's Google section walks through it). This page says when it finds the file.",
     "Press Connect a Google account and pick the account in the Google window. Igneous only asks for read-only access.",
-    "Come back here. The account appears below; add more accounts the same way.",
+    "Come back here. The account appears below; add more accounts the same way, and disconnect one to stop syncing it "
+    "(what it synced stays).",
 ]
+MAC_ONLY = "macOS only."
 
 
 @dataclass(frozen=True)
@@ -151,11 +154,14 @@ def _email(opts: SyncOptions) -> Connector:
 # makes the source's connectors; options: the SyncOptions fields it accepts.
 SOURCES: list[dict] = [
     {"id": "gmail", "kind": "google", "name": "Gmail", "group": "Connected accounts",
-     "reads": "Your email: senders, recipients, subjects, bodies, and threads. Promotions, Social and Forums are skipped.",
+     "reads": "Your email: senders, recipients, subjects, bodies, and threads, from the last "
+              f"{FIRST_SYNC_DAYS['gmail']} days on. Spam, drafts, Promotions, Social and Forums are skipped "
+              "(igneous sync gmail --all-mail keeps Promotions, Social and Forums for that account).",
      "steps": GOOGLE_STEPS, "cli": "igneous connect google && igneous sync gmail",
      "build": _google(_gmail), "options": {"since_days", "all_mail"}},
     {"id": "gcal", "kind": "google", "name": "Google Calendar", "group": "Connected accounts",
-     "reads": "Your events: titles, times, attendees, and places.",
+     "reads": f"Your events from the last {FIRST_SYNC_DAYS['gcal']} days on, in every calendar on your list: titles, "
+              "times, attendees, and places.",
      "steps": GOOGLE_STEPS, "cli": "igneous sync gcal", "build": _google(_gcal), "options": {"since_days"}},
     {"id": "gcontacts", "kind": "google", "name": "Google Contacts", "group": "Connected accounts",
      "reads": "Names, emails, phone numbers, and organizations on your contact cards. Helps merge duplicate people.",
@@ -167,17 +173,20 @@ SOURCES: list[dict] = [
      "reads": "Your repositories, README files, issues, pull requests, comments, and daily commit activity (read-only).",
      "steps": ["On github.com open Settings, Developer settings, Fine-grained tokens, and generate a token.",
                "Give it read-only access (Contents, Issues, Pull requests: Read) to the repositories you want.",
-               "Paste it below. It is stored encrypted on this computer and never shown again."],
+               "Paste it below. It is stored encrypted on this computer and never shown again. When it expires, "
+               "paste a new one the same way: a token for the same account replaces the old one."],
      "cli": "igneous connect github && igneous sync github", "build": _github, "options": set()},
     {"id": "chatgpt", "kind": "import", "name": "ChatGPT export", "group": "Exports you upload",
-     "reads": "Your ChatGPT conversation history from OpenAI's data export.",
+     "reads": "Your ChatGPT conversation history from OpenAI's data export: your messages and ChatGPT's written "
+              "replies (images, code runs and tool output are skipped).",
      "steps": ["Request the export in ChatGPT settings (Data controls, Export data).",
-               "Upload the .zip you receive by email in the box below."],
+               "Upload the .zip you receive by email in the box below, or give its path."],
      "cli": "igneous import ai-export ~/Downloads/chatgpt-export.zip"},
     {"id": "claude_ai", "kind": "import", "name": "Claude.ai export", "group": "Exports you upload",
-     "reads": "Your claude.ai conversation history from Anthropic's data export.",
+     "reads": "Your claude.ai conversation history from Anthropic's data export: your messages and Claude's written "
+              "replies.",
      "steps": ["Request the export in claude.ai settings (Privacy, Export data).",
-               "Upload the .zip you receive by email in the box below."],
+               "Upload the .zip you receive by email in the box below, or give its path."],
      "cli": "igneous import ai-export ~/Downloads/claude-export.zip"},
     {"id": "linkedin", "kind": "import", "name": "LinkedIn", "group": "Exports you upload",
      "reads": "Your LinkedIn profile (positions, education, projects, skills) and your connections with their company, "
@@ -201,17 +210,20 @@ SOURCES: list[dict] = [
                "Download every zip. In the box below choose Scan Downloads for takeout-*.zip, give a path, or upload them."],
      "cli": "igneous import takeout ~/Downloads/takeout-*.zip"},
     {"id": "imessage", "kind": "local", "name": "Messages", "group": "On this computer",
-     "reads": "iMessage and SMS conversations on this Mac, grouped into one entry per conversation per day.",
+     "reads": "iMessage and SMS conversations on this Mac, grouped into one entry per conversation per day. "
+              + MAC_ONLY,
      "steps": ["Messages must be signed in on this Mac so the history is on disk.", *FDA_STEPS,
-               "Press Sync now. The first sync reads the last 90 days."],
+               f"Press Sync now. The first sync reads the last {FIRST_SYNC_DAYS['imessage']} days; later ones read "
+               "what is new, including older messages that arrive late from your other devices."],
      "cli": "igneous sync imessage",
      "build": _local(lambda o: imessage.MessagesConnector(o.path or imessage.DEFAULT_DB,
                                                           since_days=o.since_days or FIRST_SYNC_DAYS["imessage"])),
      "options": {"path", "since_days"}},
     {"id": "maccontacts", "kind": "local", "name": "Contacts", "group": "On this computer",
      "reads": "Contacts.app cards (where iPhone contacts sync): names, phone numbers, and emails. "
-              "Lets Messages show names instead of numbers.",
-     "steps": [*FDA_STEPS, "Press Sync now."], "cli": "igneous sync maccontacts",
+              "Lets Messages show names instead of numbers. " + MAC_ONLY,
+     "steps": [*FDA_STEPS, "Press Sync now. A card you delete in Contacts goes at the next sync."],
+     "cli": "igneous sync maccontacts",
      "build": _local(lambda o: mac_contacts.MacContactsConnector()), "options": set()},
     {"id": "ai_chats", "kind": "local", "name": "Claude Code and Codex chats", "group": "On this computer",
      "reads": "Your prompts and the assistant's written replies from coding sessions on this Mac. Tool output and "
@@ -220,21 +232,34 @@ SOURCES: list[dict] = [
                "Press Sync now."],
      "cli": "igneous sync ai_chats", "build": _local(lambda o: ai_chats.AIChatConnector()), "options": set()},
     {"id": "fs", "kind": "local", "name": "Local files", "group": "On this computer",
-     "reads": "Metadata for every non-secret file in the folders you choose, plus text from readable documents. "
-              "Secrets are skipped and document text is redacted.",
+     "reads": "Name, folder and size of every file in the folders you choose, the text of documents (PDF, .docx, "
+              ".xlsx, .pptx, text and code), and each git checkout. Key and .env files are never read, and "
+              "credentials in text are redacted. Searched by keyword; meaning-based search and hosted models need "
+              "IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true.",
      "steps": ["Set IGNEOUS_FILESYSTEM_ROOTS to a comma-separated list of folders (in api/.env or the API's "
                "environment), then restart the API. With no setting, existing Documents, Desktop, Downloads, and "
                "iCloud Drive folders are used.",
-               "Press Sync now. Each sync reconciles deletions without reopening unchanged file bodies."],
-     "cli": "igneous sync fs", "build": _local(_fs), "options": {"path"}},
+               "On macOS, let the app that runs the API read those folders: System Settings, Privacy & Security, "
+               "Files and Folders (or Full Disk Access), then turn on its Documents, Desktop and Downloads "
+               "folders. Restart that app and the API. A folder it can't read is skipped and keeps what an earlier "
+               "sync stored.",
+               "Press Sync now. Each sync notices added, changed and deleted files in those folders without "
+               "reopening unchanged ones."],
+     "cli": "igneous sync fs (or --path FOLDER for one folder, leaving the others as they are)",
+     "build": _local(_fs), "options": {"path"}},
     {"id": "notes", "kind": "local", "name": "Apple Notes", "group": "On this computer",
-     "reads": "Unlocked Notes.app titles and bodies from the local database. Bodies are redacted.",
+     "reads": "Unlocked Notes.app titles and bodies from the local database, with credentials redacted. Searched by "
+              "keyword; meaning-based search and hosted models need IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true. "
+              + MAC_ONLY,
      "steps": [*FDA_STEPS, "Press Sync now. Locked notes are skipped."], "cli": "igneous sync notes",
      "build": _local(lambda o: apple_notes.AppleNotesConnector(o.path or apple_notes.DEFAULT_DB)),
      "options": {"path"}},
     {"id": "email", "kind": "local", "name": "Enron demo mailbox", "group": "Demo",
-     "reads": "The public Enron email corpus. For demos and evaluation only; never mix it with your own data.",
-     "steps": ["Run make enron once to download the mailboxes into data/maildir.", "Press Sync now."],
+     "reads": f"The public Enron email corpus: the {', '.join(DEMO_MAILBOXES)} mailbox (about 3,000 emails). For "
+              "demos and evaluation only; never mix it with your own data.",
+     "steps": ["Run make enron once to download the mailboxes into data/maildir.",
+               f"Press Sync now to read {', '.join(DEMO_MAILBOXES)}. Other mailboxes are read from the command line "
+               "(igneous sync email --mailbox lay-k)."],
      "cli": "igneous sync email", "build": _local(_email), "options": {"path", "mailboxes"}},
 ]
 BY_ID = {s["id"]: s for s in SOURCES}
@@ -289,6 +314,8 @@ def check_requirements(source_id: str) -> tuple[bool, str | None]:
     if kind == "google":
         if not (Path(settings.data_dir) / "google" / "client_secret.json").exists():
             return False, "No Google OAuth client found. Save its JSON as data/google/client_secret.json (step 1)."
+    elif source_id in ("imessage", "maccontacts", "notes") and sys.platform != "darwin":
+        return False, f"{BY_ID[source_id]['name']} is read on macOS only."
     elif source_id == "imessage":
         problem = _sqlite_readable(str(imessage.DEFAULT_DB))
         return (problem is None), problem

@@ -220,6 +220,20 @@ def connect(provider: str = typer.Argument(..., metavar="PROVIDER", help="google
 
 
 @app.command()
+def disconnect(provider: str = typer.Argument(..., metavar="PROVIDER", help="google or github"),
+               account: str = typer.Argument(..., help="the account's email (google) or login (github)")):
+    """Forget an account's stored token, so nothing syncs it. What it synced stays; connecting it again resumes."""
+    if provider not in ("google", "github"):
+        raise typer.BadParameter("disconnect google or github")
+    from igneous.connectors import secrets
+
+    with SessionLocal() as s:
+        if not secrets.delete(s, provider, account):
+            raise typer.BadParameter(f"no {provider} account {account} is connected")
+    print("disconnected", account)
+
+
+@app.command()
 def pipeline(stage: list[str] = typer.Option(None, help="spine, chunk, embed, extract, topics, entities, self, resolve; "
                                                            "default all"),
              extract: int = typer.Option(0, help="LLM-extract up to N newest messages (costs money; 0 = skip)")):

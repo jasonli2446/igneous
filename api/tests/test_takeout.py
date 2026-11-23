@@ -1,4 +1,4 @@
-"""Google Takeout importer (#109). Synthetic data only; DB tests run in the throwaway test database."""
+"""Google Takeout importer. Synthetic data only; DB tests run in the throwaway test database."""
 import io
 import json
 import zipfile

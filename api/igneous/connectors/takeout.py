@@ -1,4 +1,4 @@
-"""Google Takeout (My Activity incl. Gemini, Chrome, Maps) as day-items, places, and visits (#109).
+"""Google Takeout (My Activity incl. Gemini, Chrome, Maps) as day-items, places, and visits.
 
 Input: one or several Takeout .zip files (a split export), an extracted folder, or a loose JSON file. Big JSON
 members are streamed with ijson, so a multi-GB zip is never read into memory; only the compact per-day
@@ -6,8 +6,8 @@ aggregates are. Pass every zip of an export in one run: a day's items are rebuil
 importing the parts one at a time would overwrite a day with its partial view.
 
 What is read (names are matched case-insensitively and tolerate a missing "Takeout/" prefix):
-  My Activity/<Product>/MyActivity.json   one item per product per day. Gemini Apps entries go to the existing
-                                          ai_chats gemini path (same external ids as /import/ai-export).
+  My Activity/<Product>/MyActivity.json   one item per product per day. Gemini Apps entries become ai_chats
+                                          gemini items (the external ids /import/ai-export gives them).
                                           The HTML variant is NOT read; the importer says so.
   Chrome/History.json | BrowserHistory.json   one item per day, repeat visits to a URL collapsed
   Chrome/Bookmarks.html                       one item, grouped by folder
@@ -757,8 +757,8 @@ def parse(paths: list[Path], progress: Callable[[dict], None] | None = None) -> 
         if imp.counts.get("skipped_noise"):
             imp.note(f"{imp.counts['skipped_noise']} Ads / Google Analytics / Takeout activity entries were skipped.")
         if not any(c and c[0] in ("timeline", "semantic") for _, c in todo):
-            imp.note("No Timeline / Location History data in this export (Timeline now lives on your phone). "
-                     "Place visits come from Maps (your places) if present.")
+            imp.note("No Timeline / Location History data in this export (Google Maps keeps Timeline on your phone; "
+                     "export it from the Maps app). Place visits come from Maps (your places) if present.")
         if html:
             imp.note(f"{len(html)} My Activity file(s) are in HTML format and were skipped. Re-export My Activity "
                      "with Multiple formats set to JSON.")

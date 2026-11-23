@@ -50,7 +50,7 @@ IGNEOUS_LLM_SOURCES=
 
 # Optional
 # IGNEOUS_LLM_ENABLED=false             # turn off every hosted model call
-# IGNEOUS_FILESYSTEM_ROOTS=~/Documents/notes,~/Desktop   # folders for the "Local files" source
+# IGNEOUS_FILESYSTEM_ROOTS=~/Documents/notes,~/Desktop   # "Local files" folders (default: Documents, Desktop, Downloads, iCloud Drive)
 # IGNEOUS_WEB_URL=http://localhost:3000 # where Google sign-in sends you back
 # IGNEOUS_DATA_DIR=../data              # OAuth client, token encryption key, Enron mailboxes (relative to api/)
 ```
@@ -86,6 +86,7 @@ Open <http://localhost:3000/settings> (**Sources** in the top bar). Every source
 **Connected accounts** (Google, GitHub), **Exports you upload** (ChatGPT, Claude.ai, LinkedIn, Google Takeout, with the
 upload or path box inline) and **On this computer** (Messages, Contacts, Claude Code and Codex chats, local files, Apple
 Notes). Each entry says what it reads, shows its status and last sync or import, and lists the steps to connect it.
+Messages, Contacts and Apple Notes, the scheduled sync, and opening a local file from the reader work on macOS only.
 The page shows `GET /sources`, the registry in `api/igneous/sources.py`. That registry also builds each source's
 connector, so **Sync now**, `igneous sync` and the scheduled sync read a source the same way. Everything is read-only.
 
@@ -135,6 +136,7 @@ The CLI uses the same `IGNEOUS_DATABASE_URL`, so `igneous sync ...` fills whiche
 cd api
 uv run igneous connect google                       # sign in to a Google account (read-only); repeat to add more
 uv run igneous connect github < token.txt           # a read-only GitHub token (or type it at the hidden prompt)
+uv run igneous disconnect google you@gmail.com      # forget an account's token (also github LOGIN); its items stay
 uv run igneous sync gmail                           # every connected account; `igneous sync --help` lists the sources
 uv run igneous sync fs                              # local files: the IGNEOUS_FILESYSTEM_ROOTS folders
 uv run igneous sync fs --path ~/Documents/notes     # just this folder; other folders' files are left alone
@@ -153,8 +155,9 @@ The Google steps (the OAuth client file) are under [Google](#google-gmail-drive-
 
 `make synthetic-corpus` writes a small, deterministic fixture corpus to `data/synthetic-cross-source/`: five
 invented document-style files plus two ICS calendar events that reuse the public Enron demo persona addresses.
-It makes no network or model calls and **does not import** the data; it is input for the future filesystem and
-ICS importers. Every output is labeled synthetic and excludes real email text, credentials, and personal data.
+It makes no network or model calls and **does not import** the data. The Local files source reads the documents
+(`igneous sync fs --path ../data/synthetic-cross-source`); no source reads ICS calendars. Every output is labeled
+synthetic and excludes real email text, credentials, and personal data.
 Re-run it safely to restore the exact fixture, or validate an existing output with:
 
 ```bash
@@ -264,14 +267,29 @@ without them). Postgres must be running (`make db`).
 
 ## Google (Gmail, Drive, Calendar, Contacts)
 
-1. Put the OAuth desktop client JSON at `data/google/client_secret.json` (git-ignored).
-2. `cd api && uv run igneous connect google` opens Google sign-in (read-only scopes). Click **Continue** past
-   "Google hasn't verified this app": the project is in Testing mode, so tokens expire after 7 days; re-run it then.
-3. `uv run igneous sync drive`, `uv run igneous sync gcal`, `uv run igneous sync gcontacts`,
-   `uv run igneous sync gmail --since-days 90`, then `uv run igneous pipeline`. Drive backfills files once,
-   then uses the Changes API; Google Docs, Sheets, and Slides export to parser-friendly text formats.
+Igneous signs in to Google through an OAuth client in a Google Cloud project of your own. Create it once:
 
-Gmail skips Promotions/Social/Forums by default (`--all-mail` to include them); in a real inbox they were 94% of mail.
+1. In the [Google Cloud console](https://console.cloud.google.com/) create a project.
+2. Under **APIs & Services > Library** enable the Gmail API, Google Drive API, Google Calendar API and People API.
+3. Under **APIs & Services > OAuth consent screen** choose **External**, give the app a name and your email, and add
+   each Google account you will connect as a **test user**. Leave the app in Testing.
+4. Under **APIs & Services > Credentials** create an **OAuth client ID** of type **Desktop app** and download its JSON.
+5. Save it as `data/google/client_secret.json` (git-ignored). The Sources page says when it finds the file.
+
+Then connect each account: **Connect a Google account** on the Sources page (Google sends the browser back to the API at
+`http://localhost:8000/sources/google/callback`, which a Desktop client allows), or `cd api && uv run igneous connect
+google` (it listens on a free local port; `--no-browser` prints the URL instead). Igneous asks only for read-only access
+to Gmail, Drive, Calendar and Contacts, plus your email address. Click **Continue** past "Google hasn't verified this
+app". In Testing mode Google expires the tokens after 7 days: connect again when a sync says the token expired.
+Disconnecting an account (under Gmail on the Sources page, or `igneous disconnect google you@gmail.com`) forgets its
+token; what it synced stays.
+
+Sync with **Sync now** on each entry, or `uv run igneous sync gmail` (and `gcal`, `gcontacts`, `drive`), then
+`uv run igneous pipeline`. Drive backfills files once, then uses the Changes API; Google Docs and Slides export as text.
+
+Gmail's first sync reads the last 90 days (`--since-days` sets another window). It skips spam, drafts, Promotions,
+Social and Forums; `igneous sync gmail --all-mail` keeps the last three for that account, which remembers the choice
+(`--no-all-mail` switches back and removes them). Mail moved to Spam or Trash, or deleted, goes at the next sync.
 **Quota:** a Google Cloud project in Testing mode is cut off near 730 Gmail units/min (about 120 messages/min), far
 below Google's published 15,000. The connector paces itself to `IGNEOUS_GMAIL_UNITS_PER_MIN` (default 600; raise it in
 `api/.env` if your project's quota page allows more), so a large inbox takes a while but won't error out. Resuming

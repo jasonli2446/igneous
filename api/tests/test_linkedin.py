@@ -1,4 +1,4 @@
-"""LinkedIn export importer (#157). Synthetic CSVs only; DB tests run in the throwaway test database."""
+"""LinkedIn export importer. Synthetic CSVs only; DB tests run in the throwaway test database."""
 import zipfile
 from pathlib import Path
 
@@ -133,7 +133,7 @@ def test_content_change_updates(db, tmp_path, zpath):
 
 
 def test_the_profile_stage_reads_linkedin_without_a_model(db, zpath, monkeypatch):
-    """The export states positions, schools and projects outright: the backbone needs no model call (#157)."""
+    """The export states positions, schools and projects outright: the backbone needs no model call."""
     from igneous import llm
     from igneous.graph import profile
 
