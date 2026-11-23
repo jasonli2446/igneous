@@ -32,6 +32,10 @@ Every table comes from a migration. After pulling, run `uv run alembic upgrade h
 API, the CLI and the MCP server check the schema first and refuse to run on any other, with the reason and the fix:
 a database behind the code, one migrated by newer code, no schema yet, or Postgres not reachable.
 
+Upgrading to migration 0012 from an earlier one (0012 tracks which records each node and edge come from): the next
+Rebuild or `igneous pipeline` reads every record into the graph once more, about a minute for the six Enron baseline
+mailboxes (26k records), and then deletes what no record supports. Chunks and embeddings are kept.
+
 Tests (`make test`) never use that database or your personal one, nor your `api/.env` or model credentials: each
 run creates, migrates and finally drops its own `igneous_test_<pid>` database on the same server
 (`api/tests/conftest.py`), so two runs can share a server.
@@ -123,7 +127,8 @@ make demo       # make migrate, igneous sync email (the allen-p demo mailbox), i
 `make demo` calls the model for up to 100 messages (`EXTRACT=100`); that needs `AWS_BEARER_TOKEN_BEDROCK` and
 `IGNEOUS_LLM_SOURCES=email`, which Ask and the evaluation need too. Run `make demo EXTRACT=0` to skip model calls. `make baseline` ingests six mailboxes
 (about 26k emails; embedding takes about 45 minutes on CPU, and search falls back to lexical for unembedded chunks
-meanwhile). Then try searching `jeff.skilling` or `phillip.allen` on the Graph page.
+meanwhile). The demo's Graph page opens on Phillip Allen: one mailbox's sent folders name its owner. Six mailboxes
+are six people's mail, so nobody is "you" there: search for `jeff.skilling` or `phillip.allen` to start.
 
 Your own data goes in a separate database. Create it, migrate it, and point the API and CLI at it:
 
@@ -194,11 +199,11 @@ subject, a file's name, a conversation's name). When the chunk layout changes (`
 | Path | What |
 |---|---|
 | `api/igneous/connectors/` | `base.py` connector contract + resumable sync runner, which stores every item's title, text and metadata text with the credentials `redact.py` matches replaced by `[REDACTED:<kind>]` (and `redact_stored`, the pipeline's first step, which brings items stored under an older version of those rules up to date); one module per source (`gmail.py`, `gcal.py`, `drive.py`, `github.py`, `imessage.py`, `ai_chats.py`, `filesystem.py`, `takeout.py`, `linkedin.py`, ...) |
-| `api/igneous/graph/` | `spine.py` deterministic graph; `extract.py` model mentions with span provenance; `entities.py`, `threads.py`, `resolve_threads.py`, `profile.py`, `backbone.py` derived projects, life threads and your orgs; `resolve.py` entity resolution; `verify.py` checks every derived link; `traversal.py` what the explorer shows; `invariants.py` `igneous check-graph` |
+| `api/igneous/graph/` | `spine.py` the graph read from record metadata, recording which records support each node and edge and what each says about it; `extract.py` model mentions with span provenance; `entities.py`, `threads.py`, `resolve_threads.py`, `profile.py`, `backbone.py` derived projects, life threads and your orgs; `resolve.py` entity resolution; `verify.py` checks every derived link; `traversal.py` what the explorer shows; `invariants.py` `igneous check-graph` |
 | `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `constraints.py` the filters a question states, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
 | `api/igneous/llm.py` | structured model calls and the rule for what a model may read (`allowed_sources`, `visible_nodes`); `providers.py` talks to Bedrock |
 | `api/eval/` | gold questions, ER labels, harnesses, results (see `api/eval/README.md`) |
-| `api/igneous/pipeline.py` | the stage list in dependency order and the one runner `igneous pipeline` and Rebuild share |
+| `api/igneous/pipeline.py` | the stage list in dependency order and the one runner `igneous pipeline` and Rebuild share; spine and chunk read only the records whose content changed since they read them, so every stage is safe to re-run |
 | `api/igneous/main.py` | FastAPI app: search, ask, the explorer's `/graph/*` routes, sources, sync and import jobs (the full list at <http://localhost:8000/docs>) |
 | `api/migrations/` | the whole schema, as plain SQL migrations (`0001_core_schema.py` onward); app code never creates tables |
 | `web/` | Next.js: the 3D explorer (`Graph3D.tsx`, 3d-force-graph) with the inspector and why-view, Ask, Search, and the Sources page |
@@ -223,18 +228,33 @@ cd api && uv run igneous sync imessage && uv run igneous pipeline
   scopes it listed) when it listed everything (`connectors/base.py`; `run_sync` redacts and stores what it yields).
   Then add its entry to `SOURCES` in `api/igneous/sources.py`, with the `build` that makes it (the CLI, the Sources
   page and the scheduler all use that one) and the steps to set it up; each value it stores in
-  `source_items.source` to `source_catalog.py`; and how the spine turns its items into nodes (`graph/spine.py`).
+  `source_items.source` to `source_catalog.py`; and how the spine turns its items into nodes (`graph/spine.py`'s
+  `BUILDERS`; a builder that builds nothing is fine). `igneous check-graph` reports a stored value the catalog
+  doesn't know.
 - **Pipeline stage:** add it to `STAGES` in `api/igneous/pipeline.py`, after every stage whose output it reads, with
   the label the Sources page shows while it runs. A source stage (redact, spine, chunk, embed, extract) reads only what
-  is new and commits as it goes. A derived stage runs inside the publishing transaction: it never commits, rolls back
-  or bumps the graph version, rebuilds only the rows it owns (its extractor), stores paid model results with
-  `llm.cache_store` as they arrive, and leaves corrections to the last step. `igneous pipeline --stage NAME` runs it
-  alone, then publishes.
+  is new and commits as it goes: it finds its own work and marks it done at the version it read, in the transaction
+  that writes the result, never by a timestamp (a sync can commit records stamped before the last run). See
+  `rag/chunking.py`: it reads records whose `chunked_hash` differs from `content_hash` and writes back the hash it read.
+  A derived stage runs inside the publishing transaction: it never commits, rolls back or bumps the graph version,
+  rebuilds only the rows it owns (its extractor), stores paid model results with `llm.cache_store` as they arrive, and
+  leaves corrections to the last step. `igneous pipeline --stage NAME` runs it alone, then publishes. The spine's edges
+  (`spine`, `contacts`, `github`, `linkedin`) list their records in `spine_edge_support`. One rule says what keeps a
+  node (`node_held`, migration 0012): the owner, a record that supports it, an edge of yours, and, for anything but a
+  message, thread, event, file, folder or place, an edge with a record behind it (its `source_item_id`, its
+  `edge_evidence`, or the spine's support). So set `source_item_id` or `edge_evidence` on what your stage writes from a
+  record: when the record is deleted, its edges that no other record backs go, and so do the nodes that pointed at it
+  or that only those edges held (a commitment it states, a topic only it is about). On a node the spine built, write
+  only props it doesn't own (`SPINE_PROPS` in `graph/spine.py`): it recomputes its own from the records that remain.
 
 ## Known gaps in the baseline
 
-- Enron has no `In-Reply-To`/`References` headers. Threads are keyed on subject + participants; `REPLIES_TO` is inferred and sparse.
-- Enron stores one email in several folders with different Message-IDs. Messages dedupe on a content fingerprint (`raw_meta.fingerprint`).
+- Enron has no `In-Reply-To`/`References` headers. Threads are keyed on subject + participants; `REPLIES_TO` comes from
+  quoted "Original Message" headers that name exactly one message, else is inferred within the thread.
+- Enron stores one email in several folders with different Message-IDs. Messages dedupe on a content fingerprint
+  (`raw_meta.fingerprint`); the message stays while any copy remains.
+- In a mailbox, assistants send some of the owner's mail. The owner is whoever sent most of its sent folders, so an
+  executive's mailbox that an assistant ran (lay-k, skilling-j) would name the assistant if imported alone.
 - Embeddings are made on this computer (`bge-small-en-v1.5`, 384-d, FastEmbed; `docs/decisions/0001-local-embeddings.md`);
   Bedrock as a second index was dropped (`docs/decisions/0002-bedrock-interop.md`). Each chunk records the model behind its vector: setting
   `IGNEOUS_EMBEDDING_MODEL` to another 384-dimensional model re-embeds every chunk on the next pipeline run, and search

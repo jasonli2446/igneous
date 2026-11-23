@@ -126,3 +126,16 @@ def test_a_name_your_resume_gave_an_organization_stays(db):
     card(db, "acct/people/3", "Ana Ames", emails=["ana@acme.test"], orgs=["Acme Robotics"])
     build(db)
     assert ("me", "ACME (resume)") in worked_at(db)
+
+
+def test_a_company_keeps_a_name_when_the_record_that_named_it_goes(db):
+    """A LinkedIn connection names Globex Corp; your card says Lu works there. Without the connection, the company is
+    still where Lu works, named as the card spells it rather than by its key."""
+    put(db, "linkedin", "connection/kim", "Kim Wu", {"kind": "connection", "name": "Kim Wu", "company": "Globex Corp",
+                                                     "url": "https://www.linkedin.com/in/kim"})
+    card(db, "acct/people/1", "Lu Park", emails=["lu@park.dev"], orgs=["Globex Corp."])
+    build(db)
+    assert worked_at(db) == {("lu@park.dev", "Globex Corp")}
+    db.execute(text("DELETE FROM source_items WHERE source = 'linkedin'"))
+    build(db)
+    assert worked_at(db) == {("lu@park.dev", "Globex Corp.")}

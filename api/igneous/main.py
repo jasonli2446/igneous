@@ -401,8 +401,8 @@ def graph_view(seed: int | None = Query(None, ge=1), per: int = Query(6, ge=1, l
     projects, each linked to the centre, with what is part of what and the ties among them. Every edge carries its
     `origin` and whether it is `stated`. With no seed and no one to open on, `{seed: null, nodes: [], edges: [], empty:
     true, reason}`: 'nothing_built' (connect a source on the Sources page and press Rebuild) or 'no_owner' (no source
-    says which person is you, or nothing links you to anyone yet: search for someone to start from). 404 for an unknown
-    seed."""
+    says which person is you, such as your Google account, your Messages, a mail archive with one owner or your
+    LinkedIn export, or nothing links you to anyone yet: search for someone to start from). 404 for an unknown seed."""
     return view(s, seed, per)
 
 

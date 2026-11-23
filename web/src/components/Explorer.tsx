@@ -417,7 +417,7 @@ export default function Explorer() {
       {data.nodes.length === 0 && !loading && !error && empty === "no_owner" && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center text-sm text-muted">
           <p className="text-base text-ink">Nobody to start from yet</p>
-          <p className="max-w-sm">No source says which person is you, or nothing links you to anyone yet. Press / to search for someone to start from, or connect one of your own accounts and build the graph. Everything stays on this computer.</p>
+          <p className="max-w-sm">No source says which person is you, or nothing links you to anyone yet. Connect one of your own accounts and build the graph, or press / to search for someone to start from. Everything stays on this computer.</p>
           <Link href="/settings" className="btn-primary">Open Sources</Link>
         </div>
       )}
