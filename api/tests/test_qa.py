@@ -238,3 +238,14 @@ def test_ask_route_maps_provider_failures_and_validates_its_body(mailbox, model,
     monkeypatch.setattr(llm, "chat", busy)
     r = client.post("/ask", json={"question": QUESTION, "mode": "lexical"})
     assert r.status_code == 503 and "rate-limiting" in r.json()["detail"]
+
+
+def test_gathering_the_evidence_calls_no_model_and_is_what_ask_shows(mailbox, model, monkeypatch):
+    monkeypatch.setattr(rerank.settings, "reranker_enabled", False)
+    found = qa.gather(mailbox.s, QUESTION, mode="lexical")
+    assert model.calls == [] and found.refusal is None and found.retrieve_s >= 0
+    assert [p["chunk_id"] for p in found.passages] == _shown(qa.answer(mailbox.s, QUESTION, mode="lexical"))
+    assert len(model.calls) == 1  # only the answer itself reaches the model
+    monkeypatch.setattr(llm.settings, "llm_sources", "")
+    refused = qa.gather(mailbox.s, QUESTION, mode="lexical")
+    assert refused.passages == [] and refused.refusal == qa.NO_SOURCES

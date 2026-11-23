@@ -7,6 +7,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.config import settings
+from igneous.graph import identity
+from igneous.graph.visibility import not_service
 from igneous.rag.embed import embed_query
 
 RRF_K = 60
@@ -19,16 +21,16 @@ HUMAN_NAME = r"^[^@0-9]+\s+[^@0-9]+$"
 class Filters:
     """What a search may return. An empty or None field restricts nothing."""
     sources: tuple[str, ...] = ()  # stored source values (igneous/source_catalog.py)
-    person_id: int | None = None  # an identity head: messages any of its merged identities sent or received
-    mentions_id: int | None = None  # an identity head: passages naming any of its identities, or linked by MENTIONS
+    person_id: int | None = None  # a person: messages any of their merged identities sent or received
+    mentions_id: int | None = None  # a person: passages naming any of their identities, or linked by MENTIONS
     since: datetime | None = None
     until: datetime | None = None  # exclusive
     from_question: frozenset[str] = field(default=frozenset())  # the fields the question set (constraints.apply)
 
 
 def _members(param: str) -> str:
-    """SQL for the identities of the identity head bound to `param`: the head and every node merged into it."""
-    return f"(SELECT CAST(:{param} AS bigint) UNION SELECT node_id FROM canonical WHERE canonical_id = :{param})"
+    """SQL for every identity of the person bound to `param` (any of their identities)."""
+    return identity.members_sql(f"CAST(:{param} AS bigint)")
 
 
 def _where(f: Filters) -> tuple[str, dict]:
@@ -161,7 +163,7 @@ def experts(s: Session, q: str, k: int = 10, evidence_limit: int = 3, mode: str 
 
     item_ids = list(candidates)
     relevance = [candidates[item_id]["score"] for item_id in item_ids]
-    rows = s.execute(text("""
+    rows = s.execute(text(f"""
         WITH candidate_items AS (
             SELECT item_id, relevance
             FROM unnest(CAST(:item_ids AS bigint[]), CAST(:relevance AS double precision[]))
@@ -194,6 +196,7 @@ def experts(s: Session, q: str, k: int = 10, evidence_limit: int = 3, mode: str 
             SELECT i.person_id, i.source_item_id, array_agg(DISTINCT i.kind ORDER BY i.kind) AS involvement,
                    ci.relevance, si.source, si.external_id, si.title, si.occurred_at
             FROM involvement i
+            JOIN nodes pn ON pn.id = i.person_id AND {not_service('pn')}
             JOIN candidate_items ci ON ci.item_id = i.source_item_id
             JOIN source_items si ON si.id = i.source_item_id
             GROUP BY i.person_id, i.source_item_id, ci.relevance, si.source, si.external_id, si.title, si.occurred_at
@@ -217,11 +220,14 @@ def experts(s: Session, q: str, k: int = 10, evidence_limit: int = 3, mode: str 
         ORDER BY p.score DESC, p.evidence_count DESC, p.person_id, e.item_rank
     """), {"item_ids": item_ids, "relevance": relevance, "k": k, "evidence_limit": evidence_limit}).mappings().all()
 
+    from igneous.graph.traversal import label, names
+
+    named = names(s)
     excerpts = {item_id: candidates[item_id]["text"][:400] for item_id in item_ids}
     out: dict[int, dict] = {}
     for row in rows:
         expert = out.setdefault(row["person_id"], {
-            "id": row["person_id"], "name": row["name"], "score": round(float(row["score"]), 5),
+            "id": row["person_id"], "name": label(row["name"], "Person", named), "score": round(float(row["score"]), 5),
             "evidence_count": row["evidence_count"], "evidence": [],
         })
         expert["evidence"].append({

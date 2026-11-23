@@ -6,7 +6,7 @@ import EntityInspector from "@/components/EntityInspector";
 import NodeSummary from "@/components/NodeSummary";
 import Sources from "@/components/SourceList";
 import { InlineError, Section, Skeleton } from "@/components/ui";
-import { api, type GEdge, type GNode } from "@/lib/api";
+import { api, type GEdge, type GNode, type Thing } from "@/lib/api";
 import { formatDayTime } from "@/lib/dates";
 import { nodeColor, typeLabel } from "@/lib/graph-style";
 import { useLiveSearch, useRequest } from "@/lib/hooks";
@@ -47,7 +47,7 @@ function InspectorSkeleton() {
 
 export default function Inspector({ id, revision, onExpandAction, onCloseAction, onSelectAction, onWhyAction,
   onCorrectedAction, onLinkedAction, expanded }: Props) {
-  const { data: node, error, retry } = useRequest(id, () => api.node(id), revision);
+  const { data: node, error, retry } = useRequest(id, (signal) => api.node(id, signal), revision);
   const [busy, setBusy] = useState(false);
   const [fullText, setFullText] = useState(false);
   const [showOriginal, setShowOriginal] = useState(false);
@@ -60,8 +60,8 @@ export default function Inspector({ id, revision, onExpandAction, onCloseAction,
   }
 
   const src = node.source_item;
-  const meta = (src?.raw_meta ?? {}) as { from?: { email: string }[]; to?: { email: string }[] };
-  const body = src?.body_text ?? "";
+  const meta = (src?.meta ?? {}) as { from?: { email: string }[]; to?: { email: string }[] };
+  const body = src?.text ?? "";
   const long = body.length > 600;
 
   return (
@@ -125,7 +125,7 @@ function SamePerson({ id, onMergedAction }: { id: number; onMergedAction: (c: Co
   const [q, setQ] = useState("");
   const [error, setError] = useState<string | null>(null);
   const people = useLiveSearch(open ? q : "",
-    (text) => api.findNodes(text, "Person").then((r) => r.nodes.filter((n) => n.type === "Person" && n.id !== id)));
+    (text, signal) => api.findThings(text, { types: ["Person"] }, signal).then((r) => r.results.filter((n) => n.id !== id)));
 
   if (!open) {
     return (
@@ -135,7 +135,7 @@ function SamePerson({ id, onMergedAction }: { id: number; onMergedAction: (c: Co
       </div>
     );
   }
-  const merge = (other: GNode) => api.mergePeople(id, other.id).then((r) => {
+  const merge = (other: Thing) => api.mergePeople(id, other.id).then((r) => {
     setOpen(false);
     setQ("");
     onMergedAction({ text: `Merged "${other.name}" into this person.`, keep: r.person });
@@ -154,7 +154,7 @@ function SamePerson({ id, onMergedAction }: { id: number; onMergedAction: (c: Co
           {people.results?.map((n) => (
             <li key={n.id}>
               <button type="button" className="btn-option" onClick={() => void merge(n)}>
-                <span className="truncate">{n.name}</span><span className="text-muted tabular-nums">{n.degree}</span>
+                <span className="truncate">{n.name}</span><span className="shrink-0 text-muted">{n.context}</span>
               </button>
             </li>
           ))}

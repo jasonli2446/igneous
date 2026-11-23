@@ -6,7 +6,7 @@ for a rebuild that is publishing (pipeline.hold_off_publishing), so it lands on 
 """
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from igneous import pipeline
 from igneous.db import get_session
 from igneous.graph import dirty, overrides
+from igneous.graph.visibility import group_conversation, not_service
 
 router = APIRouter()
 MEMBER_TYPES = ("Person", "Thread", "Event", "Message", "File", "Folder")
@@ -49,28 +50,33 @@ def _aliases(props: dict, name: str) -> list[str]:
 
 
 @router.get("/graph/entity/{node_id}")
-def entity(node_id: int, items: int = Query(30, ge=1, le=200), s: Session = Depends(get_session)):
+def entity(node_id: int = Path(ge=1), items: int = Query(30, ge=1, le=200), s: Session = Depends(get_session)):
     """Everything known about one derived entity: who is in it, where it lives, and the evidence per item."""
     p = _project(s, node_id)
-    members = s.execute(text("""
+    # A person is their identity head, and only group conversations are groups; no service is a member.
+    members = s.execute(text(f"""
         SELECT n.id, n.type, n.name, e.type AS edge, e.props AS eprops, e.confidence,
                COALESCE(si.source, si2.source) AS source,
                COALESCE(si.occurred_at, si2.occurred_at) AS at
-        FROM edges e JOIN nodes n ON n.id = e.src
+        FROM edges e LEFT JOIN canonical c ON c.node_id = e.src JOIN nodes n ON n.id = COALESCE(c.canonical_id, e.src)
         LEFT JOIN source_items si ON si.id = e.source_item_id
         LEFT JOIN source_items si2 ON si2.id = n.source_item_id
-        WHERE e.dst = :p AND e.type IN ('PART_OF', 'INVOLVED_IN') AND n.type = ANY(:types)
+        WHERE e.dst = :p AND e.type IN ('PART_OF', 'INVOLVED_IN') AND n.type = ANY(:types) AND {not_service('n')}
+          AND (n.type <> 'Thread' OR {group_conversation('n')})
+        ORDER BY e.id
     """), {"p": node_id, "types": list(MEMBER_TYPES)}).mappings().all()
 
-    from igneous.graph.traversal import handle_names, pretty_thread
-    named = handle_names(s)
-    people, groups, events, rows = [], [], [], []
+    from igneous.graph.traversal import label, names
+    named = names(s)
+    team: dict[int, dict] = {}
+    groups, events, rows = [], [], []
     for m in members:
         w, ep = m["edge"], m["eprops"] or {}
         if m["type"] == "Person" and w == "INVOLVED_IN":
-            people.append({"id": m["id"], "name": m["name"], "items": int(ep.get("items", 1))})
+            person = team.setdefault(m["id"], {"id": m["id"], "name": label(m["name"], "Person", named), "items": 0})
+            person["items"] += int(ep.get("items", 1))
         elif m["type"] == "Thread":
-            groups.append({"id": m["id"], "name": pretty_thread(m["name"], named) or m["name"],
+            groups.append({"id": m["id"], "name": label(m["name"], "Thread", named),
                            "why": ep.get("why"), "days": ep.get("days")})
         elif m["type"] == "Event":
             events.append({"id": m["id"], "name": m["name"], "date": m["at"], "why": ep.get("why")})
@@ -78,7 +84,7 @@ def entity(node_id: int, items: int = Query(30, ge=1, le=200), s: Session = Depe
             rows.append({"id": m["id"], "type": m["type"], "name": m["name"], "why": ep.get("why"),
                          "quote": ep.get("quote"), "source": m["source"], "date": m["at"],
                          "confidence": m["confidence"]})
-    people.sort(key=lambda x: -x["items"])
+    people = sorted(team.values(), key=lambda x: -x["items"])
     groups.sort(key=lambda x: -(x["days"] or 0))
     events.sort(key=lambda x: (x["date"] is None, str(x["date"])), reverse=False)
     rows.sort(key=lambda x: str(x["date"] or ""), reverse=True)

@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     # The OAuth client, the key that encrypts stored tokens, and the Enron mailboxes. A relative path is relative
     # to the api folder.
     data_dir: str = "../data"
-    # Where the browser UI lives; the Google sign-in callback sends you back here.
+    # Where the browser UI lives: the only site whose pages may call the API (igneous/access.py), and where the
+    # Google sign-in callback sends you back. The API also answers to this host's name besides localhost.
     web_url: str = "http://localhost:3000"
     # The Local files folders, comma-separated. Empty: the Documents, Desktop, Downloads and iCloud Drive folders
     # that exist (sources.fs_roots).
@@ -39,7 +40,7 @@ class Settings(BaseSettings):
     # its model can't load, Ask keeps retrieval order and holds places for graph neighbours (rag/qa.py).
     reranker_enabled: bool = True
     reranker_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
-    reranker_pool_size: int = 32
+    reranker_pool_size: int = 16  # as deep as evidence recall still rose on the baseline (eval/README.md)
     rerank_batch_size: int = 64
     # Kill switch for every outbound model call (CO-1). Search and the graph still work without it.
     llm_enabled: bool = True
