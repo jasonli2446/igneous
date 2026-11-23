@@ -504,7 +504,7 @@ def apply_verdicts(s: Session) -> int:
           {f"AND NOT {blocked_sql('a.id', 'b.id')}" if blocked else ""}
         ON CONFLICT DO NOTHING RETURNING type
     """), {"blocked": blocked, **keyed}).scalars().all()
-    # An archived link goes once its verdict (as the graph is keyed now) no longer drops it.
+    # An archived link goes when its verdict, read as the graph is keyed now, doesn't drop it.
     s.execute(text(f"""
         DELETE FROM edges_dropped d WHERE NOT EXISTS (
             SELECT 1 FROM {verdicts} v
