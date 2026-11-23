@@ -37,6 +37,7 @@ run creates, migrates and finally drops its own `igneous_test_<pid>` database on
 (`api/tests/conftest.py`), so two runs can share a server.
 `make check` runs the checks every pull request must pass: ruff and the tests for the API, then `next typegen`, `tsc`,
 ESLint and the production build for the web app. CI runs them too, and audits the locked dependencies (`make audit`).
+`web/README.md` covers the explorer walkthrough (`npm run walkthrough`), a browser check run against the demo database.
 
 ### 3. Configuration (`api/.env`)
 
