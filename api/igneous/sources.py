@@ -25,6 +25,7 @@ from igneous import source_catalog
 from igneous.config import settings
 from igneous.connectors import ai_chats, apple_notes, imessage, mac_contacts
 from igneous.connectors.base import Connector
+from igneous.parsers import MAX_DOCUMENT_BYTES
 
 Progress = Callable[..., None]  # progress(dict, force=False), as jobs.Progress
 
@@ -167,7 +168,8 @@ SOURCES: list[dict] = [
      "reads": "Names, emails, phone numbers, and organizations on your contact cards. Helps merge duplicate people.",
      "steps": GOOGLE_STEPS, "cli": "igneous sync gcontacts", "build": _google(_gcontacts), "options": set()},
     {"id": "drive", "kind": "google", "name": "Google Drive", "group": "Connected accounts",
-     "reads": "The text of your Docs, Sheets, Slides, PDFs, and other readable files.",
+     "reads": "The text of your Docs, Sheets (every sheet), Slides, PDFs, and other readable files up to "
+              f"{MAX_DOCUMENT_BYTES // 2**20} MB. Anything else is never downloaded.",
      "steps": GOOGLE_STEPS, "cli": "igneous sync drive", "build": _google(_drive), "options": set()},
     {"id": "github", "kind": "remote", "name": "GitHub", "group": "Connected accounts",
      "reads": "Your repositories, README files, issues, pull requests, comments, and daily commit activity (read-only).",
@@ -233,9 +235,9 @@ SOURCES: list[dict] = [
      "cli": "igneous sync ai_chats", "build": _local(lambda o: ai_chats.AIChatConnector()), "options": set()},
     {"id": "fs", "kind": "local", "name": "Local files", "group": "On this computer",
      "reads": "Name, folder and size of every file in the folders you choose, the text of documents (PDF, .docx, "
-              ".xlsx, .pptx, text and code), and each git checkout. Key and .env files are never read, and "
-              "credentials in text are redacted. Searched by keyword; meaning-based search and hosted models need "
-              "IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true.",
+              f".xlsx, .pptx, text and code, up to {MAX_DOCUMENT_BYTES // 2**20} MB), and each git checkout. Key "
+              "and .env files are never read, and credentials in text are redacted. Searched by keyword; "
+              "meaning-based search and hosted models need IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true.",
      "steps": ["Set IGNEOUS_FILESYSTEM_ROOTS to a comma-separated list of folders (in api/.env or the API's "
                "environment), then restart the API. With no setting, existing Documents, Desktop, Downloads, and "
                "iCloud Drive folders are used.",

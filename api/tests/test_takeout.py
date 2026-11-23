@@ -180,6 +180,19 @@ def test_places_keys_and_timeline_without_names(zpath):
     assert takeout.place_key(None, "  Board  Game Cafe", 41.5004, -81.6004) == saved["key"]
 
 
+def test_a_days_visits_count_the_secrets_redacted_from_them(tmp_path):
+    visit = {"placeVisit": {"location": {"placeId": "ChIJkey", "name": f"Locker {TOKEN}", "address": "2 Side St"},
+                            "duration": {"startTimestamp": "2025-06-04T09:00:00.000Z",
+                                         "endTimestamp": "2025-06-04T10:00:00.000Z"}}}
+    # The same visit twice (a history exported in both formats is one visit): counted once.
+    z = build_zip(tmp_path / "t.zip", {
+        "Location History (Timeline)/Semantic Location History/2025/2025_JUNE.json": {"timelineObjects": [visit, visit]}})
+    items, report = takeout.parse([z])
+    day = by_id(items)["maps/visits/2025-06-04"]
+    assert TOKEN not in day.body_text and "[REDACTED:github_token]" in day.body_text
+    assert day.raw_meta["redactions"] == 1 and report["redactions"] >= 1
+
+
 def test_html_activity_is_reported_not_parsed(tmp_path):
     z = build_zip(tmp_path / "t.zip", full_files(html_activity=True))
     _, report = takeout.parse([z])

@@ -118,6 +118,44 @@ def test_an_unreadable_folder_keeps_its_items_and_the_rest_reconciles(db, tmp_pa
     assert stored(db) == {f"{key}/Desktop/d.txt", f"{key}/Documents/kept.txt"}
 
 
+def test_only_readable_documents_within_the_size_cap_are_opened(tmp_path, monkeypatch):
+    from igneous.connectors import filesystem
+
+    monkeypatch.setattr(filesystem, "MAX_DOCUMENT_BYTES", 10)
+    write(tmp_path / "small.md", "# short")
+    write(tmp_path / "big.txt", "x" * 11)
+    (tmp_path / "movie.mp4").write_bytes(b"\x00" * 64)
+    opened = []
+    read_bytes = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda p: opened.append(p.name) or read_bytes(p))
+    items = {e.title: e for e in emitted(FilesystemConnector(tmp_path)) if isinstance(e, SourceItem)}
+    assert opened == ["small.md"]  # neither the video nor the oversized text is read at all
+    assert items["big.txt"].body_text is None and items["big.txt"].raw_meta["parse_status"] == "too_large"
+    assert items["movie.mp4"].raw_meta["parse_status"] == "unsupported" and items["movie.mp4"].raw_meta["size"] == 64
+    assert items["small.md"].body_text == "# short"
+
+
+def test_system_files_and_folders_are_skipped(tmp_path):
+    for name in (".DS_Store", "._notes.md", "Thumbs.db", "desktop.ini", "~$report.docx", ".~lock.sheet.ods#"):
+        write(tmp_path / name)
+    write(tmp_path / ".Trashes" / "old.txt")
+    write(tmp_path / "notes.md")
+    items = [e.title for e in emitted(FilesystemConnector(tmp_path)) if isinstance(e, SourceItem)]
+    assert items == ["notes.md"]
+
+
+def test_checkpoints_come_by_time_not_by_count(tmp_path, monkeypatch):
+    from igneous.connectors import base
+
+    for i in range(5):
+        write(tmp_path / f"{i}.txt")
+    events = emitted(FilesystemConnector(tmp_path))
+    assert [type(e).__name__ for e in events].count("Checkpoint") == 0  # a quick scan writes its cursor once
+    monkeypatch.setattr(base, "CHECKPOINT_SECONDS", 0)
+    events = emitted(FilesystemConnector(tmp_path))
+    assert [type(e).__name__ for e in events].count("Checkpoint") == 5
+
+
 def test_a_file_that_cannot_be_read_keeps_its_item_and_is_read_again(db, tmp_path, monkeypatch):
     root = tmp_path / "docs"
     locked = write(root / "locked.txt", "first")

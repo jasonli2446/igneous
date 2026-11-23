@@ -7,6 +7,7 @@ content hash is unchanged.
 """
 import hashlib
 import json
+import time
 from bisect import bisect_left
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
@@ -125,6 +126,24 @@ def stored(item: SourceItem) -> SourceItem:
 class Checkpoint:
     """Yielded by a connector when everything before it is safe to skip on resume."""
     cursor: dict
+
+
+# How often a long scan whose cursor is big to write (every file it has seen) checkpoints: by time, not by count, so
+# the writes stay few however many items it holds.
+CHECKPOINT_SECONDS = 30.0
+
+
+class Every:
+    """`due()` is true at most once per CHECKPOINT_SECONDS: when a long scan should yield its next Checkpoint."""
+
+    def __init__(self):
+        self.last = time.monotonic()
+
+    def __call__(self) -> bool:
+        if time.monotonic() - self.last < CHECKPOINT_SECONDS:
+            return False
+        self.last = time.monotonic()
+        return True
 
 
 @dataclass

@@ -13,6 +13,7 @@ from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem
 
 DEFAULT_DB = Path.home() / "Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=UTC)
+LOCK_FLAGS = ("ZISPASSWORDPROTECTED", "ZISLOCKED", "ZISENCRYPTED")
 
 
 def apple_time(value: object) -> datetime | None:
@@ -107,7 +108,12 @@ def _note_query(connection: sqlite3.Connection) -> tuple[str, str, str, str, tup
         return None
     identifier = next((c for c in ("ZIDENTIFIER", "ZUNIQUEIDENTIFIER") if c in note_columns), "Z_PK")
     modified = next((c for c in ("ZMODIFICATIONDATE", "ZCREATIONDATE") if c in note_columns), "Z_PK")
-    locked = next((c for c in note_columns if "PASSWORD" in c or "LOCKED" in c or "ENCRYPT" in c), None)
+    # The flag that marks a note locked. Several columns mention passwords (ZPASSWORDHINT is text, set on unlocked
+    # notes too): take the known flags first, then any other lock flag in name order, never a hint.
+    flags = [c for c in LOCK_FLAGS if c in note_columns]
+    flags += sorted(c for c in note_columns - set(LOCK_FLAGS)
+                    if any(w in c for w in ("PASSWORDPROTECTED", "LOCKED", "ENCRYPTED")) and "HINT" not in c)
+    locked = flags[0] if flags else None
     return objects, data_table, title, blob, (identifier, modified, data_join, object_join, locked)
 
 

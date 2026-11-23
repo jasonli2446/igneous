@@ -10,8 +10,8 @@ from datetime import UTC, datetime, timedelta
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from igneous.connectors import google_api
 from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem, Tombstone
-from igneous.connectors.gmail import _retry
 
 
 def _when(t: dict) -> datetime | None:
@@ -38,7 +38,7 @@ class CalendarConnector:
     def _calendars(self) -> Iterator[dict]:
         page = None
         while True:
-            response = _retry(self.svc.calendarList().list(pageToken=page))
+            response = google_api.call("calendar", self.svc.calendarList().list(pageToken=page))
             yield from response.get("items", [])
             page = response.get("nextPageToken")
             if not page:
@@ -67,7 +67,7 @@ class CalendarConnector:
             page = None
             while True:
                 try:
-                    response = _retry(self.svc.events().list(**params, pageToken=page))
+                    response = google_api.call("calendar", self.svc.events().list(**params, pageToken=page))
                 except HttpError as exc:
                     if exc.resp.status != 410 or not token:
                         raise
@@ -131,20 +131,21 @@ class ContactsConnector:
     def sync(self, cursor: dict) -> Iterator[SourceItem | CompletedScan]:
         page, observed = None, set()
         while True:
-            response = _retry(self.svc.people().connections().list(
+            response = google_api.call("people", self.svc.people().connections().list(
                 resourceName="people/me", pageSize=1000, pageToken=page,
                 personFields="names,emailAddresses,organizations,phoneNumbers"))
             for person in response.get("connections", []):
                 resource_name = person["resourceName"]
                 external_id = _external_id(self.account, resource_name)
-                observed.add(external_id)
                 emails = [email["value"].lower() for email in person.get("emailAddresses", [])
                           if email.get("value")]
                 name = (person.get("names") or [{}])[0].get("displayName", "")
                 if not emails and not name:
-                    continue
+                    continue  # nothing to store: not observed, so a card stored before is removed
+                observed.add(external_id)
                 orgs = [org["name"] for org in person.get("organizations", []) if org.get("name")]
-                yield SourceItem(source=self.name, external_id=external_id, title=name or emails[0],
+                # A card without a name still ties its addresses together, but names no one: no title.
+                yield SourceItem(source=self.name, external_id=external_id, title=name or None,
                                  body_text="", mime="text/vcard",
                                  raw_meta={"emails": emails, "orgs": orgs, "account": self.account,
                                            "phones": [phone.get("canonicalForm") or phone.get("value")

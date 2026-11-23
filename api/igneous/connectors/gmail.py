@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from igneous.config import settings
+from igneous.connectors import google_api
 from igneous.connectors.base import Checkpoint, SourceItem, Tombstone
 from igneous.connectors.email_maildir import parse_message
 
@@ -38,48 +38,9 @@ BULK = frozenset({"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS"})
 CLOCK_MARGIN = 3600
 
 
-class TokenBucket:
-    """Client-side pacing so we stay under Gmail's per-user quota instead of tripping it and waiting out the
-    penalty window. messages.get costs 5 units, list 5, getProfile 1."""
-
-    def __init__(self, rate: float, burst: float):
-        self.rate, self.capacity, self.tokens, self.t = rate, burst, burst, time.monotonic()
-        self.lock = threading.Lock()
-
-    def take(self, n: float = 1.0) -> None:
-        with self.lock:
-            self._take(n)
-
-    def _take(self, n: float) -> None:
-        while True:
-            now = time.monotonic()
-            self.tokens = min(self.capacity, self.tokens + (now - self.t) * self.rate)
-            self.t = now
-            if self.tokens >= n:
-                self.tokens -= n
-                return
-            time.sleep((n - self.tokens) / self.rate)
-
-
-QUOTA = TokenBucket(rate=settings.gmail_units_per_min / 60, burst=50)
-
-
-def _retry(call, units: float = 5, tries: int = 6):
-    """Backoff on rate limits (429 / 403 rateLimitExceeded) and transient 5xx. Google's per-user window is a
-    minute, so rate-limit waits grow to 64 s: a shorter cap gives up while the window is still closed."""
-    for i in range(tries):
-        QUOTA.take(units)
-        try:
-            return call.execute()
-        except HttpError as e:
-            status = e.resp.status
-            limited = status == 429 or (status == 403 and b"ateLimit" in (e.content or b""))
-            if limited or status in (500, 502, 503):
-                time.sleep(min(64, 2 ** (i + 1)) if limited else min(16, 2 ** i))
-                continue
-            raise
-    QUOTA.take(units)
-    return call.execute()
+def _retry(request, units: float = 5):
+    """A Gmail request, paced in quota units (messages.get and list cost 5)."""
+    return google_api.call("gmail", request, units)
 
 
 def skipped_labels(all_mail: bool) -> frozenset[str]:

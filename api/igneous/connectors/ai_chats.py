@@ -23,7 +23,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterator
 from datetime import datetime
 
-from igneous.connectors.base import Checkpoint, SourceItem
+from igneous.connectors.base import Checkpoint, Every, SourceItem
 from igneous.connectors.redact import redact
 
 CLAUDE_ROOT = os.path.expanduser("~/.claude/projects")
@@ -231,6 +231,7 @@ class AIChatConnector:
 
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint]:
         seen = dict(cursor.get("files", {}))
+        due = Every()  # the cursor names every session file: write it every so often, not after each file
         for tool, path in self._files():
             st = os.stat(path)
             sig = f"{int(st.st_mtime)}:{st.st_size}"
@@ -240,5 +241,6 @@ class AIChatConnector:
             session = meta["session_id"] or os.path.splitext(os.path.basename(path))[0]
             yield from day_items(tool, session, meta, turns)
             seen[path] = sig
-            yield Checkpoint({"files": seen})
+            if due():
+                yield Checkpoint({"files": seen})
         yield Checkpoint({"files": seen})

@@ -285,7 +285,9 @@ Disconnecting an account (under Gmail on the Sources page, or `igneous disconnec
 token; what it synced stays.
 
 Sync with **Sync now** on each entry, or `uv run igneous sync gmail` (and `gcal`, `gcontacts`, `drive`), then
-`uv run igneous pipeline`. Drive backfills files once, then uses the Changes API; Google Docs and Slides export as text.
+`uv run igneous pipeline`. Drive lists your files once (an interrupted listing continues where it stopped), then
+follows the Changes API. Google Docs and Slides export as text and Sheets as a workbook, every sheet; other files are
+downloaded only when they are a readable format of 20 MB or less (`MAX_DOCUMENT_BYTES` in `parsers.py`).
 
 Gmail's first sync reads the last 90 days (`--since-days` sets another window). It skips spam, drafts, Promotions,
 Social and Forums; `igneous sync gmail --all-mail` keeps the last three for that account, which remembers the choice

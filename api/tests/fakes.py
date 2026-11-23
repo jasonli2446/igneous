@@ -35,7 +35,7 @@ class FakeDrive:
         self.items, self.content, self.start_token = items, content or {}, start_token
         self.page_size, self.change_responses = page_size, list(changes or [])
         self.calls: list[tuple[str, dict]] = []
-        self.fail_page: str | None = None  # a page token whose listing answers 400
+        self.fail_page: str | None = None  # a stale page token: its next listing answers 400
 
     def files(self):
         return self
@@ -46,6 +46,7 @@ class FakeDrive:
     def list(self, pageToken=None, **kwargs):
         self.calls.append(("list", {"pageToken": pageToken, **kwargs}))
         if pageToken is not None and pageToken == self.fail_page:
+            self.fail_page = None  # a new listing hands out new tokens
             return Request(http_error(400, "invalidPageToken"))
         start = int(pageToken or 0)
         page = self.items[start:start + self.page_size]

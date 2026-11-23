@@ -390,6 +390,7 @@ class _Import:
         self.chrome_secrets: dict[str, int] = defaultdict(int)
         self.bookmarks: list[tuple[str, str, str]] = []
         self.visits: dict[str, dict[tuple[str, str], dict]] = defaultdict(dict)  # day -> (key, start) -> visit
+        self.visit_secrets: dict[str, int] = defaultdict(int)
         self.lists: dict[tuple[str, str], list[dict]] = defaultdict(list)  # (kind, list name) -> places
         self.list_secrets: dict[tuple[str, str], int] = defaultdict(int)
         self.reading: list[tuple[str, str, str]] = []
@@ -523,13 +524,17 @@ class _Import:
         self.bookmarks += [m_ for m_ in p.marks if m_[2].startswith(("http://", "https://"))]
 
     # -- maps
-    def add_visit(self, start, end, name, address, lat, lng, place_id, red):
+    def add_visit(self, start, end, name, address, lat, lng, place_id):
         key = place_key(place_id, name, lat, lng)
         if not key or not start:
             return
+        red = [0]
         v = _place(key, name, address, lat, lng, place_id, red)
         v.update(start=start.isoformat(), end=end.isoformat() if end else None)
-        self.visits[start.date().isoformat()].setdefault((key, v["start"]), v)
+        day = start.date().isoformat()
+        if (key, v["start"]) not in self.visits[day]:
+            self.visits[day][(key, v["start"])] = v
+            self.visit_secrets[day] += red[0]
 
     def read_semantic(self, m: Member):
         def go():
@@ -542,9 +547,8 @@ class _Import:
                 lng = loc.get("longitudeE7") / 1e7 if isinstance(loc.get("longitudeE7"), int | float) else None
                 start = _any_ts(dur.get("startTimestamp") or dur.get("startTimestampMs"))
                 end = _any_ts(dur.get("endTimestamp") or dur.get("endTimestampMs"))
-                red = [0]
                 self.add_visit(start, end, loc.get("name") or loc.get("address"), loc.get("address"), lat, lng,
-                               loc.get("placeId"), red)
+                               loc.get("placeId"))
                 self.counts["place_visits"] += 1
         self._safe(m, go)
 
@@ -562,7 +566,7 @@ class _Import:
                 lat, lng = _latlng((cand.get("placeLocation") or {}).get("latLng"))
                 name = cand.get("name") or labels.get(str(cand.get("semanticType") or "").removeprefix("TYPE_"))
                 self.add_visit(_any_ts(seg.get("startTime")), _any_ts(seg.get("endTime")), name, None, lat, lng,
-                               cand.get("placeId"), [0])
+                               cand.get("placeId"))
                 self.counts["place_visits"] += 1
         self._safe(m, go)
 
@@ -620,7 +624,7 @@ class _Import:
             yield SourceItem(source="takeout_maps", external_id=f"maps/visits/{day}", title=f"Places visited, {day}",
                              body_text="\n".join(lines[:MAX_LINES]), occurred_at=_utc(_ts(vl[0]["start"])),
                              mime="text/plain", raw_meta={"kind": "visits", "product": "Maps", "day": day,
-                                                          "visits": vl, "redactions": 0})
+                                                          "visits": vl, "redactions": self.visit_secrets[day]})
         for (kind, stem), places in sorted(self.lists.items()):
             uniq = list({p["key"]: p for p in places}.values())
             lines = []

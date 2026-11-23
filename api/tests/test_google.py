@@ -2,9 +2,10 @@
 import time
 
 import pytest
-from fakes import FakeCalendar, FakeDrive, FakeGmail, FakePeople, http_error
+from fakes import FakeCalendar, FakeDrive, FakeGmail, FakePeople, Request, http_error
+from googleapiclient.errors import HttpError
 
-from igneous.connectors import gmail
+from igneous.connectors import gmail, google_api
 from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem, Tombstone
 from igneous.connectors.drive import DriveConnector, _is_skippable_download_error
 from igneous.connectors.gcal import CalendarConnector, ContactsConnector
@@ -19,8 +20,9 @@ def items(events) -> list[SourceItem]:
 
 @pytest.fixture(autouse=True)
 def unpaced(monkeypatch):
-    """The fakes answer instantly; pacing them to the real quota would only slow the tests down."""
-    monkeypatch.setattr(gmail, "QUOTA", gmail.TokenBucket(rate=1e9, burst=1e9))
+    """The fakes answer instantly; pacing them to the real quotas would only slow the tests down."""
+    for api in google_api.BUCKETS:
+        monkeypatch.setitem(google_api.BUCKETS, api, google_api.TokenBucket(rate=1e9, burst=1e9))
 
 
 # ---- Gmail ----
@@ -182,6 +184,89 @@ def test_drive_changes_emit_tombstones_and_advance_only_at_final_page():
                       Checkpoint({"start_page_token": "cursor-2"})]
 
 
+def test_drive_decides_from_the_listing_what_to_download(monkeypatch):
+    from igneous.connectors import drive as drive_module
+
+    monkeypatch.setattr(drive_module, "MAX_DOCUMENT_BYTES", 100)
+    drive = FakeDrive([
+        {"id": "notes", "name": "notes.md", "mimeType": "text/markdown", "size": "20"},
+        {"id": "video", "name": "talk.mp4", "mimeType": "video/mp4", "size": "50"},
+        {"id": "huge", "name": "dump.txt", "mimeType": "text/plain", "size": "5000"},
+        {"id": "sheet", "name": "Budget", "mimeType": "application/vnd.google-apps.spreadsheet"},
+    ], {"notes": b"# notes", "sheet": _xlsx()})
+    events = list(DriveConnector(None, "me@x.com", drive).sync({}))
+    assert [call for call, _ in drive.calls if call in ("get_media", "export")] == ["get_media", "export"]
+    assert {"get_media": "notes", "export": "sheet"} == {c: k["fileId"] for c, k in drive.calls if c in ("get_media", "export")}
+    assert "size" in next(k for c, k in drive.calls if c == "list")["fields"]
+    sheet = next(i for i in items(events) if i.title == "Budget")
+    assert "Q1" in sheet.body_text and "Q2" in sheet.body_text  # every sheet, not the first one CSV holds
+    assert ("export", {"fileId": "sheet", "mimeType": drive_module.WORKSPACE_EXPORTS[
+        "application/vnd.google-apps.spreadsheet"][0]}) in drive.calls
+
+
+def _xlsx() -> bytes:
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    workbook.active.title = "Q1"
+    workbook.active.append(["Q1", 10])
+    workbook.create_sheet("Q2").append(["Q2", 20])
+    data = BytesIO()
+    workbook.save(data)
+    return data.getvalue()
+
+
+def test_an_interrupted_drive_backfill_continues_where_it_stopped(monkeypatch):
+    from igneous.connectors import base
+
+    monkeypatch.setattr(base, "CHECKPOINT_SECONDS", 0)
+    files = [{"id": f"d{i}", "name": f"d{i}.txt", "mimeType": "text/plain", "size": "3"} for i in range(4)]
+    drive = FakeDrive(files, {f"d{i}": b"txt" for i in range(4)}, start_token="T", page_size=2)
+    events = list(DriveConnector(None, "me@x.com", drive).sync({}))
+    (mid,) = [e.cursor for e in events if isinstance(e, Checkpoint)]
+    assert mid == {"backfill": {"start_page_token": "T", "page_token": "2", "observed": ["me@x.com/d0", "me@x.com/d1"]}}
+    drive.calls.clear()
+    resumed = list(DriveConnector(None, "me@x.com", drive).sync(mid))
+    assert [i.external_id for i in items(resumed)] == ["me@x.com/d2", "me@x.com/d3"]  # page one isn't read again
+    assert resumed[-1] == CompletedScan({"start_page_token": "T"}, "drive", frozenset(
+        f"me@x.com/d{i}" for i in range(4)), scopes=("me@x.com",))
+    drive.fail_page = "2"  # a page token that outlived its listing: list again from the start
+    again = list(DriveConnector(None, "me@x.com", drive).sync(mid))
+    assert len(items(again)) == 4 and isinstance(again[-1], CompletedScan)
+
+
+def test_drive_folder_names_fail_loudly_unless_the_folder_is_hidden():
+    class Broken(FakeDrive):
+        def get(self, fileId, **kwargs):
+            return Request(http_error(500, "backendError") if fileId == "boom" else http_error(404, "notFound"))
+
+    connector = DriveConnector(None, "me@x.com", Broken([]))
+    assert connector._folder_name("hidden") is None  # not shared with this account: the file keeps no folder name
+    with pytest.raises(HttpError):  # a failure is not a missing folder: the sync stops and retries later
+        connector._folder_name("boom")
+
+
+def test_each_google_api_has_its_own_pace(monkeypatch):
+    taken = []
+
+    class Recorder:
+        def __init__(self, api):
+            self.api = api
+
+        def take(self, n=1.0):
+            taken.append((self.api, n))
+
+    for api in google_api.BUCKETS:
+        monkeypatch.setitem(google_api.BUCKETS, api, Recorder(api))
+    gmail_sync(FakeGmail({"m": ["INBOX"]}, pages=[["m"]]), {}, since_days=None)
+    list(CalendarConnector(None, "me@x.com", service=FakeCalendar([{"id": "c"}], [{"items": []}])).sync({}))
+    list(ContactsConnector(None, "me@x.com", service=FakePeople([])).sync({}))
+    assert {api for api, _ in taken} == {"gmail", "calendar", "people"}
+    assert ("gmail", 5) in taken and ("calendar", 1) in taken  # Gmail counts quota units, the others calls
+
+
 def test_a_drive_change_that_makes_a_file_unreadable_removes_it():
     drive = FakeDrive([], {"doc": b"\x00\x01binary now"}, changes=[{"changes": [
         {"fileId": "doc", "file": {"id": "doc", "name": "notes.txt", "mimeType": "text/plain"}},
@@ -245,6 +330,29 @@ def test_a_calendar_that_leaves_the_list_takes_its_events(db):
     # An empty list is a failure to list, not every calendar gone.
     events = list(CalendarConnector(None, "me@x.com", service=FakeCalendar([], [])).sync(cursor))
     assert not tombstones(events)
+
+
+def test_a_card_without_a_name_ties_its_addresses_together_but_names_no_one(db):
+    from sqlalchemy import text
+
+    from igneous.connectors.base import run_sync
+    from igneous.graph import spine
+
+    people = FakePeople([
+        {"resourceName": "people/anon", "emailAddresses": [{"value": "Anon@Example.com"}, {"value": "a2@example.com"}]},
+        {"resourceName": "people/sam", "names": [{"displayName": "Sam Lee"}],
+         "emailAddresses": [{"value": "sam@example.com"}]},
+    ])
+    assert [i.title for i in items(ContactsConnector(None, "me@x.com", service=people).sync({}))] == [None, "Sam Lee"]
+    run_sync(db, ContactsConnector(None, "me@x.com", service=people))
+    spine.run(db)
+    person = {row.key: row for row in db.execute(text("SELECT id, key, name, props FROM nodes WHERE type = 'Person'"))}
+    anon, other, sam = person["anon@example.com"], person["a2@example.com"], person["sam@example.com"]
+    assert (anon.name, other.name) == ("anon@example.com", "a2@example.com")
+    assert "named_by" not in anon.props and "named_by" not in other.props
+    assert sam.name == "Sam Lee" and sam.props["named_by"] == "contacts"
+    same = db.execute(text("SELECT src, dst FROM edges WHERE type = 'SAME_AS' AND extractor = 'contacts'")).all()
+    assert same == [tuple(sorted((anon.id, other.id)))]
 
 
 def test_contacts_complete_scan_is_account_scoped():

@@ -1,5 +1,6 @@
 """Folders on this computer: a metadata item for every non-secret file, the text of readable documents, and one
-item per git checkout.
+item per git checkout. Only a document the parsers read and no larger than MAX_DOCUMENT_BYTES is ever opened; system
+files (.DS_Store, Thumbs.db, lock files) and folders (trash, indexes) are skipped.
 
 An item's id is `<anchor key>/<path below the anchor>`. The anchor is the outermost of the configured folders and
 the scanned folders that contains the file, and its key is a hash of its path, so ids name no home directory and a
@@ -15,21 +16,26 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem
+from igneous.connectors.base import Checkpoint, CompletedScan, Every, SourceItem
 from igneous.connectors.redact import url_without_credentials
-from igneous.parsers import parse_document
+from igneous.parsers import MAX_DOCUMENT_BYTES, parse_document, supported
 
-CHECKPOINT_EVERY = 100
 IGNORED_DIRECTORIES = frozenset({
     ".git", ".hg", ".svn", ".tox", ".venv", "__pycache__", "node_modules", "vendor",
     "dist", "build", ".next", ".pytest_cache", ".mypy_cache",
     # Agent worktrees are full copies of a repo (every file would be imported once per worktree), and the
     # .claude folder holds session state, not documents.
     ".claude", "worktrees",
+    # What operating systems keep beside your files: indexes, trash, version stores.
+    ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems", ".DocumentRevisions-V100",
+    "$RECYCLE.BIN", "System Volume Information",
 })
 # These files are never read or represented, even as metadata. They commonly hold credentials.
 SECRET_NAMES = re.compile(r"^(?:\.env(?:\..*)?|id_.*|credentials.*)$", re.I)
 SECRET_SUFFIXES = frozenset({".key", ".pem"})
+# Nor are these: folder settings, thumbnails and lock files the system or an editor writes, not your documents.
+NOISE_NAMES = re.compile(r"^(?:\.DS_Store|\._.*|Thumbs\.db|desktop\.ini|\.localized|Icon\r|~\$.*|\.~lock\..*#)$",
+                         re.I)
 
 
 def _root_key(root: Path) -> str:
@@ -138,7 +144,7 @@ class FilesystemConnector:
         if any(entry.name == ".git" for entry in entries):
             yield "repo", directory
         for entry in entries:
-            if entry.name == ".git" or _is_secret(entry.name):
+            if entry.name == ".git" or _is_secret(entry.name) or NOISE_NAMES.match(entry.name):
                 continue
             try:
                 if entry.is_symlink():
@@ -156,7 +162,7 @@ class FilesystemConnector:
         stored: dict[str, list[int]] = {}  # this scan: ids now stored (or unchanged), with their fingerprints
         observed: set[str] = set()
         kept: list[str] = []
-        processed = 0
+        due = Every()  # the cursor holds every file: write it every so often, not every so many files
         for root in self.roots:
             unreadable: list[Path] = []
             for kind, path in self._walk(root.path, unreadable):
@@ -167,10 +173,9 @@ class FilesystemConnector:
                 observed.add(external_id)
                 if item is not None:
                     yield item
-                    processed += 1
                 if fingerprint is not None:  # recorded only once the item is stored
                     stored[external_id] = fingerprint
-                if item is not None and processed % CHECKPOINT_EVERY == 0:
+                if item is not None and due():
                     yield Checkpoint({"files": {**previous, **stored}})
             kept += [scope for folder in unreadable for scope in root.scopes_of(folder)]
         scanned = [scope for root in self.roots for scope in root.scopes]
@@ -187,20 +192,26 @@ class FilesystemConnector:
         fingerprint = _fingerprint(stat)
         if previous.get(external_id) == fingerprint:
             return external_id, None, fingerprint
-        try:
-            data = path.read_bytes()
-        except OSError:
-            return external_id, None, None  # its item stays as it was; read again next time
         folders = external_id.split("/")[:-1]
         meta = {"path": external_id, "folders": ["/".join(folders[:i]) for i in range(1, len(folders) + 1)],
                 "size": stat.st_size, "model_opt_in": False}
         body, mime = None, None
-        parsed = parse_document(data, path.name)
-        if parsed.status == "ok":
-            body, mime = parsed.text, parsed.mime
-            meta.update({"parser": parsed.parser, "boundaries": parsed.boundaries})
+        # Only a document the parsers read, and not too large, is opened at all; anything else is its metadata.
+        if not supported(path.name):
+            meta.update({"parser": None, "parse_status": "unsupported"})
+        elif stat.st_size > MAX_DOCUMENT_BYTES:
+            meta.update({"parser": None, "parse_status": "too_large"})
         else:
-            meta.update({"parser": None, "parse_status": parsed.status})
+            try:
+                data = path.read_bytes()
+            except OSError:
+                return external_id, None, None  # its item stays as it was; read again next time
+            parsed = parse_document(data, path.name)
+            if parsed.status == "ok":
+                body, mime = parsed.text, parsed.mime
+                meta.update({"parser": parsed.parser, "boundaries": parsed.boundaries})
+            else:
+                meta.update({"parser": None, "parse_status": parsed.status})
         return external_id, SourceItem(
             source=self.name, external_id=external_id, title=path.name, body_text=body,
             occurred_at=datetime.fromtimestamp(stat.st_mtime, UTC), mime=mime, raw_meta=meta), fingerprint
