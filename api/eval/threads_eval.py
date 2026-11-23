@@ -1,19 +1,23 @@
 """Score derived threads/projects against a gold set: found, duplicated, hierarchy, must-include/exclude, who took part.
 
     IGNEOUS_DATABASE_URL=...igneous_personal uv run python eval/threads_eval.py [data/eval/threads_gold.json]
+    IGNEOUS_DATABASE_URL=...igneous_persona uv run python eval/threads_eval.py igneous/persona/gold/threads.json
 
-The gold file is local (it names a person's projects and people) and lives in git-ignored data/. It holds
-{"threads": [...]}, each entry {name, terms: [words its name may use], parent: the name of the gold thread it sits
-under, must_include: [source_item ids], must_exclude: [...], participants: [names], not_participants: [names]};
-every field but name and terms is optional. A gold thread is "found" by the derived Project named exactly like it,
-or else by a Project whose name contains one of its terms (three letters or more), the one covering most of
-must_include. Reported per thread and in total, so a change that fixes one case and breaks another shows.
+A personal gold file names a person's projects and people, so it stays local, in git-ignored data/; the synthetic
+persona's (igneous/persona/gold) is in the repo. A file holds {"threads": [...]}, each entry {name, terms: [words its
+name may use], parent: the name of the gold thread it sits under, must_include: [records], must_exclude: [...],
+participants: [names], not_participants: [names]}; every field but name and terms is optional. A record is a stable
+key (gold.py: {source, external_id} or {source, path}), which holds on any build, or a source_items id of the database
+the file was written on. A gold thread is "found" by the derived Project named exactly like it, or else by a Project
+whose name contains one of its terms (three letters or more), the one covering most of must_include. Reported per
+thread and in total, so a change that fixes one case and breaks another shows.
 """
 import json
 import re
 import sys
 from pathlib import Path
 
+import gold as keys
 from sqlalchemy import text
 
 from igneous.config import settings
@@ -32,16 +36,24 @@ def _projects(s) -> dict[int, dict]:
     return {r["id"]: {**r, "items": set(r["items"] or [])} for r in rows}
 
 
+def _records(s, given: list) -> set[int]:
+    """The source_items ids a gold list names: ids as they are, keys resolved on this database."""
+    ids = {r for r in given if isinstance(r, int)}
+    found = keys.resolve(s, [r for r in given if isinstance(r, dict)])
+    return ids.union(*found)
+
+
 def score(gold: dict) -> dict:
     with SessionLocal() as s:
         projects = _projects(s)
         parents = {(a, b) for a, b in s.execute(text(
             "SELECT src, dst FROM edges WHERE type = 'PART_OF' AND src IN (SELECT id FROM nodes WHERE type='Project') "
             "AND dst IN (SELECT id FROM nodes WHERE type='Project')"))}
+        records = [(_records(s, g.get("must_include") or []), _records(s, g.get("must_exclude") or []))
+                   for g in gold["threads"]]
     report, found_ids = [], {}
-    for g in gold["threads"]:
+    for g, (inc, exc) in zip(gold["threads"], records, strict=True):
         terms = [t.lower() for t in g["terms"]]
-        inc, exc = set(g.get("must_include") or []), set(g.get("must_exclude") or [])
         # A gold thread is found by name first (the thing exists under the name the person uses); records only
         # break ties, since matching by overlapping records would let one big thread match several gold threads.
         gname = g["name"].lower()

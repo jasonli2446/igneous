@@ -142,6 +142,27 @@ IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous
   uv run python eval/threads_eval.py
 ```
 
+## The synthetic persona
+
+`make persona` builds `igneous_persona` from a fictional student's generated exports (`api/igneous/persona`). Its gold
+set lives beside the generator (`api/igneous/persona/gold`), keyed by stable record keys (a local file by its path in
+the documents folder, since its id starts with a hash of where the folder sits), and describes the default seed:
+
+- `threads.json`: the trips, classes, job and project, each with the records that must and must not be in it, who
+  took part, and the organization it sits under, in `threads_eval.py`'s format;
+- `people.json`: the identities that are one person and pairs that are two (true by construction), scored like
+  `er_pairs.csv` by `er_labels.py`'s scoring;
+- `questions.jsonl`: Ask questions with their gold records and quotes, in `questions.jsonl`'s format.
+
+`persona_eval.py` scores all three on the database it runs on, without model calls unless `--qa`:
+
+```bash
+IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous_persona \
+  uv run python eval/persona_eval.py
+```
+
+PERSONA_RESULTS
+
 ## LightRAG on Igneous's graph (criterion 5)
 
 `lightrag_demo.py` loads `igneous export lightrag` into LightRAG and answers a question from it; see its docstring.

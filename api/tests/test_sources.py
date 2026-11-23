@@ -32,14 +32,14 @@ def test_registry_shape():
         assert isinstance(s["steps"], list) and s["steps"] and all(isinstance(x, str) for x in s["steps"])
         assert ("build" in s) == (s["kind"] != "import")  # every source you sync builds its own connector
     assert sources.SYNCABLE == ("gmail", "gcal", "gcontacts", "drive", "github", "imessage", "maccontacts",
-                                "ai_chats", "fs", "notes", "email")
+                                "ai_chats", "fs", "notes", "email", "persona")
 
 
 def test_every_local_source_builds_its_connector_with_the_shared_defaults(db, monkeypatch, tmp_path):
     monkeypatch.setattr(sources.settings, "filesystem_roots", str(tmp_path))
     for sid in sources.SYNCABLE:
         entry = sources.BY_ID[sid]
-        if entry["kind"] != "local":
+        if entry["kind"] != "local" or sid == "persona":  # one connector per export: test_persona.py
             continue
         ((account, make),) = entry["build"](db, None, sources.SyncOptions())
         connector = make()

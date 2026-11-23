@@ -6,7 +6,10 @@ IGN := cd api && uv run igneous
 # Messages to LLM-extract per run (needs AWS_BEARER_TOKEN_BEDROCK and IGNEOUS_LLM_SOURCES=email). EXTRACT=0 skips model calls.
 EXTRACT ?= 100
 
-.PHONY: enron synthetic-corpus db migrate demo baseline api web test check audit
+# The synthetic persona's own database: never igneous or igneous_personal. CLEAN=1 replaces it.
+PERSONA_URL ?= postgresql+psycopg://igneous:igneous@localhost:5432/igneous_persona
+
+.PHONY: enron synthetic-corpus persona db migrate demo baseline api web test check audit
 
 # curl -f fails on an HTTP error instead of saving the error page, and the archive gets its name only once the
 # download is complete, so neither passes for the corpus on the next run.
@@ -20,6 +23,15 @@ enron:  ## download the corpus (~450 MB) and extract the mailboxes we use
 synthetic-corpus:  ## generate small synthetic files and calendar data (no import)
 	$(IGN) synthetic-corpus ../data/synthetic-cross-source
 	$(IGN) verify-synthetic-corpus ../data/synthetic-cross-source
+
+# Every step reads and writes the persona's database (Postgres must be running: make db, or your own).
+persona: export IGNEOUS_DATABASE_URL = $(PERSONA_URL)
+persona:  ## the synthetic persona end to end: generate data/persona, create igneous_persona, import it, build the graph
+	cd api && uv sync
+	$(IGN) persona generate ../data/persona
+	$(IGN) persona database $(if $(CLEAN),--clean)
+	$(IGN) sync persona
+	$(IGN) pipeline
 
 db:  ## Postgres in Docker; returns once it accepts connections
 	docker compose up -d --wait db
