@@ -13,13 +13,13 @@ links and goes), its backbone thread follows (`backbone:<domain>` -> `backbone:<
 the verifier's verdicts, which are keyed by natural keys, follow them, so a link you rejected stays rejected and a name
 you gave the org's thread stays.
 
-Revision ID: 0015
-Revises: 0014
+Revision ID: 0016
+Revises: 0015
 """
 from alembic import op
 
-revision = "0015"
-down_revision = "0014"
+revision = "0016"
+down_revision = "0015"
 
 # A company name's key, as organizations.company_key makes it: org:<slug>.
 SLUG = "trim(both '-' from regexp_replace(lower({0}), '[^a-z0-9]+', '-', 'g'))"

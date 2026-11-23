@@ -1,5 +1,5 @@
 """The spine: which records it builds, what each record contributed, what goes when a record changes or goes, the
-replies it derives, and an incremental build equal to a build at once."""
+replies and threads it derives, and an incremental build equal to a build at once."""
 import json
 import time
 from datetime import UTC, datetime, timedelta
@@ -672,6 +672,124 @@ def test_replies_sent_at_one_time_are_inferred_the_same_whichever_was_stored_fir
     assert stored([1, 2, 3, 4]) == stored([1, 3, 2, 4]) == {("fp-2", "fp-1"), ("fp-3", "fp-1"), ("fp-4", "fp-3")}
 
 
+# --- threads -----------------------------------------------------------------------------------------------------------
+
+def said(s, n, frm, to, title, parent=None, references=None, source="email", **meta):
+    """A message as a mail client writes it: its own Message-ID `<n@x.test>`, and a reply's In-Reply-To and
+    References (its parent's References and the parent)."""
+    headers = {}
+    if parent is not None:
+        headers = {"in_reply_to": f"<{parent}@x.test>",
+                   "references": [f"<{m}@x.test>" for m in (references if references is not None else [parent])]}
+    return put(s, source, f"box/{n}", {"from": [{"email": frm}], "to": [{"email": t} for t in to],
+                                       "message_id": f"<{n}@x.test>", "fingerprint": f"fp-{n}", **headers, **meta},
+               title, T0 + timedelta(hours=n))
+
+
+def threads(s) -> dict[str, str]:
+    """Each message -> its thread's key."""
+    return dict(s.execute(text("""
+        SELECT m.key, t.key FROM edges e JOIN nodes m ON m.id = e.src JOIN nodes t ON t.id = e.dst
+        WHERE e.type = 'IN_THREAD'""")).all())
+
+
+def test_a_reply_and_the_message_it_answers_are_one_thread(db):
+    """#228: the message that began a conversation has no reply headers and its reply names it. Both are one thread,
+    keyed by the first message's Message-ID, so the reply's REPLIES_TO stays inside it."""
+    said(db, 1, "mira@x.test", ["jo@x.test"], "Practice problems")
+    said(db, 2, "jo@x.test", ["mira@x.test"], "Re: Practice problems", parent=1)
+    spine.run(db)
+    assert threads(db) == {"fp-1": "<1@x.test>", "fp-2": "<1@x.test>"}
+    assert edges(db, "REPLIES_TO") == {("fp-2", "fp-1")}
+    legal(db)
+
+
+def test_a_conversation_is_one_thread_whichever_message_was_stored_first(db):
+    """The first message stored before its replies moves to their thread when the first reply arrives; a reply stored
+    before the message it answers is in that thread from the start. Built at once or in steps, in either order, the
+    graph is the same."""
+    conversation = [
+        (1, "mira@x.test", ["jo@x.test"], "Practice problems", None, None),
+        (2, "jo@x.test", ["mira@x.test"], "Re: Practice problems", 1, None),
+        (3, "mira@x.test", ["jo@x.test"], "Re: Practice problems", 2, [1, 2]),
+    ]
+
+    def stored(steps):
+        db.execute(text("TRUNCATE source_items, nodes, edges, spine_gc_nodes, spine_gc_edges RESTART IDENTITY CASCADE"))
+        for step in steps:
+            for n, frm, to, title, parent, refs in step:
+                said(db, n, frm, to, title, parent, refs)
+            spine.run(db)
+        legal(db)
+        return snapshot(db)
+
+    at_once = stored([conversation])
+    assert stored([[m] for m in conversation]) == stored([[m] for m in reversed(conversation)]) == at_once
+    assert stored([conversation[1:], conversation[:1]]) == at_once
+    assert threads(db) == dict.fromkeys(("fp-1", "fp-2", "fp-3"), "<1@x.test>")
+
+
+def test_conversations_that_share_a_subject_and_people_stay_apart(db):
+    """Two conversations titled "Exam room" between the same two people, on different days, are two threads; mail
+    without reply headers (Enron) is still grouped by subject and people."""
+    said(db, 1, "mira@x.test", ["ro@x.test"], "Exam room")
+    said(db, 2, "ro@x.test", ["mira@x.test"], "Re: Exam room", parent=1)
+    said(db, 30, "mira@x.test", ["ro@x.test"], "Exam room")
+    said(db, 31, "ro@x.test", ["mira@x.test"], "Re: Exam room", parent=30)
+    mail(db, 50, "ann@x.test", ["bo@x.test"], "Budget")
+    mail(db, 51, "bo@x.test", ["ann@x.test"], "RE: Budget")
+    spine.run(db)
+    assert threads(db) == {"fp-1": "<1@x.test>", "fp-2": "<1@x.test>", "fp-30": "<30@x.test>",
+                           "fp-31": "<30@x.test>", "fp-50": "subject:budget|ann@x.test,bo@x.test",
+                           "fp-51": "subject:budget|ann@x.test,bo@x.test"}
+    legal(db)
+
+
+def test_a_chain_of_in_reply_to_alone_is_one_thread(db):
+    """Some clients write In-Reply-To without References: each reply names only its parent. The chain is one thread
+    however its messages arrive: here the middle one last."""
+    said(db, 3, "ann@x.test", ["bo@x.test"], "Re: Plans", parent=2, references=[])
+    said(db, 1, "ann@x.test", ["bo@x.test"], "Plans")
+    spine.run(db)
+    assert threads(db) == {"fp-3": "<2@x.test>", "fp-1": "subject:plans|ann@x.test,bo@x.test"}
+    said(db, 2, "bo@x.test", ["ann@x.test"], "Re: Plans", parent=1, references=[])
+    spine.run(db)
+    assert threads(db) == dict.fromkeys(("fp-1", "fp-2", "fp-3"), "<1@x.test>")
+    assert edges(db, "REPLIES_TO") == {("fp-2", "fp-1"), ("fp-3", "fp-2")}
+    legal(db)
+
+
+def test_when_its_replies_go_the_first_message_goes_back_to_its_subject_thread(db):
+    """Deleting the replies leaves what a build of the first message alone gives; deleting the first message leaves
+    its replies in the thread its headers name."""
+    said(db, 1, "mira@x.test", ["jo@x.test"], "Practice problems")
+    said(db, 2, "jo@x.test", ["mira@x.test"], "Re: Practice problems", parent=1)
+    said(db, 3, "mira@x.test", ["jo@x.test"], "Re: Practice problems", parent=2, references=[1, 2])
+    spine.run(db)
+    gone(db, "email", "box/3")
+    gone(db, "email", "box/2")
+    spine.run(db)
+    assert threads(db) == {"fp-1": "subject:practice problems|jo@x.test,mira@x.test"}
+    legal(db)
+    said(db, 2, "jo@x.test", ["mira@x.test"], "Re: Practice problems", parent=1)
+    said(db, 3, "mira@x.test", ["jo@x.test"], "Re: Practice problems", parent=2, references=[1, 2])
+    spine.run(db)
+    gone(db, "email", "box/1")
+    spine.run(db)
+    assert threads(db) == {"fp-2": "<1@x.test>", "fp-3": "<1@x.test>"}
+    assert edges(db, "REPLIES_TO") == {("fp-3", "fp-2")}
+    legal(db)
+
+
+def test_a_reply_to_a_gmail_message_joins_its_conversation(db):
+    """Gmail's conversations are Gmail's own; another source's reply to a Gmail message is in that conversation."""
+    said(db, 1, "mira@x.test", ["jo@x.test"], "Trip", source="gmail", gmail_thread_id="t1")
+    said(db, 2, "jo@x.test", ["mira@x.test"], "Re: Trip", parent=1)
+    spine.run(db)
+    assert threads(db) == {"fp-1": "gmail:t1", "fp-2": "gmail:t1"}
+    legal(db)
+
+
 # --- incremental equals at once --------------------------------------------------------------------------------------
 
 CORPUS = [
@@ -711,6 +829,12 @@ CORPUS = [
      "Yes!\n -----Original Message-----\nFrom: Ray, Dee \nSent: Tue 1/7/2025 9:00 AM \nSubject: Lunch\n\nNoon?"),
     ("email", "box/dee/1", {"from": [{"email": "dee@x.test"}], "to": [{"email": "ann@x.test"}],
                             "fingerprint": "fp-8", "x_from": "Ray, Dee"}, "Lunch", 29, "Noon?"),
+    # Mail with reply headers: a conversation's first message stored before its reply.
+    ("email", "box/sent/20", {"from": [{"email": "ann@x.test"}], "to": [{"email": "eve@x.test"}],
+                              "message_id": "<c1@x.test>", "fingerprint": "fp-c1"}, "Exam room", 40, "Which room?"),
+    ("email", "box/inbox/21", {"from": [{"email": "eve@x.test"}], "to": [{"email": "ann@x.test"}],
+                               "message_id": "<c2@x.test>", "in_reply_to": "<c1@x.test>",
+                               "references": ["<c1@x.test>"], "fingerprint": "fp-c2"}, "Re: Exam room", 41, "B12."),
 ]
 
 
@@ -747,8 +871,10 @@ def test_an_incremental_build_equals_one_build_of_the_same_records(db, monkeypat
     # And what the corpus is meant to show is there: copies are one message, replies of every kind, a series.
     assert {(e[0], e[1], e[3]) for e in at_once["edges"] if e[2] == "REPLIES_TO"} == {
         ("fp-g1", "fp-g0", "spine"), ("fp-2", "fp-1", "spine-inferred"), ("fp-3", "fp-2", "spine-quoted"),
-        ("fp-9", "fp-8", "spine-quoted")}
-    assert sum(1 for n in at_once["nodes"] if n[0] == "Message") == 8
+        ("fp-9", "fp-8", "spine-quoted"), ("fp-c2", "fp-c1", "spine")}
+    assert {(e[0], e[1]) for e in at_once["edges"] if e[2] == "IN_THREAD" and e[0].startswith("fp-c")} == {
+        ("fp-c1", "<c1@x.test>"), ("fp-c2", "<c1@x.test>")}
+    assert sum(1 for n in at_once["nodes"] if n[0] == "Message") == 10
 
 
 # --- upgrading a database built before provenance ------------------------------------------------------------------
@@ -819,6 +945,65 @@ def test_an_existing_database_records_support_once_and_sheds_what_nothing_suppor
             assert edges(s, "MEMBER_OF") == {("cy@globex.test", "org:globex")}
             assert s.execute(text("SELECT count(*) FROM spine_gc_nodes")).scalar() == 0
             legal(s)
+    finally:
+        engine.dispose()
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+def test_an_existing_database_threads_each_conversation_once_after_one_run(test_db, monkeypatch):
+    """Migration 0015: a database built when a conversation's first message was keyed by its subject (and its replies
+    by its Message-ID) rebuilds that conversation's records, and only those, into one thread on the next run."""
+    from alembic import command
+    from alembic.config import Config
+    from conftest import API, TEST_DB
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.orm import Session
+
+    from igneous.config import settings
+
+    def by_own_headers(s, rows):  # the spine as it was
+        out = {}
+        for r in rows:
+            meta = r.raw_meta
+            out[r.id] = (f"gmail:{meta['gmail_thread_id']}" if meta.get("gmail_thread_id")
+                         else (meta.get("references") or [None])[0] or meta.get("in_reply_to")
+                         or spine._subject_key(meta, r.title))
+        return out
+
+    name = f"{TEST_DB}_threads"
+    url = make_url(settings.database_url).set(database=name).render_as_string(hide_password=False)
+    admin = create_engine(make_url(settings.database_url).set(database="postgres"), isolation_level="AUTOCOMMIT")
+    config = Config(str(API / "alembic.ini"))
+    config.set_main_option("script_location", str(API / "migrations"))
+    monkeypatch.setattr(settings, "database_url", url)  # migrations/env.py connects to settings.database_url
+    engine = create_engine(url)
+    try:
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+            c.execute(text(f'CREATE DATABASE "{name}"'))
+        command.upgrade(config, "0014")
+        with Session(engine) as s:
+            current = spine.thread_keys
+            monkeypatch.setattr(spine, "thread_keys", by_own_headers)
+            said(s, 1, "mira@x.test", ["jo@x.test"], "Practice problems")
+            said(s, 2, "jo@x.test", ["mira@x.test"], "Re: Practice problems", parent=1)
+            said(s, 3, "jo@x.test", ["mira@x.test"], "Trip", source="gmail", gmail_thread_id="t1")
+            mail(s, 4, "ann@x.test", ["bo@x.test"], "Budget")
+            assert spine.run(s) == 4
+            assert threads(s)["fp-1"] != threads(s)["fp-2"]
+            monkeypatch.setattr(spine, "thread_keys", current)
+        command.upgrade(config, "head")
+        with Session(engine) as s:
+            assert s.execute(text("SELECT external_id FROM source_items WHERE spined_hash IS NULL ORDER BY id")) \
+                .scalars().all() == ["box/1", "box/2"]
+            assert spine.run(s) == 2
+            assert threads(s) == {"fp-1": "<1@x.test>", "fp-2": "<1@x.test>", "fp-3": "gmail:t1",
+                                  "fp-4": "subject:budget|ann@x.test,bo@x.test"}
+            legal(s)
+            assert spine.run(s) == 0
     finally:
         engine.dispose()
         with admin.connect() as c:
