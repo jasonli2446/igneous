@@ -52,7 +52,8 @@ SUMMARY:Holiday at home"""
 def records(data: bytes, file: str = "sam@example.com", chat_user: str | None = None):
     cal = ical.read(data, file)
     report = ical.Report()
-    return {i.external_id: i for i in ical.items([cal], ical.account([cal], chat_user), report)}, report
+    return {i.external_id: i for c in ical.listings([cal], ical.account([cal], chat_user), report)
+            for i in c.items}, report
 
 
 def test_a_weekly_series_is_each_occurrence_keyed_as_the_calendar_api_keys_it():
@@ -83,6 +84,35 @@ def test_a_weekly_series_is_each_occurrence_keyed_as_the_calendar_api_keys_it():
     assert (report.events, report.occurrences, report.notes()) == (2, 5, [])
 
 
+def test_a_repeating_event_is_read_up_to_the_export_and_its_floating_until_in_the_calendars_zone():
+    # The export (Nov 2 2025) holds a weekly meeting with no end: its occurrences stop there, not a forecast after.
+    weekly = """DTSTART:20251006T150000Z
+RRULE:FREQ=WEEKLY
+UID:weekly@google.com
+SUMMARY:Weekly sync"""
+    # Floating times, in the calendar's zone (Los Angeles): UNTIL is 8pm there on Jan 8, so Jan 8 is the last.
+    floating = """DTSTART:20250106T200000
+RRULE:FREQ=DAILY;UNTIL=20250108T200000
+UID:floating@google.com
+SUMMARY:Floating daily"""
+    found, _ = records(calendar(weekly, floating, zone="America/Los_Angeles"))
+    assert sorted(k.rsplit("_", 1)[1] for k in found if "/weekly_" in k) == [
+        f"202510{d}T150000Z" for d in ("06", "13", "20", "27")]
+    assert sorted(k.rsplit("_", 1)[1] for k in found if "/floating_" in k) == [
+        "20250107T040000Z", "20250108T040000Z", "20250109T040000Z"]
+
+
+def test_an_event_that_cannot_be_read_is_counted_and_the_rest_are_kept():
+    broken = """DTSTART:99991231T230000Z
+DURATION:P2D
+RRULE:FREQ=DAILY
+UID:broken@google.com
+SUMMARY:Out of range"""
+    found, report = records(calendar(HOLIDAY, broken))
+    assert list(found) == ["sam@example.com/sam@example.com/xmas2024"]
+    assert report.unreadable == 1 and "couldn't be read" in report.notes()[-1]
+
+
 def test_an_all_day_series_a_rule_without_an_end_and_an_occurrence_alone():
     birthdays = """DTSTART;VALUE=DATE:20200314
 DTEND;VALUE=DATE:20200315
@@ -101,8 +131,8 @@ UID:standup@google.com
 SUMMARY:Their standup"""
     found, _ = records(calendar(birthdays, gym, alone))
     days = sorted(k.rsplit("_", 1)[1] for k in found if "/pi-day_" in k)
-    # Yearly with no end: through a year after the export (Nov 2025), so 2020 to 2026.
-    assert days == [f"{y}0314" for y in range(2020, 2027)]
+    # Yearly with no end: through the export (Nov 2025), so 2020 to 2025.
+    assert days == [f"{y}0314" for y in range(2020, 2026)]
     assert found["sam@example.com/sam@example.com/pi-day_20230314"].occurred_at == datetime(2023, 3, 14, tzinfo=UTC)
     assert sorted(k for k in found if "/gym_" in k) == [f"sam@example.com/sam@example.com/gym_202501{d}T120000Z"
                                                         for d in ("06", "13", "20")]
@@ -120,17 +150,30 @@ ORGANIZER;CN=Kim Ito:mailto:kim@example.org
 UID:040000008200E00074C5B7101A82E008000000001
 SUMMARY:Vendor call"""
     # A secondary calendar is the organizer of its own events: its id is known, the account isn't (no calendar named
-    # by a person's address, no Chat export).
+    # by a person's address, no Chat export), and the note says that is why.
     found, report = records(calendar(work, outlook, name="Work"), file="Work")
     assert sorted(found) == ["takeout/Work/040000008200E00074C5B7101A82E008000000001", "takeout/Work/review"]
     assert found["takeout/Work/review"].raw_meta["calendar_id"] == "abc123xyz@group.calendar.google.com"
-    assert report.unkeyed == {"Work": 2} and "Work" in report.notes()[0]
+    assert (report.no_account, report.no_id) == ({"Work": 2}, {})
+    assert report.notes()[0].startswith("The export doesn't say whose calendars these are") and "Work (2)" in report.notes()[0]
+    # The account known, a calendar that names no address of its own: its id is what's missing.
+    trips = """DTSTART:20250312T150000Z
+ORGANIZER;CN=Kim Ito:mailto:kim@example.org
+UID:trip@google.com
+SUMMARY:Flight"""
+    found, report = records(calendar(trips, name="Trips"), file="Trips", chat_user="sam@example.com")
+    assert list(found) == ["takeout/Trips/trip"] and report.no_id == {"Trips": 1}
+    assert report.notes() == ["The export doesn't name the address of the calendar Trips, so its events (1) are keyed "
+                              "by the export: syncing Google Calendar later stores its own record of each (still one "
+                              "event in the graph)."]
     # With the account known (Chat's export names you), the secondary calendar is keyed as the API keys it; the event
     # from another calendar program keeps its own UID, and is said.
     found, report = records(calendar(work, outlook, name="Work"), file="Work", chat_user="sam@example.com")
     assert sorted(found) == ["sam@example.com/abc123xyz@group.calendar.google.com/040000008200E00074C5B7101A82E008000000001",
                              "sam@example.com/abc123xyz@group.calendar.google.com/review"]
-    assert report.foreign == 1 and "other calendar programs" in report.notes()[0]
+    assert report.foreign == 1 and report.notes() == [
+        "Events from other calendar programs carry no Google event id (1): those a Google Calendar sync lists later "
+        "are stored under its own ids, in place of the export's."]
     for item in found.values():
         assert item.raw_meta["event_key"].startswith("gcal:") and item.raw_meta["account"] == "sam@example.com"
 
@@ -145,6 +188,12 @@ def test_content_lines_unfold_unescape_and_read_vcard_21():
     assert contentlines.split(card.first("N").value) == ["Lee, Jr.", "Jordan", "", "", ""]
     assert card.text("NOTE") == "café"
     assert contentlines.parse_line('ATTENDEE;CN="Lee, Jordan":mailto:j@x.com').param("CN") == "Lee, Jordan"
+    # vCard 2.1's bare QUOTED-PRINTABLE is an encoding, not a type; a CHARSET nobody knows reads as UTF-8.
+    bare = contentlines.parse_line("N;CHARSET=UTF-8;QUOTED-PRINTABLE:Caf=C3=A9;Jos=C3=A9")
+    assert (bare.value, bare.types()) == ("Café;José", set())
+    tel = contentlines.parse_line("TEL;CELL;QUOTED-PRINTABLE:555=2D0100")
+    assert (tel.value, tel.types()) == ("555-0100", {"cell"})
+    assert contentlines.parse_line("NOTE;ENCODING=QUOTED-PRINTABLE;CHARSET=X-NOPE:caf=C3=A9").value == "café"
 
 
 def test_a_calendar_sync_later_updates_the_exported_events_instead_of_adding_them(db):
@@ -155,7 +204,8 @@ def test_a_calendar_sync_later_updates_the_exported_events_instead_of_adding_the
         name = "takeout"
 
         def sync(self, cursor):
-            yield from ical.items([cal], ical.account([cal]))
+            for listing in ical.listings([cal], ical.account([cal])):
+                yield from listing.items
 
     first = run_sync(db, Export())
     assert run_sync(db, Export()) == {**first, "inserted": 0, "unchanged": first["inserted"]}  # the same file again

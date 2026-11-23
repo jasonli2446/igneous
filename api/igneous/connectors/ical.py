@@ -1,4 +1,5 @@
-"""Google Calendar's iCalendar export (Google Takeout's Calendar/*.ics) read as Google Calendar events.
+"""Google Calendar's iCalendar export (Google Takeout's Calendar/*.ics, or a calendar file given on its own) read as
+Google Calendar events.
 
 Every occurrence of an event is one record, keyed and shaped as connectors/gcal.py stores it from the Calendar API:
 source `gcal`, external id `<account>/<calendar id>/<event id>`, where an occurrence of a repeating event is
@@ -6,6 +7,11 @@ source `gcal`, external id `<account>/<calendar id>/<event id>`, where an occurr
 the same Google account later and syncing Google Calendar updates these records instead of storing every event again,
 and in the graph a repeating event is one Event (its `event_key`: "gcal:" and the iCalendar UID, which the API calls
 iCalUID), its occurrences the records behind it. Each record says it came from the export (`product`: Calendar).
+
+An export is each calendar as it was when it was exported (Google stamps every event with that time): a repeating
+event's occurrences are the ones up to then, not a forecast of the ones still to come. Each calendar is one `Listing`:
+all its records, under the external-id prefix they share (its scope), and when it was exported, so the importer can
+tell which stored records a newer export no longer holds (connectors/takeout.py).
 
 What the export doesn't name, and how such an event is keyed instead:
 - The account and a calendar's id. Takeout names each file after its calendar (X-WR-CALNAME too), and an account's
@@ -15,17 +21,15 @@ What the export doesn't name, and how such an event is keyed instead:
 - Google's event id. A Google event's UID is `<event id>@google.com`; an event that came from another calendar program
   keeps that program's UID, and Google's id for it isn't in the export.
 An event whose account, calendar id or event id isn't known is keyed `takeout/<calendar name>/<UID>` (or
-`<account>/<calendar id>/<UID>`): syncing Google Calendar later stores its own record of it too, and the graph still
-shows both as one Event, keyed by the UID. The import's notes say which calendars and how many events.
+`<account>/<calendar id>/<UID>`), and the import's notes say which calendars and how many events.
 
 Repeating events are expanded as the API expands them: RRULE, RDATE and EXDATE, and the occurrences moved, changed or
-cancelled one by one (a VEVENT with RECURRENCE-ID). A rule without an end stops a year after the export (AHEAD), so a
-weekly meeting set to repeat forever doesn't fill the store with years that haven't happened. Times are UTC, a TZID
-(an IANA zone, as Google writes them) or floating times in the calendar's X-WR-TIMEZONE; all-day events are dates.
+cancelled one by one (a VEVENT with RECURRENCE-ID). Times are UTC, a TZID (an IANA zone, as Google writes them) or
+floating times in the calendar's X-WR-TIMEZONE; all-day events are dates. An event whose dates or rule can't be read is
+left out and counted, never the end of the import.
 """
 import re
 from collections import deque
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -36,7 +40,6 @@ from igneous.connectors import contentlines
 from igneous.connectors.base import SourceItem
 from igneous.connectors.contentlines import Component, Prop, address
 
-AHEAD = timedelta(days=365)  # how far past the export a repeating event with no end is expanded
 MAX_OCCURRENCES = 3660       # per event, the latest kept: ten years of a daily reminder
 GOOGLE_UID = "@google.com"
 # Calendars that belong to no account: groups, imported and subscribed calendars (holidays, birthdays).
@@ -46,6 +49,9 @@ SHARED_CALENDAR = re.compile(r"@(group|import|group\.v)\.calendar\.google\.com$"
 MEET_BLOCK = re.compile(r"-::~:~::~[:~]*::-.*?-::~:~::~[:~]*::-", re.S)
 RESPONSE = {"ACCEPTED": "accepted", "DECLINED": "declined", "TENTATIVE": "tentative", "NEEDS-ACTION": "needsAction",
             "DELEGATED": "needsAction"}
+# What reading one event can raise on input nobody foresaw (a year out of range, a rule dateutil rejects late): the
+# event is left out and counted.
+UNREADABLE = (ValueError, TypeError, KeyError, OverflowError)
 
 
 @dataclass
@@ -55,7 +61,16 @@ class Calendar:
     id: str | None
     zone: str | None
     events: list[Component] = field(default_factory=list)
-    exported: datetime | None = None  # when it was exported (Google stamps every event then): where AHEAD counts from
+    exported: datetime | None = None  # when it was exported (Google stamps every event then)
+
+
+@dataclass
+class Listing:
+    """One calendar's records as of its export: every record's external id is `<scope>/<event or occurrence id>`."""
+    name: str
+    scope: str
+    exported: datetime
+    items: list[SourceItem]
 
 
 def _zone(tzid: str | None) -> ZoneInfo | None:
@@ -89,6 +104,14 @@ def _moments(prop: Prop, default_zone: str | None) -> list[tuple[datetime, bool]
     return out
 
 
+def _utc(m: datetime) -> datetime | None:
+    """The moment in UTC (a naive one read as UTC), or None when it lies outside the years Python can hold."""
+    try:
+        return m.astimezone(UTC) if m.tzinfo else m.replace(tzinfo=UTC)
+    except OverflowError:
+        return None
+
+
 def _moment(prop: Prop | None, default_zone: str | None) -> tuple[datetime, bool] | None:
     found = _moments(prop, default_zone) if prop is not None else []
     return found[0] if found else None
@@ -101,21 +124,32 @@ def _like(when: datetime, start: datetime) -> datetime:
     return when if when.tzinfo else when.replace(tzinfo=start.tzinfo)
 
 
+def _until(value: str, start: datetime) -> datetime | None:
+    """An RRULE's UNTIL, comparable with `start`: a date is through the end of that day, a UTC time is that moment, and
+    a floating time is in the start's zone (RFC 5545 writes UNTIL floating only when DTSTART is). None if unreadable."""
+    value = value.strip()
+    try:
+        if re.fullmatch(r"\d{8}", value):
+            end = datetime.strptime(value, "%Y%m%d") + timedelta(days=1, microseconds=-1)
+        elif m := re.fullmatch(r"(\d{8}T\d{6})(Z?)", value):
+            end = datetime.strptime(m.group(1), "%Y%m%dT%H%M%S")
+            if m.group(2):
+                return _like(end.replace(tzinfo=UTC), start)
+        else:
+            return None
+    except ValueError:
+        return None
+    return end if start.tzinfo is None else end.replace(tzinfo=start.tzinfo)
+
+
 def _rule(text: str, start: datetime):
-    """An RRULE starting at `start`. UNTIL is read here, because dateutil only takes one as aware as DTSTART: a date
-    means through that day, a floating time is in the start's zone, and with COUNT it is ignored (RFC 5545 allows only
-    one of them)."""
+    """An RRULE starting at `start`. UNTIL is read here (`_until`), because dateutil only takes one as aware as
+    DTSTART; with COUNT it is ignored (RFC 5545 allows only one of them)."""
     parts = [p for p in text.strip().removeprefix("RRULE:").split(";") if p]
     until = next((p.split("=", 1)[1] for p in parts if p.upper().startswith("UNTIL=")), None)
     rule = rrulestr(";".join(p for p in parts if not p.upper().startswith("UNTIL=")), dtstart=start)
-    if until and not any(p.upper().startswith("COUNT=") for p in parts):
-        found = _moment(Prop("UNTIL", {}, until), None)
-        if found:
-            end, all_day = found
-            if all_day:
-                end += timedelta(days=1, microseconds=-1)
-                end = end if start.tzinfo is None else end.replace(tzinfo=start.tzinfo)
-            rule = rule.replace(until=_like(end, start))
+    if until and not any(p.upper().startswith("COUNT=") for p in parts) and (end := _until(until, start)):
+        rule = rule.replace(until=end)
     return rule
 
 
@@ -141,8 +175,8 @@ def read(data: bytes | str, name: str) -> Calendar | None:
     # when its events were last changed, or when they start.
     found: list[datetime] = []
     for stamp in (("DTSTAMP",), ("LAST-MODIFIED", "CREATED"), ("DTSTART",)):
-        found = [m.astimezone(UTC) if m.tzinfo else m.replace(tzinfo=UTC)
-                 for e in events for p in e.props if p.name in stamp for m, _ in _moments(p, None)]
+        found = [t for e in events for p in e.props if p.name in stamp for m, _ in _moments(p, None)
+                 if (t := _utc(m)) is not None]
         if found:
             break
     return Calendar(title, calendar_id([title, name], events), cal.text("X-WR-TIMEZONE") or None, events,
@@ -174,50 +208,78 @@ def account(calendars: list[Calendar], chat_user: str | None = None) -> str | No
 class Report:
     events: int = 0          # events read (a repeating one is one)
     occurrences: int = 0     # records made
-    unkeyed: dict[str, int] = field(default_factory=dict)  # calendar -> its events keyed by the export
+    no_account: dict[str, int] = field(default_factory=dict)  # calendar -> its events, keyed by the export: no account
+    no_id: dict[str, int] = field(default_factory=dict)  # calendar -> its events, keyed by the export: no calendar id
     foreign: int = 0         # events from other calendar programs (no Google event id), on calendars keyed by Google
     cut: list[str] = field(default_factory=list)  # repeating events with more than MAX_OCCURRENCES
+    unreadable: int = 0      # events left out: their dates or rule couldn't be read
 
     def notes(self) -> list[str]:
-        out = [f"The export doesn't name the address of the calendar {name}, so its events ({n}) are keyed by the "
-               "export: syncing Google Calendar later stores its own record of each (still one event in the graph)."
-               for name, n in sorted(self.unkeyed.items())]
+        later = "syncing Google Calendar later stores its own record of each (still one event in the graph)."
+        out = []
+        if self.no_account:
+            out.append(f"The export doesn't say whose calendars these are (Google Chat's export would name you, as would "
+                       f"a calendar named by your address), so the events of {', '.join(sorted(self.no_account))} "
+                       f"({sum(self.no_account.values())}) are keyed by the export: {later}")
+        out += [f"The export doesn't name the address of the calendar {name}, so its events ({n}) are keyed by the "
+                f"export: {later}" for name, n in sorted(self.no_id.items())]
         if self.foreign:
-            out.append(f"Events from other calendar programs carry no Google event id ({self.foreign}): syncing Google "
-                       "Calendar later stores its own record of each (still one event in the graph).")
+            out.append(f"Events from other calendar programs carry no Google event id ({self.foreign}): those a Google "
+                       "Calendar sync lists later are stored under its own ids, in place of the export's.")
         out += [f"{title} repeats more than {MAX_OCCURRENCES:,} times; its latest {MAX_OCCURRENCES:,} are kept."
                 for title in self.cut]
+        if self.unreadable:
+            out.append(f"Events whose dates or repeat rule couldn't be read were left out ({self.unreadable}).")
         return out
 
 
-def items(calendars: list[Calendar], owner: str | None, report: Report | None = None) -> Iterator[SourceItem]:
-    """Every occurrence of every event, as Google Calendar records (gcal), in time order within each calendar."""
+def listings(calendars: list[Calendar], owner: str | None, report: Report | None = None) -> list[Listing]:
+    """Each calendar's records: every occurrence of every event up to the calendar's export, as Google Calendar
+    records (gcal), in time order. A calendar without a single event has no listing: nothing says when it was
+    exported."""
     report = report if report is not None else Report()
+    out = []
     for cal in calendars:
+        if cal.exported is None:
+            continue
         keyed = bool(owner and cal.id)
-        prefix = f"{owner}/{cal.id}" if keyed else f"takeout/{cal.name}"
-        horizon = (cal.exported or datetime.now(UTC)) + AHEAD
+        scope = f"{owner}/{cal.id}" if keyed else f"takeout/{cal.name}"
         masters: dict[str, Component] = {}
         changed: dict[str, dict] = {}  # UID -> an occurrence's original start -> the VEVENT that replaces it
         for e in cal.events:
             uid = e.text("UID")
-            if rid := _moment(e.first("RECURRENCE-ID"), cal.zone):
-                changed.setdefault(uid, {})[_original(*rid)] = e
+            try:
+                rid = _moment(e.first("RECURRENCE-ID"), cal.zone)
+                original = _original(*rid) if rid else None
+            except UNREADABLE:
+                report.unreadable += 1
+                continue
+            if original is not None:
+                changed.setdefault(uid, {})[original] = e
             else:
                 masters.setdefault(uid, e)
         rows: list[tuple[datetime, str, SourceItem]] = []
         for uid in sorted(set(masters) | set(changed)):
-            report.events += 1
             google = uid.lower().endswith(GOOGLE_UID)
+            event = _Event(cal, uid, f"{scope}/{uid[:-len(GOOGLE_UID)] if google else uid}", scope, owner)
+            try:
+                found, cut = event.records(masters.get(uid), changed.get(uid, {}), cal.exported)
+            except UNREADABLE:
+                report.unreadable += 1
+                continue
+            report.events += 1
+            if cut:
+                report.cut.append(event.title(masters.get(uid)))
             if not keyed:
-                report.unkeyed[cal.name] = report.unkeyed.get(cal.name, 0) + 1
+                unkeyed = report.no_id if owner else report.no_account
+                unkeyed[cal.name] = unkeyed.get(cal.name, 0) + 1
             elif not google:
                 report.foreign += 1
-            event = _Event(cal, uid, f"{prefix}/{uid[:-len(GOOGLE_UID)] if google else uid}", prefix, owner)
-            rows += event.records(masters.get(uid), changed.get(uid, {}), horizon, report)
-        for _start, _id, item in sorted(rows, key=lambda r: (r[0], r[1])):
-            report.occurrences += 1
-            yield item
+            rows += found
+        items = [item for _start, _id, item in sorted(rows, key=lambda r: (r[0], r[1]))]
+        report.occurrences += len(items)
+        out.append(Listing(cal.name, scope, cal.exported, items))
+    return out
 
 
 @dataclass
@@ -227,41 +289,46 @@ class _Event:
     cal: Calendar
     uid: str
     key: str
-    prefix: str
+    scope: str
     owner: str | None
 
-    def records(self, master: Component | None, changed: dict, horizon: datetime,
-                report: Report) -> list[tuple[datetime, str, SourceItem]]:
-        """(when it starts, external id, record) for a single event, or for each occurrence of a repeating one."""
+    def title(self, master: Component | None) -> str:
+        return (master.text("SUMMARY") if master is not None else "") or "(no title)"
+
+    def records(self, master: Component | None, changed: dict,
+                horizon: datetime) -> tuple[list[tuple[datetime, str, SourceItem]], bool]:
+        """(when it starts, external id, record) for a single event, whenever it is, or for each occurrence of a
+        repeating one up to `horizon` (the export); and whether it repeats more than MAX_OCCURRENCES times by then."""
         zone = self.cal.zone
         if master is not None and master.text("STATUS").upper() == "CANCELLED":
-            return []
+            return [], False
         found = _moment(master.first("DTSTART"), zone) if master is not None else None
         if master is not None and not (master.all("RRULE") or master.all("RDATE") or changed):
             if not found:
-                return []
+                return [], False
             start, all_day = found
-            return [self._record(master, self.key, start, _end(master, start, all_day, zone), all_day, False)]
+            return [self._record(master, self.key, start, _end(master, start, all_day, zone), all_day, False)], False
         # As the API names a series: its event id (iCalUID only for a single event).
-        series = self.key.removeprefix(self.prefix + "/")
-        out = []
+        series = self.key.removeprefix(self.scope + "/")
+        out, cut = [], False
         if found:
             start, all_day = found
             length = _end(master, start, all_day, zone) - start
-            for when in _occurrences(master, start, all_day, zone, horizon, report):
+            occurrences, cut = _occurrences(master, start, all_day, zone, horizon)
+            for when in occurrences:
                 iid = f"{self.key}_{_suffix(when, all_day)}"
                 replaced = changed.pop(_original(when, all_day), None)
                 if replaced is None:
                     out.append(self._record(master, iid, when, when + length, all_day, True, series))
                 elif moved := _changed(replaced, zone):
                     out.append(self._record(replaced, iid, *moved, True, series))
-        # Occurrences changed on their own whose original start the rule doesn't give: the rule changed since, or the
-        # export holds only the occurrence you were invited to.
+        # Occurrences changed on their own whose original start the rule doesn't give (the rule changed since, or the
+        # export holds only the occurrence you were invited to), up to the export like the rest.
         for replaced in changed.values():
             rid = _moment(replaced.first("RECURRENCE-ID"), zone)
-            if rid and (moved := _changed(replaced, zone)):
+            if rid and rid[0] <= _like(horizon, rid[0]) and (moved := _changed(replaced, zone)):
                 out.append(self._record(replaced, f"{self.key}_{_suffix(*rid)}", *moved, True, series))
-        return out
+        return out, cut
 
     def _record(self, e: Component, external_id: str, start: datetime, end: datetime, all_day: bool,
                 recurring: bool, series: str | None = None) -> tuple[datetime, str, SourceItem]:
@@ -289,7 +356,7 @@ class _Event:
             mime="text/calendar",
             raw_meta={"calendar": self.cal.name, "calendar_id": self.cal.id, "attendees": attendees,
                       "organizer": organizer, "start": when(start), "end": when(end), "account": self.owner,
-                      "series_key": f"{self.prefix}/{series or self.uid}", "recurring": recurring,
+                      "series_key": f"{self.scope}/{series or self.uid}", "recurring": recurring,
                       "event_key": f"gcal:{self.uid}", "product": "Calendar"})
         return at, external_id, item
 
@@ -329,10 +396,11 @@ def _changed(e: Component, zone: str | None) -> tuple[datetime, datetime, bool] 
     return start, _end(e, start, all_day, zone), all_day
 
 
-def _occurrences(master: Component, start: datetime, all_day: bool, zone: str | None, horizon: datetime,
-                 report: Report) -> list[datetime]:
-    """The original start of every occurrence up to `horizon` (the latest MAX_OCCURRENCES). DTSTART is always one, as
-    RFC 5545 says. A rule that can't be read is skipped: the event keeps its first occurrence and its RDATEs."""
+def _occurrences(master: Component, start: datetime, all_day: bool, zone: str | None,
+                 horizon: datetime) -> tuple[list[datetime], bool]:
+    """The original start of every occurrence up to `horizon` (the latest MAX_OCCURRENCES), and whether there were
+    more. DTSTART is always one, as RFC 5545 says. A rule that can't be read is skipped: the event keeps its first
+    occurrence and its RDATEs."""
     rset = rruleset()
     rset.rdate(start)
     for p in master.all("RRULE"):
@@ -354,6 +422,4 @@ def _occurrences(master: Component, start: datetime, all_day: bool, zone: str | 
             break
         kept.append(when)
         seen += 1
-    if seen > MAX_OCCURRENCES:
-        report.cut.append(master.text("SUMMARY") or "(no title)")
-    return list(kept)
+    return list(kept), seen > MAX_OCCURRENCES
