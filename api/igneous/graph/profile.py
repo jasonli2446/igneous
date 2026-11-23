@@ -251,7 +251,6 @@ def run(s: Session, log=print) -> dict:
     # Organizations an older reading of your resume made that nothing points at any more.
     s.execute(text("""DELETE FROM nodes n WHERE n.type = 'Organization' AND n.props->>'named_by' = 'profile'
                       AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id OR e.dst = n.id)"""))
-    s.commit()
     stats = {"documents": used, "orgs": len(orgs), "schools": len(schools), "projects": len(projects)}
     if log:
         log(json.dumps(stats))

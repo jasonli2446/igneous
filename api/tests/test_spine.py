@@ -48,7 +48,7 @@ def edges(s, type_):
 def legal(s):
     from igneous.graph import resolve
 
-    resolve.refresh_canonical(s, commit=False)
+    resolve.refresh_canonical(s)
     assert [v.as_dict() for v in invariants.check_graph(s)] == []
 
 

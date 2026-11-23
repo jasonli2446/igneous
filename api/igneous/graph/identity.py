@@ -30,3 +30,14 @@ def members(s: Session, node_id: int) -> list[int]:
     ids = s.execute(text(f"SELECT node_id FROM canonical WHERE canonical_id = {head_sql(':id')}"),
                     {"id": node_id}).scalars().all()
     return sorted({node_id, *ids})
+
+
+def card_keys(meta: dict) -> list[str]:
+    """The Person keys a contact card (raw_meta of a gcontacts or maccontacts item) names, each once: its addresses
+    lowercased, as mail addresses are keyed, and its phone numbers normalized the way phone handles are keyed, so
+    '(614) 555-0199' finds +16145550199."""
+    from igneous.connectors.mac_contacts import norm_phone
+
+    keys = [e.strip().lower() for e in meta.get("emails") or [] if e and e.strip()]
+    keys += [norm_phone(p) or p for p in meta.get("phones") or [] if p]
+    return list(dict.fromkeys(keys))

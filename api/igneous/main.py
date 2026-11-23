@@ -314,7 +314,8 @@ def get_job(job_id: str, s: Session = Depends(get_session)):
 
 @app.post("/pipeline/run")
 def run_pipeline():
-    """Build the graph from whatever is new (spine, chunk, embed, topics, entities, self, resolve; not extract)."""
+    """Rebuild as a background job: every pipeline stage except extract (igneous/pipeline.py), the derived graph
+    published at once at the end; poll /jobs/{id} for the stage, step and counts."""
     return _start_job("pipeline", "pipeline", sources.run_pipeline)
 
 
@@ -456,7 +457,7 @@ def graph_view(seed: int | None = None, per: int = Query(6, le=20), s: Session =
             raise HTTPException(404, "No owner: no source says which person is you yet (your Google account, your "
                                      "Messages, a mail archive with one owner, your LinkedIn export). Pass a seed.")
     # Ranking every relationship takes seconds on a large mailbox; the result only changes when the graph does,
-    # so cache it per (seed, per) and graph version (bumped by every pipeline stage that changes the graph).
+    # so cache it per (seed, per) and graph version (bumped once per published rebuild and by every correction).
     from igneous.graph import dirty
     key = (seed, per, dirty.version(s))
     hit = _VIEW_CACHE.get(key)

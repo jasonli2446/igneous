@@ -56,6 +56,54 @@ def test_downgrading_to_base_and_upgrading_again_gives_the_fresh_schema(test_db,
         admin.dispose()
 
 
+def test_organizations_keyed_by_company_name_converge_on_one_node_each(test_db, monkeypatch):
+    """Migration 0009: company:<slug> (contact cards) and name:<slug> (model mentions) become org:<slug>, merging into
+    an org: node that already exists; changes pending in the old shared flag carry over to entity resolution."""
+    from alembic import command
+    from alembic.config import Config
+
+    name = f"{TEST_DB}_orgkeys"
+    url = make_url(settings.database_url).set(database=name).render_as_string(hide_password=False)
+    admin = create_engine(make_url(settings.database_url).set(database="postgres"), isolation_level="AUTOCOMMIT")
+    config = Config(str(API / "alembic.ini"))
+    config.set_main_option("script_location", str(API / "migrations"))
+    monkeypatch.setattr(settings, "database_url", url)  # migrations/env.py connects to settings.database_url
+    try:
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+            c.execute(text(f'CREATE DATABASE "{name}"'))
+        command.upgrade(config, "0008")
+        engine = create_engine(url)
+        with engine.begin() as c:
+            ids = dict(c.execute(text("""
+                INSERT INTO nodes (type, key, name) VALUES ('Person', 'sam@x.test', 'Sam'), ('Message', 'm1', 'Hi'),
+                    ('Organization', 'company:acme-inc', 'Acme Inc'), ('Organization', 'name:acme-inc', 'Acme, Inc.'),
+                    ('Organization', 'org:globex', 'Globex'), ('Organization', 'company:globex', 'Globex')
+                RETURNING key, id""")).all())
+            c.execute(text("""
+                INSERT INTO edges (src, dst, type, extractor) VALUES
+                    (:sam, :acme_card, 'WORKED_AT', 'organizations'), (:m1, :acme_mention, 'MENTIONS', 'llm-extract'),
+                    (:sam, :globex_card, 'WORKED_AT', 'organizations')"""),
+                      {"sam": ids["sam@x.test"], "m1": ids["m1"], "acme_card": ids["company:acme-inc"],
+                       "acme_mention": ids["name:acme-inc"], "globex_card": ids["company:globex"]})
+            c.execute(text("INSERT INTO dirty_rebuild VALUES (true)"))
+        command.upgrade(config, "head")
+        with engine.connect() as c:
+            orgs = c.execute(text("SELECT key FROM nodes WHERE type = 'Organization' ORDER BY key")).scalars().all()
+            links = c.execute(text("""SELECT a.key, e.type, b.key FROM edges e JOIN nodes a ON a.id = e.src
+                                      JOIN nodes b ON b.id = e.dst ORDER BY 1, 2, 3""")).all()
+            pending = c.execute(text("SELECT stage FROM pipeline_changes")).scalars().all()
+        engine.dispose()
+        assert orgs == ["org:acme-inc", "org:globex"]
+        assert [tuple(r) for r in links] == [("m1", "MENTIONS", "org:acme-inc"), ("sam@x.test", "WORKED_AT", "org:acme-inc"),
+                                             ("sam@x.test", "WORKED_AT", "org:globex")]
+        assert pending == ["resolve"]
+    finally:
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
 def test_schema_status_is_none_at_head(test_db):
     assert dbm.schema_status() is None
 

@@ -121,41 +121,48 @@ def test_check_graph_reports_what_the_spine_never_builds(db):
 
     phantom = node("Message", "<never-ingested@x.test>")       # a reply parent no record holds, in no thread
     a, b = node("Person", "a@x.test"), node("Person", "b@x.test")
-    backwards = edge(b, a, "SAME_AS", "er")                     # stored src > dst, and canonical never formed
+    backwards = edge(b, a, "SAME_AS", "user")                   # stored src > dst, and canonical never formed
     unsupported = edge(a, phantom, "SENT")                      # a spine edge no record supports
     _put(db, "myspace", "1", "?", {})                           # a source the catalog doesn't know
     assert _codes(db) == sorted([
-        ("canonical_missing", a), ("canonical_missing", b), ("message_without_thread", phantom),
-        ("phantom_message", phantom), ("same_as_malformed", backwards), ("spine_edge_unsupported", unsupported),
-        ("unknown_source", None)])
+        ("canonical_split", backwards), ("message_without_thread", phantom), ("phantom_message", phantom),
+        ("same_as_malformed", backwards), ("spine_edge_unsupported", unsupported), ("unknown_source", None)])
 
 
 def test_canonical_must_be_the_clusters_same_as_forms(db):
     from igneous.graph import resolve
 
-    def person(key, name):
-        return db.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Person', :k, :n) RETURNING id"),
-                          {"k": key, "n": name}).scalar_one()
+    def person(key, name, props=None):
+        return db.execute(text("INSERT INTO nodes (type, key, name, props) VALUES ('Person', :k, :n, "
+                               "CAST(:p AS jsonb)) RETURNING id"),
+                          {"k": key, "n": name, "p": json.dumps(props or {})}).scalar_one()
 
     def link(a, b, extractor):
         return db.execute(text("INSERT INTO edges (src, dst, type, extractor) VALUES (:a, :b, 'SAME_AS', :x) "
                                "RETURNING id"), {"a": min(a, b), "b": max(a, b), "x": extractor}).scalar_one()
 
+    me, mine, mo = person("me", "Me", {"self": True}), person("mo@x.test", "Mo Self"), person("mo@y.test", "Mo Self")
     liz, larry, taylor = person("liz@x.test", "Liz Taylor"), person("larry@x.test", "Larry Taylor"), \
-        person("taylor@x.test", "Taylor")
+        person("taylor@x.test", "T Taylor")
     jo, jo2 = person("jo@x.test", "Jo Park"), person("jpark@x.test", "Jo Park")
+    ann, ann2 = person("ann@x.test", "Ann Lee"), person("ann@y.test", "Ann Lee")
+    db.execute(text("""INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, source)
+                       VALUES ('Person:ann@x.test', 'Person:ann@y.test', 'SAME_AS', 'er', '', 'drop', 'user')"""))
+    link(me, mine, "self")
     link(liz, taylor, "er")
-    refused = link(larry, taylor, "er")   # would put Liz and Larry in one cluster: resolution refuses it
     link(jo, jo2, "user")
-    resolve.refresh_canonical(db, commit=False)
-    assert _codes(db) == []               # canonical is exactly what SAME_AS forms, refusals included
+    refused = [link(larry, taylor, "er"),  # would put Liz and Larry in one cluster
+               link(mine, mo, "er"),       # scoring never adds anyone to your own cluster
+               link(ann, ann2, "er")]      # you said they are two people
+    resolve.refresh_canonical(db)
+    assert _codes(db) == []                # canonical is exactly what SAME_AS forms, refusals included
 
     db.execute(text("DELETE FROM canonical WHERE node_id = :n"), {"n": jo2})
-    db.execute(text("UPDATE canonical SET canonical_id = :n WHERE node_id = :n"), {"n": jo2})
-    db.execute(text("INSERT INTO canonical (node_id, canonical_id) VALUES (:n, :n)"), {"n": jo2})
     trusted = db.execute(text("SELECT id FROM edges WHERE extractor = 'user'")).scalar_one()
-    assert ("canonical_split", trusted) in _codes(db)       # a link you stated, kept apart
-    assert ("canonical_split", refused) not in _codes(db)
+    assert ("canonical_split", trusted) in _codes(db)  # a link you stated, kept apart
+    assert not {("canonical_split", r) for r in refused} & set(_codes(db))
+    db.execute(text("DELETE FROM edge_verdicts"))
+    assert ("canonical_split", refused[2]) in _codes(db)  # without your verdict, scoring would have joined them
 
 
 def test_replies_thread_violations_include_edge_endpoints():

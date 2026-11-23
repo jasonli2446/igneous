@@ -104,7 +104,8 @@ def restore_unlink(s: Session, data: dict | None) -> None:
 
 
 def apply(s: Session) -> int:
-    """Replay every override. Idempotent; runs last in every entities rebuild and after each correction."""
+    """Replay every override. Idempotent; runs in the pipeline's last step (corrections) and after each correction.
+    Bumps nothing: whoever publishes the change bumps the graph version."""
     p = plan(load(s))
 
     # Back to the derived state first, so a removed rename or hide really disappears.
@@ -148,6 +149,4 @@ def apply(s: Session) -> int:
             s.execute(text("""
                 DELETE FROM edges WHERE src = :m AND dst = :p AND extractor = :x AND type IN ('PART_OF', 'INVOLVED_IN')
             """), {"m": ids[m], "p": ids[k], "x": EXTRACTOR})
-    from igneous.graph import dirty
-    dirty.touch(s)
     return len(p.merges) + len(p.renames) + len(p.hidden) + len(p.unlinks)

@@ -1,7 +1,8 @@
 """HTTP surface for derived entities (Projects): the inspector's read model and its corrections.
 
 Reads: GET /graph/entity/{id}. Corrections: POST /graph/entity/{id}/rename|hide|merge|unlink, each stored in
-`overrides` (graph/overrides.py) and applied immediately; DELETE /overrides/{id} undoes one.
+`overrides` (graph/overrides.py) and applied immediately; DELETE /overrides/{id} undoes one. Every correction waits
+for a rebuild that is publishing (pipeline.hold_off_publishing), so it lands on the graph that rebuild published.
 """
 import json
 
@@ -10,11 +11,21 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous import pipeline
 from igneous.db import get_session
-from igneous.graph import entities, overrides
+from igneous.graph import dirty, overrides
 
 router = APIRouter()
 MEMBER_TYPES = ("Person", "Thread", "Event", "Message", "File", "Folder")
+
+
+def correction_session(s: Session = Depends(get_session)) -> Session:
+    """The session of a correction: no rebuild publishes until it commits (503 while one keeps publishing)."""
+    try:
+        pipeline.hold_off_publishing(s)
+    except pipeline.PublishBusy as e:
+        raise HTTPException(503, str(e)) from e
+    return s
 
 
 def _project(s: Session, node_id: int) -> dict:
@@ -93,12 +104,13 @@ class UnlinkBody(BaseModel):
 def _commit(s: Session, op: str, keys: list[str], value: str | None = None, data: dict | None = None) -> dict:
     oid = overrides.add(s, op, keys, value, data)
     overrides.apply(s)
+    dirty.touch(s)
     s.commit()
     return {"override_id": oid, "op": op}
 
 
 @router.post("/graph/entity/{node_id}/rename")
-def rename(node_id: int, body: RenameBody, s: Session = Depends(get_session)):
+def rename(node_id: int, body: RenameBody, s: Session = Depends(correction_session)):
     p = _project(s, node_id)
     name = body.name.strip()
     if not name:
@@ -107,13 +119,13 @@ def rename(node_id: int, body: RenameBody, s: Session = Depends(get_session)):
 
 
 @router.post("/graph/entity/{node_id}/hide")
-def hide(node_id: int, s: Session = Depends(get_session)):
+def hide(node_id: int, s: Session = Depends(correction_session)):
     _project(s, node_id)
     return {**_commit(s, "hide", [_key(s, node_id)]), "id": node_id}
 
 
 @router.post("/graph/entity/{node_id}/merge")
-def merge(node_id: int, body: MergeBody, s: Session = Depends(get_session)):
+def merge(node_id: int, body: MergeBody, s: Session = Depends(correction_session)):
     """Fold `other` into this entity: its members move here and it never reappears on its own."""
     if body.other == node_id:
         raise HTTPException(422, "Can't merge an entity into itself")
@@ -123,10 +135,10 @@ def merge(node_id: int, body: MergeBody, s: Session = Depends(get_session)):
 
 
 @router.post("/graph/entity/{node_id}/unlink")
-def unlink(node_id: int, body: UnlinkBody, s: Session = Depends(get_session)):
+def unlink(node_id: int, body: UnlinkBody, s: Session = Depends(correction_session)):
     """Drop one item or person from this entity, and keep it dropped across rebuilds."""
     _project(s, node_id)
-    from igneous.graph import corrections, dirty, verify
+    from igneous.graph import corrections, verify
     eid = s.execute(text("""
         SELECT id FROM edges WHERE src=:m AND dst=:p AND type IN ('PART_OF','INVOLVED_IN')
             AND extractor <> ALL(:stated) ORDER BY id LIMIT 1
@@ -141,13 +153,22 @@ def unlink(node_id: int, body: UnlinkBody, s: Session = Depends(get_session)):
 
 @router.delete("/overrides/{override_id}")
 def undo(override_id: int, s: Session = Depends(get_session)):
-    """Undo one correction. Hide / rename / unlink are replayed from the table; a merge needs the folded
-    entity back, so the entity stage re-derives it."""
+    """Undo one correction. Hide / rename / unlink are replayed from the table. A merge needs the folded entity back:
+    the undo and an entities run publish together (replaying the remaining corrections), or, when a rebuild keeps
+    publishing, nothing changes and the answer is 503."""
+    op = s.execute(text("SELECT op FROM overrides WHERE id = :i"), {"i": override_id}).scalar()
+    if op is None:
+        raise HTTPException(404, "No such correction (already undone?)")
+    if op != "merge":
+        correction_session(s)
     row = overrides.remove(s, override_id)
     if row is None:
         raise HTTPException(404, "No such correction (already undone?)")
     if row["op"] == "merge":
-        entities.run(s, log=None)  # commits; rebuilds the folded entity, then replays the remaining overrides
+        try:
+            pipeline.run(s, ["entities"], wait_ms=pipeline.CORRECTION_WAIT_MS)
+        except pipeline.PublishBusy as e:
+            raise HTTPException(503, str(e)) from e
     else:
         if row["op"] == "unlink":
             if (row["data"] or {}).get("pair_correction"):
@@ -156,6 +177,7 @@ def undo(override_id: int, s: Session = Depends(get_session)):
             else:
                 overrides.restore_unlink(s, row["data"])
         overrides.apply(s)
+        dirty.touch(s)
         s.commit()
     return {"undone": override_id, "op": row["op"]}
 
@@ -165,11 +187,11 @@ class WrongEdgeBody(BaseModel):
 
 
 @router.post("/graph/edge/wrong")
-def edge_is_wrong(body: WrongEdgeBody, s: Session = Depends(get_session)):
+def edge_is_wrong(body: WrongEdgeBody, s: Session = Depends(correction_session)):
     """'This is wrong' on any derived link: recorded as your verdict (it stays gone on every rebuild and teaches
     the verifier), and the link leaves the graph now. Links read straight from your data (who sent an email) can't
     be wrong this way; only inferred ones can."""
-    from igneous.graph import corrections, dirty
+    from igneous.graph import corrections
     try:
         result = corrections.reject(s, body.edge)
     except LookupError as e:
@@ -186,7 +208,7 @@ class SamePersonBody(BaseModel):
 
 
 @router.post("/graph/person/{node_id}/merge")
-def merge_people(node_id: int, body: SamePersonBody, s: Session = Depends(get_session)):
+def merge_people(node_id: int, body: SamePersonBody, s: Session = Depends(correction_session)):
     """"These are the same person": a trusted identity link (extractor 'user') that entity resolution always
     honors, so the two become one person now and on every rebuild (e.g. a nickname contact and a school address)."""
     from igneous.graph import resolve
@@ -201,7 +223,6 @@ def merge_people(node_id: int, body: SamePersonBody, s: Session = Depends(get_se
         VALUES (:a, :b, 'SAME_AS', '{"why": "you said they are the same person"}', 'user', '1', 1.0)
         ON CONFLICT (src, dst, type, extractor) DO NOTHING"""), {"a": a, "b": b})
     resolve.refresh_canonical(s)
-    from igneous.graph import dirty
     dirty.touch(s)
     s.commit()
     head = s.execute(text("SELECT COALESCE((SELECT canonical_id FROM canonical WHERE node_id = :n), :n)"), {"n": a}).scalar()
@@ -213,9 +234,9 @@ class RestoreBody(BaseModel):
 
 
 @router.post("/graph/edge/restore")
-def restore_edges(body: RestoreBody, s: Session = Depends(get_session)):
+def restore_edges(body: RestoreBody, s: Session = Depends(correction_session)):
     """Undo "This is wrong": bring the removed links back and forget the verdicts that removed them."""
-    from igneous.graph import corrections, dirty, verify
+    from igneous.graph import corrections, verify
     groups = s.execute(text("""
         SELECT id,op,node_keys,value,data FROM overrides WHERE data->>'pair_correction'='true'
             AND EXISTS (SELECT 1 FROM jsonb_array_elements(data->'edges') e WHERE (e->>'id')::bigint=ANY(:i))
@@ -243,7 +264,7 @@ def restore_edges(body: RestoreBody, s: Session = Depends(get_session)):
     verify.apply_verdicts(s)
     if any(r.type == "SAME_AS" for r in rows):
         from igneous.graph.resolve import refresh_canonical
-        refresh_canonical(s, commit=False)
+        refresh_canonical(s)
     dirty.touch(s)
     s.commit()
     candidates = sorted({*restored, *(r.id for r in rows)})
@@ -283,10 +304,10 @@ class LinkBody(BaseModel):
 
 
 @router.post("/graph/link")
-def add_link(body: LinkBody, s: Session = Depends(get_session)):
+def add_link(body: LinkBody, s: Session = Depends(correction_session)):
     """Add a connection you know about: stored as yours (extractor 'user'), never checked or dropped by the AI, kept
     on every rebuild. A 'same person' link merges the two identities."""
-    from igneous.graph import dirty, resolve
+    from igneous.graph import resolve
     ta, tb = (s.execute(text("SELECT type FROM nodes WHERE id = :i"), {"i": i}).scalar() for i in (body.src, body.dst))
     if ta is None or tb is None:
         raise HTTPException(404, "No such node")

@@ -33,7 +33,8 @@ from sqlalchemy.orm import Session
 
 from igneous.connectors.mac_contacts import norm_phone
 from igneous.graph import dirty, item_class, quoted
-from igneous.graph.identity import OWNER_KEY
+from igneous.graph.identity import OWNER_KEY, card_keys
+from igneous.graph.organizations import company_key
 
 BATCH = 1000
 MAIL = ("email", "gmail")
@@ -503,13 +504,6 @@ def build_event(b: Builder, item) -> None:
         b.edge(pid, eid, "ATTENDED", item.occurred_at, record=True)
 
 
-def card_keys(meta: dict) -> list[str]:
-    """A contact card's identifiers as Person keys: addresses lowercased, phone numbers normalized."""
-    keys = [e.strip().lower() for e in meta.get("emails", []) if e and e.strip()]
-    keys += [norm_phone(p) or p for p in meta.get("phones", []) if p]
-    return list(dict.fromkeys(keys))
-
-
 def card_name(title: str | None, keys: list[str]) -> str | None:
     """The person a card names, or None for a nameless card (its title is only one of its identifiers)."""
     name = (title or "").strip()
@@ -605,10 +599,8 @@ def build_linkedin(b: Builder, item) -> None:
     if email and slug:
         lid = b.node("Person", f"linkedin:{slug}", name, props, record=True)
         b.edge(lid, pid, "SAME_AS", record=True, extractor="linkedin", confidence=1.0)
-    company = (meta.get("company") or "").strip()
-    org_slug = re.sub(r"[^a-z0-9]+", "-", company.lower()).strip("-")
-    if len(org_slug) >= 2:
-        oid = b.node("Organization", f"org:{org_slug}", company, {"kind": "employer", "source": "linkedin"})
+    if company := company_key(meta.get("company")):
+        oid = b.node("Organization", company[0], company[1], {"kind": "employer", "source": "linkedin"})
         b.edge(pid, oid, "MEMBER_OF", record=True, extractor="linkedin", confidence=1.0)
 
 

@@ -21,12 +21,12 @@ node and edge is queued, so whatever no record supports after that run (reply pa
 attendees a later update removed, a LinkedIn company keyed by an email domain) is deleted at its end.
 
 Revision ID: 0010
-Revises: 0008
+Revises: 0009
 """
 from alembic import op
 
 revision = "0010"
-down_revision = "0008"
+down_revision = "0009"
 
 # Node types and edge extractors the spine builds from records (graph/spine.py: SPINE_TYPES, RECORD_EXTRACTORS).
 SPINE_NODES = """

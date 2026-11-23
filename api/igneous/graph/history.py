@@ -64,27 +64,29 @@ def store_claims(s: Session, item, body: str, out: dict, model: str) -> dict:
 
 
 def refresh_commitment_status(s: Session) -> int:
-    """Mark a derived commitment resolved only after a cached, opt-in model check.
+    """Mark derived commitments resolved when later messages in their thread explicitly confirm them done, cancelled or
+    superseded: one cached model check per commitment and set of later messages. Returns how many it resolved.
 
-    The check sees later messages in the same thread, not arbitrary personal data.
-    With no approved model source it leaves the conservative ``open`` status intact.
+    A check reads only the commitment and later messages from opted-in sources (IGNEOUS_LLM_SOURCES), most similar
+    first. A result the model gave earlier counts even with the model off; with none, or when the call fails, the
+    commitment stays open and is checked again on the next run.
     """
     from igneous.config import settings
     from igneous.llm import LLMDisabled, allowed_sources, cache_lookup, cache_store, structured
 
-    changed = 0
+    sources = sorted(allowed_sources())
+    if not sources:
+        return 0
     rows = s.execute(text("""
-        SELECT n.id, n.props, si.source, si.occurred_at, e.source_item_id
+        SELECT n.id, n.props, si.source, e.source_item_id
         FROM nodes n JOIN edges e ON e.dst = n.id AND e.type = 'HAS_COMMITMENT' AND e.extractor = :ex
         JOIN source_items si ON si.id = e.source_item_id
         WHERE n.type = 'Commitment' AND COALESCE(n.props->>'status', 'open') = 'open'
-    """), {"ex": EXTRACTOR}).mappings().all()
-    sources = sorted(allowed_sources())
-    if not settings.llm_enabled or not sources:
-        return 0
+          AND si.source = ANY(CAST(:sources AS text[]))
+        ORDER BY n.id
+    """), {"ex": EXTRACTOR, "sources": sources}).mappings().all()
+    model_on, changed = settings.llm_enabled, 0
     for row in rows:
-        if row["source"] not in sources:
-            continue
         # Rank follow-ups by local embedding similarity first; a missing embedding
         # model or unembedded message safely falls back to chronological evidence.
         try:
@@ -103,17 +105,18 @@ def refresh_commitment_status(s: Session) -> int:
             WHERE original.source_item_id = :sid AND in_thread.type = 'IN_THREAD'
               AND later_item.occurred_at > origin_item.occurred_at
               AND later_item.source = ANY(CAST(:sources AS text[]))
-            GROUP BY later.id, later.body_text, later_item.occurred_at
+            GROUP BY later.id, later_item.id
             ORDER BY CASE WHEN CAST(:vector AS text) IS NULL OR count(c.id) = 0 THEN 1 ELSE 0 END,
-                     min(c.embedding <=> CAST(:vector AS vector)), later_item.occurred_at ASC LIMIT 8
+                     min(c.embedding <=> CAST(:vector AS vector)), later_item.occurred_at, later_item.id LIMIT 8
         """), {"sid": row["source_item_id"], "sources": sources, "vector": vector}).scalars().all()
         if not later:
             continue
         material = "\n---\n".join(later)
-        key = "commitment-resolution:v1:" + hashlib.sha256(
-            (str(row["id"]) + material).encode()).hexdigest()
-        cached = cache_lookup(key)
-        if cached is None:
+        key = "commitment-resolution:v1:" + hashlib.sha256((str(row["id"]) + material).encode()).hexdigest()
+        verdict = cache_lookup(key)
+        if verdict is None:
+            if not model_on:
+                continue
             try:
                 verdict, _ = structured(
                     "Decide whether later messages explicitly confirm that a promise was completed, cancelled, or superseded. "
@@ -122,10 +125,11 @@ def refresh_commitment_status(s: Session) -> int:
                     {"type": "object", "properties": {"resolved": {"type": "boolean"}},
                      "required": ["resolved"], "additionalProperties": False}, max_tokens=300)
             except LLMDisabled:
+                model_on = False
+                continue
+            except Exception:  # this commitment stays open and is checked again next run
                 continue
             cache_store(key, verdict)
-        else:
-            verdict = cached
         if verdict.get("resolved"):
             s.execute(text("UPDATE nodes SET props = props || '{\"status\": \"resolved\"}' WHERE id = :id"),
                       {"id": row["id"]})

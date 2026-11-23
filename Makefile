@@ -6,21 +6,25 @@ IGN := cd api && uv run igneous
 # Messages to LLM-extract per run (needs AWS_BEARER_TOKEN_BEDROCK and IGNEOUS_LLM_SOURCES=email). EXTRACT=0 skips model calls.
 EXTRACT ?= 100
 
-.PHONY: enron synthetic-corpus db migrate demo baseline api web test
+.PHONY: enron synthetic-corpus db migrate demo baseline api web test check audit
 
+# curl -f fails on an HTTP error instead of saving the error page, and the archive gets its name only once the
+# download is complete, so neither passes for the corpus on the next run.
 enron:  ## download the corpus (~450 MB) and extract the mailboxes we use
 	mkdir -p data
-	test -f data/enron.tar.gz || curl -L -o data/enron.tar.gz https://www.cs.cmu.edu/~enron/enron_mail_20150507.tar.gz
+	test -f data/enron.tar.gz || { \
+		curl -fL -o data/enron.tar.gz.part https://www.cs.cmu.edu/~enron/enron_mail_20150507.tar.gz \
+		&& mv data/enron.tar.gz.part data/enron.tar.gz; }
 	cd data && tar -xzf enron.tar.gz $(addprefix maildir/,$(ALL_BOXES))
 
 synthetic-corpus:  ## generate small synthetic files and calendar data (no import)
 	$(IGN) synthetic-corpus ../data/synthetic-cross-source
 	$(IGN) verify-synthetic-corpus ../data/synthetic-cross-source
 
-db:
-	docker compose up -d db
+db:  ## Postgres in Docker; returns once it accepts connections
+	docker compose up -d --wait db
 
-migrate: db
+migrate:  ## migrate the database IGNEOUS_DATABASE_URL names (Postgres must be running: make db, or your own)
 	cd api && uv sync && uv run alembic upgrade head
 
 demo: migrate  ## one mailbox (~3k emails), end to end in a few minutes
@@ -39,3 +43,11 @@ web:
 
 test:
 	cd api && uv run pytest -q
+
+check:  ## the checks CLAUDE.md requires before any PR (CI runs the same)
+	cd api && uv run ruff check . && uv run pytest -q
+	cd web && npx next typegen && npx tsc --noEmit && npm run build
+
+audit:  ## fail on known advisories in the locked Python and npm dependencies, as CI does
+	cd api && bash -o pipefail -c 'uv export --frozen --no-hashes --no-emit-project | uvx pip-audit --strict --disable-pip --no-deps -r /dev/stdin'
+	cd web && npm audit --audit-level=moderate

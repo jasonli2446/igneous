@@ -15,7 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous.connectors.mac_contacts import norm_phone
-from igneous.graph.identity import OWNER_KEY
+from igneous.graph.identity import OWNER_KEY, self_id
 from igneous.source_catalog import BY_VALUE
 
 # Edge types stored in ``edges`` and the node types permitted at each endpoint.
@@ -50,8 +50,6 @@ LEGAL_ENDPOINTS: dict[str, set[tuple[str, str]]] = {
 
 # Edges the spine builds from records: each lists its supporting records in spine_edge_support (graph/spine.py).
 RECORD_EXTRACTORS = ("spine", "contacts", "github", "linkedin")
-# Identity links that are ground truth, never refused when clusters form (graph/resolve.py TRUSTED).
-TRUSTED_LINKS = ("self", "contacts", "user", "github", "linkedin")
 
 
 @dataclass(frozen=True)
@@ -172,17 +170,19 @@ def same_as_violations(rows: Iterable[Mapping[str, Any]]) -> list[Violation]:
 
 
 def canonical_violations(links: Iterable[Mapping[str, Any]], canonical: Mapping[int, int],
-                         firsts: Mapping[int, str]) -> list[Violation]:
-    """`canonical` holds the identity clusters SAME_AS forms. Rows: every SAME_AS link between two Person nodes
-    (src, dst, extractor) and every canonical row (node -> head); `firsts`: each Person's first name ('' when
-    unknown). Every cluster is one connected set of SAME_AS links with a head that maps to itself, every linked node is
-    in a cluster, and a link between two clusters is one resolution refused: a heuristic link whose clusters carry
-    first names that can't be one person's (graph/resolve.py refresh_canonical)."""
-    from igneous.graph.resolve import same_first
+                         firsts: Mapping[int, str], me: int | None = None,
+                         rejected: Iterable[frozenset[int]] = ()) -> list[Violation]:
+    """`canonical` holds the identity clusters SAME_AS forms (graph/resolve.py refresh_canonical). Rows: every SAME_AS
+    link between two Person nodes (id, src, dst, extractor) and every canonical row (node -> head; a node in no
+    cluster has none); `firsts`: each Person's own first name ('' when unknown, and for you); `me`: your node;
+    `rejected`: pairs of nodes said not to be one person. Every cluster is connected by the links within it and has a
+    head that maps to itself. A trusted link (resolve.TRUSTED) never spans two clusters, and a scored one does only
+    where resolution refuses it: the two clusters carry first names that can't be one person's, one of them is yours,
+    or they hold a pair said not to be one person."""
+    from igneous.graph.resolve import TRUSTED, same_first
 
     out = []
-    heads = set(canonical.values())
-    for head in sorted(heads):
+    for head in sorted(set(canonical.values())):
         if canonical.get(head) != head:
             out.append(Violation(code="canonical_head", message="a cluster head does not map to itself", node_id=head))
     members: dict[int, set[int]] = defaultdict(set)
@@ -199,25 +199,29 @@ def canonical_violations(links: Iterable[Mapping[str, Any]], canonical: Mapping[
     between = []
     for link in links:
         a, b = link["src"], link["dst"]
-        for n in (a, b):
-            if n not in canonical:
-                out.append(Violation(code="canonical_missing", node_id=n,
-                                     message="a node with a SAME_AS link has no canonical row"))
-        if a in canonical and b in canonical:
-            if canonical[a] == canonical[b]:
-                parent[find(a)] = find(b)
-            else:
-                between.append(link)
+        if a != b and canonical.get(a, a) == canonical.get(b, b):  # both in one cluster
+            parent[find(a)] = find(b)
+        else:
+            between.append(link)
     for head, nodes in sorted(members.items()):
         if len({find(n) for n in nodes}) > 1:
             out.append(Violation(code="canonical_disconnected", node_id=head,
                                  message="a canonical cluster is not connected by SAME_AS links within it",
                                  details={"members": sorted(nodes)}))
+    never = {frozenset(p) for p in rejected}
+
+    def cluster(n: int) -> set[int]:
+        return members.get(canonical.get(n, n)) or {n}
+
+    def named(c: set[int]) -> set[str]:
+        return {f for f in (firsts.get(n, "") for n in c) if len(f) > 1}  # an initial says nothing
+
     for link in between:
-        a, b = canonical[link["src"]], canonical[link["dst"]]
-        fa = {f for f in (firsts.get(n, "") for n in members[a]) if len(f) > 1}  # an initial says nothing
-        fb = {f for f in (firsts.get(n, "") for n in members[b]) if len(f) > 1}
-        refused = link["extractor"] not in TRUSTED_LINKS and any(not same_first(x, y) for x in fa for y in fb)
+        ca, cb = cluster(link["src"]), cluster(link["dst"])
+        refused = link["extractor"] not in TRUSTED and (
+            any(not same_first(x, y) for x in named(ca) for y in named(cb))
+            or me in ca or me in cb
+            or any(frozenset((x, y)) in never for x in ca for y in cb))
         if not refused:
             out.append(Violation(code="canonical_split", edge_id=link["id"],
                                  message="SAME_AS links two identities that canonical keeps apart",
@@ -297,14 +301,16 @@ def check_graph(s: Session) -> list[Violation]:
     violations.extend(replies_thread_violations(s.execute(_REPLIES_OUTSIDE_THREAD).mappings()))
     links = s.execute(_SAME_AS).mappings().all()
     violations.extend(same_as_violations(links))
-    from igneous.graph.resolve import split_name
+    from igneous.graph import resolve
 
     canonical = dict(s.execute(text("""
         SELECT c.node_id, c.canonical_id FROM canonical c JOIN nodes n ON n.id = c.node_id WHERE n.type = 'Person'
     """)).all())
-    firsts = {r.id: "" if (r.props or {}).get("self") else split_name(r.name, "")[0] for r in s.execute(text(
-        "SELECT id, name, props FROM nodes WHERE id = ANY(:ids)"), {"ids": sorted(canonical)})} if canonical else {}
-    violations.extend(canonical_violations(links, canonical, firsts))
+    me = self_id(s)
+    ids = sorted({*canonical, *(link["src"] for link in links), *(link["dst"] for link in links)})
+    firsts = {r.id: "" if r.id == me else resolve.split_name(resolve.own_name(r.name, r.props), "")[0]
+              for r in s.execute(text("SELECT id, name, props FROM nodes WHERE id = ANY(:ids)"), {"ids": ids})}
+    violations.extend(canonical_violations(links, canonical, firsts, me, resolve.rejected(s)))
     violations.extend(Violation(code="phantom_message", node_id=r.id, details={"key": r.key},
                                 message="Message is built from no record")
                       for r in s.execute(_PHANTOM_MESSAGES))
