@@ -186,8 +186,9 @@ def test_me_lists_each_role_with_its_dates_and_its_title_only_from_an_opted_in_r
     item = {source: row("""INSERT INTO source_items (source, external_id, content_hash, title, body_text)
                            VALUES (:s, :s, :s, 'Resume', 'Mo Self. Northwind Robotics, Acme Labs.') RETURNING id""",
                         s=source) for source in ("drive", "fs")}
-    org = {name: row("INSERT INTO nodes (type, key, name) VALUES ('Organization', :k, :n) RETURNING id",
-                     k=f"org:{name.lower().replace(' ', '-')}", n=name) for name in ("Northwind Robotics", "Acme Labs")}
+    org = {name: row("""INSERT INTO nodes (type, key, name, source_item_id) VALUES ('Organization', :k, :n, :i)
+                        RETURNING id""", k=f"org:{name.lower().replace(' ', '-')}", n=name, i=item["drive"])
+           for name in ("Northwind Robotics", "Acme Labs")}  # the opted-in resume names both
     roles = [{"title": "Software Engineer", "start": "2026-07-01", "end": None, "source_item_id": item["fs"]},
              {"title": "Software Engineering Intern", "start": "2025-01-01", "end": "2026-05-01",
               "source_item_id": item["drive"]}]
