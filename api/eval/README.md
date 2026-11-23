@@ -110,6 +110,37 @@ opens with and the start of its text. Reading only 600, 1,000 or 1,500 character
 at the same machine load. Rerun with
 `IGNEOUS_LLM_SOURCES=email uv run python eval/run_eval.py --no-qa --pools 8,16,24,32`.
 
+### Dense retrieval is exact
+
+Dense search compares the query with every vector the filters let through (`search.dense`). Every ranking puts equal
+scores in chunk id order: lexical, dense, their fusion and the cut at k, as graph expansion and the cross-encoder
+already did. A build numbers chunks in the order it stores them, and a rebuild of the same data repeats that order,
+so two builds of the same records give the same results. Dense search used to read an HNSW index (migration 0015 drops
+it), which answers approximately:
+
+- **Its graph is random,** so two builds found different passages.
+- **Re-ranking its candidates exactly changes only the order of ties.** pgvector already returns exact distances, in
+  order, for the candidates it finds. Only a deeper search (`hnsw.ef_search`, at most 1000) finds more.
+- **A filter applies after it,** so passages that pass the filter go missing, and Ask always filters to the opted-in
+  sources. With only the persona's email (a quarter of its chunks), the index at `ef_search` 100 returned fewer than
+  50 passages for 14 of 15 questions. Dense recall@10 fell to 0.31, against 0.85 exact.
+
+Two persona builds from scratch hold the same chunks (same ids, texts and vectors). Each was measured against an
+exact search, on the 50 passages the dense leg fetches. The timings are the dense query alone, at a machine load of 8
+to 9 on 4 cores:
+
+| Dense leg | Same 50 as exact, per build | Same 50 on both builds | Dense / hybrid recall@10, per build | Dense query p50 |
+|---|---|---|---|---|
+| HNSW, `ef_search` 100 | 6, 2 of 15 | 4 of 15 | 0.77 / 0.85, 0.38 / 0.62 | 2 ms |
+| HNSW, `ef_search` 400 | 12, 8 | 10 | 0.85 / 0.85 on both | 3–4 ms |
+| HNSW, `ef_search` 1000 | 13, 12 | 14 | 0.92 / 0.92 on both | 6–9 ms |
+| **exact** | **15, 15** | **15** | **0.92 / 0.92 on both** | 12–21 ms |
+
+An exact search takes time in proportion to the chunks it reads. On a synthetic table of 150,240 chunks (the
+persona's forty times over), the dense query took about 0.25 s with two parallel workers, at a load of 5 to 6. Most of
+that time goes to reading vectors stored out of line (TOAST). With each vector stored in its row, the same scan took
+0.08 s, which is the lever if the scale test (#59) needs one. Rerun with `eval/persona_eval.py` on each build.
+
 ## Entity resolution (criterion 3)
 
 `er_pairs.csv`: 240 Person pairs sampled across the resolver's score range (¼ low, ½ middle, ¼ high), each named by
@@ -201,7 +232,7 @@ after a second run:
 | Who took part: missing or wrongly there | 0 | 0 |
 | Identities: clusters P / R | 1.00 / 0.94 | 1.00 / 0.94 |
 | Identities: pairs ≥ 0.5, P / R | 1.00 / 0.83 | 1.00 / 0.83 |
-| Ask retrieval, recall@10 over 13 answerable questions: hybrid / dense / lexical | 0.85 / 0.77 / 0.85 | the same |
+| Ask retrieval, recall@10 over 13 answerable questions: hybrid / dense / lexical | 0.92 / 0.92 / 0.85 | the same |
 
 - Most duplicates are a Project the entities stage named from a folder ("Lisbon 2025", "CS 341 Operating Systems",
   "tidepool") beside the thread the threads stage found for the same thing; CS 481 is also split in two threads
@@ -217,9 +248,10 @@ after a second run:
   record that mentions Lisbon.
 - The only identity left apart is classmate Alex Chen's LinkedIn profile: two people share the name, so the name
   alone joins neither.
-- Retrieval moves by a question or two between builds of the same seed (hybrid recall@10 from 0.77 to 0.92 over
-  four builds): lexical search orders equal scores by however the rows were stored, and the vector index (HNSW) is
-  approximate.
+- Retrieval is the same on every build of the seed, because equal scores go in chunk id order and dense search is
+  exact ("Dense retrieval is exact" above). Two builds from scratch, measured at `8f5317c`, gave the same recall@10
+  and the same result lists for every gold question. That includes both legs' 50-passage pools and Ask's evidence,
+  with the cross-encoder on and off.
 - With the model off, threads keep their fallback names ("Lisbon · Jan-Mar 2025", kind "thread"). `--qa` needs the
   model.
 
