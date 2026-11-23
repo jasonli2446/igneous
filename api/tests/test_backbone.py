@@ -4,10 +4,10 @@ import json
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
-from pipeline_data import put, rows
+from pipeline_data import card, put, rows
 from sqlalchemy import text
 
-from igneous import llm
+from igneous import llm, pipeline
 from igneous.graph import backbone, profile, summary, traversal
 from igneous.main import app
 
@@ -139,6 +139,29 @@ def test_one_organization_spelled_two_ways_keeps_every_role_and_one_degree_spell
                                  ("B.S. Computer Science", "2020-09-01", "2024-05-01", "your resume")]}
     assert dict(rows(db, "SELECT key, name FROM nodes WHERE type = 'Organization'")) == {
         "org:northwind-robotics": "Northwind", "org:state-university": "State University"}
+
+
+def test_your_name_for_a_role_stays_when_its_organization_takes_its_peoples_name(db):
+    """Your resume lists two roles at ACME, at acme.test: org:acme, a thread per role, and you rename the internship's.
+    Then Ana's card says acme.test is Acme Robotics: the organization is org:acme-robotics, and so are its roles'
+    threads (backbone:org:acme-robotics/...), the internship's still by your name."""
+    me(db)
+    resume(db, datetime(2025, 9, 1, tzinfo=UTC), experience=[
+        {"org": "ACME", "title": "Software Engineer", "start": "2025-01", "domain_hint": "acme.test"},
+        {"org": "ACME", "title": "Software Engineering Intern", "start": "2024-06", "end": "2024-08",
+         "domain_hint": "acme.test"}])
+    db.commit()
+    stages = ["profile", "organizations", "backbone"]
+    pipeline.run(db, stages)
+    intern = db.execute(text("SELECT id FROM nodes WHERE key = 'backbone:org:acme/software-engineering-intern'")).scalar()
+    renamed = TestClient(app).post(f"/graph/entity/{intern}/rename", json={"name": "My internship"}).json()
+    assert renamed["applied"] == "now"
+    card(db, "acct/people/1", "Ana Ames", emails=["ana@acme.test"], orgs=["Acme Robotics"])
+    db.commit()
+    pipeline.run(db, stages)
+    assert dict(rows(db, "SELECT key, name FROM nodes WHERE key LIKE 'backbone:%' ORDER BY key")) == {
+        "backbone:org:acme-robotics": "ACME", "backbone:org:acme-robotics/software-engineer": "Software Engineer",
+        "backbone:org:acme-robotics/software-engineering-intern": "My internship"}
 
 
 def test_overlapping_roles_leave_a_thread_both_hold_under_the_org(db):

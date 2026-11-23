@@ -48,13 +48,26 @@ def follow(folded: dict[str, str], key: str) -> str:
 def rekeyed(s: Session) -> dict[str, str]:
     """What is the same thing under another key now, by natural key: an organization known by a key another
     organization has now (graph/organizations.py records them in `organization_keys`: a domain its company took over,
-    your resume's spelling of a company its people name otherwise), and the thread the backbone keys by it
-    (`backbone:<org key>`, graph/backbone.py)."""
+    your resume's spelling of a company its people name otherwise), and the threads the backbone keys by it
+    (graph/backbone.py: the org's own, `backbone:<org key>`, and its roles', `backbone:<org key>/<title>`)."""
+    orgs = dict(s.execute(text("SELECT key, org_key FROM organization_keys WHERE key <> org_key ORDER BY key")).all())
+    if not orgs:
+        return {}
+    orgs = {old: follow(orgs, old) for old in orgs}
     out = {}
-    for old, new in s.execute(text("SELECT key, org_key FROM organization_keys WHERE key <> org_key ORDER BY key")):
+    for old, new in orgs.items():
         out[f"Organization:{old}"] = f"Organization:{new}"
         out[f"Project:backbone:{old}"] = f"Project:backbone:{new}"
-    return {k: follow(out, k) for k in out}
+    earlier: dict[str, list[str]] = {}  # an org's key now -> the keys it had
+    for old, new in orgs.items():
+        earlier.setdefault(new, []).append(old)
+    roles = {tuple(key.removeprefix("backbone:").split("/", 1)) for key in s.execute(text(
+        "SELECT key FROM nodes WHERE type = 'Project' AND key LIKE 'backbone:%/%'")).scalars()}
+    for org, title in sorted(roles):
+        now = orgs.get(org, org)
+        for old in earlier.get(now, []):
+            out[f"Project:backbone:{old}/{title}"] = f"Project:backbone:{now}/{title}"
+    return out
 
 
 def merges(s: Session) -> dict[str, str]:
