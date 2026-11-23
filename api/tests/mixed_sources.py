@@ -60,6 +60,13 @@ def _edge(s, src, dst, type_, extractor="spine", item=None) -> int:
         {"a": src, "b": dst, "t": type_, "x": extractor, "i": item}).scalar_one()
 
 
+def _named(s, node, item, name) -> None:
+    """Record that `item` gives `node` the name `name`, as the spine does for every person a record names (a mail
+    header's display name, a chat's handle)."""
+    s.execute(text("""INSERT INTO spine_node_support (node_id, source_item_id, name, rank) VALUES (:n, :i, :name, 3)
+                      ON CONFLICT DO NOTHING"""), {"n": node, "i": item, "name": name})
+
+
 def _item(s, source, external_id, title, body, when) -> int:
     return s.execute(text("""
         INSERT INTO source_items (source, external_id, content_hash, title, body_text, occurred_at)
@@ -90,12 +97,15 @@ def build() -> dict:
             gm = _node(s, "Message", f"gmail:g{i}", f"Robotics Lab: Atlas update {i}", item=gid)
             _edge(s, g["sam"], gm, "SENT", item=gid)
             _edge(s, gm, g["me"], "RECEIVED", item=gid)
+            _named(s, g["sam"], gid, "Sam Shared")
+            _named(s, g["me"], gid, "Me Myself")
             _edge(s, gm, thread, "PART_OF", "threads", item=gid)
             iid = _item(s, "imessage", f"i{i}", "Chat with Pat Private",
                         f"PRIVATEMARKER Robotics Lab and Atlas plans with Pat Private, day {i}", when)
             im = _node(s, "Message", f"imessage:i{i}", "Chat with Pat Private", item=iid)
             _edge(s, g["pat"], im, "SENT", item=iid)
             _edge(s, im, g["me"], "RECEIVED", item=iid)
+            _named(s, g["pat"], iid, "Pat Private")
             _edge(s, im, thread, "PART_OF", "threads", item=iid)
             _edge(s, im, g["pat_only"], "PART_OF", "threads", item=iid)
             s.execute(text("INSERT INTO chunks (source_item_id, node_id, ord, text, meta) VALUES "
@@ -108,6 +118,7 @@ def build() -> dict:
         m2 = _node(s, "Message", "gmail:g-other", "Hello from my other address", item=s2)
         _edge(s, g["sam2"], m2, "SENT", item=s2)
         _edge(s, m2, g["me"], "RECEIVED", item=s2)
+        _named(s, g["sam2"], s2, "Sam Shared")
         for person in ("sam", "pat"):
             _edge(s, g[person], g["atlas"], "INVOLVED_IN", "threads")
             _edge(s, g[person], g["platform"], "INVOLVED_IN", "threads")
