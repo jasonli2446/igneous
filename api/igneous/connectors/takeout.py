@@ -847,8 +847,8 @@ def parse(paths: list[Path], progress: Callable[[dict], None] | None = None) -> 
         if imp.cards:
             imp.counts["contact_cards"] = len(imp.cards)
         if skipped := imp.counts.get("contacts_without_phone_or_email"):
-            imp.note(f"{skipped} contact cards have no phone number or email address: they name no one we could "
-                     "key, so they were skipped.")
+            imp.note(f"Contact cards with no phone number or email address, which name no one we could key, were "
+                     f"skipped: {skipped}.")
     if not items:
         raise TakeoutError("Found Takeout files but nothing readable in them." + (
             " My Activity is in HTML format; re-export it as JSON (Multiple formats, Activity records: JSON)."

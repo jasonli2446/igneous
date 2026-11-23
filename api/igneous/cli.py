@@ -191,9 +191,9 @@ def import_vcard(paths: list[Path] = typer.Argument(..., help="a contacts export
     with session() as s:
         result = vcard.run_import(s, resolved)
     skipped = result["without_phone_or_email"]
-    print(f"{result['cards']} contact cards ({result['phones']} phone numbers, {result['emails']} email addresses"
-          + (f"; {skipped} without either, skipped" if skipped else "") + f"); {_stats(result)} in "
-          f"{time.time() - t:.1f}s")
+    print(f"contact cards: {result['cards']}, phone numbers: {result['phones']}, email addresses: {result['emails']}"
+          + (f", cards without either (skipped): {skipped}" if skipped else "")
+          + f"; {_stats(result)} in {time.time() - t:.1f}s")
 
 
 @import_app.command("ai-export")

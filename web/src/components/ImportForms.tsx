@@ -214,8 +214,10 @@ function VCardForm({ onDone }: { onDone: () => void }) {
           </div>
           {done.without_phone_or_email > 0 && (
             <p className="mt-3 text-xs leading-5 text-muted">
-              {nf.format(done.without_phone_or_email)} cards have no phone number or email address, so they name no
-              one here and were skipped.
+              {done.without_phone_or_email === 1
+                ? "1 card has no phone number or email address, so it names no one here and was skipped."
+                : `${nf.format(done.without_phone_or_email)} cards have no phone number or email address, so they name `
+                  + "no one here and were skipped."}
             </p>
           )}
         </div>

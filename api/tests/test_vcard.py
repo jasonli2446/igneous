@@ -193,4 +193,4 @@ def test_the_cli_imports_an_export(db, tmp_path, monkeypatch):
     export.write_text(V4)
     result = CliRunner().invoke(cli, ["import", "vcard", str(export)])
     assert result.exit_code == 0, result.output
-    assert click.unstyle(result.output).startswith("1 contact cards (2 phone numbers, 1 email addresses); 1 new")
+    assert click.unstyle(result.output).startswith("contact cards: 1, phone numbers: 2, email addresses: 1; 1 new")
