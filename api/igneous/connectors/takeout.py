@@ -896,24 +896,29 @@ class TakeoutConnector:
         left: set[str] = set()  # the export's calendar records not stored
         gone: list[str] = []    # records earlier exports stored that this one doesn't hold
         notes = self.report["notes"]
+        # Calendars keyed alike (two called "Work", whose account isn't known) are one listing of their scope.
+        scopes: dict[str, list[ical.Listing]] = defaultdict(list)
         for cal in listings:
-            ours = {i.external_id for i in cal.items}
-            had = imported.get(cal.scope)
-            if had and datetime.fromisoformat(had) > cal.exported:
+            scopes[cal.scope].append(cal)
+        for scope, cals in scopes.items():
+            name, exported = cals[0].name, max(c.exported for c in cals)
+            records = [i for c in cals for i in c.items]
+            ours = {i.external_id for i in records}
+            had = imported.get(scope)
+            if had and datetime.fromisoformat(had) > exported:
                 left |= ours
-                notes.append(f"The calendar {cal.name} in this export ({cal.exported:%Y-%m-%d}) is older than one "
-                             f"imported before ({had[:10]}): its events were left as they are.")
+                notes.append(f"The calendar {name} in this export ({exported:%Y-%m-%d}) is older than one imported "
+                             f"before ({had[:10]}): its events were left as they are.")
                 continue
-            st = state.get(cal.scope) or CalendarState(set(), set(), None)
-            synced = {i.external_id for i in cal.items
+            st = state.get(scope) or CalendarState(set(), set(), None)
+            synced = {i.external_id for i in records
                       if i.external_id in st.synced or (st.window and i.occurred_at >= st.window)}
             if synced:
                 left |= synced
-                notes.append(f"Google Calendar syncs the calendar {cal.name}: {len(synced)} of its events were left "
-                             "as the sync keeps them" + (f" (every one from {st.window:%Y-%m-%d} on)." if st.window
-                                                         else "."))
+                notes.append(f"Google Calendar syncs the calendar {name}: {len(synced)} of its events were left as the "
+                             "sync keeps them" + (f" (every one from {st.window:%Y-%m-%d} on)." if st.window else "."))
             gone += sorted(st.exported - ours)
-            imported[cal.scope] = cal.exported.isoformat()
+            imported[scope] = exported.isoformat()
         if left:
             items = [i for i in items if not (i.source == "gcal" and i.external_id in left)]
         for n, item in enumerate(items, 1):

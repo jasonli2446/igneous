@@ -479,6 +479,18 @@ def test_a_newer_export_replaces_a_calendars_records_and_an_older_one_leaves_the
         assert len(calendar_records(s)) == 4
 
 
+def test_two_calendars_keyed_alike_in_one_export_keep_each_others_records(db, tmp_path):
+    """Two calendars called "Work", and nothing says whose they are: both are keyed under takeout/Work, and importing
+    the export again changes nothing (neither removes the other's events)."""
+    export = build_zip(tmp_path / "takeout-20250801T000000Z-001.zip", {
+        "Calendar/Work.ics": ics("20250801T000000Z", RETRO, name="Work"),
+        "Calendar/Work (1).ics": ics("20250801T000000Z", STANDUP, name="Work")})
+    with SessionLocal() as s:
+        assert takeout.run_import(s, [export])["inserted"] == 2
+        again = takeout.run_import(s, [export])
+        assert (again["inserted"], again["updated"], again["deleted"], again["unchanged"]) == (0, 0, 0, 2)
+
+
 def test_a_calendar_sync_keeps_its_window_and_the_export_adds_only_what_came_before(db, tmp_path):
     from fakes import FakeCalendar
 
