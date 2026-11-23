@@ -1,4 +1,4 @@
-// Small shared placeholders so loading and error states look the same everywhere.
+// Small shared pieces so loading states, errors and panel sections look the same everywhere.
 
 export function Skeleton({ className = "" }: { className?: string }) {
   return <div aria-hidden="true" className={`animate-pulse rounded bg-hover ${className}`} />;
@@ -9,7 +9,7 @@ export function InlineError({ message, onRetry }: { message: string; onRetry?: (
     <div role="alert" className="flex items-start gap-2 text-xs leading-relaxed text-danger">
       <span className="min-w-0 break-words">{message}</span>
       {onRetry && (
-        <button onClick={onRetry} className="shrink-0 font-medium underline underline-offset-2 hover:no-underline">Retry</button>
+        <button type="button" onClick={onRetry} className="shrink-0 font-medium underline underline-offset-2 hover:no-underline">Retry</button>
       )}
     </div>
   );
@@ -22,5 +22,15 @@ export function TopProgress({ active }: { active: boolean }) {
       className={`pointer-events-none absolute inset-x-0 top-0 z-30 h-0.5 overflow-hidden transition-opacity duration-200 ${active ? "opacity-100" : "opacity-0"}`}>
       <div className="progress-slide h-full w-1/3 bg-accent" />
     </div>
+  );
+}
+
+/** A titled block in a details panel; `count` follows the title when given. */
+export function Section({ title, count, children }: { title: string; count?: number; children: React.ReactNode }) {
+  return (
+    <section className="border-t border-line pt-4">
+      <h3 className="mb-2 text-xs font-medium text-muted">{title}{count !== undefined && ` (${count})`}</h3>
+      {children}
+    </section>
   );
 }

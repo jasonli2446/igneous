@@ -1,36 +1,67 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Igneous web
 
-## Getting Started
-
-First, run the development server:
+The browser app: the 3D graph explorer (`/`), Ask (`/ask`), Search (`/search`) and the Sources page
+(`/settings`, where every source is connected and the graph is built). It talks to the API at `NEXT_PUBLIC_API_URL`
+(default `http://localhost:8000`), which Next.js inlines when it compiles, so restart `npm run dev` or rebuild after
+changing it (`web/.env.example`).
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install && npm run dev    # http://localhost:3000, with the API running (see the root README)
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+This is Next.js 16 with React 19 and Tailwind CSS 4. Its APIs differ from older versions: the guides in
+`node_modules/next/dist/docs/` describe this version; read the relevant one before changing Next-specific code.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Layout
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- `src/app/`: one folder per route, the root layout (nav, theme script) and `globals.css`.
+- `src/components/Explorer.tsx`: the Graph page. `Graph3D.tsx` draws it with 3d-force-graph (WebGL, so it is only
+  ever loaded in the browser); `Inspector`, `EntityInspector` and `WhyConnected` fill the details panel.
+- `src/lib/api.ts`: every call to the API, with its types.
+- `src/lib/graph-style.ts`: every color drawn outside CSS (section hues, the theme's colors for the graph).
+  `dates.ts` formats dates, `theme.ts` holds the light/dark theme, `hooks.ts` the request hooks that let only the
+  latest reply land.
 
-## Learn More
+## How the explorer behaves
 
-To learn more about Next.js, take a look at the following resources:
+- The URL names the centre (`/?seed=<node id>`; your own graph is `/`), so a reload or a shared link opens the same
+  graph.
+- Next keeps a page alive while you use the other tabs and runs its effects again when you return. The explorer
+  loads only on its first mount, so coming back shows the graph as you left it.
+- What is on screen is the centre's view plus layers: each expansion, each node opened from the panel, each link you
+  made. Collapsing a node removes what it brought in. When the API's graph version changes, and after every
+  correction, the view and each layer are fetched again in place: the selection, the panel and positions stay.
+- One WebGL renderer lives as long as the Graph page; it is released (with its WebGL context) when the page unmounts
+  or is hidden.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Theme and styles
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+The theme is `data-theme` on `<html>`, set by a script in `<head>` before the first paint (your choice, or the OS
+setting until you choose). Colors are tokens in `globals.css` (light under `:root`, dark under
+`[data-theme="dark"]`); the 3D graph reads them at runtime. Shared button and field styles are Tailwind utilities
+defined there (`btn`, `btn-primary`, `btn-chip`, `btn-close`, `btn-link`, `btn-option`, `field`).
 
-## Deploy on Vercel
+## Checks
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+`make check` at the repo root runs them with the API's; CI runs the same.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+npx next typegen && npx tsc --noEmit && npm run lint && npm run build
+```
+
+### The explorer walkthrough
+
+`npm run walkthrough` drives the Graph page in headless Chromium the way a person would: search, collapse and expand,
+Back, a correction undone from the notice and from the panel, the Reader (Escape closes only it), another tab and
+back, and twenty changes of centre. It fails on any console error or warning, a WebGL context warning among them.
+It needs the API and the web app running against the Enron demo database (`make demo`):
+
+```bash
+npx playwright install chromium               # once: the browser build this Playwright version drives
+WEB_URL=http://localhost:3000 npm run walkthrough
+```
+
+The correction it makes is undone before it moves on, so the database ends as it started. Headless Chromium draws
+WebGL in software and logs its own "GPU stall due to ReadPixels" driver notes; those are the only console warnings it
+ignores.
+The names it searches for come from the demo mailbox (`WALK_PEOPLE`, `WALK_PAIR` and `WALK_SEEDS` override them).

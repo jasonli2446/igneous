@@ -6,16 +6,16 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "next typegen && tsc --noEmit"
+    "lint": "eslint .",
+    "typecheck": "next typegen && tsc --noEmit",
+    "walkthrough": "node scripts/walkthrough.mjs"
   },
   "dependencies": {
     "3d-force-graph": "^1.80.2",
-    "graphology": "^0.26.0",
-    "graphology-communities-louvain": "^2.0.2",
     "next": "16.4.6",
     "react": "19.3.1",
     "react-dom": "19.3.1",
-    "three": "^0.186.1",
+    "three": "^0.187.0",
     "three-spritetext": "^1.10.0"
   },
   "devDependencies": {
@@ -23,7 +23,10 @@
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "@types/three": "^0.186.0",
+    "@types/three": "^0.187.0",
+    "eslint": "^10.15.0",
+    "eslint-config-next": "16.4.6",
+    "playwright": "1.63.0",
     "tailwindcss": "^4.3.5",
     "typescript": "^5"
   }

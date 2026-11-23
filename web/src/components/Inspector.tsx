@@ -1,34 +1,33 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import ConnectTo from "@/components/ConnectTo";
 import EntityInspector from "@/components/EntityInspector";
 import NodeSummary from "@/components/NodeSummary";
 import Sources from "@/components/SourceList";
-import { InlineError, Skeleton } from "@/components/ui";
-import { typeLabel } from "@/lib/graph-style";
-import { api, GEdge, GNode, NodeDetail, TYPE_COLORS } from "@/lib/api";
+import { InlineError, Section, Skeleton } from "@/components/ui";
+import { api, type GEdge, type GNode } from "@/lib/api";
+import { formatDayTime } from "@/lib/dates";
+import { nodeColor, typeLabel } from "@/lib/graph-style";
+import { useLiveSearch, useRequest } from "@/lib/hooks";
+
+/** A correction made in a panel, for the page to announce and show: what changed, how to undo it (when it can be
+ *  undone), and the node to stay on when the correction moved it (a merge). */
+export type Corrected = { text: string; undo?: () => Promise<unknown>; keep?: number };
 
 type Props = {
-  id: number | null; onExpandAction: (id: number) => void | Promise<void>; onCloseAction?: () => void;
+  id: number;
+  /** Bumped after every correction: the panel loads again to show its result. */
+  revision: number;
+  onExpandAction: (id: number) => void | Promise<void>;
+  onCloseAction: () => void;
   /** Whether this node's connections are currently shown on the graph (so the button says Show or Hide). */
-  expanded?: boolean;
-  // Projects are editable: selecting one of their members, and re-fetching the graph after a correction.
-  onSelectAction?: (id: number) => void; onWhyAction?: (a: number, b: number) => void; onChangedAction?: (keep: number | null) => void;
-  onLinkedAction?: (node: GNode, edge: GEdge) => void;
+  expanded: boolean;
+  onSelectAction: (id: number) => void;
+  onWhyAction: (a: number, b: number) => void;
+  onLinkedAction: (node: GNode, edge: GEdge) => void;
+  onCorrectedAction: (c: Corrected) => void;
 };
-
-const when = (iso: string) =>
-  new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(iso));
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="border-t border-line pt-4">
-      <h3 className="mb-2 text-xs font-medium text-muted">{title}</h3>
-      {children}
-    </section>
-  );
-}
 
 function InspectorSkeleton() {
   return (
@@ -46,30 +45,18 @@ function InspectorSkeleton() {
   );
 }
 
-export default function Inspector({ id, onExpandAction, onCloseAction, onSelectAction, onWhyAction, onChangedAction, onLinkedAction, expanded }: Props) {
+export default function Inspector({ id, revision, onExpandAction, onCloseAction, onSelectAction, onWhyAction,
+  onCorrectedAction, onLinkedAction, expanded }: Props) {
+  const { data: node, error, retry } = useRequest(id, () => api.node(id), revision);
   const [busy, setBusy] = useState(false);
-  const [node, setNode] = useState<NodeDetail | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [attempt, setAttempt] = useState(0);
   const [fullText, setFullText] = useState(false);
   const [showOriginal, setShowOriginal] = useState(false);
 
-  useEffect(() => {
-    if (id === null) return setNode(null);
-    let live = true;
-    setNode(null);
-    setError(null);
-    setFullText(false);
-    setShowOriginal(false);
-    api.node(id).then((n) => live && setNode(n)).catch((e) => live && setError(`Couldn't load details. (${String(e)})`));
-    return () => { live = false; };
-  }, [id, attempt]);
-
-  if (error) return <div className="p-4"><InlineError message={error} onRetry={() => setAttempt((a) => a + 1)} /></div>;
+  if (error && !node) return <div className="p-4"><InlineError message={`Couldn't load details. (${String(error)})`} onRetry={retry} /></div>;
   if (!node) return <InspectorSkeleton />;
-  if (node.type === "Project" && onSelectAction) {
-    return <EntityInspector id={node.id} onSelectAction={onSelectAction} onCloseAction={onCloseAction}
-      onChangedAction={onChangedAction ?? (() => {})} onLinkedAction={onLinkedAction} />;
+  if (node.type === "Project") {
+    return <EntityInspector id={node.id} revision={revision} onSelectAction={onSelectAction} onCloseAction={onCloseAction}
+      onCorrectedAction={onCorrectedAction} onLinkedAction={onLinkedAction} />;
   }
 
   const src = node.source_item;
@@ -81,24 +68,20 @@ export default function Inspector({ id, onExpandAction, onCloseAction, onSelectA
     <div className="space-y-4 p-4 text-sm">
       <header>
         <div className="flex items-center gap-2 text-xs text-muted">
-          <span className="h-2 w-2 rounded-full" style={{ background: TYPE_COLORS[node.type] }} />
+          <span aria-hidden className="h-2 w-2 rounded-full" style={{ background: nodeColor(node) }} />
           {typeLabel(node.type, node.props as { group?: boolean } | undefined)}
-          {onCloseAction && (
-            <button onClick={onCloseAction} aria-label="Close details"
-              className="ml-auto rounded px-1.5 text-lg leading-none hover:bg-hover hover:text-ink">×</button>
-          )}
+          <button type="button" onClick={onCloseAction} aria-label="Close details" className="btn-close ml-auto">×</button>
         </div>
         <h2 className="mt-1 text-lg font-semibold leading-snug break-words">{node.name}</h2>
         {/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(node.key) && node.key.toLowerCase() !== node.name.toLowerCase() && (
           <div className="mt-0.5 text-xs break-all text-muted">{node.key}</div>)}
       </header>
 
-      <NodeSummary id={node.id} onSelectAction={(x) => onSelectAction?.(x)} onWhyAction={onWhyAction} />
+      <NodeSummary id={node.id} revision={revision} onSelectAction={onSelectAction} onWhyAction={onWhyAction} />
 
-      <button disabled={busy} aria-pressed={expanded}
+      <button type="button" disabled={busy} aria-pressed={expanded}
         onClick={async () => { setBusy(true); try { await onExpandAction(node.id); } finally { setBusy(false); } }}
-        className={`inline-flex items-center gap-2 rounded-md border px-2.5 py-1 text-xs transition-colors disabled:opacity-60 ${
-          expanded ? "border-accent/50 bg-accent/10 text-ink hover:bg-accent/15" : "border-line hover:bg-hover"}`}>
+        className={`btn inline-flex items-center gap-2 ${expanded ? "border-accent/50 bg-accent/10 hover:bg-accent/15" : ""}`}>
         {busy && <span aria-hidden className="h-3 w-3 animate-spin rounded-full border-2 border-accent border-t-transparent" />}
         {busy ? (expanded ? "Hiding…" : "Finding connections…")
           : expanded ? "Hide their connections" : "Show their connections on the graph"}
@@ -106,28 +89,29 @@ export default function Inspector({ id, onExpandAction, onCloseAction, onSelectA
 
       <ConnectTo id={node.id} name={node.name} onLinkedAction={onLinkedAction} />
 
-      {node.type === "Person" && <SamePerson id={node.id} onDone={(person) => { onChangedAction?.(person); }} />}
+      {node.type === "Person" && <SamePerson id={node.id} onMergedAction={onCorrectedAction} />}
 
       <Section title="Sources">
-        <Sources id={node.id} highlight={[node.name]} />
+        <Sources id={node.id} revision={revision} highlight={[node.name]} />
       </Section>
 
       {src && (
         <Section title="Original">
-          <button onClick={() => setShowOriginal((v) => !v)} aria-expanded={showOriginal}
-            className="text-xs text-accent hover:underline">{showOriginal ? "Hide original" : "Show original"}</button>
+          <button type="button" onClick={() => setShowOriginal((v) => !v)} aria-expanded={showOriginal} className="btn-link">
+            {showOriginal ? "Hide original" : "Show original"}
+          </button>
           {showOriginal && <>
-          <div className="space-y-0.5 text-xs text-soft">
-            {src.occurred_at && <div>{when(src.occurred_at)}</div>}
-            {meta.from?.[0] && <div className="break-words">From {meta.from[0].email}</div>}
-            {meta.to && meta.to.length > 0 && <div className="break-words">To {meta.to.map((a) => a.email).join(", ")}</div>}
-          </div>
-          <pre className={`mt-2 overflow-y-auto rounded-md bg-bg p-2.5 text-xs leading-relaxed whitespace-pre-wrap text-soft ${fullText ? "max-h-96" : "max-h-32 overflow-hidden"}`}>{body}</pre>
-          {long && (
-            <button onClick={() => setFullText((v) => !v)} className="mt-1.5 text-xs text-accent hover:underline">
-              {fullText ? "Show less" : "Show full text"}
-            </button>
-          )}
+            <div className="space-y-0.5 text-xs text-soft">
+              {src.occurred_at && <div>{formatDayTime(src.occurred_at)}</div>}
+              {meta.from?.[0] && <div className="break-words">From {meta.from[0].email}</div>}
+              {meta.to && meta.to.length > 0 && <div className="break-words">To {meta.to.map((a) => a.email).join(", ")}</div>}
+            </div>
+            <pre className={`mt-2 overflow-y-auto rounded-md bg-bg p-2.5 text-xs leading-relaxed whitespace-pre-wrap text-soft ${fullText ? "max-h-96" : "max-h-32 overflow-hidden"}`}>{body}</pre>
+            {long && (
+              <button type="button" onClick={() => setFullText((v) => !v)} className="btn-link mt-1.5">
+                {fullText ? "Show less" : "Show full text"}
+              </button>
+            )}
           </>}
         </Section>
       )}
@@ -136,49 +120,48 @@ export default function Inspector({ id, onExpandAction, onCloseAction, onSelectA
 }
 
 /** "Same person as…": fold another identity (a nickname contact, an old address) into this person, for good. */
-function SamePerson({ id, onDone }: { id: number; onDone: (person: number) => void }) {
+function SamePerson({ id, onMergedAction }: { id: number; onMergedAction: (c: Corrected) => void }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
-  const [hits, setHits] = useState<{ id: number; name: string; degree: number }[]>([]);
-  const [msg, setMsg] = useState<string | null>(null);
-  useEffect(() => {
-    if (q.trim().length < 2) return setHits([]);
-    const t = setTimeout(() => {
-      api.findNodes(q, "Person").then((r) => setHits(r.nodes.filter((n) => n.type === "Person" && n.id !== id))).catch(() => {});
-    }, 200);
-    return () => clearTimeout(t);
-  }, [q, id]);
+  const [error, setError] = useState<string | null>(null);
+  const people = useLiveSearch(open ? q : "",
+    (text) => api.findNodes(text, "Person").then((r) => r.nodes.filter((n) => n.type === "Person" && n.id !== id)));
+
   if (!open) {
     return (
       <div>
-        <button onClick={() => setOpen(true)} className="rounded-md border border-line px-2.5 py-1 text-xs hover:bg-hover">
-          Same person as…
-        </button>
-        {msg && <p className="mt-1 text-xs text-muted">{msg}</p>}
+        <button type="button" onClick={() => { setOpen(true); setError(null); }} className="btn">Same person as…</button>
+        {error && <div className="mt-1"><InlineError message={error} /></div>}
       </div>
     );
   }
+  const merge = (other: GNode) => api.mergePeople(id, other.id).then((r) => {
+    setOpen(false);
+    setQ("");
+    onMergedAction({ text: `Merged "${other.name}" into this person.`, keep: r.person });
+  }).catch((e) => { setOpen(false); setError(`Couldn't merge them. (${String(e)})`); });
+
   return (
     <div className="rounded-md border border-line p-2">
       <div className="flex items-center gap-2">
         <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Find the other name or address"
-          aria-label="Search people to merge" onKeyDown={(e) => e.key === "Escape" && setOpen(false)}
-          className="min-w-0 flex-1 rounded border border-line bg-bg px-2 py-1 text-xs outline-none focus:border-accent" />
-        <button onClick={() => setOpen(false)} className="text-xs text-muted hover:text-ink">Cancel</button>
+          aria-label="Search people to merge" onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); setOpen(false); } }}
+          className="field flex-1" />
+        <button type="button" onClick={() => setOpen(false)} className="text-xs text-muted hover:text-ink">Cancel</button>
       </div>
-      {q.trim().length >= 2 && (
+      {people.active && (
         <ul className="mt-2 space-y-0.5">
-          {hits.map((n) => (
+          {people.results?.map((n) => (
             <li key={n.id}>
-              <button className="flex w-full justify-between rounded px-1.5 py-1 text-left text-xs hover:bg-hover"
-                onClick={() => api.mergePeople(id, n.id).then((r) => {
-                  setOpen(false); setQ(""); setMsg(`Merged "${n.name}" into this person.`); onDone(r.person);
-                }).catch((e) => setMsg(String(e)))}>
+              <button type="button" className="btn-option" onClick={() => void merge(n)}>
                 <span className="truncate">{n.name}</span><span className="text-muted tabular-nums">{n.degree}</span>
               </button>
             </li>
           ))}
-          {hits.length === 0 && <li className="px-1.5 py-1 text-xs text-muted">No one else matches.</li>}
+          {people.results?.length === 0 && (
+            <li className="px-1.5 py-1 text-xs text-muted">{people.failed ? "Search failed." : "No one else matches."}</li>
+          )}
+          {people.results === null && <li className="px-1.5 py-1 text-xs text-muted">Searching…</li>}
         </ul>
       )}
     </div>
