@@ -34,9 +34,37 @@ def _require_schema() -> None:
 
 def session():
     """A session on the database, once it is at the code's migration head. Every command opens the database through
-    it, so help and the commands that never touch the database work whatever its schema."""
+    it or `_job`, so help and the commands that never touch the database work whatever its schema."""
     _require_schema()
     return SessionLocal()
+
+
+# What a command says when the job it would start is already running.
+BUSY = {"sync": "{source} is already syncing", "import": "a {source} import is already running",
+        "pipeline": "the graph is already being built"}
+
+
+def _job(kind: str, source: str, runner, account: str | None = None):
+    """Run `runner(session, progress)` here as the job Sync now, an import or Rebuild on the Sources page starts for
+    `source`: the page shows it running, and no other job for `source` starts until it ends, from the page, the
+    scheduled sync or another command. Exits (code 1) while one runs. Returns what the runner returns and raises
+    what it raises."""
+    from igneous import jobs
+
+    _require_schema()
+    try:
+        return jobs.call(kind, source, runner, account)
+    except jobs.JobBusy as e:
+        typer.echo(f"igneous: {BUSY[kind].format(source=source)}; run this again once it finishes", err=True)
+        raise typer.Exit(code=1) from e
+
+
+def _both(*callbacks):
+    """One progress callback that passes each report to every one of `callbacks` (the job's row, the terminal)."""
+    def progress(p: dict, force: bool = False) -> None:
+        for callback in callbacks:
+            callback(p, force)
+    return progress
 
 
 @schedule_app.command("install")
@@ -108,31 +136,35 @@ def sync(source: str = typer.Argument(..., metavar="SOURCE", help=SOURCE_HELP),
          all_mail: bool = typer.Option(None, "--all-mail/--no-all-mail",
                                        help="gmail: include Promotions/Social/Forums (skipped by default); the "
                                             "account remembers the choice")):
-    """Sync a source into the database, as Sync now on the Sources page does. Each sync continues where the last
-    one stopped; run `igneous pipeline` afterwards to add what is new to the graph."""
+    """Sync a source into the database, as Sync now on the Sources page does, and as its job: the page shows it
+    syncing, and while it runs no other sync of the source starts. Each sync continues where the last one stopped;
+    run `igneous pipeline` afterwards to add what is new to the graph."""
     opts = sources.SyncOptions(path=path, mailboxes=tuple(mailbox or ()), since_days=since_days, all_mail=all_mail)
     try:
         sources.check_options(source, opts, account)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
-    with session() as s:
-        try:
-            result = sources.sync(source, s, account, opts, progress=_counter(), limit=limit)
-        except sources.SetupNeeded as e:
-            typer.echo(f"igneous: {e}", err=True)
-            raise typer.Exit(code=2) from e
-        except sources.SyncFailed as e:
-            for name, stats in e.result["accounts"].items():
-                print(f"{name}: {_stats(stats)} in {stats['seconds']}s")
-            typer.echo(f"\nigneous: {source} sync failed: {e}", err=True)
-            raise typer.Exit(code=1) from e
+    shown = _counter()
+    try:
+        result = _job("sync", source, lambda s, progress: sources.sync(
+            source, s, account, opts, progress=_both(progress, shown), limit=limit), account)
+    except sources.SetupNeeded as e:
+        typer.echo(f"igneous: {e}", err=True)
+        raise typer.Exit(code=2) from e
+    except sources.SyncFailed as e:
+        for name, stats in e.result["accounts"].items():
+            print(f"{name}: {_stats(stats)} in {stats['seconds']}s")
+        typer.echo(f"\nigneous: {source} sync failed: {e}", err=True)
+        raise typer.Exit(code=1) from e
     if sys.stderr.isatty():
         print(file=sys.stderr)
     for name, stats in result["accounts"].items():
         print(f"{'' if name == 'default' else name + ': '}{_stats(stats)} in {stats['seconds']}s")
 
 
-import_app = typer.Typer(no_args_is_help=True, help="Import exports you downloaded.")
+import_app = typer.Typer(no_args_is_help=True, help="Import exports you downloaded, each as the job an upload on the "
+                                                    "Sources page starts: the page shows it, and one import of a "
+                                                    "source runs at a time.")
 app.add_typer(import_app, name="import")
 
 
@@ -148,10 +180,13 @@ def import_takeout(paths: list[Path] = typer.Argument(None, help="Takeout .zip f
         takeout.preflight(resolved)
     except takeout.TakeoutError as e:
         raise typer.BadParameter(str(e)) from e
+
+    def shown(p: dict, force: bool = False) -> None:
+        if "items_total" in p:
+            print(f"\r  {p.get('items', 0)}/{p['items_total']} items", end="", flush=True)
+
     t = time.time()
-    with session() as s:
-        result = takeout.run_import(s, resolved, lambda p, force=False: print(
-            f"\r  {p.get('items', 0)}/{p['items_total']} items" if "items_total" in p else "", end="", flush=True))
+    result = _job("import", "takeout", lambda s, progress: takeout.run_import(s, resolved, _both(progress, shown)))
     print()
     for note in result.pop("notes", []):
         print("note:", note)
@@ -170,8 +205,7 @@ def import_linkedin(paths: list[Path] = typer.Argument(..., help="LinkedIn expor
     except linkedin.LinkedInError as e:
         raise typer.BadParameter(str(e)) from e
     t = time.time()
-    with session() as s:
-        result = linkedin.run_import(s, resolved)
+    result = _job("import", "linkedin", lambda s, progress: linkedin.run_import(s, resolved, progress))
     print(result, f"in {time.time() - t:.1f}s")
 
 
@@ -187,11 +221,12 @@ def import_ai_export(path: Path = typer.Argument(..., exists=True, dir_okay=Fals
     from igneous.connectors import ai_exports
 
     t = time.time()
-    with session() as s:
-        try:
-            result = ai_exports.run_import(s, path, provider)
-        except ai_exports.ExportError as e:
-            raise typer.BadParameter(str(e)) from e
+    try:
+        found = ai_exports.preflight(path, provider)
+        result = _job("import", sources.EXPORT_ENTRY[found],
+                      lambda s, progress: ai_exports.run_import(s, path, found, progress))
+    except ai_exports.ExportError as e:
+        raise typer.BadParameter(str(e)) from e
     print(f"{result['provider']}: {result['conversations']} conversations; {_stats(result)} in {time.time() - t:.1f}s")
 
 
@@ -288,14 +323,17 @@ class _Printer:
 
 
 def _run_stages(names: list[str] | None, extract: int = 0) -> None:
+    """Run these stages as Rebuild's job: the Sources page shows each stage as it runs, and no other build starts
+    meanwhile."""
     from igneous import pipeline as runner
 
     try:
         runner.plan(names, extract)
     except ValueError as e:
         raise typer.BadParameter(str(e), param_hint="--stage") from e
-    with session() as s:
-        runner.run(s, names, extract=extract, progress=_Printer())
+    printer = _Printer()
+    _job("pipeline", "pipeline",
+         lambda s, progress: runner.run(s, names, extract=extract, progress=_both(progress, printer)))
 
 
 @app.command()
@@ -306,8 +344,8 @@ def pipeline(stage: list[StageName] = typer.Option(
              extract: int = typer.Option(0, min=0, help="also read up to N newest messages with the model for "
                                                         "people, topics and promises (costs money; 0 = skip)")):
     """Build the graph: read what is new in your sources, then recompute everything derived from it and publish it
-    at once (Rebuild on the Sources page does the same, without extract). Readers keep the previous graph until the
-    new one is published."""
+    at once (Rebuild on the Sources page does the same, without extract, and the page shows this run as it shows a
+    Rebuild; one build runs at a time). Readers keep the previous graph until the new one is published."""
     _run_stages([st.value for st in stage] if stage else None, extract)
 
 
@@ -324,14 +362,17 @@ def resolve(undo: bool = typer.Option(False, help="instead, delete the merges en
                                                   "that remain (contact cards, your accounts, merges you made) and "
                                                   "publish; the next `igneous resolve` scores them again")):
     """Entity resolution: score which people are the same human (SAME_AS, extractor 'er'), recompute identity
-    clusters and publish."""
+    clusters and publish, as a build: the Sources page shows it, and no other build runs meanwhile."""
     from igneous import pipeline as runner
     from igneous.graph import resolve as er
 
-    with session() as s, runner.publishing(s):
-        result = {"removed": er.undo(s)} if undo else er.run(s, rescore=True)
-        runner.final_step(s)  # your corrections, applied to what it publishes
-    print(json.dumps(result), flush=True)
+    def run(s, progress):
+        with runner.publishing(s):
+            result = {"removed": er.undo(s)} if undo else er.run(s, rescore=True)
+            runner.final_step(s)  # your corrections, applied to what it publishes
+        return result
+
+    print(json.dumps(_job("pipeline", "pipeline", run)), flush=True)
 
 
 @app.command()

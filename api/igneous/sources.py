@@ -297,6 +297,9 @@ BY_ID = {s["id"]: s for s in SOURCES}
 SYNCABLE = tuple(s["id"] for s in SOURCES if "build" in s)  # in page order
 IMPORT_TOOL = {"chatgpt", "gemini", "claude_ai"}  # raw_meta.tool values stored under source 'ai_chats'
 MODEL_ID = {"chatgpt": "ai_chats", "claude_ai": "ai_chats"}  # the IGNEOUS_LLM_SOURCES id that covers an export
+# The entry whose job imports an AI chat export, by its provider: Gemini's chats are counted with Google Takeout,
+# whose import stores the same items.
+EXPORT_ENTRY = {"chatgpt": "chatgpt", "claude_ai": "claude_ai", "gemini": "takeout"}
 _OPTION_FLAG = {"path": "--path", "mailboxes": "--mailbox", "since_days": "--since-days", "all_mail": "--all-mail"}
 
 

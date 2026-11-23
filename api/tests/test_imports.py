@@ -221,3 +221,14 @@ def test_the_cli_and_the_route_store_the_same_items(committed_db, tmp_path):
     assert wait(job["id"])["result"]["unchanged"] == 2
     with SessionLocal() as s:
         assert s.execute(text("SELECT external_id, content_hash FROM source_items ORDER BY 1")).all() == first
+
+
+def test_a_gemini_export_is_imported_as_the_takeout_entrys_job(committed_db, tmp_path):
+    """Gemini's chats are counted under Google Takeout, whose import stores the same items: the Takeout entry shows
+    the import running, and the two never run at once."""
+    export = tmp_path / "MyActivity.json"
+    export.write_text(json.dumps([{"header": "Gemini Apps", "title": "Prompted hello",
+                                   "time": "2025-05-01T15:00:00.000Z"}]))
+    job = TestClient(app).post("/import/ai-export", json={"path": str(export)}).json()
+    assert (job["kind"], job["source"]) == ("import", "takeout")
+    assert wait(job["id"])["result"]["provider"] == "gemini"

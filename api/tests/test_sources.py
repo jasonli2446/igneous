@@ -1,6 +1,9 @@
 """The Sources registry, the one path every sync takes (CLI, API, scheduler), and the background job runner.
 No network: Google and GitHub are faked, and jobs run fake connectors against the test database."""
 import json
+import os
+import subprocess
+import sys
 import time
 
 import click
@@ -9,9 +12,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from typer.testing import CliRunner
 
-from igneous import jobs, sources
+from igneous import jobs, schedule, sources
 from igneous.cli import app as cli
-from igneous.connectors import secrets
+from igneous.connectors import ai_exports, secrets
 from igneous.connectors.base import Checkpoint, SourceItem
 from igneous.connectors.email_maildir import MaildirConnector
 from igneous.connectors.imessage import MessagesConnector
@@ -165,6 +168,136 @@ def test_igneous_import_ai_export(db, tmp_path):
     result = CliRunner().invoke(cli, ["import", "ai-export", str(export)])
     assert result.exit_code == 0 and "claude_ai: 1 conversations; 1 new" in said(result)
     assert db.execute(text("SELECT external_id FROM source_items")).scalars().all() == ["claude_ai/u1/2025-04-01"]
+    job = jobs.latest_by_source(db)["claude_ai"]  # the job an upload on the Claude.ai entry starts
+    assert (job["kind"], job["status"], job["result"]["inserted"]) == ("import", "succeeded", 1)
+
+
+# ---- a command runs as the job the Sources page would start, so one runs per source, whoever starts it ----
+
+def running_job(s, job_id: str, kind: str, source: str, pid: int) -> None:
+    """A job another process on this computer runs."""
+    s.execute(text("INSERT INTO jobs (id, kind, source, owner_host, owner_pid) VALUES (:i, :k, :s, :h, :p)"),
+              {"i": job_id, "k": kind, "s": source, "h": jobs.HOST, "p": pid})
+
+
+def job_status(s, job_id: str) -> tuple:
+    return tuple(s.execute(text("SELECT status, error FROM jobs WHERE id = :i"), {"i": job_id}).one())
+
+
+def dead_pid() -> int:
+    """The pid of a process that has exited."""
+    return int(subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True,
+                              text=True, check=True).stdout)
+
+
+def test_a_cli_sync_is_the_job_sync_now_starts(db, monkeypatch, tmp_path):
+    """While `igneous sync fs` runs, the Sources page shows fs syncing with its count, and Sync now and the
+    scheduled sync are refused; then the page shows how it ended."""
+    monkeypatch.setattr(sources.settings, "filesystem_roots", str(tmp_path))
+    monkeypatch.setattr(sources, "run_pipeline", lambda s, progress: {})
+    # Set up, so the scheduled sync reads it.
+    db.execute(text("INSERT INTO source_items (source, external_id, content_hash) VALUES ('fs', 'x', 'h')"))
+    client, seen = TestClient(app), {}
+    stats = {"inserted": 3, "updated": 0, "unchanged": 0, "deleted": 0, "redactions": 0}
+
+    def syncing(source_id, s, account=None, opts=None, progress=None, limit=None):
+        progress({"items": 3}, True)
+        fs = next(r for r in client.get("/sources").json()["sources"] if r["id"] == "fs")
+        seen["page"] = (fs["status"], fs["job"]["kind"], fs["job"]["status"], fs["job"]["progress"])
+        seen["sync now"] = client.post("/sources/fs/sync").status_code
+        with SessionLocal() as other:
+            seen["scheduled sync"] = schedule.run(other)["fs"]
+        return {**stats, "accounts": {"default": {**stats, "seconds": 0.1}}}
+
+    monkeypatch.setattr(sources, "sync", syncing)
+    result = CliRunner().invoke(cli, ["sync", "fs"])
+    assert result.exit_code == 0 and "3 new, 0 updated" in said(result), result.output
+    assert seen == {"page": ("syncing", "sync", "running", {"items": 3}), "sync now": 409,
+                    "scheduled sync": {"skipped": "already syncing"}}
+    fs = next(r for r in client.get("/sources").json()["sources"] if r["id"] == "fs")
+    assert (fs["status"], fs["job"]["status"], fs["job"]["result"]["inserted"]) == ("ready", "succeeded", 3)
+
+
+def test_a_cli_sync_that_fails_says_why_as_its_job_records_it(db, monkeypatch):
+    result = CliRunner().invoke(cli, ["sync", "gmail"])
+    assert result.exit_code == 2 and "No Google account connected yet" in said(result)
+    assert jobs.latest_by_source(db)["gmail"]["error"].startswith("No Google account connected yet")
+    entry = {**sources.BY_ID["github"], "build": lambda s, account, opts: [
+        ("bad", lambda: Fixed("github", 0, "GitHub rejected the token")), ("good", lambda: Fixed("github", 2))]}
+    monkeypatch.setitem(sources.BY_ID, "github", entry)
+    result = CliRunner().invoke(cli, ["sync", "github"])
+    assert result.exit_code == 1 and "good: 2 new, 0 updated" in said(result)
+    assert "github sync failed: bad: GitHub rejected the token" in said(result)
+    job = jobs.latest_by_source(db)["github"]  # what the page shows: the error, and what the good account stored
+    assert (job["status"], job["error"], job["result"]["inserted"]) == ("failed", "bad: GitHub rejected the token", 2)
+
+
+def test_a_command_is_refused_while_its_sources_job_runs(db, monkeypatch, tmp_path):
+    """A sync, an import or a build from the command line, while Sync now, an upload, Rebuild, the scheduled sync or
+    another command runs the same job: it says so and reads nothing. Gemini's chats are imported as Takeout's."""
+    monkeypatch.setattr(sources, "sync", lambda *a, **k: pytest.fail("synced while the source was syncing"))
+    claude = tmp_path / "conversations.json"
+    claude.write_text(json.dumps([{"uuid": "u1", "name": "Plan", "chat_messages": [
+        {"sender": "human", "text": "hello", "created_at": "2025-04-01T10:00:00Z"}]}]))
+    gemini = tmp_path / "MyActivity.json"
+    gemini.write_text(json.dumps([{"header": "Gemini Apps", "title": "Prompted hello",
+                                   "time": "2025-05-01T15:00:00.000Z"}]))
+    takeout = tmp_path / "Takeout" / "My Activity" / "Search"
+    takeout.mkdir(parents=True)
+    (takeout / "MyActivity.json").write_text("[]")
+    linkedin = tmp_path / "linkedin"
+    linkedin.mkdir()
+    (linkedin / "Connections.csv").write_text("First Name,Last Name,URL\nAda,Lovelace,https://x.test/ada\n")
+    cases = [(["sync", "fs"], "sync", "fs", "fs is already syncing"),
+             (["sync", "gmail", "--account", "me@x.com"], "sync", "gmail", "gmail is already syncing"),
+             (["import", "ai-export", str(claude)], "import", "claude_ai", "a claude_ai import is already running"),
+             (["import", "ai-export", str(gemini)], "import", "takeout", "a takeout import is already running"),
+             (["import", "takeout", str(tmp_path / "Takeout")], "import", "takeout", "a takeout import is"),
+             (["import", "linkedin", str(linkedin)], "import", "linkedin", "a linkedin import is already running"),
+             (["pipeline"], "pipeline", "pipeline", "the graph is already being built"),
+             (["pipeline", "--stage", "resolve"], "pipeline", "pipeline", "the graph is already being built"),
+             (["extract", "--limit", "1"], "pipeline", "pipeline", "the graph is already being built"),
+             (["resolve"], "pipeline", "pipeline", "the graph is already being built")]
+    for command, kind, source, says in cases:
+        running_job(db, "elsewhere", kind, source, os.getppid())  # a live process: the API, the scheduled sync
+        result = CliRunner().invoke(cli, command)
+        assert result.exit_code == 1 and says in said(result) and "run this again once it finishes" in said(result), \
+            (command, result.output)
+        assert job_status(db, "elsewhere") == ("running", None)
+        assert db.execute(text("SELECT count(*) FROM jobs")).scalar() == 1, command  # it started no job
+        db.execute(text("DELETE FROM jobs"))
+    assert db.execute(text("SELECT count(*) FROM source_items")).scalar() == 0
+    assert set(sources.EXPORT_ENTRY) == set(ai_exports.PROVIDERS)
+    assert {sources.BY_ID[entry]["kind"] for entry in sources.EXPORT_ENTRY.values()} == {"import"}
+
+
+def test_a_job_whose_process_died_never_holds_its_source(db, monkeypatch, tmp_path):
+    """A command killed mid-sync (its terminal closed) leaves its job running: the next job for the source fails it
+    first, and the page shows it failed, with what to do, never as running."""
+    monkeypatch.setattr(sources.settings, "filesystem_roots", str(tmp_path))
+    monkeypatch.setattr(sources, "sync", lambda *a, **k: {"accounts": {}})
+    gone = dead_pid()
+    running_job(db, "killed", "sync", "fs", gone)
+    assert CliRunner().invoke(cli, ["sync", "fs"]).exit_code == 0
+    assert job_status(db, "killed") == ("failed", jobs.INTERRUPTED["sync"])
+    client = TestClient(app)
+    db.execute(text("DELETE FROM jobs"))  # every job here starts at the test transaction's now(): the page shows one
+    running_job(db, "killed-too", "sync", "fs", gone)
+    fs = next(r for r in client.get("/sources").json()["sources"] if r["id"] == "fs")
+    assert (fs["status"], fs["message"], fs["job"]["id"]) == ("needs_attention", jobs.INTERRUPTED["sync"], "killed-too")
+    running_job(db, "killed-build", "pipeline", "pipeline", gone)
+    build = next(j for j in client.get("/jobs").json()["jobs"] if j["source"] == "pipeline")
+    assert (build["id"], build["status"], build["error"]) == ("killed-build", "failed", jobs.INTERRUPTED["pipeline"])
+
+
+def test_a_command_stopped_with_ctrl_c_leaves_its_job_failed(db, monkeypatch):
+    def stopped(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(sources, "sync", stopped)
+    assert CliRunner().invoke(cli, ["sync", "fs"]).exit_code == 130  # as a shell reports Ctrl-C
+    job = jobs.latest_by_source(db)["fs"]
+    assert (job["status"], job["error"]) == ("failed", jobs.INTERRUPTED["sync"]) and job["id"] not in jobs._MINE
 
 
 def test_requirements_report_missing_client_secret_and_blocked_messages(monkeypatch, tmp_path):
