@@ -89,34 +89,40 @@ def visible_nodes(s: Session, ids, sources: frozenset[str] | None = None) -> set
     return set(nameable(s, ids, sources))
 
 
-# The records a node appears in (the node's own record, an edge's record or the record of the node at its other end,
-# an edge's evidence), from allowed sources, as EXISTS clauses over `m`; `{match}` narrows the record `si`.
-_APPEARS = """(
+# The edges a record states: all but a link you added ("+ Connect to…", extractor 'user'), which is your word, not
+# something any record says, so it never makes either of its ends appear in a record.
+_STATED_BY_RECORDS = "e.extractor <> 'user'"
+# The records a node appears in (the node's own record, the record of an edge a record states or of the node at its
+# other end, such an edge's evidence), from allowed sources, as EXISTS clauses over `m`; `{match}` narrows the record
+# `si`.
+_APPEARS = f"""(
     EXISTS (SELECT 1 FROM nodes x JOIN source_items si ON si.id = x.source_item_id
-            WHERE x.id = m AND si.source = ANY(CAST(:src AS text[])) {match})
+            WHERE x.id = m AND si.source = ANY(CAST(:src AS text[])) {{match}})
     OR EXISTS (SELECT 1 FROM edges e JOIN source_items si ON si.id = e.source_item_id
-               WHERE e.src = m AND si.source = ANY(CAST(:src AS text[])) {match})
+               WHERE e.src = m AND {_STATED_BY_RECORDS} AND si.source = ANY(CAST(:src AS text[])) {{match}})
     OR EXISTS (SELECT 1 FROM edges e JOIN source_items si ON si.id = e.source_item_id
-               WHERE e.dst = m AND si.source = ANY(CAST(:src AS text[])) {match})
+               WHERE e.dst = m AND {_STATED_BY_RECORDS} AND si.source = ANY(CAST(:src AS text[])) {{match}})
     OR EXISTS (SELECT 1 FROM edges e JOIN nodes o ON o.id = e.dst JOIN source_items si ON si.id = o.source_item_id
-               WHERE e.src = m AND si.source = ANY(CAST(:src AS text[])) {match})
+               WHERE e.src = m AND {_STATED_BY_RECORDS} AND si.source = ANY(CAST(:src AS text[])) {{match}})
     OR EXISTS (SELECT 1 FROM edges e JOIN nodes o ON o.id = e.src JOIN source_items si ON si.id = o.source_item_id
-               WHERE e.dst = m AND si.source = ANY(CAST(:src AS text[])) {match})
+               WHERE e.dst = m AND {_STATED_BY_RECORDS} AND si.source = ANY(CAST(:src AS text[])) {{match}})
     OR EXISTS (SELECT 1 FROM edges e JOIN edge_evidence ev ON ev.edge_id = e.id
                JOIN source_items si ON si.id = ev.source_item_id
-               WHERE (e.src = m OR e.dst = m) AND si.source = ANY(CAST(:src AS text[])) {match}))"""
+               WHERE (e.src = m OR e.dst = m) AND {_STATED_BY_RECORDS}
+                 AND si.source = ANY(CAST(:src AS text[])) {{match}}))"""
 # ...whose text holds the name being checked (:name per row, lowercase).
 _HOLDS = ("AND strpos(lower(coalesce(si.title, '') || ' ' || coalesce(si.body_text, '') || ' ' || "
           "CAST(si.raw_meta AS text)), {name}) > 0")
 
 
-def _named_elsewhere(type_: str, props: dict, own_record_allowed: bool) -> bool:
-    """Whether a node's name came from outside the records it appears in, so the name itself must be found there:
-    a contact card's, LinkedIn's or your resume's name for a person or another identity's name shown for them; any
-    organization's (contact cards, LinkedIn, your resume, a domain's signatures); a Project named by your resume or
-    by you; a chat or folder (named by its own source, which may not be allowed)."""
+def _named_elsewhere(type_: str, props: dict, own_record_allowed: bool, given: bool) -> bool:
+    """Whether a node's name came from outside the allowed records it appears in, so the name itself must be found
+    there: a person's, unless an allowed record gave them exactly that name (`given`: a mail header, or a card or
+    LinkedIn connection whose source is allowed; never a calendar invite or chat that isn't, your resume, or another
+    identity's name shown for them); any organization's (contact cards, LinkedIn, your resume, a domain's signatures);
+    a Project named by your resume or by you; a chat or folder (named by its own source, which may not be allowed)."""
     if type_ == "Person":
-        return props.get("named_by") in ("contacts", "linkedin", "profile") or "shown_name" in props
+        return not given
     if type_ == "Project":
         return bool(props.get("renamed")) or props.get("named_from") in ("profile", "you")
     if type_ == "Organization":
@@ -125,12 +131,15 @@ def _named_elsewhere(type_: str, props: dict, own_record_allowed: bool) -> bool:
 
 
 def nameable(s: Session, ids, sources: frozenset[str] | None = None) -> dict[int, str]:
-    """The nodes among `ids` a prompt may name, each with the name it may use. A node qualifies when it appears in a
-    record from an allowed source (the record is the node itself, the node at the other end of one of its edges, or
-    that edge's evidence; for a person, any of their identities' records) and its name is grounded in such records:
-    read from them (a sender's display name, a calendar title, a term found in them) or given by a model that read
-    only them (a judged thread). A name that came from elsewhere (`_named_elsewhere`), or a person's that only another
-    of their identities' records hold, must itself appear in one of them, in any identity's records for a person;
+    """The nodes among `ids` a prompt may name, each with the name it may use.
+
+    A node qualifies when it appears in a record from an allowed source: its own record, the record of an edge a
+    record states or of the node at that edge's other end, or that edge's evidence (a link you added is your word,
+    not a record's, so it never counts); for a person, any of their identities' records. Its name must be grounded in
+    such records too: read from them (a calendar title, a term found in them; for a person, a name one of them gave
+    them, such as a sender's display name) or given by a model that read only them (a judged thread). A name that
+    came from elsewhere (`_named_elsewhere`: a person's from a calendar invite or chat whose source isn't allowed, a
+    contact card's, your resume's) must itself appear in one of those records, in any identity's for a person;
     failing that, a Project you renamed is named as it was derived."""
     ids = sorted({int(i) for i in ids if i is not None})
     allowed = sorted(allowed_sources() if sources is None else sources)
@@ -140,12 +149,14 @@ def nameable(s: Session, ids, sources: frozenset[str] | None = None) -> dict[int
         WITH c AS (SELECT n.*, EXISTS (SELECT 1 FROM (SELECT n.id AS m) q WHERE {_APPEARS.format(match='')}) AS direct
                    FROM nodes n WHERE n.id = ANY(CAST(:ids AS bigint[])))
         SELECT c.id, c.type, c.name, c.props, c.direct,
-               COALESCE(own.source = ANY(CAST(:src AS text[])), false) AS own
+               COALESCE(own.source = ANY(CAST(:src AS text[])), false) AS own,
+               EXISTS (SELECT 1 FROM spine_node_support x JOIN source_items si ON si.id = x.source_item_id
+                       WHERE x.node_id = c.id AND x.name = c.name AND si.source = ANY(CAST(:src AS text[]))) AS given
         FROM c LEFT JOIN source_items own ON own.id = c.source_item_id
         WHERE c.direct OR (c.type = 'Person' AND EXISTS (
             SELECT 1 FROM ({identity_members('c.id')}) q(m) WHERE {_APPEARS.format(match='')}))
     """), {"ids": ids, "src": allowed}).all()
-    out = {r.id: r.name for r in rows if r.direct and not _named_elsewhere(r.type, r.props or {}, r.own)}
+    out = {r.id: r.name for r in rows if r.direct and not _named_elsewhere(r.type, r.props or {}, r.own, r.given)}
     check = {r.id: r for r in rows if r.id not in out}
     if not check:
         return out
@@ -153,7 +164,7 @@ def nameable(s: Session, ids, sources: frozenset[str] | None = None) -> dict[int
     candidates = [{"id": r.id, "name": r.name.lower()} for r in check.values()]
     candidates += [{"id": r.id, "name": (r.props or {})["original_name"].lower()} for r in check.values()
                    if r.type == "Project" and (r.props or {}).get("original_name")
-                   and not _named_elsewhere("Project", {**r.props, "renamed": False}, r.own)]
+                   and not _named_elsewhere("Project", {**r.props, "renamed": False}, r.own, r.given)]
     held = s.execute(text(f"""
         WITH c AS (SELECT * FROM jsonb_to_recordset(CAST(:c AS jsonb)) AS c(id bigint, name text)),
         ident AS (SELECT c.id, c.name, COALESCE((SELECT canonical_id FROM canonical WHERE node_id = c.id), c.id) AS head
