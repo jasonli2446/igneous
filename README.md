@@ -206,12 +206,12 @@ cd api && uv run igneous sync imessage --since-days 90 && uv run igneous pipelin
 
 ## Model calls
 
-Q&A uses Claude Sonnet 5.5 on Amazon Bedrock. Set `AWS_BEARER_TOKEN_BEDROCK` and `AWS_REGION` (e.g. `us-east-1`);
-application model access goes through `api/igneous/providers.py`: local FastEmbed embeddings, a local FastEmbed
-cross-encoder reranker, and the existing Bedrock chat client. Select them with `IGNEOUS_EMBEDDING_PROVIDER`,
-`IGNEOUS_RERANK_PROVIDER`, and `IGNEOUS_CHAT_PROVIDER`; the supported defaults are `fastembed`, `cross_encoder`,
-and `bedrock`. `IGNEOUS_LLM_ENABLED=false` turns off hosted model calls (search and the graph keep working; `/ask`
-returns 503).
+Q&A uses Claude Sonnet 5.5 on Amazon Bedrock. Set `AWS_BEARER_TOKEN_BEDROCK` and `AWS_REGION` (e.g. `us-east-1`).
+All model access goes through `api/igneous/providers.py`: local FastEmbed embeddings and a local FastEmbed
+cross-encoder reranker, which send nothing anywhere, and Claude on Bedrock for chat (`IGNEOUS_LLM_MODEL`, and
+`IGNEOUS_LLM_CHEAP_MODEL` for high-volume checks). The Anthropic SDK retries a failed call `IGNEOUS_HOSTED_RETRIES`
+times (2 by default). `IGNEOUS_LLM_ENABLED=false` turns off hosted model calls (search and the graph keep working;
+`/ask` returns 503).
 
 **What a model may read.** Only the sources listed in `IGNEOUS_LLM_SOURCES`: the comma-separated ids the Sources
 page shows (`gmail,ai_chats`; `takeout` covers every Takeout product, `ai_chats` every AI chat import). Every hosted
@@ -241,8 +241,10 @@ the model can't answer from it, Ask says so and cites nothing. A failed model ca
 model a 503, each with a message.
 
 To verify providers without credentials, run `cd api && uv run python scripts/provider_smoke.py`. It exercises the
-local embedding and reranking models only. Add `--hosted` only with an explicit real `AWS_BEARER_TOKEN_BEDROCK`; that
-mode makes one paid Bedrock chat request and is never run by the test suite.
+local embedding and reranking models only. Add `--hosted` only with an explicit real `AWS_BEARER_TOKEN_BEDROCK`: it
+then sends one paid, schema-constrained request to each hosted model (`IGNEOUS_LLM_MODEL` and
+`IGNEOUS_LLM_CHEAP_MODEL`), the way every model call goes, so a model that rejects the request fails there first. The
+test suite never runs it.
 
 ## MCP server (use the graph from Claude Code, Claude Desktop, Cursor)
 

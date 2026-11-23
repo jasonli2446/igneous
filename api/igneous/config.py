@@ -25,13 +25,11 @@ class Settings(BaseSettings):
     # Gmail API quota units per minute the connector paces itself to. Google publishes 15,000; a project in
     # Testing mode is cut off near 730, so the default stays under that. Raise it to your project's quota.
     gmail_units_per_min: float = 600
-    embedding_provider: str = "fastembed"
     # chunks.embedding is vector(384) (migration 0001): a model with another dimension, or another model's vector
     # space, needs a migration that changes the column and re-embeds every chunk.
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_dim: int = 384
     embedding_batch_size: int = 128
-    rerank_provider: str = "cross_encoder"
     # Ask's local cross-encoder: it scores the retrieved and graph-expanded passages together (at most
     # reranker_pool_size of them, which is also how many passages Ask retrieves) and keeps the best. Off, or when
     # its model can't load, Ask keeps retrieval order and holds places for graph neighbours (rag/qa.py).
@@ -39,7 +37,6 @@ class Settings(BaseSettings):
     reranker_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
     reranker_pool_size: int = 32
     rerank_batch_size: int = 64
-    chat_provider: str = "bedrock"
     # Kill switch for every outbound model call (CO-1). Search and the graph still work without it.
     llm_enabled: bool = True
     # Comma-separated source ids (the Sources page shows them) whose records a hosted model may read: Ask,
@@ -49,9 +46,9 @@ class Settings(BaseSettings):
     # High-volume yes/no judgments (verifying edges, pair same/related, umbrellas, summaries) use the cheap model;
     # nuanced ones (naming threads, picking their records, confirming a merge) use llm_model.
     llm_cheap_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    # How many times the Anthropic SDK retries a failed hosted call (connection errors, 408, 409, 429, 5xx), with
+    # backoff. It is the only retry layer.
     hosted_retries: int = 2
-    hosted_retry_seconds: float = 1.0
-    hosted_batch_size: int = 4
 
     @field_validator("data_dir")
     @classmethod

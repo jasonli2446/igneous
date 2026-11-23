@@ -12,22 +12,30 @@ from sqlalchemy.orm import Session
 
 from igneous import source_catalog
 from igneous.config import settings
-from igneous.providers import LLMDisabled, ProviderError, chat
+from igneous.providers import LLMDisabled, ProviderError, ProviderUnavailable, chat
 
-__all__ = ["LLMDisabled", "ProviderError", "allowed_sources", "cache_lookup", "cache_store", "model_status",
-           "require_whole_corpus", "structured", "visible_nodes"]
+__all__ = ["LLMDisabled", "ProviderError", "ProviderUnavailable", "allowed_sources", "cache_lookup", "cache_store",
+           "model_status", "require_whole_corpus", "structured", "visible_nodes"]
 
 LOCAL_SOURCES = source_catalog.LOCAL_TEXT  # also need IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED
 
 
 def structured(system: str, user: str, schema: dict, max_tokens: int = 4000, effort: str = "low",
                model: str | None = None) -> tuple[dict, dict]:
-    """One schema-constrained chat call returning parsed JSON and usage."""
+    """One schema-constrained chat call (on `model`, else IGNEOUS_LLM_MODEL) returning parsed JSON and usage. Raises
+    the providers' errors: LLMDisabled, ProviderUnavailable, or ProviderError, which also covers an answer that
+    isn't the JSON object the schema asks for."""
     result = chat([
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ], schema, max_tokens=max_tokens, effort=effort, model=model)
-    return json.loads(result.text), result.usage
+    try:
+        parsed = json.loads(result.text)
+    except json.JSONDecodeError as e:
+        raise ProviderError(f"the model's answer is not JSON: {e}") from e
+    if not isinstance(parsed, dict):
+        raise ProviderError("the model's answer is not a JSON object")
+    return parsed, result.usage
 
 
 def cache_lookup(key: str) -> dict | None:

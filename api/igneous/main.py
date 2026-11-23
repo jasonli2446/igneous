@@ -22,7 +22,7 @@ from igneous.graph.entity_api import router as entity_router
 from igneous.graph.history import commitments, decisions, relationship_history
 from igneous.graph.traversal import GraphFilters, expand, explain, neighborhood, network, people, view
 from igneous.items import router as items_router
-from igneous.llm import LLMDisabled, ProviderError, model_status
+from igneous.llm import ProviderError, ProviderUnavailable, model_status
 from igneous.rag import qa
 from igneous.rag.constraints import apply, describe, person_by_address_or_name
 from igneous.rag.search import Filters, experts, hybrid
@@ -354,12 +354,13 @@ class AskBody(BaseModel):
 @app.post("/ask")
 def ask(body: AskBody, s: Session = Depends(get_session)):
     """A cited answer from the sources opted in to the hosted model (IGNEOUS_LLM_SOURCES), or `answerable: false`;
-    `filters` says what narrowed the search, as in /search. 503 when the hosted model is off or not configured, 502
-    when it fails to answer (a refusal, a cut-off or empty response); `detail` says which."""
+    `filters` says what narrowed the search, as in /search. 503 when the hosted model is off, not configured or
+    can't be used now (unreachable, rate-limited, refusing the credentials); 502 when it gives no usable answer (a
+    refusal, a cut-off or empty response, a rejected request). `detail` says which."""
     f = _request_filters(s, None, body.person, None, None)
     try:
         return qa.answer(s, body.question, f, use_graph=body.use_graph, mode=body.mode)
-    except LLMDisabled as e:
+    except ProviderUnavailable as e:
         raise HTTPException(503, str(e)) from e
     except ProviderError as e:
         raise HTTPException(502, str(e)) from e

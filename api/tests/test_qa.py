@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from igneous import llm
-from igneous.providers import ChatResult, LLMDisabled, ProviderError
+from igneous.providers import ChatResult, LLMDisabled, ProviderError, ProviderUnavailable
 from igneous.rag import qa, rerank
 
 T0 = datetime(2001, 5, 1, 9, 0, tzinfo=UTC)
@@ -196,3 +196,10 @@ def test_ask_route_maps_provider_failures_and_validates_its_body(mailbox, model,
     monkeypatch.setattr(llm, "chat", off)
     r = client.post("/ask", json={"question": QUESTION, "mode": "lexical"})
     assert r.status_code == 503 and "AWS_BEARER_TOKEN_BEDROCK" in r.json()["detail"]
+
+    def busy(*_args, **_kwargs):
+        raise ProviderUnavailable("Bedrock is rate-limiting the model; try again shortly")
+
+    monkeypatch.setattr(llm, "chat", busy)
+    r = client.post("/ask", json={"question": QUESTION, "mode": "lexical"})
+    assert r.status_code == 503 and "rate-limiting" in r.json()["detail"]
