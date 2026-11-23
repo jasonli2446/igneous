@@ -177,7 +177,7 @@ def test_corrections_become_intents_and_dropped_links_one_row_each(test_db, monk
 
 
 def test_a_domain_organization_its_company_holds_takes_the_company_key_and_corrections_follow(test_db, monkeypatch):
-    """Migration 0015 on a database the code before it built: acme.test, named by its people's own words, gives its
+    """Migration 0016 on a database the code before it built: acme.test, named by its people's own words, gives its
     links to the LinkedIn company Acme Robotics and goes; state.edu, which your resume named, takes the key of the
     company its people name; a domain only the model named, for a company nothing else names, stays. Its backbone
     thread follows, and so do your rejection, your rename, the verifier's verdict and the link it dropped."""
