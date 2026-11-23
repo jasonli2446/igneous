@@ -199,14 +199,14 @@ T0 = datetime(2024, 9, 2, 15, tzinfo=UTC)
 
 
 def found(s, name: str, term: str, sender: str, subjects: list[str], start: int, kind: str = "thread",
-          key: str | None = None, named_from: str = "records") -> None:
-    """A thread the threads stage found, with its records: mail from `sender` with these subjects, a week apart from
-    day `start`. Without the model a thread's kind is 'thread' and its name is its term and months."""
+          key: str | None = None, named_from: str = "records", body: str = "{subject}. See you then.") -> int:
+    """A thread the threads stage found, with its records: mail from `sender` with these subjects (and `body`), a week
+    apart from day `start`. Without the model a thread's kind is 'thread' and its name is its term and months."""
     from pipeline_data import mail
 
     refs = [f"{term}-{i}" for i in range(len(subjects))]
     for ref, subject, i in zip(refs, subjects, range(len(subjects)), strict=True):
-        mail(s, ref, sender, [ME], subject, T0 + timedelta(days=start + 7 * i), body=f"{subject}. See you then.")
+        mail(s, ref, sender, [ME], subject, T0 + timedelta(days=start + 7 * i), body=body.format(subject=subject))
     s.commit()
     from igneous.graph import spine
     spine.run(s)
@@ -218,6 +218,7 @@ def found(s, name: str, term: str, sender: str, subjects: list[str], start: int,
     s.execute(text("""INSERT INTO edges (src, dst, type, extractor, confidence)
                       SELECT n.id, :t, 'PART_OF', 'threads', 0.6 FROM nodes n JOIN source_items si ON si.id = n.source_item_id
                       WHERE n.type = 'Message' AND si.external_id = ANY(:r)"""), {"t": tid, "r": refs})
+    return tid
 
 
 def test_only_what_an_org_holds_goes_under_it_by_its_domain(db):
@@ -261,3 +262,72 @@ def test_only_what_an_org_holds_goes_under_it_by_its_domain(db):
     assert why["Acme · Dec 2024"] == "named for Acme Robotics; 100% of its conversations involve acme.test"
     assert why["Atlas · Feb 2025"] == "what you wrote about your Engineer role (since Jan 2025) names Atlas"
     assert why["Beacon rollout"] == "a work project; 100% of its conversations involve acme.test"
+
+
+def school_and_job(s) -> None:
+    """Mo studied at State University (state.edu) and was a TA there, and works at Acme Robotics (acme.test) as an
+    engineer and, from June, also as team lead; LinkedIn says what each job was about."""
+    me(s)
+    linkedin(s, positions=[("Acme Robotics", "Engineer", "2025-01", "", "Built Atlas, the fleet dashboard, all summer."),
+                           ("Acme Robotics", "Team Lead", "2025-06", "", "Ran the Beacon rollout."),
+                           ("State University", "Teaching Assistant", "2024-09", "2024-12", "")],
+             education=[("State University", "BS", "2021-09", "2025-05")])
+    s.commit()
+    profile.run(s, log=None)
+    s.execute(text("""UPDATE nodes SET props = props || jsonb_build_object('domains', jsonb_build_array(
+                          CASE name WHEN 'State University' THEN 'state.edu' ELSE 'acme.test' END))
+                      WHERE type = 'Organization'"""))
+
+
+def test_the_kind_a_model_judged_says_what_a_thread_is_before_the_course_codes_in_its_mail(db):
+    """A trip with a TA (whose signature names her course on every message) is still a trip; a thread named without
+    the model whose mail names a course only in what it quotes and in signatures is no class; "has 300" is no course.
+    A project the model calls a project is neither work nor a class; one it calls a TA job is work, under the TA job;
+    a demo day the model calls an event, most of whose own mail names CS 481, is a class, under the degree."""
+    school_and_job(db)
+    signed = "{subject}. See you then.\n\nThanks,\nCy\nTeaching Assistant, CS 210"
+    found(db, "Lake trip", "Lake", "cy@state.edu", ["Lake cabin", "Lake food", "Lake photos"], 10, kind="trip",
+          body=signed)
+    found(db, "Owl · Oct 2024", "Owl", "cy@state.edu", ["Owl notes", "Owl plan", "Owl ideas"], 20, body=(
+        "{subject}: the tracker has 300 owls now.\n\nOn Monday, Cy wrote:\n> CS 210 lab moved\n\n--\nCy, CS 210 TA"))
+    found(db, "Kestrel", "Kestrel", "cy@state.edu", ["Kestrel app", "Kestrel demo", "Kestrel bugs"], 30, kind="project")
+    found(db, "Grading", "Grading", "cy@state.edu", ["Grading week 1", "Grading week 2", "Grading week 3"], 40,
+          kind="teaching assistant")
+    found(db, "Demo Day", "Demo Day", "cy@state.edu", ["Demo Day plan", "Demo Day booth", "Demo Day!"], 60, kind="event",
+          body="{subject}: the CS 481 teams present at noon.")
+    backbone.run(db, log=None)
+    assert {c: p for c, p in parents(db).items() if c in ("Lake trip", "Owl · Oct 2024", "Kestrel", "Grading",
+                                                           "Demo Day")} == {
+        "Grading": "Teaching Assistant", "Demo Day": "BS"}
+
+
+def test_what_you_wrote_about_a_role_puts_a_thread_under_that_role_before_anything_is_inferred(db):
+    """Atlas falls in both Acme jobs' dates and most of its mail is with the university, where Mo had a TA job: the
+    Engineer description names it, so it goes under Engineer, whose dates alone wouldn't tell. A trip called Summer in
+    the same months isn't what "all summer" in the description names."""
+    school_and_job(db)
+    found(db, "Atlas · Jul 2025", "Atlas", "cy@state.edu", ["Atlas review", "Atlas bugs", "Atlas launch"], 300,
+          kind="work project")
+    found(db, "Summer", "Summer", "jo@acme.test", ["Summer plans", "Summer cabin", "Summer pics"], 310, kind="trip")
+    backbone.run(db, log=None)
+    assert parents(db).get("Atlas · Jul 2025") == "Engineer" and "Summer" not in parents(db)
+    why = dict(rows(db, """SELECT c.name, e.props->>'why' FROM edges e JOIN nodes c ON c.id = e.src
+                           WHERE e.type = 'PART_OF' AND e.extractor = 'backbone'"""))
+    assert why["Atlas · Jul 2025"] == "what you wrote about your Engineer role (since Jan 2025) names Atlas"
+
+
+def test_this_is_wrong_under_a_role_leaves_the_org_and_under_the_org_leaves_its_roles_too(db):
+    """Beacon is placed under the Team Lead job (what Mo wrote about it names Beacon). "This is wrong" there: the next
+    build puts it under Acme Robotics itself. "This is wrong" on that: it stays out of Acme and its roles."""
+    school_and_job(db)
+    beacon = found(db, "Beacon", "Beacon", "jo@acme.test", ["Beacon rollout", "Beacon fixes", "Beacon done"], 320,
+                   kind="work project")
+    client = TestClient(app)
+    backbone.run(db, log=None)
+    for expected in ("Team Lead", "Acme Robotics", None):
+        assert parents(db).get("Beacon") == expected
+        if expected:
+            link = db.execute(text("""SELECT id FROM edges WHERE src = :t AND type = 'PART_OF' AND extractor = 'backbone'"""),
+                              {"t": beacon}).scalar_one()
+            assert client.post("/graph/edge/wrong", json={"edge": link}).json()["applied"] == "now"
+            backbone.run(db, log=None)

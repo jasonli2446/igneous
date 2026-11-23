@@ -11,25 +11,30 @@ backbone:
      gets one of its own (`backbone:<org key>`, a Project under the correction contract: a name you give it stays).
   2. Stated: projects your resume lists under the org (`props.resume_projects`) are part of it, and a lab inside a
      university is part of the university's thread. These are stated (extractor 'profile'), never judged.
-  3. Described: a thread your own description of a role there names (your LinkedIn says the internship was "Heron
-     depth filtering"), inside that role's dates, was work you did there.
+  3. Described: a thread your own description of a role there names as written (your LinkedIn says the internship
+     was "Heron depth filtering"), inside that role's dates, was work you did there, under that role. A trip or a
+     hobby never is.
   4. Mostly theirs, for what an org holds: a thread most of whose correspondence involves the org's email domains is
-     part of it when it is the kind of thing that org holds (`_what`): a class at a school (a thread judged a class,
-     or most of whose records name one course code, like a capstone project), a job's work at an employer (judged a
-     job, internship or work project), or a thread named for the org itself ("Northwind" at Northwind Robotics). A
-     trip, a hobby or a side project with people who share a domain (classmates on a trip, a friend from class on a
-     side project your resume lists as your own) is not the domain's, and neither is a thread whose kind is unknown
-     (named without the model, with no course code or org name to go on): those sit under an org only by what you
-     stated (2, 3) or a link you add. Only the most specific org takes a thread (a lab before its university), and an
-     org you never wrote to doesn't. Your own addresses don't count.
+     part of it when it is the kind of thing that org holds (`_what`): a class at a school, a job's work at an
+     employer, or a thread named for the org itself ("Northwind" at Northwind Robotics). What a thread is comes from
+     the kind a model judged it first (graph/traversal.py placing_kind: a trip, a class, work); without one that
+     says (no model, or "project", "event"), a thread most of whose records name one course code in their own words
+     is a class (a capstone's demo day), and a project your resume or LinkedIn lists under no org is your own. A trip,
+     a hobby or a side project with people who share a domain (classmates on a trip, a friend from class on a side
+     project) is not the domain's, and neither is a thread whose kind is unknown (named without the model, with no
+     course code or org name to go on): those sit under an org only by what you stated (2, 3) or a link you add.
+     Only the most specific org takes a thread (a lab before its university), and an org you never wrote to doesn't.
+     Your own addresses don't count. What you stated (2, 3) is placed for every org before anything is inferred.
   5. Classes: a class (as 4 tells one), inside your dates at exactly one school, was taken there (a class run in
      group chats has no school email to go on). Its records from those dates are the evidence.
 
 Roles: an org where your resume or LinkedIn lists several roles (an internship, then the full-time job; a degree and
 a TA job; graph/profile.py props.roles) shows once, with a thread for each role under its own thread
 (`backbone:<org key>/<title>`, kind 'role', named by its title, stated: extractor 'profile'). A thread placed under
-such an org goes under the one role whose dates hold it (a month's slack either side; a class only under a degree,
-anything else only under a job), else under the org: two roles at once leave it to you.
+such an org goes under the role a description of yours names it in (3), else under the one role whose dates hold it
+(a month's slack either side; a class only under a degree, anything else only under a job), else under the org: two
+roles at once leave it to you. "This is wrong" on a thread under the org keeps it out of the org and its roles; on
+a thread under a role, out of that role.
 
 Inferred links (3, 4, 5) are PART_OF thread -> org's (or role's) thread with extractor 'backbone' and their evidence;
 the verifier checks them like any other. A thread you hid takes no part. Rebuilt every run: the stage owns its links (both
@@ -53,15 +58,10 @@ EVIDENCE = 6
 SLACK = timedelta(days=31)  # around your dates at an org or in a role: planning before, wrap-up after
 COURSE_SHARE = 0.5     # of a thread's records naming one course code: it is about that class
 
-# What a thread is, as far as placing it goes, from the kind a model judged it (free text, so whole words): what a
-# school holds, what an employer holds, and what neither does whoever is in it. A side project is checked before a
-# project.
-PERSONAL = re.compile(r"\b(trip|travel|travels|vacation|holiday|visit|hobby|hobbies|game|games|sport|sports|club|"
-                      r"music|band|league|friend|friends|party|wedding|concert|festival|hangout|side project|"
-                      r"personal project)\b", re.I)
-CLASS = re.compile(r"\b(class|course|lecture|seminar|coursework|lab section|capstone)\b", re.I)
-WORK = re.compile(r"\b(job|internship|intern|work|employment|role|position|project|research|client|team|hiring|"
-                  r"interview|onboarding|field trials?)\b", re.I)
+# A record's own words: what comes before the text it quotes and before its sign-off ("Thanks,", "--"), where a
+# signature names the same course on every message someone sends.
+SIGN_OFF = re.compile(r"^\s*(--\s*|(best|thanks|thank you|cheers|regards|best regards|kind regards|warm regards|"
+                      r"sincerely|all the best|talk soon)[,!.]?\s*)$", re.I | re.M)
 # Words an organization's name starts with that say nothing about which one it is.
 GENERIC_ORG_WORDS = frozenset({"the", "university", "college", "school", "institute", "academy", "state", "city",
                                "county", "national", "international", "american", "united", "first", "new", "north",
@@ -96,21 +96,31 @@ def _orgs(s: Session) -> list[dict]:
     return sorted(orgs, key=lambda o: (o["id"] in parents, o["id"]))
 
 
+def _own_words(body: str) -> str:
+    """A record's text without what it quotes and its sign-off and signature."""
+    from igneous.rag.chunking import QUOTE_START
+
+    body = body[:m.start()] if (m := QUOTE_START.search(body)) else body
+    return body[:m.start()] if (m := SIGN_OFF.search(body)) else body
+
+
 def _course_shares(s: Session) -> dict[int, tuple[float, str]]:
     """{thread: (the share of its records that name its most named course code, that code)}, for the threads whose
-    records name one at all ("CS 481" in most of the capstone's mail and documents)."""
+    records name one at all ("CS 481" in most of the capstone's mail and documents). A record names a course in its
+    title or its own words (`_own_words`), with the department written in capitals ("CS 481", never "has 300")."""
     from collections import Counter, defaultdict
 
-    from igneous.graph.threads import COURSE_SQL, course_codes
+    from igneous.graph.threads import COURSE_CODE, COURSE_SQL, MONTHS
 
     named: dict[int, Counter] = defaultdict(Counter)
-    for thread, _record, text_ in s.execute(text("""
-        SELECT DISTINCT pe.dst, si.id, coalesce(si.title, '') || ' ' || left(coalesce(si.body_text, ''), 4000)
+    for thread, _record, title, body in s.execute(text("""
+        SELECT DISTINCT pe.dst, si.id, coalesce(si.title, ''), coalesce(si.body_text, '')
         FROM edges pe JOIN nodes n ON n.id = pe.src JOIN source_items si ON si.id = n.source_item_id
         WHERE pe.type = 'PART_OF' AND pe.extractor = 'threads'
-          AND coalesce(si.title, '') || ' ' || left(coalesce(si.body_text, ''), 4000) ~ :c
+          AND coalesce(si.title, '') || ' ' || coalesce(si.body_text, '') ~ :c
     """), {"c": COURSE_SQL}):
-        named[thread].update(set(course_codes(text_)))
+        said = f"{title}\n{_own_words(body)[:4000]}"
+        named[thread].update({f"{d} {n}" for d, n in COURSE_CODE.findall(said) if d.isupper() and d.lower() not in MONTHS})
     totals = dict(s.execute(text("""SELECT pe.dst, count(DISTINCT n.source_item_id) FROM edges pe
                                     JOIN nodes n ON n.id = pe.src WHERE pe.type = 'PART_OF' AND pe.extractor = 'threads'
                                       AND pe.dst = ANY(:t) GROUP BY pe.dst"""), {"t": sorted(named)}).all())
@@ -119,16 +129,19 @@ def _course_shares(s: Session) -> dict[int, tuple[float, str]]:
 
 
 def _what(t: dict, shares: dict[int, tuple[float, str]]) -> str | None:
-    """What a thread is, as far as placing it goes: 'class' (judged one, or about one: most of its records name one
-    course code), 'personal' (a trip, a hobby, or a side project: one your resume lists as your own, under no org),
-    'work' (a job, an internship, a work project), or None when it isn't known (named without the model)."""
+    """What a thread is, as far as placing it goes: 'class', 'work' or 'personal' (a trip, a hobby, a side project), or
+    None when that isn't known. The kind a model judged says it first (graph/traversal.py placing_kind: a trip with a
+    classmate's course in the mail is still a trip). Otherwise (no model, or a kind like "project" or "event" that says
+    neither): a class when most of its records name one course code (a capstone's demo day), and your own when your
+    resume or LinkedIn lists it as a project under no organization."""
+    from igneous.graph.traversal import placing_kind
+
     p = t["props"] or {}
-    kind = p.get("kind") or ""
-    if shares.get(t["id"], (0, ""))[0] >= COURSE_SHARE or CLASS.search(kind):
+    if judged := placing_kind(p.get("kind")):
+        return judged
+    if shares.get(t["id"], (0, ""))[0] >= COURSE_SHARE:
         return "class"
-    if PERSONAL.search(kind) or (p.get("named_from") == "profile" and t["key"].startswith("profile:")):
-        return "personal"
-    return "work" if WORK.search(kind) else None
+    return "personal" if p.get("named_from") == "profile" and t["key"].startswith("profile:") else None
 
 
 def _named_for(t: dict, org: dict) -> bool:
@@ -141,20 +154,23 @@ def _named_for(t: dict, org: dict) -> bool:
     return any(norm(term) in names for term in (t["props"] or {}).get("terms") or [])
 
 
-def _described(org: dict, threads: list[dict]) -> dict[int, tuple[str, str, str, int | None]]:
-    """{thread: (the term, the role's title, when you held it, the record that says it)} for each thread one of its
-    defining terms names in your description of a role at the org, inside that role's dates."""
+def _described(org: dict, threads: list[dict], what: dict[int, str | None]) -> dict[int, tuple[str, dict]]:
+    """{thread: (the term, the role)} for each thread one of whose defining terms your description of a role at the
+    org names as written (a name: "Heron", never "summer" for a thread called Summer), inside that role's dates. A
+    thing of your own (a trip, a hobby) is never work a description names."""
     out = {}
     for r in org["roles"] or []:
-        said = (r.get("description") or "").lower()
+        said = r.get("description") or ""
         if not said:
             continue
         for t in threads:
             p = t["props"] or {}
+            if t["id"] in out or what.get(t["id"]) == "personal":
+                continue
             term = next((x for x in p.get("terms") or [] if len(x) >= 4
-                         and re.search(rf"(?<![a-z0-9]){re.escape(x.lower())}(?![a-z0-9])", said)), None)
-            if term and t["id"] not in out and _inside(p, _day(r.get("start")), _day(r.get("end"))):
-                out[t["id"]] = (term, r["title"], _span(r), r.get("source_item_id"))
+                         and re.search(rf"(?<![A-Za-z0-9]){re.escape(x)}(?![A-Za-z0-9])", said)), None)
+            if term and _inside(p, _day(r.get("start")), _day(r.get("end"))):
+                out[t["id"]] = (term, r)
     return out
 
 
@@ -347,16 +363,23 @@ def run(s: Session, log=print) -> dict:
     shares = _course_shares(s)
     what = {t["id"]: _what(t, shares) for t in threads}
 
-    def place(t: int, o: dict, why: str, named_role: str | None = None, **edge) -> int | None:
-        """Put thread `t` under org `o`: under the one role there whose dates hold it (a class only under a degree,
-        anything else only under a job), else under the org's own thread. `why` names the role already when it is
-        `named_role`."""
+    def place(t: int, o: dict, why: str, role: dict | None = None, **edge) -> int | None:
+        """Put thread `t` under org `o`: under `role` when what you wrote about that role names the thread, else under
+        the one role there whose dates hold it (a class only under a degree, anything else only under a job), else
+        under the org's own thread. A placement you said is wrong stays out: one under the org's thread keeps the
+        thread out of the org and its roles; one under a role keeps it out of that role."""
+        ot = org_thread[o["id"]]
+        if w.rejected.blocks(t, ot):
+            return None
         p = (by_id.get(t) or {}).get("props") or {}
-        cls = what.get(t) == "class"
-        fits = [r for r in roles[o["id"]] if r["school"] == cls and _inside(p, r["start"], r["end"])]
-        if len(fits) == 1 and fits[0]["title"] != named_role:
-            why += f", while you were {fits[0]['title']} there" + (f" ({fits[0]['span']})" if fits[0]["span"] else "")
-        return w.edge(t, fits[0]["id"] if len(fits) == 1 else org_thread[o["id"]], "PART_OF", {"why": why}, **edge)
+        held = [r for r in roles[o["id"]] if not w.rejected.blocks(t, r["id"])]
+        if role is not None:
+            fits = [r for r in held if (r["title"], r["start"]) == (role["title"], _day(role.get("start")))]
+        else:
+            fits = [r for r in held if r["school"] == (what.get(t) == "class") and _inside(p, r["start"], r["end"])]
+            if len(fits) == 1:
+                why += f", while you were {fits[0]['title']} there" + (f" ({fits[0]['span']})" if fits[0]["span"] else "")
+        return w.edge(t, fits[0]["id"] if len(fits) == 1 else ot, "PART_OF", {"why": why}, **edge)
 
     def kind_of(t: int) -> str:
         """What the thread is, for a reason: the course most of its records name, or the kind a model judged."""
@@ -373,6 +396,8 @@ def run(s: Session, log=print) -> dict:
     placed: set[int] = set(org_thread.values())
     stats = {"orgs": len(orgs), "roles": sum(len(r) for r in roles.values()), "stated": 0, "described": 0,
              "by_domain": 0, "nested": 0, "classes": 0}
+    # What your resume and LinkedIn state, for every org, before anything is inferred: an org inside an org, the
+    # projects your resume lists under it, what your description of a role there names.
     for o in orgs:
         ot = org_thread[o["id"]]
         # An org inside an org (the Lab in State University): its thread is under the parent's.
@@ -386,12 +411,17 @@ def run(s: Session, log=print) -> dict:
                 place(t, o, f"your resume lists it under {o['name']}", confidence=1.0, extractor="profile")
                 placed.add(t)
                 stats["stated"] += 1
-        for t, (term, title, span, sid) in sorted(_described(o, threads).items()):
+    for o in orgs:
+        ot = org_thread[o["id"]]
+        for t, (term, role) in sorted(_described(o, threads, what).items()):
+            span, sid = _span(role), role.get("source_item_id")
             if t not in placed and t not in has_parent and t != ot and place(
-                    t, o, f"what you wrote about your {title} role" + (f" ({span})" if span else "") + f" names {term}",
-                    named_role=title, confidence=0.9, evidence=[(sid, "backbone", {})] if sid else []):
+                    t, o, f"what you wrote about your {role['title']} role" + (f" ({span})" if span else "")
+                    + f" names {term}", role=role, confidence=0.9, evidence=[(sid, "backbone", {})] if sid else []):
                 placed.add(t)
                 stats["described"] += 1
+    for o in orgs:
+        ot = org_thread[o["id"]]
         ds = domains(o)
         if not ds:
             continue
