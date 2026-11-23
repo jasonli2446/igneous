@@ -318,10 +318,11 @@ def run(s: Session, log=print) -> dict:
     s.execute(text("UPDATE nodes SET props = props - 'thread' WHERE type = 'Organization' AND props ? 'thread'"))
     s.execute(text("UPDATE nodes SET props = props - 'same_as_org' WHERE type = 'Project' AND props ? 'same_as_org'"))
     from igneous.graph import overrides
+    from igneous.graph.derived import rekeyed
 
     w = Writer(s, EXTRACTOR, VERSION)
     orgs = _orgs(s)
-    hidden = overrides.plan(overrides.load(s)).hidden
+    hidden = overrides.plan(overrides.load(s), rekeyed(s)).hidden
     threads = _threads(s, hidden)
     # A name on your resume is the life thread of that name before any other Project (a repo folder of the same name).
     by_name: dict[str, int] = {}
@@ -339,6 +340,9 @@ def run(s: Session, log=print) -> dict:
     # threads of roles no longer listed.
     s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = :x AND NOT (key = ANY(:k))"""),
               {"x": EXTRACTOR, "k": sorted(keys)})
+    # A thread you put under an org's thread is under the one made now, which is keyed by the org's key now.
+    from igneous.graph.threads import stated_hierarchy
+    stated_hierarchy(s)
     by_id = {t["id"]: t for t in threads}
     shares = _course_shares(s)
     what = {t["id"]: _what(t, shares) for t in threads}
