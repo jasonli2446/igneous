@@ -337,8 +337,8 @@ def test_a_class_found_under_its_project_and_its_demo_day_is_one_thread(db):
                                AND origin <> 'entities' ORDER BY name""")).all()
     assert [(n.split(" · ")[0], by) for n, by in parts] == [("Demo Day", "part"), ("Harborline", "part")]
     # Its folder and its team chat are about it: they join it, never a Project beside it.
-    joined = db.execute(text("SELECT name FROM thread_registry WHERE origin = 'entities' ORDER BY name")).scalars()
-    assert list(joined) == ["Harborline team", "cs481"]
+    joined = db.execute(text("SELECT name FROM thread_registry WHERE origin = 'entities'")).scalars()
+    assert set(joined) == {"Harborline team", "cs481"}
     assert db.execute(text("""SELECT count(*) FROM nodes WHERE type = 'Project'
                               AND props->>'derived' IN ('true', 'threads')""")).scalar() == 1
     before = (name, held)
