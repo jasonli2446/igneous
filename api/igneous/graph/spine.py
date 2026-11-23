@@ -9,12 +9,14 @@ didn't commit pending.
 
 What each record contributed. `spine_node_support` / `spine_edge_support` list the records each node and edge was
 built from. Building a record first removes what it built before, so an update replaces exactly its contribution, and
-deleting a record deletes its support rows. Whatever loses its last supporting record is queued (database triggers, so
-a sync's prune or tombstone counts too) and `settle` deletes it at the end of the run: never the owner, nothing a user
-fact holds, and no person or organization another stage still uses. A node several records share (an event series, an
-email filed in two folders, a Drive file two accounts see, a person in many messages) stays while any of them remains,
-and its `source_item_id` points at one of the records it is. An edge's interval spans what its records observed: a
-weekly series' attendance runs from the first occurrence to the last.
+deleting a record deletes its support rows. Whatever loses a supporting record is queued (database triggers, so a
+sync's prune or tombstone counts too) and `settle` deletes what nothing holds any more at the end of the run, by the
+rule a deleted record's trigger follows for other stages' nodes too (`node_held`, migration 0012): never the owner or
+what an edge of yours holds, and no person or organization while another stage's edge with a record behind it uses it.
+A node several records share (an event series, an email filed in two folders, a Drive file two accounts see, a person
+in many messages) stays while any of them remains, and its `source_item_id` points at one of the records it is. An
+edge's interval spans what its records observed: a weekly series' attendance runs from the first occurrence to the
+last.
 
 What each record says about a node (the name it gives, how strongly, and its props) is stored with its support row,
 and the node's name and props are recomputed from the records that support it whenever they change (`refresh`,
@@ -47,11 +49,14 @@ CONTACTS = ("gcontacts", "maccontacts")
 # These edges represent a discrete message or event, rather than an ongoing relationship.
 POINT_IN_TIME_TYPES = frozenset({"SENT", "RECEIVED", "IN_THREAD", "REPLIES_TO", "ATTENDED"})
 # Extractors of the edges the spine builds from records (each has spine_edge_support rows), and of those it derives
-# from the built graph (replies recovered from quotes and inferred within a thread; recomputed, never supported).
+# from the built graph (replies recovered from quotes and inferred within a thread; recomputed, never supported). A
+# deleted record's trigger leaves these to the spine (migration 0012 names them too).
 RECORD_EXTRACTORS = ("spine", "contacts", "github", "linkedin")
 SPINE_EXTRACTORS = (*RECORD_EXTRACTORS, quoted.EXTRACTOR, "spine-inferred")
-# Node types only the spine builds. People and organizations are built by other stages too (an extracted mention,
-# a resume's employer), so one of those stays while another stage's edge still uses it.
+# Node types only the spine builds, each of which is its records: nothing but a record (or an edge of yours) holds one
+# (`node_held` in migration 0012 names them too). People and organizations are built by other stages too (an
+# extracted mention, a resume's employer), so one of those stays while another stage's edge with a record behind it
+# uses it.
 SPINE_TYPES = ("Message", "Thread", "Event", "File", "Folder", "Place")
 # Nodes that are one record (copies of one email, one file two accounts see): named by their record's own title.
 TITLED = ("Message", "File")
@@ -1022,18 +1027,9 @@ def settle(s: Session, cards: dict) -> dict:
           AND NOT EXISTS (SELECT 1 FROM spine_edge_support x WHERE x.edge_id = e.id)
         RETURNING e.id, e.src, e.dst, e.type, e.valid_from
     """), {"q": edge_q}).all() if edge_q else []
-    doomed = s.execute(text(f"""
-        SELECT n.id FROM nodes n WHERE n.id = ANY(:q)
-          AND NOT EXISTS (SELECT 1 FROM spine_node_support x WHERE x.node_id = n.id)
-          AND NOT (n.type = 'Person' AND n.key = '{OWNER_KEY}')
-          AND NOT EXISTS (SELECT 1 FROM edges u WHERE u.src = n.id AND u.extractor = 'user')
-          AND NOT EXISTS (SELECT 1 FROM edges u WHERE u.dst = n.id AND u.extractor = 'user')
-          AND (n.type = ANY(:spine_types) OR (
-              NOT EXISTS (SELECT 1 FROM edges o WHERE o.src = n.id AND o.extractor <> ALL(:spine) AND o.type <> 'SAME_AS')
-              AND NOT EXISTS (SELECT 1 FROM edges o WHERE o.dst = n.id AND o.extractor <> ALL(:spine)
-                              AND o.type <> 'SAME_AS')))
-    """), {"q": node_q, "spine_types": list(SPINE_TYPES), "spine": list(SPINE_EXTRACTORS)}).scalars().all() \
-        if node_q else []
+    # What nothing holds any more: node_held is the one rule, which a deleted record's trigger follows too.
+    doomed = s.execute(text("SELECT id FROM nodes WHERE id = ANY(:q) AND NOT node_held(id, NULL) ORDER BY id"),
+                       {"q": node_q}).scalars().all() if node_q else []
     orphans = set()
     if doomed:
         # Replies that quoted a message about to go may now quote another one unambiguously.
@@ -1043,6 +1039,7 @@ def settle(s: Session, cards: dict) -> dict:
         s.execute(text("DELETE FROM nodes WHERE id = ANY(:d)"), {"d": doomed})
     survivors = sorted(set(node_q) - set(doomed))
     if survivors:
+        # Each points at one of the records it is, or at none (a person another stage's edge still holds).
         moved = s.execute(text("""
             UPDATE nodes n SET source_item_id = x.rep
             FROM (SELECT n.id,
@@ -1051,8 +1048,7 @@ def settle(s: Session, cards: dict) -> dict:
                               THEN n.source_item_id
                               ELSE (SELECT min(y.source_item_id) FROM spine_node_support y
                                     WHERE y.node_id = n.id AND y.represents) END AS rep
-                  FROM nodes n WHERE n.id = ANY(:ids)
-                    AND EXISTS (SELECT 1 FROM spine_node_support y WHERE y.node_id = n.id)) x
+                  FROM nodes n WHERE n.id = ANY(:ids)) x
             WHERE n.id = x.id AND n.source_item_id IS DISTINCT FROM x.rep
             RETURNING n.type, n.source_item_id
         """), {"ids": survivors}).all()

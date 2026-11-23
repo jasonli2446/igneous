@@ -14,9 +14,15 @@
   matched to the replies that quote it without reading every body again.
 - `nodes.source_item_id` / `edges.source_item_id` are ON DELETE SET NULL, so a node or edge several records share (an
   event series, an email filed in two folders) stays while any of them remains; the spine points it at another of its
-  records, or garbage-collects it. What other stages hang off one record alone goes with it
-  (`source_items_take_derived`, before the record is deleted): their nodes that point at it, their edges whose records
-  (source_item_id and edge_evidence) are only it, and the evidence it gave. Your corrections stay.
+  records, or garbage-collects it.
+- One rule says what keeps a node (`node_held`): the owner; a record that supports it; an edge of yours; and, for
+  anything but a message, thread, event, file, folder or place (each of which is its records), an edge with a record
+  behind it (`edge_backed`: the edge's own record, its evidence, or the spine's support for it). The spine's garbage
+  collection deletes the queued nodes nothing holds. What other stages hang off one record
+  goes with it (`source_items_take_derived`, before the record is deleted): the evidence it gave, their edges that no
+  other record backs, and their nodes that point at it or that those edges reached, once nothing holds them (a
+  commitment it states, a topic or a mention only it gave). An edge backed by another record points at that one.
+  Your corrections stay.
 - `pipeline_state` (timestamp watermarks) is dropped, and with it the bounded temporal backfill's index.
 
 An existing database keeps its chunk progress (records at or before the chunk watermark count as chunked) but every
@@ -40,6 +46,8 @@ SPINE_NODES = """
 """
 # Edges a deleted record never takes by itself: the spine's (graph/spine.py SPINE_EXTRACTORS) and your corrections.
 KEPT = "'spine', 'contacts', 'github', 'linkedin', 'spine-quoted', 'spine-inferred', 'user'"
+# Nodes that are their records, which nothing but a record (or your edge) holds (graph/spine.py SPINE_TYPES).
+RECORDS = "'Message', 'Thread', 'Event', 'File', 'Folder', 'Place'"
 
 
 def upgrade():
@@ -119,13 +127,41 @@ def upgrade():
                 REFERENCES source_items(id) ON DELETE SET NULL;
         DROP INDEX IF EXISTS edges_temporal_missing_idx;
 
-        -- What other stages hang off one record alone goes with it: their edges whose records (source_item_id and
-        -- evidence) are only this one, and their nodes that point at it. The evidence it gave goes too, and an edge
-        -- with evidence from elsewhere points at another of its records. The spine's nodes and edges are left to
-        -- its provenance (`spine_node_support`, `spine_edge_support`), and your corrections stay.
+        -- Whether a record other than `leaving` (NULL: none is leaving) is behind an edge: its own record, its
+        -- evidence (from a record, or from beyond any record: a NULL source), or the spine's support for it.
+        CREATE FUNCTION edge_backed(edge bigint, edge_source bigint, leaving bigint) RETURNS boolean
+        LANGUAGE sql STABLE AS $$
+            SELECT (edge_source IS NOT NULL AND edge_source IS DISTINCT FROM leaving)
+                OR EXISTS (SELECT 1 FROM edge_evidence ev WHERE ev.edge_id = edge
+                           AND (leaving IS NULL OR ev.source_item_id IS DISTINCT FROM leaving))
+                OR EXISTS (SELECT 1 FROM spine_edge_support y WHERE y.edge_id = edge
+                           AND y.source_item_id IS DISTINCT FROM leaving)
+        $$;
+        -- Whether anything besides the record `leaving` holds a node: it is the owner; a record supports it; an edge
+        -- of yours touches it; or, for a node that isn't itself records (a person, an organization, a topic, a
+        -- commitment), an edge with a record behind it touches it.
+        CREATE FUNCTION node_held(node bigint, leaving bigint) RETURNS boolean LANGUAGE sql STABLE AS $$
+            SELECT (n.type = 'Person' AND n.key = 'me')
+                OR EXISTS (SELECT 1 FROM spine_node_support x WHERE x.node_id = n.id
+                           AND x.source_item_id IS DISTINCT FROM leaving)
+                OR EXISTS (SELECT 1 FROM edges u WHERE u.src = n.id AND u.extractor = 'user')
+                OR EXISTS (SELECT 1 FROM edges u WHERE u.dst = n.id AND u.extractor = 'user')
+                OR (n.type <> ALL (ARRAY[{RECORDS}]) AND (
+                    EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id
+                            AND edge_backed(e.id, e.source_item_id, leaving))
+                    OR EXISTS (SELECT 1 FROM edges e WHERE e.dst = n.id
+                               AND edge_backed(e.id, e.source_item_id, leaving))))
+            FROM nodes n WHERE n.id = node
+        $$;
+
+        -- What other stages hang off one record goes with it: the evidence it gave, their edges that no other record
+        -- backs (an edge another record backs points at that one), and their nodes that point at it or that those
+        -- edges reached, once nothing else holds them. The spine's nodes and edges are left to its provenance
+        -- (`spine_node_support`, `spine_edge_support`, and the queue for what lost it), and your corrections stay.
         CREATE FUNCTION source_items_take_derived() RETURNS trigger LANGUAGE plpgsql AS $$
         DECLARE
             hit bigint[];
+            reached bigint[];
         BEGIN
             SELECT array_agg(e.id) INTO hit FROM edges e
             WHERE e.id IN (SELECT id FROM edges WHERE source_item_id = OLD.id
@@ -133,14 +169,19 @@ def upgrade():
               AND e.extractor <> ALL (ARRAY[{KEPT}]);
             DELETE FROM edge_evidence WHERE source_item_id = OLD.id;
             IF hit IS NOT NULL THEN
-                DELETE FROM edges e WHERE e.id = ANY (hit) AND COALESCE(e.source_item_id, OLD.id) = OLD.id
-                  AND NOT EXISTS (SELECT 1 FROM edge_evidence ev WHERE ev.edge_id = e.id);
+                WITH gone AS (
+                    DELETE FROM edges e WHERE e.id = ANY (hit) AND NOT edge_backed(e.id, e.source_item_id, OLD.id)
+                    RETURNING e.src, e.dst)
+                SELECT array_agg(DISTINCT x) INTO reached FROM (SELECT src FROM gone UNION SELECT dst FROM gone) g(x);
                 UPDATE edges e SET source_item_id = (SELECT min(ev.source_item_id) FROM edge_evidence ev
                                                      WHERE ev.edge_id = e.id)
                 WHERE e.id = ANY (hit) AND e.source_item_id = OLD.id;
             END IF;
-            DELETE FROM nodes n WHERE n.source_item_id = OLD.id
-              AND NOT EXISTS (SELECT 1 FROM spine_node_support x WHERE x.node_id = n.id);
+            DELETE FROM nodes n
+            WHERE (n.source_item_id = OLD.id OR n.id = ANY (COALESCE(reached, '{{}}')))
+              AND NOT EXISTS (SELECT 1 FROM spine_node_support x WHERE x.node_id = n.id)
+              AND NOT EXISTS (SELECT 1 FROM spine_gc_nodes q WHERE q.node_id = n.id)
+              AND NOT node_held(n.id, OLD.id);
             RETURN OLD;
         END $$;
         CREATE TRIGGER source_items_take_derived BEFORE DELETE ON source_items
@@ -157,7 +198,7 @@ def upgrade():
 def downgrade():
     op.execute("""
         DROP TRIGGER source_items_take_derived ON source_items;
-        DROP FUNCTION source_items_take_derived();
+        DROP FUNCTION source_items_take_derived(), node_held(bigint, bigint), edge_backed(bigint, bigint, bigint);
         CREATE INDEX edges_temporal_missing_idx ON edges (id) WHERE valid_from IS NULL OR valid_to IS NULL;
         ALTER TABLE edges DROP CONSTRAINT edges_source_item_id_fkey,
             ADD CONSTRAINT edges_source_item_id_fkey FOREIGN KEY (source_item_id)

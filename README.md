@@ -32,9 +32,9 @@ Every table comes from a migration. After pulling, run `uv run alembic upgrade h
 API, the CLI and the MCP server check the schema first and refuse to run on any other, with the reason and the fix:
 a database behind the code, one migrated by newer code, no schema yet, or Postgres not reachable.
 
-Upgrading past migration 0010 (which records each node and edge belongs to): the next Rebuild or `igneous pipeline`
-reads every record into the graph once more, about 40 seconds for the six Enron baseline mailboxes (26k records),
-and then deletes what no record supports. Chunks and embeddings are kept.
+Upgrading past migration 0012 (which records which records each node and edge come from): the next Rebuild or
+`igneous pipeline` reads every record into the graph once more, about 40 seconds for the six Enron baseline mailboxes
+(26k records), and then deletes what no record supports. Chunks and embeddings are kept.
 
 Tests (`make test`) never use that database or your personal one, nor your `api/.env` or model credentials: each
 run creates, migrates and finally drops its own `igneous_test_<pid>` database on the same server
@@ -238,11 +238,13 @@ cd api && uv run igneous sync imessage && uv run igneous pipeline
   A derived stage runs inside the publishing transaction: it never commits, rolls back or bumps the graph version,
   rebuilds only the rows it owns (its extractor), stores paid model results with `llm.cache_store` as they arrive, and
   leaves corrections to the last step. `igneous pipeline --stage NAME` runs it alone, then publishes. The spine's edges
-  (`spine`, `contacts`, `github`, `linkedin`) list their records in `spine_edge_support`, and a person or organization
-  the spine built stays while another stage's edge uses it. Set `source_item_id` (or `edge_evidence`) on what your
-  stage writes from a record: deleting the record deletes a node or edge it alone holds. On a node the spine built,
-  write only props it doesn't own (`SPINE_PROPS` in `graph/spine.py`): it recomputes its own from the records that
-  remain.
+  (`spine`, `contacts`, `github`, `linkedin`) list their records in `spine_edge_support`. One rule says what keeps a
+  node (`node_held`, migration 0012): the owner, a record that supports it, an edge of yours, and, for anything but a
+  message, thread, event, file, folder or place, an edge with a record behind it (its `source_item_id`, its
+  `edge_evidence`, or the spine's support). So set `source_item_id` or `edge_evidence` on what your stage writes from a
+  record: when the record is deleted, its edges that no other record backs go, and so do the nodes that pointed at it
+  or that only those edges held (a commitment it states, a topic only it is about). On a node the spine built, write
+  only props it doesn't own (`SPINE_PROPS` in `graph/spine.py`): it recomputes its own from the records that remain.
 
 ## Known gaps in the baseline
 

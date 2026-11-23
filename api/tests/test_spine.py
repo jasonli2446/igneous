@@ -229,25 +229,31 @@ def test_a_shared_node_stays_while_any_record_supports_it(db):
 
 def test_garbage_collection_keeps_the_owner_user_facts_and_other_stages_rows(db):
     put(db, "imessage", "c1/2025-01-06", {"chat": "c1", "participants": ["+16145550100"], "senders": ["me"]}, "Pat")
-    mail(db, 1, "ann@x.test", ["bo@x.test"], "Kickoff")
+    mail(db, 1, "ann@x.test", ["bo@x.test", "cy@x.test"], "Kickoff")
     put(db, "linkedin", "connection/kim", {"kind": "connection", "name": "Kim Wu", "company": "Globex",
                                            "url": "https://www.linkedin.com/in/kim"}, "Kim Wu")
+    signature = put(db, "fs", "notes/globex.txt", {"path": "notes/globex.txt"}, "globex.txt")  # builds a file only
     spine.run(db)
     ids = dict(db.execute(text("SELECT key, id FROM nodes")).all())
     project = db.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Project', 'project:kickoff', 'Kickoff') "
                               "RETURNING id")).scalar_one()
-    db.execute(text("""INSERT INTO edges (src, dst, type, extractor) VALUES
-                       (:ann, :p, 'INVOLVED_IN', 'user'), (:m, :p, 'PART_OF', 'entities'),
-                       (:bo, :org, 'WORKED_AT', 'organizations')"""),
-               {"ann": ids["ann@x.test"], "bo": ids["bo@x.test"], "m": ids["fp-1"], "p": project,
-                "org": ids["org:globex"]})
+    worked_at = db.execute(text("""
+        INSERT INTO edges (src, dst, type, extractor) VALUES
+            (:ann, :p, 'INVOLVED_IN', 'user'), (:m, :p, 'PART_OF', 'entities'),
+            (:bo, :org, 'WORKED_AT', 'organizations'), (:cy, :org, 'WORKED_AT', 'organizations'),
+            (:cy, :bo, 'SAME_AS', 'er')
+        RETURNING id, src"""), {"ann": ids["ann@x.test"], "bo": ids["bo@x.test"], "cy": ids["cy@x.test"],
+                                "m": ids["fp-1"], "p": project, "org": ids["org:globex"]}).all()
+    db.execute(text("INSERT INTO edge_evidence (edge_id, source_item_id, kind) VALUES (:e, :s, 'signature')"),
+               {"e": next(e.id for e in worked_at if e.src == ids["bo@x.test"]), "s": signature})
     for source, external_id in (("imessage", "c1/2025-01-06"), ("email", "box/inbox/1"),
                                 ("linkedin", "connection/kim")):
         gone(db, source, external_id)
     spine.run(db)
     left = keys(db, "Person") | keys(db, "Organization") | keys(db, "Project") | keys(db, "Message")
-    # The owner stays, Ann has a fact you stated, and another stage still uses Bo and Globex. A message is its record:
-    # it goes with it, and so does what another stage derived from it (PART_OF).
+    # The owner stays, Ann has a fact you stated, and another stage's edge with a record behind it still uses Bo and
+    # Globex. Cy's link (an inference with no record behind it) holds nothing. A message is its record: it goes with
+    # it, and so does what another stage derived from it (PART_OF).
     assert left == {"me", "ann@x.test", "bo@x.test", "org:globex", "project:kickoff"}
     assert keys(db, "Thread") == set() and edges(db, "PART_OF") == set()
     db.execute(text("DELETE FROM edges WHERE extractor = 'organizations'"))   # that stage rebuilt without them
@@ -412,8 +418,9 @@ def test_names_and_props_another_stage_owns_stay_its_own(db):
     assert described(db, "sam@x.test") == ("Samuel Ito", {"email": "sam@x.test", "shown_name": "Samuel Ito",
                                                            "own_name": "Sam Ito"})
     gone(db, "linkedin", "connection/kim")
-    db.execute(text("INSERT INTO edges (src, dst, type, extractor) SELECT p.id, o.id, 'WORKED_AT', 'organizations' "
-                    "FROM nodes p, nodes o WHERE p.key = 'pat@x.test' AND o.key = 'org:globex'"))
+    db.execute(text("""INSERT INTO edges (src, dst, type, extractor, source_item_id)
+                       SELECT p.id, o.id, 'WORKED_AT', 'organizations', si.id FROM nodes p, nodes o, source_items si
+                       WHERE p.key = 'pat@x.test' AND o.key = 'org:globex' AND si.external_id = 'box/inbox/1'"""))
     spine.run(db)   # the company stays for the stage that uses it, without what LinkedIn said about it
     assert described(db, "org:globex") == ("Globex Corporation", {"kind": "employer", "named_by": "profile"})
 
@@ -458,6 +465,82 @@ def test_a_deleted_record_takes_what_other_stages_hung_off_it_alone(db):
     legal(db)
 
 
+def test_what_extraction_made_from_a_record_goes_with_it_unless_something_else_holds_it(db):
+    """Extraction reads two messages. What it made from the first alone goes when that record is deleted, at once:
+    its claims, its mentions and topics, a person known only from its text (an inference linking it to someone holds
+    nothing), and a topic only it was about (a co-occurrence holds nothing either). A topic the second message is
+    about too stays, and so does an organization you linked someone to."""
+    from types import SimpleNamespace
+
+    from igneous.graph import extract
+
+    body = "Jordan Lee from Acme will send the offsite budget by Friday. We chose the lake venue."
+    first = mail(db, 1, "ann@x.test", ["bo@x.test"], "Offsite", body=body)
+    second = mail(db, 2, "bo@x.test", ["ann@x.test"], "Re: Offsite", body="The budget looks fine.")
+    mail(db, 3, "jordan@acme.test", ["ann@x.test"], "Hello")
+    spine.run(db)
+    ids = dict(db.execute(text("SELECT key, id FROM nodes")).all())
+
+    def read(record, key, text_, out):
+        item = SimpleNamespace(id=record, node_id=ids[key], occurred_at=T0)
+        extract.store(db, item, text_, {"people": [], "organizations": [], "topics": [], "commitments": [],
+                                        "decisions": [], **out})
+
+    read(first, "fp-1", body, {
+        "people": [{"name": "Jordan Lee", "quote": "Jordan Lee", "role": "sends the budget"}],
+        "organizations": [{"name": "Acme", "quote": "Acme"}], "topics": ["Offsite budget", "Lake venue"],
+        "commitments": [{"who": "Jordan Lee", "what": "send the offsite budget", "by_when": "Friday",
+                         "quote": "will send the offsite budget by Friday"}],
+        "decisions": [{"what": "the lake venue", "quote": "We chose the lake venue."}]})
+    read(second, "fp-2", "The budget looks fine.", {"topics": ["Offsite budgets"]})   # the same topic
+    ids |= dict(db.execute(text("SELECT key, id FROM nodes")).all())
+    db.execute(text("""
+        INSERT INTO edges (src, dst, type, extractor) VALUES
+            (:mention, :jordan, 'SAME_AS', 'er'), (:lake, :budget, 'RELATED_TO', 'topic-normalization'),
+            (:ann, :acme, 'WORKED_AT', 'user')
+    """), {"mention": ids["name:jordan-lee"], "jordan": ids["jordan@acme.test"], "lake": ids["lake-venue"],
+           "budget": ids["offsite-budget"], "ann": ids["ann@x.test"], "acme": ids["org:acme"]})
+    assert set(db.execute(text("SELECT DISTINCT type FROM nodes")).scalars()) >= {"Commitment", "Decision", "Topic"}
+
+    gone(db, "email", "box/inbox/1")
+    assert keys(db, "Commitment") | keys(db, "Decision") == set()
+    assert keys(db, "Topic") == {"offsite-budget"} and keys(db, "Organization") == {"org:acme"}
+    assert "name:jordan-lee" not in keys(db, "Person") and "jordan@acme.test" in keys(db, "Person")
+    assert edges(db, "MENTIONS") == set() and edges(db, "ABOUT") == {("fp-2", "offsite-budget")}
+    spine.run(db)
+    assert keys(db, "Message") == {"fp-2", "fp-3"}
+    legal(db)
+
+
+def test_one_rule_says_what_holds_a_node_and_which_edges_a_record_takes(db):
+    """`node_held` (the database's rule, which the spine's garbage collection and a deleted record's trigger share)
+    knows the spine's types: a message, thread, event, file, folder or place is its records, so another stage's edge
+    holds it no more than an inference does; a person is held by an edge with a record behind it. Your edge holds
+    either. Deleting a record leaves the spine's edges to its provenance and takes another stage's."""
+    record = mail(db, 1, "ann@x.test", ["bo@x.test"], "Plans")
+    other = mail(db, 2, "bo@x.test", ["ann@x.test"], "Lunch")
+    spine.run(db)
+    for type_ in (*spine.SPINE_TYPES, "Person", "Topic"):
+        node = db.execute(text("INSERT INTO nodes (type, key, name) VALUES (:t, 'k', 'k') RETURNING id"),
+                          {"t": type_}).scalar_one()
+        db.execute(text("""INSERT INTO edges (src, dst, type, extractor, source_item_id)
+                           SELECT id, :n, 'RELATED_TO', 'entities', :r FROM nodes WHERE key = 'fp-2'"""),
+                   {"n": node, "r": other})
+        held = db.execute(text("SELECT node_held(:n, NULL)"), {"n": node}).scalar_one()
+        assert held is (type_ not in spine.SPINE_TYPES), type_
+        db.execute(text("INSERT INTO edges (src, dst, type, extractor) SELECT id, :n, 'RELATED_TO', 'user' "
+                        "FROM nodes WHERE key = 'ann@x.test'"), {"n": node})
+        assert db.execute(text("SELECT node_held(:n, NULL)"), {"n": node}).scalar_one(), type_
+        db.execute(text("DELETE FROM nodes WHERE id = :n"), {"n": node})
+    a, b = db.execute(text("SELECT id FROM nodes WHERE key IN ('ann@x.test', 'bo@x.test') ORDER BY key")).scalars()
+    for extractor in (*spine.SPINE_EXTRACTORS, "user", "entities"):
+        db.execute(text("""INSERT INTO edges (src, dst, type, extractor, source_item_id)
+                           VALUES (:a, :b, 'INTRODUCED', :x, :r)"""), {"a": a, "b": b, "x": extractor, "r": record})
+    gone(db, "email", "box/inbox/1")
+    assert set(db.execute(text("SELECT extractor FROM edges WHERE type = 'INTRODUCED'")).scalars()) == {
+        *spine.SPINE_EXTRACTORS, "user"}
+
+
 def test_a_record_redacted_again_is_built_and_chunked_again_without_the_secret(db):
     """A message stored before today's redaction rules, with a key in its subject, a header name and a quoted
     header, was built and chunked. The pipeline's first step redacts it, which changes its content hash, so the spine
@@ -489,6 +572,8 @@ def test_a_record_redacted_again_is_built_and_chunked_again_without_the_secret(d
     marks = db.execute(text("SELECT content_hash, spined_hash, chunked_hash FROM source_items WHERE id = :i"),
                        {"i": record}).one()
     assert marks.content_hash != "stored-before-the-rules" and marks.spined_hash is None and marks.chunked_hash is None
+    # The new content hash alone makes both stages read it again: when the record was stamped doesn't matter.
+    db.execute(text("UPDATE source_items SET updated_at = '2000-01-01' WHERE id = :i"), {"i": record})
     db.commit()
     results = pipeline.run(db, ["spine", "chunk"])
     assert results["spine"]["result"] == 1 and results["chunk"]["result"] == 1
