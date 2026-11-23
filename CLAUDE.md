@@ -73,8 +73,8 @@ all run `sources.sync`.
 - Adding, renaming or removing a setting in `api/igneous/config.py`, or changing its default, means the same edit in
   `api/.env.example` (a one-line meaning, then the default, commented out); `tests/test_env_example.py` checks.
 - Derived stages (self through corrections, `api/igneous/pipeline.py`) publish in one transaction: never commit, roll
-  back or bump the graph version inside one. A correction endpoint takes `entity_api.correction_session`, so it never
-  runs while a rebuild publishes.
+  back or bump the graph version inside one. A correction commits its intent at once and applies now when no rebuild is
+  deriving, else at that rebuild's final step; it never answers 503 (`graph/corrections.py`).
 
 ## Checks before any PR
 
