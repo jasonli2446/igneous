@@ -6,8 +6,8 @@ calendar" does, "the events that led to the crisis" and "the text of the contrac
 "involving", "mentioning" and "concerning" name someone the records mention, not their correspondent.
 
 When the rules find nothing, the cheap hosted model reads the question, never a record, through `llm.structured`,
-and only once some source is opted in (IGNEOUS_LLM_SOURCES). Its answer is validated before use and cached under a
-hash of the question, so a question costs one call ever, and any failure leaves the search unfiltered.
+and only once some source is opted in (IGNEOUS_LLM_SOURCES). Its answer is cached under a hash of the question, so
+the model reads a question once, and validated before use; any failure leaves the search unfiltered.
 
 Filters the caller passes win; a source restriction in the question can only narrow the caller's.
 """
@@ -204,13 +204,14 @@ def resolve_person(s: Session, name: str | None) -> int | None:
 
 
 def person_by_address_or_name(s: Session, value: str) -> int | None:
-    """The identity head of the Person a caller names by address (a Person's key) or by exact display name."""
+    """The identity head of the Person a caller names by address (a Person's key, stored lowercase) or by exact
+    display name."""
     value = value.strip()
     if not value:
         return None
     row = s.execute(text("""
         SELECT COALESCE(c.canonical_id, n.id) FROM nodes n LEFT JOIN canonical c ON c.node_id = n.id
-        WHERE n.type = 'Person' AND lower(n.key) = lower(:v) ORDER BY n.id LIMIT 1
+        WHERE n.type = 'Person' AND n.key = lower(:v)
     """), {"v": value}).scalar()
     return int(row) if row is not None else resolve_person(s, value)
 

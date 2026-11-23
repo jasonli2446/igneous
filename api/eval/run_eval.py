@@ -35,6 +35,7 @@ from igneous.rag import qa
 from igneous.rag.search import hybrid
 
 HERE = Path(__file__).parent
+RESULTS = HERE / "results"
 MODES = ("hybrid", "dense", "lexical")
 CONFIGS = {  # how Ask runs in each config
     "full": {"mode": "hybrid", "use_graph": True, "reranker": True},
@@ -174,11 +175,11 @@ def main(run_qa: bool, configs: list[str], limit: int | None, score: Path | None
             rows = ask_all(s, asked, configs)
             report.update(qa_metrics(asked, rows))
             # Every config's answer to each question, for the blind A/B grading the proposal calls for.
-            (HERE / "results").mkdir(exist_ok=True)
-            (HERE / "results" / f"{report['date']}-answers.jsonl").write_text(
+            RESULTS.mkdir(exist_ok=True)
+            (RESULTS / f"{report['date']}-answers.jsonl").write_text(
                 "".join(json.dumps(r) + "\n" for r in rows))
 
-    out = HERE / "results" / f"{report['date']}.json"
+    out = RESULTS / f"{report['date']}.json"
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps(report, indent=2) + "\n")
     print(f"-> {out}")
