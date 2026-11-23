@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from igneous import jobs, sources
+from igneous import jobs, source_catalog, sources
 from igneous.config import settings
 from igneous.connectors import secrets
 from igneous.connectors.ai_exports import ExportConnector, ExportError, export_items, parse_export
@@ -24,7 +24,7 @@ from igneous.graph.traversal import GraphFilters, expand, explain, neighborhood,
 from igneous.items import router as items_router
 from igneous.llm import LLMDisabled, ProviderError, model_status
 from igneous.rag import qa
-from igneous.rag.constraints import apply
+from igneous.rag.constraints import apply, describe, person_by_address_or_name
 from igneous.rag.search import Filters, experts, hybrid
 from igneous.sync_status import sync_status
 from igneous.timeline import EntityNotFoundError, timeline
@@ -96,23 +96,48 @@ def sync(
     return {"syncs": sync_status(s, connector=connector, account=account)}
 
 
+SearchMode = Literal["hybrid", "lexical", "dense"]
+
+
+def _request_filters(s: Session, sources: list[str] | None, person: str | None, since: datetime | None,
+                     until: datetime | None) -> Filters:
+    """The filters a request passes, checked: known source values, a person in the records, a forward date range."""
+    unknown = sorted(set(sources or ()) - set(source_catalog.BY_VALUE))
+    if unknown:
+        raise HTTPException(422, f"Unknown source {', '.join(unknown)}. Sources: {', '.join(source_catalog.BY_VALUE)}.")
+    if since and until and since >= until:
+        raise HTTPException(422, "`from` must be earlier than `to`.")
+    person_id = None
+    if person and person.strip():
+        person_id = person_by_address_or_name(s, person)
+        if person_id is None:
+            raise HTTPException(422, f"No one in your records has the address or name {person.strip()!r}.")
+    return Filters(sources=tuple(sources or ()), person_id=person_id, since=since, until=until)
+
+
 @app.get("/search")
-def search(q: str, source: str | None = None, person: str | None = None,
+def search(q: str = Query(..., min_length=1, max_length=500, pattern=r"\S"),
+           sources: list[str] | None = Query(None), person: str | None = None,
            since: datetime | None = Query(None, alias="from"), until: datetime | None = Query(None, alias="to"),
-           k: int = Query(10, le=50), mode: str = Query("hybrid", pattern="^(hybrid|lexical|dense)$"),
-           s: Session = Depends(get_session)):
-    return {"hits": hybrid(s, q, apply(s, q, Filters(source, person, since, until)), k=k, mode=mode)}
+           k: int = Query(10, ge=1, le=50), mode: SearchMode = "hybrid", s: Session = Depends(get_session)):
+    """Passages for `q`, best first. `sources` (repeatable) are stored source values; `person` is an address or an
+    exact name, matching messages any of that person's merged identities sent or received; `from`/`to` bound the
+    date (`to` exclusive). The query can narrow further ("from Jeff Skilling", "in my calendar", "in May 2001");
+    `filters` says what was applied and which of it came from the query."""
+    f = apply(s, q, _request_filters(s, sources, person, since, until))
+    return {"hits": hybrid(s, q, f, k=k, mode=mode), "filters": describe(s, f)}
 
 
 @app.get("/experts")
-def expert_search(q: str = Query(..., min_length=1), k: int = Query(10, ge=1, le=20),
-                  evidence_limit: int = Query(3, ge=1, le=5),
-                  mode: str = Query("hybrid", pattern="^(hybrid|lexical|dense)$"),
+def expert_search(q: str = Query(..., min_length=1, max_length=500, pattern=r"\S"), k: int = Query(10, ge=1, le=20),
+                  evidence_limit: int = Query(3, ge=1, le=5), sources: list[str] | None = Query(None),
+                  person: str | None = None, since: datetime | None = Query(None, alias="from"),
+                  until: datetime | None = Query(None, alias="to"), mode: SearchMode = "hybrid",
                   s: Session = Depends(get_session)):
-    """People involved in query-relevant items, with at most five bounded evidence excerpts each."""
-    if not q.strip():
-        raise HTTPException(422, "q must contain non-whitespace characters")
-    return {"experts": experts(s, q, k=k, evidence_limit=evidence_limit, mode=mode)}
+    """People involved in query-relevant items, with at most five bounded evidence excerpts each. Takes the same
+    filters as /search, so its people come from the items a search with them finds."""
+    f = apply(s, q, _request_filters(s, sources, person, since, until))
+    return {"experts": experts(s, q, k=k, evidence_limit=evidence_limit, mode=mode, f=f), "filters": describe(s, f)}
 
 
 @app.post("/import/ai-export")
@@ -320,23 +345,24 @@ def run_pipeline():
 
 class AskBody(BaseModel):
     question: str = Field(min_length=1, max_length=2000, pattern=r"\S")
-    person: str | None = None  # an address: only messages it sent or received
-    # False: the eval's baseline (dense retrieval, no graph expansion, no reranking).
+    person: str | None = None  # an address or exact name: only messages that person sent or received
+    # False: the eval's baseline (retrieval only: no graph expansion, no reranking).
     use_graph: bool = True
-    mode: Literal["hybrid", "lexical", "dense"] = "hybrid"
+    mode: SearchMode = "hybrid"
 
 
 @app.post("/ask")
 def ask(body: AskBody, s: Session = Depends(get_session)):
-    """A cited answer from the sources opted in to the hosted model (IGNEOUS_LLM_SOURCES), or `answerable: false`.
-    503 when the hosted model is off or not configured, 502 when it fails to answer (a refusal, a cut-off or
-    empty response); `detail` says which."""
+    """A cited answer from the sources opted in to the hosted model (IGNEOUS_LLM_SOURCES), or `answerable: false`;
+    `filters` says what narrowed the search, as in /search. 503 when the hosted model is off or not configured, 502
+    when it fails to answer (a refusal, a cut-off or empty response); `detail` says which."""
+    f = _request_filters(s, None, body.person, None, None)
     try:
-        return qa.answer(s, body.question, Filters(person=body.person), use_graph=body.use_graph, mode=body.mode)
+        return qa.answer(s, body.question, f, use_graph=body.use_graph, mode=body.mode)
     except LLMDisabled as e:
-        raise HTTPException(503, f"The hosted model is not available: {e}") from e
+        raise HTTPException(503, str(e)) from e
     except ProviderError as e:
-        raise HTTPException(502, f"The hosted model failed to answer: {e}") from e
+        raise HTTPException(502, str(e)) from e
 
 
 @app.get("/ask/suggestions")

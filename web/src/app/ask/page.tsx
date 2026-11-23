@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { Fragment, useEffect, useState } from "react";
+import AppliedFilters from "@/components/AppliedFilters";
 import { sourceLabel } from "@/components/SourceList";
 import { InlineError, Skeleton } from "@/components/ui";
 import { api, ApiError, AskResult, Hit } from "@/lib/api";
@@ -107,6 +108,7 @@ export default function AskPage() {
         )}
       </div>
 
+      {res && !busy && <AppliedFilters filters={res.filters} scope="answer" />}
       {error && <div className="mt-6"><AskFailure error={error} onRetry={() => run(q)} /></div>}
 
       {busy && (

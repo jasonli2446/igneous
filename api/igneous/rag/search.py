@@ -1,5 +1,6 @@
 """Hybrid search: lexical (tsvector) + dense (pgvector), merged with reciprocal rank fusion."""
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy import text
@@ -9,23 +10,29 @@ from igneous.rag.embed import embed_query
 
 RRF_K = 60
 POOL = 50
+# A record names a person when its text has one of their names as a phrase: two or more words, not an address.
+HUMAN_NAME = r"^[^@0-9]+\s+[^@0-9]+$"
 
 
 @dataclass
 class Filters:
-    source: str | None = None
-    person: str | None = None  # email address; matches sender or recipient
+    """What a search may return. An empty or None field restricts nothing."""
+    sources: tuple[str, ...] = ()  # stored source values (igneous/source_catalog.py)
+    person_id: int | None = None  # an identity head: messages any of its merged identities sent or received
+    mentions_id: int | None = None  # an identity head: passages naming any of its identities, or linked by MENTIONS
     since: datetime | None = None
-    until: datetime | None = None
-    person_id: int | None = None  # canonical Person node id; matches sender or recipient aliases
-    sources: tuple[str, ...] = ()
+    until: datetime | None = None  # exclusive
+    from_question: frozenset[str] = field(default=frozenset())  # the fields the question set (constraints.apply)
+
+
+def _members(param: str) -> str:
+    """SQL for the identities of the identity head bound to `param`: the head and every node merged into it."""
+    return f"(SELECT CAST(:{param} AS bigint) UNION SELECT node_id FROM canonical WHERE canonical_id = :{param})"
 
 
 def _where(f: Filters) -> tuple[str, dict]:
+    """SQL conditions on `c` (chunks) and `si` (source_items) for `f`, each starting with AND."""
     clauses, params = [], {}
-    if f.source:
-        clauses.append("si.source = :source")
-        params["source"] = f.source
     if f.sources:
         clauses.append("si.source = ANY(:sources)")
         params["sources"] = list(f.sources)
@@ -35,44 +42,70 @@ def _where(f: Filters) -> tuple[str, dict]:
     if f.until:
         clauses.append("si.occurred_at < :until")
         params["until"] = f.until
-    if f.person:
-        clauses.append("""c.node_id IN (
-            SELECT e.dst FROM edges e JOIN nodes p ON p.id = e.src WHERE p.key = :person AND e.type = 'SENT'
-            UNION SELECT e.src FROM edges e JOIN nodes p ON p.id = e.dst WHERE p.key = :person AND e.type = 'RECEIVED')""")
-        params["person"] = f.person.lower()
     if f.person_id:
-        # Include every address folded into the canonical identity as well as an unmerged canonical head.
-        clauses.append("""c.node_id IN (
-            SELECT e.dst FROM edges e WHERE e.type = 'SENT' AND e.src IN
-                (SELECT :person_id UNION SELECT node_id FROM canonical WHERE canonical_id = :person_id)
-            UNION SELECT e.src FROM edges e WHERE e.type = 'RECEIVED' AND e.dst IN
-                (SELECT :person_id UNION SELECT node_id FROM canonical WHERE canonical_id = :person_id))""")
+        clauses.append(f"""c.node_id IN (
+            SELECT e.dst FROM edges e WHERE e.type = 'SENT' AND e.src IN {_members("person_id")}
+            UNION SELECT e.src FROM edges e WHERE e.type = 'RECEIVED' AND e.dst IN {_members("person_id")})""")
         params["person_id"] = f.person_id
+    if f.mentions_id:
+        clauses.append(f"""(c.node_id IN (SELECT e.src FROM edges e WHERE e.type = 'MENTIONS'
+                                          AND e.dst IN {_members("mentions_id")})
+            OR EXISTS (SELECT 1 FROM nodes p WHERE p.id IN {_members("mentions_id")} AND p.name ~ :human_name
+                       AND c.tsv @@ phraseto_tsquery('english', p.name)))""")
+        params["mentions_id"] = f.mentions_id
+        params["human_name"] = HUMAN_NAME
     return (" AND " + " AND ".join(clauses)) if clauses else "", params
 
 
+# Web-search syntax: a word, or a "quoted phrase", optionally negated with a leading minus.
+_TOKEN = re.compile(r'-?"[^"]*"|\S+')
+
+
+def _negations(q: str) -> tuple[str, str, dict]:
+    """The query without its negated words and phrases ("-prices", '-"gas tax"'), and an SQL condition on `c`
+    that excludes every passage containing one of them (empty when nothing is negated)."""
+    kept, negated = [], []
+    for token in _TOKEN.findall(q):
+        if token.startswith("-") and len(token) > 1:
+            negated.append(token[1:].strip('"').strip())
+        else:
+            kept.append(token)
+    negated = [n for n in negated if n]
+    if not negated:
+        return " ".join(kept), "", {}
+    return (" ".join(kept), " AND NOT c.tsv @@ websearch_to_tsquery('english', :negated)",
+            {"negated": " or ".join(f'"{n}"' for n in negated)})
+
+
 def lexical(s: Session, q: str, f: Filters, n: int = POOL) -> list[int]:
-    """websearch_to_tsquery ANDs every term, so a natural-language question ("who pitched Enron on ...")
-    matches almost nothing (recall@10 was 0.14). OR the terms instead and let ts_rank_cd reward chunks that
-    match more of them. Quoted phrases still work: the <-> operator survives the rewrite."""
+    """Full-text search. websearch_to_tsquery ANDs every term, which a question in plain words rarely satisfies, so
+    the terms are ORed and ts_rank_cd ranks passages that match more of them higher; quoted phrases keep their word
+    order. A negated word or phrase ("-prices") excludes every passage that contains it."""
+    positive, negation, negation_params = _negations(q)
+    if not positive.strip():
+        return []
     where, params = _where(f)
     return list(s.execute(text(f"""
         WITH q AS (SELECT CAST(replace(CAST(websearch_to_tsquery('english', :q) AS text), ' & ', ' | ')
                                AS tsquery) AS tq)
         SELECT c.id FROM chunks c JOIN source_items si ON si.id = c.source_item_id, q
-        WHERE c.tsv @@ q.tq {where}
+        WHERE c.tsv @@ q.tq {negation} {where}
         ORDER BY ts_rank_cd(c.tsv, q.tq, 32) DESC LIMIT :n
-    """), {"q": q, "n": n, **params}).scalars())
+    """), {"q": positive, "n": n, **negation_params, **params}).scalars())
 
 
 def dense(s: Session, q: str, f: Filters, n: int = POOL) -> list[int]:
+    """Nearest passages to the query's embedding; a negated word or phrase excludes the passages that contain it."""
+    positive, negation, negation_params = _negations(q)
+    if not positive.strip():
+        return []
     where, params = _where(f)
     s.execute(text("SET LOCAL hnsw.ef_search = 100"))
     return list(s.execute(text(f"""
         SELECT c.id FROM chunks c JOIN source_items si ON si.id = c.source_item_id
-        WHERE c.embedding IS NOT NULL {where}
+        WHERE c.embedding IS NOT NULL {negation} {where}
         ORDER BY c.embedding <=> CAST(:v AS vector) LIMIT :n
-    """), {"v": str(embed_query(q)), "n": n, **params}).scalars())
+    """), {"v": str(embed_query(positive)), "n": n, **negation_params, **params}).scalars())
 
 
 def rrf(*rankings: list[int]) -> list[tuple[int, float]]:
@@ -105,13 +138,15 @@ def hybrid(s: Session, q: str, f: Filters | None = None, k: int = 10, mode: str 
     } for cid, score in fused]
 
 
-def experts(s: Session, q: str, k: int = 10, evidence_limit: int = 3, mode: str = "hybrid") -> list[dict]:
+def experts(s: Session, q: str, k: int = 10, evidence_limit: int = 3, mode: str = "hybrid",
+            f: Filters | None = None) -> list[dict]:
     """Rank canonical people attached to the most relevant items, with a small evidence card per item.
 
-    Retrieval determines which items are about the query. Graph relationships only establish a person's
-    involvement in those items; they do not infer expertise from adjacent people or organizations.
+    Retrieval, under the same filters as search, determines which items are about the query. Graph relationships
+    only establish a person's involvement in those items; they do not infer expertise from adjacent people or
+    organizations.
     """
-    hits = hybrid(s, q, k=POOL, mode=mode)
+    hits = hybrid(s, q, f, k=POOL, mode=mode)
     candidates: dict[int, dict] = {}
     for hit in hits:
         item_id = hit["source_item_id"]

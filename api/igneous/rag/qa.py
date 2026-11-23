@@ -20,9 +20,9 @@ from dataclasses import replace
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from igneous import llm
+from igneous import llm, source_catalog
 from igneous.config import settings
-from igneous.rag.constraints import apply
+from igneous.rag.constraints import apply, describe
 from igneous.rag.rerank import rerank
 from igneous.rag.search import Filters, _where, hybrid
 
@@ -179,27 +179,34 @@ NO_SOURCES = ("Ask sends the passages it finds to a hosted model, and no source 
               "The Sources page shows each source's id.")
 
 
-def _not_opted_in(message: str) -> dict:
+def _not_opted_in(message: str, filters: dict) -> dict:
     return {"answerable": False, "answer": message, "citations": [], "evidence": [], "timing": {"retrieve_s": 0.0},
-            "reason": "no_opted_in_sources"}
+            "reason": "no_opted_in_sources", "filters": filters}
 
 
 def answer(s: Session, question: str, f: Filters | None = None, use_graph: bool = True,
            mode: str = "hybrid") -> dict:
     """A cited answer, or `answerable: false` with what is missing. `citations` (each an evidence passage with its
-    chunk, source item and node ids) is empty unless the answer stands; `evidence` is everything the model saw."""
+    chunk, source item and node ids) is empty unless the answer stands; `evidence` is everything the model saw;
+    `filters` is what narrowed the search (constraints.describe), within the opted-in sources."""
     t0 = time.time()
     # A question is consent to ask a model about the sources opted in for it, not about everything: retrieval and
     # graph expansion stay inside that list, and with nothing on it no model is called at all.
     approved = llm.allowed_sources()
     if not approved:
-        return _not_opted_in(NO_SOURCES)
+        return _not_opted_in(NO_SOURCES, describe(s, f or Filters()))
     f = apply(s, question, f)
-    sources = approved.intersection(f.sources) if f.sources else approved
-    if not sources:
-        return _not_opted_in(f"This question is limited to {', '.join(sorted(f.sources))}, and none of those is "
-                             f"opted in to the hosted model (opted in: {', '.join(sorted(approved))}).")
-    f = replace(f, sources=tuple(sorted(sources)))
+    if f.sources:  # the question or the caller limited where to look: only the opted-in part of that is read
+        sources = approved.intersection(f.sources)
+        if not sources:
+            asked = sorted({source_catalog.BY_VALUE[v].connector if v in source_catalog.BY_VALUE else v
+                            for v in f.sources})
+            return _not_opted_in(f"This question is limited to {', '.join(asked)}, and none of that is opted in to "
+                                 f"the hosted model (opted in: {', '.join(sorted(approved))}). To ask about it, add "
+                                 "its id to IGNEOUS_LLM_SOURCES in api/.env and restart the API.", describe(s, f))
+        f = replace(f, sources=tuple(sorted(sources)))
+    filters = describe(s, f)
+    f = f if f.sources else replace(f, sources=tuple(sorted(approved)))
     if use_graph:
         hits = hybrid(s, question, f, k=max(settings.reranker_pool_size, CONTEXT_CHUNKS), mode=mode)
         neighbours = expand(s, hits, f=f)
@@ -212,7 +219,7 @@ def answer(s: Session, question: str, f: Filters | None = None, use_graph: bool 
     t_retrieve = time.time() - t0
     if not context:
         return {"answerable": False, "answer": "No matching evidence.", "citations": [], "evidence": [],
-                "timing": {"retrieve_s": round(t_retrieve, 2)}}
+                "timing": {"retrieve_s": round(t_retrieve, 2)}, "filters": filters}
 
     out, usage = llm.structured(SYSTEM, f"Evidence:\n\n{_evidence_block(context)}\n\nQuestion: {question}", SCHEMA)
     by_id = {c["chunk_id"]: c for c in context}
@@ -225,6 +232,7 @@ def answer(s: Session, question: str, f: Filters | None = None, use_graph: bool 
         "The model answered without citing the evidence, so the answer was withheld.",
         "citations": cited if answerable else [],
         "evidence": context,
+        "filters": filters,
         "timing": {"retrieve_s": round(t_retrieve, 2), "total_s": round(time.time() - t0, 2)},
         "usage": usage,
     }

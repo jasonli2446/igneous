@@ -19,10 +19,15 @@ TABLES = ("chunks", "edge_evidence", "canonical", "edges", "nodes", "source_item
 
 
 def _minimal(schema: dict):
-    """The smallest answer that fits a JSON schema (first enum value, empty strings and lists, zeros)."""
+    """The smallest answer that fits a JSON schema (first enum value or alternative, empty strings and lists,
+    zeros)."""
     if "enum" in schema:
         return schema["enum"][0]
+    if "anyOf" in schema:
+        return _minimal(schema["anyOf"][0])
     kind = schema.get("type")
+    if isinstance(kind, list):
+        kind = kind[0]
     if kind == "object":
         return {k: _minimal(v) for k, v in schema.get("properties", {}).items()}
     return {"array": [], "boolean": False, "number": 0, "integer": 0}.get(kind, "")
@@ -237,6 +242,34 @@ def test_sources_page_says_what_a_model_may_read(test_db, monkeypatch):
     assert by_id["chatgpt"]["id"] == "ai_chats" and by_id["chatgpt"]["allowed"] == "no"
     assert by_id["fs"]["allowed"] == "no" and "IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED" in by_id["fs"]["note"]
     assert "IGNEOUS_LLM_SOURCES" in by_id["imessage"]["note"]
+
+
+def test_question_filters_send_the_question_alone_to_the_cheap_model_once(graph, monkeypatch):
+    """Reading filters out of a question sends that question and nothing else, only once something is opted in, on
+    the cheap model, and once per question."""
+    from igneous.rag.constraints import apply
+
+    rec, models = Recorder(), []
+
+    def chat(messages, schema=None, **options):
+        models.append(options.get("model"))
+        return rec(messages, schema)
+
+    monkeypatch.setattr(llm, "chat", chat)
+    monkeypatch.setattr(llm.settings, "llm_enabled", True)
+    question = "What did the Robotics Lab decide about the demo?"
+    monkeypatch.setattr(llm.settings, "llm_sources", "")
+    with SessionLocal() as s:
+        apply(s, question)
+    assert rec.prompts == []
+    monkeypatch.setattr(llm.settings, "llm_sources", "gmail")
+    with SessionLocal() as s:
+        apply(s, question)
+        apply(s, question)
+    assert models == [llm.settings.llm_cheap_model]
+    (prompt,) = rec.prompts
+    assert prompt.endswith("\n" + question) and rec.leaked() == []
+    assert "Atlas" not in prompt and "Sam Shared" not in prompt  # no record, no name from the graph
 
 
 def test_thread_namer_sees_only_terms_its_shown_records_contain(monkeypatch):

@@ -217,10 +217,19 @@ returns 503).
 page shows (`gmail,ai_chats`; `takeout` covers every Takeout product, `ai_chats` every AI chat import). Every hosted
 call follows one rule (`api/igneous/llm.py`): a prompt carries text only from records in those sources, names only of
 people and things that appear in them, and counts for everything else. Local files and Apple Notes also need
-`IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`. Search may also send the question itself (never records) to pick out
-names and dates. Empty, the default, means no model call at all; Ask then says to opt a source in. Results the model
-gave earlier stay cached and keep counting. The Sources page shows, per source, whether
-a model may read it.
+`IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`. Search and Ask may also send the question itself (never a record) to the
+cheap model to pick out who, where and when (below). Empty, the default, means no model call at all; Ask then says to
+opt a source in. Results the model gave earlier stay cached and keep counting. The Sources page shows, per source,
+whether a model may read it.
+
+**Filters in a question.** Search and Ask read filters out of the question (`api/igneous/rag/constraints.py`):
+"from", "to", "with" or "by" a person means messages they sent or received (any of their merged addresses);
+"regarding", "involving", "mentioning" or "concerning" a person means records that name them; "in my calendar", "my
+texts", "in my email" or "my files" limits the sources (a source word only counts when it says where to look, so
+"the events that led to the crisis" limits nothing); and "in May 2001", "since 2000" or "on May 3, 2001" limits the
+dates. When the rules find none and a source is opted in, the cheap model reads the question once (cached). Filters a
+request sets itself win. Both pages show the filters they applied and mark the ones read from the question. Search
+also takes `-word` or `-"a phrase"` to leave matches out.
 
 **How Ask picks its evidence** (`api/igneous/rag/qa.py`). Hybrid search retrieves a pool of
 `IGNEOUS_RERANKER_POOL_SIZE` passages (32 by default), graph expansion adds each hit's direct replies and the

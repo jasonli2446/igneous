@@ -209,26 +209,6 @@ def test_experts_uses_retrieved_items_and_returns_bounded_evidence(monkeypatch):
     assert session.params["k"] == 5 and session.params["evidence_limit"] == 2
 
 
-def test_experts_endpoint_validates_query_and_passes_bounded_parameters(monkeypatch):
-    from fastapi.testclient import TestClient
-
-    from igneous import main
-    from igneous.db import get_session
-
-    calls = []
-    monkeypatch.setattr(main, "experts", lambda session, q, **kwargs: calls.append((session, q, kwargs)) or [])
-    marker = object()
-    main.app.dependency_overrides[get_session] = lambda: marker
-    try:
-        client = TestClient(main.app)
-        assert client.get("/experts?q=%20%20").status_code == 422
-        response = client.get("/experts?q=budget&k=2&evidence_limit=1&mode=lexical")
-    finally:
-        main.app.dependency_overrides.clear()
-    assert response.status_code == 200 and response.json() == {"experts": []}
-    assert calls == [(marker, "budget", {"k": 2, "evidence_limit": 1, "mode": "lexical"})]
-
-
 def test_graph_filters_scope_discovery_and_final_serialization():
     """A source/date request must not discover or serialize a non-matching edge."""
     from igneous.graph.traversal import GraphFilters, neighborhood

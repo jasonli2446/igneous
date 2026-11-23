@@ -69,12 +69,25 @@ export type Expert = {
   evidence: ExpertEvidence[];
 };
 
+/** What narrowed a search or an answer: the request's own filters and what the question stated (`from_question`). */
+export type AppliedFilters = {
+  sources: string[]; // stored source values; empty = every source (for Ask: every opted-in source)
+  person: { id: number; name: string | null } | null; // sent or received by any of this person's identities
+  mentions: { id: number; name: string | null } | null; // records that name this person
+  since: string | null;
+  until: string | null; // exclusive
+  from_question: ("sources" | "person" | "mentions" | "since" | "until")[];
+};
+
+export type SearchOptions = { sources?: string[]; person?: string; from?: string; to?: string; mode?: string };
+
 export type AskResult = {
   answerable: boolean;
   answer: string;
   reason?: "no_opted_in_sources"; // nothing the question may read is opted in to the hosted model
   citations: Hit[]; // empty unless the answer stands
   evidence: Hit[]; // everything the model was shown
+  filters: AppliedFilters;
   timing: { retrieve_s: number; total_s?: number };
 };
 
@@ -173,6 +186,14 @@ async function get<T>(
   const r = await fetch(url, { signal });
   if (!r.ok) throw new Error(`${r.status} ${path}`);
   return (await r.json()) as T;
+}
+
+function searchUrl(path: string, q: string, { sources, person, from, to, mode }: SearchOptions) {
+  const url = new URL(path, API);
+  url.searchParams.set("q", q);
+  for (const s of sources ?? []) url.searchParams.append("sources", s);
+  for (const [k, v] of Object.entries({ person: person?.trim(), from, to, mode })) if (v) url.searchParams.set(k, v);
+  return url;
 }
 
 export type AiImportResult = {
@@ -321,9 +342,10 @@ export const api = {
   googleConnectUrl: () => new URL("/sources/google/connect", API).toString(),
   stats: () => get<{ source_items: Record<string, number>; nodes: Record<string, number>; edges: Record<string, number> }>("/stats", {}),
   sync: (signal?: AbortSignal) => get<{ syncs: SyncStatus[] }>("/sync", {}, signal),
-  search: (q: string, opts: { source?: string; person?: string; from?: string; to?: string; mode?: string } = {}) =>
-    get<{ hits: Hit[] }>("/search", { q, ...opts }),
-  experts: (q: string, opts: { mode?: string } = {}) => get<{ experts: Expert[] }>("/experts", { q, ...opts }),
+  search: (q: string, opts: SearchOptions = {}, signal?: AbortSignal) =>
+    requestJson<{ hits: Hit[]; filters: AppliedFilters }>(searchUrl("/search", q, opts), { signal }),
+  experts: (q: string, opts: SearchOptions = {}, signal?: AbortSignal) =>
+    requestJson<{ experts: Expert[]; filters: AppliedFilters }>(searchUrl("/experts", q, opts), { signal }),
   findThings: (q: string, seed?: number, signal?: AbortSignal) =>
     get<{ results: Thing[] }>("/graph/find", { q, seed }, signal),
   nodeSummary: (id: number, signal?: AbortSignal) => get<NodeSummary>(`/graph/node/${id}/summary`, {}, signal),
