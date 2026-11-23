@@ -7,17 +7,18 @@
 //      brings it back; then it is taken out again.
 //   3. "Same person as…" asks you to confirm (the check goes back without merging).
 //   4. A person split: "Not the same person" on one of a person's other identities, then Undo.
-//   5. A suggestion answered: the check marks one inferred link "unsure", as the verifier does when the records don't
+//   5. A project renamed and hidden, each undone from its panel once the notice has gone.
+//   6. A suggestion answered: the check marks one inferred link "unsure", as the verifier does when the records don't
 //      settle it (there are no verdicts without the model), and answers it "Right" under "Links to check".
-//   6. Ask, Search and Sources: one title each, a labelled question, the search in the URL, every labelled section.
+//   7. Ask, Search and Sources: one title each, a labelled question, the search in the URL, every labelled section.
 //
 // Needs the API and the web app running against a database you can write to, and psql: the check holds the rebuild
 // before it derives (the deriving lock, as another rebuild would) so the correction lands while it runs, and marks the
 // suggestion directly in the database. Everything it changes it undoes, so the database ends as it started. From web/:
 //   DATABASE_URL=postgresql://igneous:igneous@localhost:5432/igneous_persona API_URL=http://localhost:8000 \
 //     WEB_URL=http://localhost:3000 npm run corrections
-// The names come from the synthetic persona (make persona); CHECK_PAIR, CHECK_LINK, CHECK_SPLIT and CHECK_QUERY
-// override them.
+// The names come from the synthetic persona (make persona); CHECK_PAIR, CHECK_LINK, CHECK_SPLIT, CHECK_PROJECT and
+// CHECK_QUERY override them.
 
 import { spawn } from "node:child_process";
 import { chromium } from "playwright";
@@ -31,6 +32,8 @@ const [PERSON, OTHER] = (process.env.CHECK_PAIR ?? "Owen Brandt|Mira Castellanos
 const [LINKER, LINKED] = (process.env.CHECK_LINK ?? "Dana Kimura|Rafael Ortiz").split("|");
 // A person with another address merged into them.
 const SPLIT = process.env.CHECK_SPLIT ?? "Dana Kimura";
+// A project, to rename and hide (none, CHECK_PROJECT="", skips that step: the Enron demo has no project of its own).
+const PROJECT = process.env.CHECK_PROJECT ?? "Tidepool";
 // A search with results.
 const QUERY = process.env.CHECK_QUERY ?? "lisbon";
 const TIMEOUT = 30_000;
@@ -211,6 +214,31 @@ async function graph(page) {
   await until(page, `${label} back in ${SPLIT}`, async () => (await row.count()) === 1);
   await until(page, "the split's correction forgotten once undone", async () => (await left()) === 0);
   pass(`${label} split off and joined again`);
+
+  step = `a project's corrections undone from its panel (${PROJECT || "no project named"})`;
+  if (PROJECT) await project();
+  else pass("skipped");
+
+  async function project() {
+    await page.keyboard.press("Escape");
+    await search.fill(PROJECT);
+    await page.getByRole("option", { name: new RegExp(`^${escape(PROJECT)} Projects`) }).first().click({ timeout: TIMEOUT });
+    const title = panel.getByRole("heading", { level: 2 }).first();
+    await panel.getByRole("button", { name: "Rename" }).click({ timeout: TIMEOUT });
+    const renamed = `${PROJECT} (renamed by the check)`;
+    await panel.getByRole("textbox", { name: "Project name" }).fill(renamed);
+    await panel.getByRole("textbox", { name: "Project name" }).press("Enter");
+    await notice(`Renamed to "${renamed}".`).waitFor({ timeout: TIMEOUT });
+    const yours = panel.getByRole("list", { name: "Your corrections" });
+    await yours.getByRole("button", { name: "Undo rename" }).click({ timeout: TIMEOUT });
+    await until(page, "the name back", async () => (await yours.count()) === 0 && (await title.textContent()) === `${PROJECT}Rename`);
+    await panel.getByRole("button", { name: "Hide", exact: true }).click();
+    await notice(`Hid "${PROJECT}".`).waitFor({ timeout: TIMEOUT });
+    await yours.getByRole("button", { name: "Unhide" }).click({ timeout: TIMEOUT });
+    await until(page, "the project shown again", async () => (await yours.count()) === 0);
+    await until(page, "the project's corrections forgotten once undone", async () => (await left()) === 0);
+    pass("renamed and named back, hidden and shown again");
+  }
 
   step = "a suggestion answered";
   await page.keyboard.press("Escape");

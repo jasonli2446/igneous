@@ -7,7 +7,7 @@ import { InlineError, Skeleton } from "@/components/ui";
 import { api, ApiError, type AskResult, type Hit, type ModelStatus } from "@/lib/api";
 import { formatDay } from "@/lib/dates";
 import { useRequest } from "@/lib/hooks";
-import { useSourceLabel, useSourcesAnswer } from "@/lib/sources";
+import { shareSources, useSourceLabel, useSourcesAnswer } from "@/lib/sources";
 
 // How a graph neighbour was reached from the hit it follows.
 const RELATION: Record<NonNullable<Hit["relation"]>, string> = {
@@ -31,21 +31,39 @@ function withCitations(answer: string, ids: Set<number>, onPick: (id: number) =>
   });
 }
 
-/** Why Ask failed, in words: the hosted model isn't set up (503, and the Sources page says it is off or has no key),
- *  it can't be used right now (503 otherwise), it failed this time (502), or anything else. */
-function AskFailure({ error, model, onRetry }: { error: ApiError; model: ModelStatus | undefined; onRetry: () => void }) {
+const setUp = (model: ModelStatus) => model.enabled && model.configured;
+
+/** Ask needs the hosted model, and it isn't set up: calls are off, or no key is saved. */
+function NotSetUp({ model }: { model: ModelStatus }) {
+  return (
+    <div className="rounded-md border border-line bg-panel p-4" role="status">
+      <div className="mb-1 text-xs font-medium text-muted">The hosted model isn&apos;t set up</div>
+      <p className="leading-relaxed text-soft">
+        {model.enabled
+          ? "Ask sends the passages it finds to a hosted model, and no Bedrock key is saved: save one with `igneous connect bedrock`, or set AWS_BEARER_TOKEN_BEDROCK in the API's environment."
+          : "Ask sends the passages it finds to a hosted model, and hosted model calls are off (IGNEOUS_LLM_ENABLED=false)."}
+        {" "}Search and the graph work without it.
+      </p>
+      <Link href="/settings#model" className="mt-3 inline-block text-sm font-medium text-accent underline underline-offset-4">
+        Set up the hosted model
+      </Link>
+    </div>
+  );
+}
+
+/** Why Ask failed, in words: the hosted model can't be used right now (503), it failed this time (502), or anything
+ *  else. */
+function AskFailure({ error, onRetry }: { error: ApiError; onRetry: () => void }) {
   if (error.status !== 502 && error.status !== 503) return <InlineError message={error.detail} onRetry={onRetry} />;
-  const notSetUp = error.status === 503 && model !== undefined && !(model.enabled && model.configured);
-  const title = notSetUp ? "The hosted model isn't set up"
-    : error.status === 503 ? "The hosted model can't be used right now" : "The model couldn't answer this time";
   return (
     <div className="rounded-md border border-danger/40 p-4" role="alert">
-      <div className="mb-1 text-xs font-medium text-danger">{title}</div>
+      <div className="mb-1 text-xs font-medium text-danger">
+        {error.status === 503 ? "The hosted model can't be used right now" : "The model couldn't answer this time"}
+      </div>
       <p className="break-words text-sm leading-relaxed text-soft">{error.detail}</p>
       <div className="mt-3 flex gap-4 text-sm font-medium">
-        {notSetUp
-          ? <Link href="/settings#model" className="text-accent underline underline-offset-4">Set up the hosted model</Link>
-          : <button type="button" onClick={onRetry} className="text-accent underline underline-offset-4">Try again</button>}
+        <button type="button" onClick={onRetry} className="text-accent underline underline-offset-4">Try again</button>
+        {error.status === 503 && <Link href="/settings#model" className="text-accent underline underline-offset-4">Model settings</Link>}
       </div>
     </div>
   );
@@ -58,10 +76,12 @@ export default function AskPage() {
   const [res, setRes] = useState<AskResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
+  // The model's state when it isn't set up, so the question wasn't sent.
+  const [blocked, setBlocked] = useState<ModelStatus | null>(null);
   const [focus, setFocus] = useState<number | null>(null);
   const request = useRef<AbortController | null>(null);
   const suggestions = useRequest("ask-suggestions", (signal) => api.askSuggestions(signal));
-  const model = useSourcesAnswer()?.model;
+  const shared = useSourcesAnswer();
   const sourceLabel = useSourceLabel();
 
   const run = async (question: string) => {
@@ -72,8 +92,24 @@ export default function AskPage() {
     setQ(question);
     setBusy(true);
     setError(null);
+    setBlocked(null);
     setFocus(null);
     try {
+      // A question is sent only to a model that is set up. The state is asked again when it says otherwise (a key
+      // saved since this page loaded), and the answer shared with every page.
+      let model = shared?.model;
+      if (!model || !setUp(model)) {
+        const fresh = await api.sources(current.signal);
+        shareSources(fresh);
+        model = fresh.model;
+      }
+      if (!setUp(model)) {
+        if (request.current === current) {
+          setRes(null);
+          setBlocked(model);
+        }
+        return;
+      }
       const answer = await api.ask(question, useGraph, current.signal);
       if (request.current === current) setRes(answer);
     } catch (e) {
@@ -122,7 +158,8 @@ export default function AskPage() {
       </div>
 
       {res && !busy && <AppliedFilters filters={res.filters} scope="answer" />}
-      {error && <div className="mt-6"><AskFailure error={error} model={model} onRetry={() => void run(q)} /></div>}
+      {error && <div className="mt-6"><AskFailure error={error} onRetry={() => void run(q)} /></div>}
+      {blocked && !busy && <div className="mt-6"><NotSetUp model={blocked} /></div>}
 
       {busy && (
         <div className="mt-6 space-y-2" role="status" aria-label="Thinking">

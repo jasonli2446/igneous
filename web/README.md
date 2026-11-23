@@ -14,13 +14,19 @@ This is Next.js 16 with React 19 and Tailwind CSS 4. Its APIs differ from older 
 
 ## Layout
 
-- `src/app/`: one folder per route, the root layout (nav, theme script) and `globals.css`.
+- `src/app/`: one folder per route, the root layout (nav, theme script) and `globals.css`. Each route's `page.tsx` is a
+  Server Component that sets the page's title and renders its heading; the page's own client component lives in
+  `src/components/` (`Explorer`, `AskPage`, `SearchPage`, `SourcesPage`). Search and Sources read their URL with
+  `useSearchParams`, inside a `Suspense` boundary.
 - `src/components/Explorer.tsx`: the Graph page. `Graph3D.tsx` draws it with 3d-force-graph (WebGL, so it is only
-  ever loaded in the browser); `Inspector`, `EntityInspector` and `WhyConnected` fill the details panel.
-- `src/lib/api.ts`: every call to the API, with its types.
-- `src/lib/graph-style.ts`: every color drawn outside CSS (section hues, the theme's colors for the graph).
-  `dates.ts` formats dates, `theme.ts` holds the light/dark theme, `hooks.ts` the request hooks that let only the
-  latest reply land.
+  ever loaded in the browser); `Inspector`, `EntityInspector`, `WhyConnected` and `Suggestions` fill the details panel.
+- `src/lib/api.ts`: every call to the API, with the exact shapes it answers.
+- `src/lib/sources.ts`: `GET /sources` as every page shares it, fetched once per page load: what a record from each
+  stored source is called (the one label map, from the names the Sources page uses) and whether the hosted model is
+  set up.
+- `src/lib/graph-style.ts`: every color drawn outside CSS (section hues, the theme's colors for the graph) and the words
+  for node and link types. `dates.ts` formats dates, `theme.ts` holds the light/dark theme, `hooks.ts` the request
+  hooks that let only the latest reply land, `corrections.ts` what a panel hands the page after a correction.
 
 ## How the explorer behaves
 
@@ -33,6 +39,24 @@ This is Next.js 16 with React 19 and Tailwind CSS 4. Its APIs differ from older 
   correction, the view and each layer are fetched again in place: the selection, the panel and positions stay.
 - One WebGL renderer lives as long as the Graph page; it is released (with its WebGL context) when the page unmounts
   or is hidden.
+
+### Corrections
+
+Every correction answers when it applies (`api/igneous/graph/entity_api.py`). One that applies now updates the graph
+at once; one made while a rebuild runs is saved and applies when that rebuild publishes, and the notice says so and
+stays until the graph version moves, which the page then checks every 3 s instead of every 30 s. The node pairs an
+answer names (`pairs`, each end a person's identity head) update exactly those links on screen: a pair no link joins
+any more loses its links, including a node opened from the panel or linked by you that hung off the other end.
+
+- "This is wrong" on an inferred link, with Undo in the notice; "Undo removal" in the Why panel undoes it later.
+- "+ Connect to…" offers the ways the API allows two things to connect, never "same person". A link you added shows
+  as yours in the Why panel, with Remove; Undo brings it back.
+- "Same person as…" merges two people after you confirm. A person's panel lists the other addresses, numbers and
+  profiles merged into them ("Also known as"), each with "Not the same person".
+- A project's panel lists your rename, your hide and what you merged into it, each with its own undo (Undo rename,
+  Unhide, Separate), for as long as the correction stands.
+- "Links to check" lists the links the verifier was unsure about (`GET /graph/suggestions`); "Right" and "Wrong" are
+  labels it learns from.
 
 ## Theme and styles
 
@@ -49,22 +73,28 @@ defined there (`btn`, `btn-primary`, `btn-chip`, `btn-close`, `btn-link`, `btn-o
 npx next typegen && npx tsc --noEmit && npm run lint && npm run build
 ```
 
-### The explorer walkthrough
-
-`npm run walkthrough` drives the Graph page in headless Chromium the way a person would: search, collapse and expand,
-Back, a correction undone from the notice and from the panel, the Reader (Escape closes only it), another tab and
-back, and twenty changes of centre. It fails on any console error or warning, a WebGL context warning among them.
-It needs the API and the web app running against the Enron demo database (`make demo`):
+Two browser checks drive the app in headless Chromium, with the API and the web app running. Both fail on any console
+error or warning. Headless Chromium draws WebGL in software and logs its own "GPU stall due to ReadPixels" driver
+notes; those are the only console warnings they ignore. Install the browser once:
 
 ```bash
-npx playwright install chromium               # once: the browser build this Playwright version drives
+npx playwright install chromium               # the browser build this Playwright version drives
+```
+
+### The explorer walkthrough
+
+`npm run walkthrough` drives the Graph page the way a person would: search, collapse and expand, Back, a correction
+undone from the notice and from the panel, the Reader (Escape closes only it), another tab and back, finding you by
+name, and twenty changes of centre. A WebGL context warning fails it too. It runs against the Enron demo database
+(`make demo`):
+
+```bash
 WEB_URL=http://localhost:3000 npm run walkthrough
 ```
 
-The correction it makes is undone before it moves on, so the database ends as it started. Headless Chromium draws
-WebGL in software and logs its own "GPU stall due to ReadPixels" driver notes; those are the only console warnings it
-ignores.
-The names it searches for come from the demo mailbox (`WALK_PEOPLE`, `WALK_PAIR` and `WALK_SEEDS` override them).
+The correction it makes is undone before it moves on, so the database ends as it started.
+The names it searches for come from the demo mailbox (`WALK_PEOPLE`, `WALK_PAIR` and `WALK_SEEDS` override them); you
+are whoever the graph opens on, found by your name (Jump to marks you "You").
 On the synthetic persona (`make persona`), name its people:
 
 ```bash
@@ -72,5 +102,38 @@ WALK_PEOPLE="Dana Kimura|Priya Raman" WALK_PAIR="Owen Brandt|Mira Castellanos" \
   WALK_SEEDS="Dana Kimura|Priya Raman|Owen Brandt|Rafael Ortiz|Sofia Lindgren" npm run walkthrough
 ```
 
-Mira, the owner, is never searched for (search lists her as "You"); she is only the pair's other end, linked to Owen
-Brandt by the introduction Ruth Adeyemi made, an inferred link the correction can remove.
+There the pair is Owen Brandt and Mira, the owner, linked by the introduction Ruth Adeyemi made: an inferred link the
+correction can remove.
+
+### The corrections check
+
+`npm run corrections` (`scripts/corrections.mjs`) drives every kind of correction against the API's answers, then
+the other pages:
+
+1. A correction while a rebuild runs: its notice says it applies when the rebuild publishes, the link stays until
+   then and is gone once it publishes; then it is undone from the Why panel.
+2. A link you added: "+ Connect to…" offers no "same person"; the link is undone from its notice, added again,
+   removed from the Why panel and brought back with Undo.
+3. "Same person as…" asks before it merges.
+4. A person split, "Not the same person", and its Undo.
+5. A project renamed and hidden, each undone from its panel.
+6. A suggestion answered under "Links to check".
+7. Ask, Search and Sources: one title each, the labelled question and the state Ask is in, the search in the URL
+   (a new search, then Back), and every labelled section on the Sources page.
+
+It needs `psql` and the database the API reads, which it writes to: it holds the rebuild before it derives (the
+deriving lock, as another rebuild would) so the correction lands while the rebuild runs, and, since there are no
+verdicts without the model, it marks one inferred link "unsure" itself. Everything it changes it undoes; the rebuild
+it runs derives the graph again as any rebuild does. On the synthetic persona:
+
+```bash
+DATABASE_URL=postgresql://igneous:igneous@localhost:5432/igneous_persona API_URL=http://localhost:8000 \
+  WEB_URL=http://localhost:3000 npm run corrections
+```
+
+On the Enron demo, name its people (it has no project of its own, so that step is skipped):
+
+```bash
+CHECK_PAIR="Mery L Brown|Pallen" CHECK_LINK="Ina Rangel|Gary Taylor" CHECK_SPLIT="Jane M. Tholt" CHECK_PROJECT="" \
+  CHECK_QUERY=gas DATABASE_URL=postgresql://igneous:igneous@localhost:5432/igneous npm run corrections
+```
