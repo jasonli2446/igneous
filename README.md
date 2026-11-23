@@ -290,7 +290,10 @@ cd api && uv run igneous sync imessage && uv run igneous pipeline
 ## Known gaps in the baseline
 
 - Enron has no `In-Reply-To`/`References` headers. Threads are keyed on subject + participants; `REPLIES_TO` comes from
-  quoted "Original Message" headers that name exactly one message, else is inferred within the thread.
+  quoted "Original Message" headers that name exactly one message, else is inferred within the thread. Mail that has
+  them (the persona, any other mail archive) is threaded by its reply chain: a reply is in the thread of the message it
+  answers or, when that one isn't stored, of the message that began its conversation, and that first message is in
+  the thread too. Gmail threads are Gmail's conversations.
 - Enron stores one email in several folders with different Message-IDs. Messages dedupe on a content fingerprint
   (`raw_meta.fingerprint`); the message stays while any copy remains.
 - In a mailbox, assistants send some of the owner's mail. The owner is whoever sent most of its sent folders, so an
