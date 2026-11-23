@@ -2,9 +2,11 @@
 item per git checkout. Only a document the parsers read and no larger than MAX_DOCUMENT_BYTES is ever opened; system
 files (.DS_Store, Thumbs.db, lock files) and folders (trash, indexes) are skipped.
 
-An item's id is `<anchor key>/<path below the anchor>`. The anchor is the outermost of the configured folders and
-the scanned folders that contains the file, and its key is a hash of its path, so ids name no home directory and a
-file keeps one id whichever folder's scan reaches it. A completed scan reconciles only the folders it scanned.
+An item's id is `<anchor key>/<path below the anchor>`. The anchor is the outermost configured folder that contains
+the file, or, for a file in no configured folder, the outermost scanned one; its key is a hash of its path, so ids
+name no home directory and a file keeps one id whichever folder's scan reaches it. A completed scan reconciles only
+the folders it scanned, and with them the ids an earlier scan gave their files under a folder's own key (a nested
+root, or `--path` inside a configured folder), so a file is never stored twice.
 """
 from __future__ import annotations
 
@@ -48,6 +50,15 @@ def _is_secret(name: str) -> bool:
 
 def _fingerprint(stat: os.stat_result) -> list[int]:
     return [stat.st_mtime_ns, stat.st_size]
+
+
+def _depth(path: Path) -> tuple[int, str]:
+    return len(path.parts), str(path)
+
+
+def _below(path: Path, anchor: Path) -> str:
+    below = path.relative_to(anchor).as_posix()
+    return "" if below == "." else below
 
 
 def _in(external_id: str, scopes: Iterable[str]) -> bool:
@@ -104,8 +115,10 @@ class _Root:
 
 
 class FilesystemConnector:
-    """Scan `roots` (a folder inside another one is scanned as part of it). `anchors` are the configured folders:
-    a scanned folder inside one of them keeps the ids that folder's own scan gives its files.
+    """Scan `roots`. `anchors` are the configured folders (by default, `roots`): a scanned folder inside one of them
+    keeps the ids that folder's own scan gives its files, and a configured folder inside a scanned folder outside
+    them all is scanned as a root of its own, for the same reason. A folder inside another scanned one with the same
+    anchor is scanned as part of it.
 
     The cursor maps each stored id to the mtime and size it was stored at, so an unchanged file is never reopened;
     a scan replaces only its own folders' entries. A folder that cannot be listed stays as it was: its items are
@@ -121,26 +134,33 @@ class FilesystemConnector:
             raise ValueError("at least one filesystem root is required")
         if missing := sorted(str(root) for root in resolved if not root.is_dir()):
             raise ValueError(f"filesystem roots must be directories: {', '.join(missing)}")
-        outer = sorted((r for r in resolved if not any(r != o and r.is_relative_to(o) for o in resolved)), key=str)
-        known = {Path(a).expanduser().resolve() for a in anchors} | set(outer)
-        by_depth = sorted(known, key=lambda a: (len(a.parts), str(a)))
-        self.roots = tuple(self._root(r, by_depth) for r in outer)
+        configured = {Path(a).expanduser().resolve() for a in anchors} or set(resolved)
+        # Outermost first: the configured folders, then the scanned folders in none of them.
+        free = [r for r in resolved if not any(r.is_relative_to(c) for c in configured)]
+        by_depth = [*sorted(configured, key=_depth), *sorted(free, key=_depth)]
 
-    @staticmethod
-    def _root(path: Path, anchors: list[Path]) -> _Root:
-        anchor = next(a for a in anchors if path.is_relative_to(a))  # outermost first
-        below = path.relative_to(anchor).as_posix()
-        return _Root(path, _root_key(anchor), "" if below == "." else below)
+        def anchor(path: Path) -> Path:
+            return next(a for a in by_depth if path.is_relative_to(a))
 
-    def _walk(self, directory: Path, unreadable: list[Path]) -> Iterator[tuple[str, Path]]:
-        """("file", path) for each file and ("repo", folder) for each git checkout below `directory`, in name order.
-        Folders that cannot be listed go to `unreadable`."""
+        resolved |= {c for r in free for c in configured if c.is_relative_to(r) and c.is_dir()}
+        outer = sorted((r for r in resolved
+                        if not any(o != r and r.is_relative_to(o) and anchor(o) == anchor(r) for o in resolved)), key=str)
+        self.roots = tuple(_Root(r, _root_key(anchor(r)), _below(r, anchor(r))) for r in outer)
+        # The keys current ids are under (other syncs of these folders use them too): never an earlier scan's.
+        self.in_use = {_root_key(a) for a in configured if anchor(a) == a} | {root.key for root in self.roots}
+
+    def _walk(self, directory: Path, unreadable: list[Path], skip: set[Path],
+              listed: list[Path]) -> Iterator[tuple[str, Path]]:
+        """("file", path) for each file and ("repo", folder) for each git checkout below `directory`, in name order,
+        leaving out the folders in `skip` (roots scanned on their own). Folders listed go to `listed`, and folders
+        that cannot be listed to `unreadable`."""
         try:
             with os.scandir(directory) as listing:
                 entries = sorted(listing, key=lambda entry: entry.name)
         except OSError:
             unreadable.append(directory)
             return
+        listed.append(directory)
         if any(entry.name == ".git" for entry in entries):
             yield "repo", directory
         for entry in entries:
@@ -154,18 +174,21 @@ class FilesystemConnector:
                 continue
             if not is_dir:
                 yield "file", Path(entry.path)
-            elif entry.name not in IGNORED_DIRECTORIES:
-                yield from self._walk(Path(entry.path), unreadable)
+            elif entry.name not in IGNORED_DIRECTORIES and Path(entry.path) not in skip:
+                yield from self._walk(Path(entry.path), unreadable, skip, listed)
 
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | CompletedScan]:
         previous = cursor.get("files") if isinstance(cursor.get("files"), dict) else {}
         stored: dict[str, list[int]] = {}  # this scan: ids now stored (or unchanged), with their fingerprints
         observed: set[str] = set()
         kept: list[str] = []
+        unreadable: list[Path] = []
+        listed: list[Path] = []
         due = Every()  # the cursor holds every file: write it every so often, not every so many files
         for root in self.roots:
-            unreadable: list[Path] = []
-            for kind, path in self._walk(root.path, unreadable):
+            inside = {o.path for o in self.roots if o.path != root.path and o.path.is_relative_to(root.path)}
+            blocked: list[Path] = []
+            for kind, path in self._walk(root.path, blocked, inside, listed):
                 seen = (self._repo if kind == "repo" else self._file)(root, path, previous)
                 if seen is None:
                     continue
@@ -177,8 +200,18 @@ class FilesystemConnector:
                     stored[external_id] = fingerprint
                 if item is not None and due():
                     yield Checkpoint({"files": {**previous, **stored}})
-            kept += [scope for folder in unreadable for scope in root.scopes_of(folder)]
+            kept += [scope for folder in blocked for scope in root.scopes_of(folder)]
+            unreadable += blocked
         scanned = [scope for root in self.roots for scope in root.scopes]
+        # A folder listed here whose own key an earlier scan gave ids under (it was a root then: inside another one,
+        # or synced with --path) has its files under the ids above now. What is stored under its key goes, except
+        # below a folder that could not be listed.
+        earlier = {i.split("/", 1)[0] for i in previous} - self.in_use
+        for folder in listed if earlier else ():
+            if (key := _root_key(folder)) in earlier:
+                scanned.append(key)
+                for below in (u.relative_to(folder).as_posix() for u in unreadable if u.is_relative_to(folder)):
+                    kept += [f"{key}/{below}", f"{key}/.repos/{below}"]
         carried = {i: fp for i, fp in previous.items() if not _in(i, scanned) or _in(i, kept)}
         yield CompletedScan({"files": {**carried, **stored}}, self.name, frozenset(observed),
                             scopes=tuple(scanned), kept=tuple(kept))

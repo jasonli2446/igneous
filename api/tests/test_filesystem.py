@@ -86,6 +86,46 @@ def test_syncing_one_folder_reconciles_only_that_folder_and_keeps_the_configured
     assert stats["inserted"] == stats["updated"] == stats["unchanged"] == 0  # the cursor kept every entry
 
 
+def test_a_configured_folder_inside_a_path_keeps_its_ids(db, tmp_path):
+    documents, notes = tmp_path / "Documents", tmp_path / "Documents" / "notes"
+    write(notes / "n.md")
+    write(documents / "d.md")
+    run_sync(db, FilesystemConnector([notes]))  # notes is the configured folder
+    # --path of a folder holding it: notes is read as itself, so its file is not stored a second time.
+    stats = run_sync(db, FilesystemConnector([documents], anchors=[notes]))
+    assert stored(db) == {f"{_root_key(notes)}/n.md", f"{_root_key(documents)}/d.md"} and stats["deleted"] == 0
+
+
+def test_ids_an_earlier_scan_gave_under_a_folders_own_key_are_replaced(db, tmp_path, monkeypatch):
+    """A folder synced on its own (`--path`, or a root nested in another) had its files under its own key. A scan
+    of the folder holding it stores them under that folder's key and removes the earlier ids, except below a folder
+    it could not list."""
+    documents, notes = tmp_path / "Documents", tmp_path / "Documents" / "notes"
+    write(notes / "n.md")
+    write(notes / "locked" / "l.md")
+    write(documents / "d.md")
+    run_sync(db, FilesystemConnector([notes]))
+    old, new = _root_key(notes), _root_key(documents)
+    assert stored(db) == {f"{old}/n.md", f"{old}/locked/l.md"}
+
+    blocked = str(notes / "locked")
+    scandir = os.scandir
+
+    def no_locked(path):
+        if str(path) == blocked:
+            raise PermissionError("Operation not permitted")
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", no_locked)
+    run_sync(db, FilesystemConnector([documents]))
+    assert stored(db) == {f"{new}/d.md", f"{new}/notes/n.md", f"{old}/locked/l.md"}  # l.md: not listed, kept
+    monkeypatch.setattr(os, "scandir", scandir)
+    run_sync(db, FilesystemConnector([documents]))
+    assert stored(db) == {f"{new}/d.md", f"{new}/notes/n.md", f"{new}/notes/locked/l.md"}
+    stats = run_sync(db, FilesystemConnector([documents]))
+    assert stats["inserted"] == stats["updated"] == stats["deleted"] == 0
+
+
 def test_a_folder_inside_another_root_is_scanned_once(tmp_path):
     root = tmp_path / "Documents"
     write(root / "notes" / "n.md")
