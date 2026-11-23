@@ -9,8 +9,10 @@ const day = (d: Date) => d.toLocaleDateString(undefined, { dateStyle: "medium" }
 function dates(since: string | null, until: string | null): string | null {
   if (!since && !until) return null;
   const last = until ? new Date(new Date(until).getTime() - DAY_MS) : null; // `until` is exclusive
-  if (since && last) return since.slice(0, 10) === last.toISOString().slice(0, 10) ? `On ${day(new Date(since))}`
-    : `${day(new Date(since))} to ${day(last)}`;
+  if (since && last) {
+    const first = day(new Date(since));
+    return first === day(last) ? `On ${first}` : `${first} to ${day(last)}`;
+  }
   return since ? `Since ${day(new Date(since))}` : `Before ${day(new Date(until!))}`;
 }
 
