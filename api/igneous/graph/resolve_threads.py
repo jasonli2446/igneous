@@ -14,8 +14,8 @@ Threads are found from bursts of different words, so one real project can surfac
      and its capstone project or its demo day, found under their own names), and no model is asked.
   3. Complete-link merging: two clusters merge only when every judged pair across them says 'same' confidently and
      every thread shares a name word (or the course code most of its records name) with the other side. Each cluster
-     keeps a pinned thread first, then its class (a thread whose own term is the course code most of its records
-     name), then its biggest; the others fold into it (their links move there, their names become its aliases) and
+     keeps a pinned thread first, then its class (a thread one of whose own terms is the course code most of its
+     records name), then its biggest; the others fold into it (their links move there, their names become its aliases) and
      become its facets in the registry, so later runs build their records into it without judging the pair again. A
      class's project or demo day folded into it is its part (merged_by 'part'), not the class: a name you gave it
      doesn't name the class (graph/derived.py `merges`). A 'part_of' pair writes PART_OF child -> container
@@ -44,7 +44,7 @@ SAME = 0.8               # a 'same' this confident merges
 def _threads(s: Session) -> list[dict]:
     rows = s.execute(text("""
         SELECT p.id, p.key, p.name, p.props->>'kind' AS kind, COALESCE((p.props->>'pinned')::bool, false) AS pinned,
-               p.props->'terms'->>0 AS term,
+               p.props->'terms' AS terms,
                (p.props->>'start')::timestamptz AS a,
                (p.props->>'end')::timestamptz AS b,
                array_remove(array_agg(DISTINCT n.source_item_id), NULL) AS items,
@@ -132,11 +132,11 @@ def _codes(s: Session, ts: list[dict]) -> dict[int, set[str]]:
 
 
 def class_code(t: dict, codes: dict[int, set[str]]) -> str | None:
-    """The course code a thread is the class of: its own term, which most of its records name; None for any other."""
+    """The course code a thread is the class of: one of its own terms, which most of its records name; None for any
+    other thread."""
     from igneous.graph.threads import course_code
 
-    code = course_code(t.get("term") or "")
-    return code if code and code in codes.get(t["id"], ()) else None
+    return next((c for term in t.get("terms") or [] if (c := course_code(term)) and c in codes.get(t["id"], ())), None)
 
 
 def same_course(a: dict, b: dict, codes: dict[int, set[str]]) -> dict | None:
@@ -304,7 +304,7 @@ def run(s: Session, log=print, writer: Writer | None = None) -> dict:
 
     # Merge: each cluster keeps a pinned thread first, then its class (over the class's project), then its biggest; the
     # others fold in and become its facets, a class's project or demo day as its part.
-    from igneous.graph.threads import PART, course_code
+    from igneous.graph.threads import PART
 
     clusters: dict[int, list[dict]] = defaultdict(list)
     for t in ts:
@@ -323,7 +323,7 @@ def run(s: Session, log=print, writer: Writer | None = None) -> dict:
                 continue
             folded_into[t["id"]] = keep["id"]
             fold_into(s, t["id"], keep["id"], f"Project:{t['key']}", mark=False)
-            part = whole and whole in codes.get(t["id"], ()) and not course_code(t.get("term") or "")
+            part = whole and whole in codes.get(t["id"], ()) and class_code(t, codes) != whole
             s.execute(text("""UPDATE thread_registry SET status = 'merged', merged_into = :keep, merged_by = :by,
                               updated_at = now() WHERE key = :gone AND status = 'active'"""),
                       {"keep": keep["key"], "gone": t["key"], "by": PART if part else None})

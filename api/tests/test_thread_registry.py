@@ -375,7 +375,7 @@ def test_a_class_found_as_two_threads_before_comes_together(db):
 def test_a_shared_course_code_within_one_term_is_one_thread():
     from datetime import timedelta
 
-    from igneous.graph.resolve_threads import same_course
+    from igneous.graph.resolve_threads import class_code, same_course
 
     def thread(i, start, days):
         return {"id": i, "a": at(start), "b": at(start) + timedelta(days=days)}
@@ -384,3 +384,7 @@ def test_a_shared_course_code_within_one_term_is_one_thread():
     assert same_course(thread(1, 0, 40), thread(2, 50, 30), codes)["relation"] == "same"  # within NEAR_DAYS
     assert same_course(thread(1, 0, 40), thread(3, 300, 30), codes) is None  # the same code, another term
     assert same_course(thread(1, 0, 40), thread(4, 10, 30), codes) is None  # another course
+    # The class is the thread one of whose own terms is the code most of its records name; its project is not.
+    assert class_code({"id": 1, "terms": ["Senior Capstone", "CS 481"]}, codes) == "CS 481"
+    assert class_code({"id": 2, "terms": ["Harborline"]}, codes) is None
+    assert class_code({"id": 4, "terms": ["CS 481"]}, codes) is None  # named so, but its records name another
