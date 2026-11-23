@@ -27,6 +27,6 @@ def upgrade():
 
 
 def downgrade():
-    # The code before this keys organizations its own way on its next build; corrections recorded under a company key
-    # that build doesn't make no longer apply.
+    # The code before this keys organizations its own way on its next build; a correction recorded under a company
+    # key that build doesn't make applies to nothing then.
     op.execute("DROP TABLE organization_keys")
