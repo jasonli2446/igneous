@@ -72,6 +72,7 @@ def upgrade():
             node_id         bigint NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
             source_item_id  bigint NOT NULL REFERENCES source_items(id) ON DELETE CASCADE,
             represents      boolean NOT NULL DEFAULT false,   -- the node is this record (a message, file, occurrence)
+            at              timestamptz,                      -- when the record says it happened (occurred_at)
             name            text,                             -- the name this record gives the node
             rank            smallint NOT NULL DEFAULT 0,      -- how strongly (graph/spine.py RANK_*)
             props           jsonb NOT NULL DEFAULT '{{}}',     -- the props it gives the node (SPINE_PROPS)

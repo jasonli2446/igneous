@@ -62,8 +62,8 @@ TITLED = ("Message", "File")
 #     or 'linkedin'). While entity resolution shows the cluster's name there (props.shown_name), the spine's name
 #     waits in props.own_name, where resolve.own_name reads it. With no record naming it, a node shows its key.
 #   - props.named_by: 'contacts' or 'linkedin' when the name shown comes from your card or a LinkedIn connection.
-#   - the props below, by node type: each the latest supporting record's value (by occurred_at, then source and
-#     external id); one no remaining record gives is removed.
+#   - the props below, by node type: each the latest supporting record's value (by occurred_at, then the record
+#     stored last); one no remaining record gives is removed.
 SPINE_PROPS = {
     "Message": ("source", "tool"),
     "Thread": ("source", "tool", "group"),
@@ -97,6 +97,7 @@ NAMED_BY = {RANK_CARD: "contacts", RANK_LINKEDIN: "linkedin"}
 @dataclass
 class _Support:
     """What one record contributes to a node."""
+    at: datetime | None = None   # when the record says it happened: among statements, the latest record's wins
     represents: bool = False     # the node is this record (a message, a file, an event occurrence)
     name: str | None = None
     rank: int = 0
@@ -188,7 +189,7 @@ class Builder:
         if n is None:
             n = self.nodes[k] = _Node(ord=len(self.nodes))
         rid = self.item.id
-        support = n.records.setdefault(rid, _Support())
+        support = n.records.setdefault(rid, _Support(at=self.item.occurred_at))
         support.represents |= record
         if record and n.sid is None:
             n.sid = rid
@@ -265,20 +266,21 @@ class Builder:
         self.ids = ids
         support = [(ids[h], rid, x) for h, n in self.nodes.items() if h in ids for rid, x in n.records.items()]
         if support:
+            n_, r_, x_ = zip(*support, strict=True)
             s.execute(text("""
-                INSERT INTO spine_node_support (node_id, source_item_id, represents, name, rank, props)
-                SELECT r.node_id, r.source_item_id, r.represents, r.name, r.rank, r.props
-                FROM jsonb_to_recordset(CAST(:rows AS jsonb))
-                    AS r(node_id bigint, source_item_id bigint, represents boolean, name text, rank smallint,
-                         props jsonb)
+                INSERT INTO spine_node_support (node_id, source_item_id, at, represents, name, rank, props)
+                SELECT * FROM unnest(CAST(:n AS bigint[]), CAST(:r AS bigint[]), CAST(:at AS timestamptz[]),
+                                     CAST(:x AS boolean[]), CAST(:name AS text[]), CAST(:rank AS smallint[]),
+                                     CAST(:props AS jsonb[]))
                 ON CONFLICT (node_id, source_item_id) DO UPDATE SET
                     represents = spine_node_support.represents OR EXCLUDED.represents,
                     name = CASE WHEN EXCLUDED.rank > spine_node_support.rank THEN EXCLUDED.name
                                 ELSE spine_node_support.name END,
                     rank = GREATEST(spine_node_support.rank, EXCLUDED.rank),
                     props = spine_node_support.props || EXCLUDED.props
-            """), {"rows": _rows([{"node_id": node, "source_item_id": rid, "represents": x.represents,
-                                   "name": x.name, "rank": x.rank, "props": x.props} for node, rid, x in support])})
+            """), {"n": list(n_), "r": list(r_), "at": [x.at for x in x_], "x": [x.represents for x in x_],
+                   "name": [x.name for x in x_], "rank": [x.rank for x in x_],
+                   "props": [json.dumps(x.props, default=str) for x in x_]})
             refresh(s, sorted({node for node, _rid, _x in support}))
         self._flush_edges()
 
@@ -391,20 +393,19 @@ RETURNING id, type, key
 # The spine's name and props of each node, from the records that support it (see SPINE_PROPS and the ranks).
 REFRESH_NODES = text(f"""
 WITH s AS MATERIALIZED (
-    SELECT x.node_id, x.name, x.rank, x.props, si.occurred_at, si.source, si.external_id
-    FROM spine_node_support x JOIN source_items si ON si.id = x.source_item_id
-    WHERE x.node_id = ANY(CAST(:ids AS bigint[]))),
+    SELECT node_id, name, rank, props, at, source_item_id AS record FROM spine_node_support
+    WHERE node_id = ANY(CAST(:ids AS bigint[]))),
 stated AS (
     SELECT DISTINCT ON (node_id) node_id, name, rank FROM s WHERE rank >= {RANK_STATED} AND name IS NOT NULL
-    ORDER BY node_id, rank DESC, occurred_at DESC NULLS LAST, source DESC, external_id DESC),
+    ORDER BY node_id, rank DESC, at DESC NULLS LAST, record DESC),
 header AS (
     SELECT DISTINCT ON (node_id) node_id, name, rank
     FROM (SELECT node_id, name, rank, count(*) AS records FROM s WHERE rank = {RANK_HEADER} AND name IS NOT NULL
           GROUP BY node_id, name, rank) h
-    ORDER BY node_id, records DESC, length(name) DESC, name),
+    ORDER BY node_id, records DESC, length(name) DESC, name COLLATE "C"),
 other AS (
     SELECT DISTINCT ON (node_id) node_id, name, rank FROM s WHERE rank < {RANK_HEADER} AND name IS NOT NULL
-    ORDER BY node_id, rank DESC, length(name) DESC, name),
+    ORDER BY node_id, rank DESC, length(name) DESC, name COLLATE "C"),
 best AS (
     SELECT DISTINCT ON (node_id) node_id, name, rank
     FROM (SELECT * FROM stated UNION ALL SELECT * FROM header UNION ALL SELECT * FROM other) c
@@ -413,7 +414,7 @@ given AS (
     SELECT node_id, jsonb_object_agg(k, v) AS props
     FROM (SELECT DISTINCT ON (s.node_id, p.key) s.node_id, p.key AS k, p.value AS v
           FROM s CROSS JOIN LATERAL jsonb_each(s.props) p
-          ORDER BY s.node_id, p.key, s.occurred_at DESC NULLS LAST, s.source DESC, s.external_id DESC) g
+          ORDER BY s.node_id, p.key, s.at DESC NULLS LAST, s.record DESC) g
     GROUP BY node_id),
 owned AS (SELECT * FROM jsonb_to_recordset(CAST(:owned AS jsonb)) AS o(type text, keys text[])),
 v AS (
@@ -960,9 +961,18 @@ FROM source_items WHERE spined_hash IS DISTINCT FROM content_hash ORDER BY id LI
 """)
 
 
+def _tune(s: Session) -> None:
+    """For the rest of the transaction: the spine runs many set-based statements over one batch, which JIT
+    compilation slows instead of speeding (compiling costs more than running them), and `refresh` sorts a batch's
+    support rows, which fit in memory."""
+    s.execute(text("SET LOCAL jit = off"))
+    s.execute(text("SET LOCAL work_mem = '32MB'"))
+
+
 def _process(s: Session, rows, cards: dict) -> None:
     """Build one batch of records: replace what they built before, classify them, recompute their replies and their
     threads' flags, and mark them processed at the content hash that was read."""
+    _tune(s)
     batch = [r.id for r in rows]
     s.execute(text("DELETE FROM spine_node_support WHERE source_item_id = ANY(:ids)"), {"ids": batch})
     s.execute(text("DELETE FROM spine_edge_support WHERE source_item_id = ANY(:ids)"), {"ids": batch})
@@ -975,8 +985,8 @@ def _process(s: Session, rows, cards: dict) -> None:
     is_message = {}
     for (type_, _key), n in b.nodes.items():
         if type_ == "Message":
-            for rid, rep in n.records.items():
-                if rep:
+            for rid, support in n.records.items():
+                if support.represents:
                     is_message[rid] = b.ids[(type_, _key)]
     messages = set(is_message.values())
     quoted.store(s, {is_message[r.id]: r.body_text for r in rows if r.source in MAIL and r.id in is_message})
@@ -1004,6 +1014,7 @@ def settle(s: Session, cards: dict) -> dict:
     """Delete the queued nodes and edges no record supports any more, point what remains at records it still has,
     and re-derive what depended on what went. Returns {"deleted": nodes and edges removed, "pending": records marked
     for rebuilding}."""
+    _tune(s)
     edge_q = s.execute(text("SELECT edge_id FROM spine_gc_edges ORDER BY edge_id")).scalars().all()
     node_q = s.execute(text("SELECT node_id FROM spine_gc_nodes ORDER BY node_id")).scalars().all()
     gone = s.execute(text("""
