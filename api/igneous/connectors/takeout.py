@@ -298,7 +298,9 @@ def classify(path: str) -> tuple[str, str | None] | None:
     # .ics anywhere else (a Chat attachment, a file in Drive) is someone's invitation or a file, not your calendar.
     if name.endswith(".ics") and dirs[:1] in (["calendar"], []):
         return "calendar", Path(parts[-1]).stem
-    if name.endswith(".vcf"):  # Contacts/<label>/<label>.vcf
+    # Contacts/<label>/<label>.vcf. A .vcf anywhere else (a card shared in a chat, a file in Drive) is someone's card,
+    # not your contacts.
+    if name.endswith(".vcf") and dirs[:1] == ["contacts"]:
         return "contacts", None
     if name == "conference_history_records.csv":
         return "meet", None
@@ -519,12 +521,14 @@ class _Import:
         self._safe(m, go)
 
     def read_contacts(self, m: Member):
+        """A label's cards, stored as a contacts export's (vcard) are: a card is one record however it was imported."""
         def go():
             with m.open() as fh:
                 cards, skipped = vcard.cards(fh.read())
             for card in cards:
-                card.raw_meta["product"] = "Contacts"
-                self.cards.setdefault(card.external_id, card)
+                first = self.cards.setdefault(card.external_id, card)
+                if first is not card and (first.title, first.body_text) != (card.title, card.body_text):
+                    self.counts["contacts_same_as_another"] += 1
             self.counts["contacts_without_phone_or_email"] += skipped
         self._safe(m, go)
 
@@ -874,6 +878,9 @@ def _parse(paths: list[Path], progress: Callable[[dict], None] | None = None
         if skipped := imp.counts.get("contacts_without_phone_or_email"):
             imp.note(f"Contact cards with no phone number or email address, which name no one we could key, were "
                      f"skipped: {skipped}.")
+        if same := imp.counts.get("contacts_same_as_another"):
+            imp.note(f"Contact cards holding exactly the numbers and addresses of another card were read as that card "
+                     f"(the first in the export): {same}.")
     if not items:
         raise TakeoutError("Found Takeout files but nothing readable in them." + (
             " My Activity is in HTML format; re-export it as JSON (Multiple formats, Activity records: JSON)."

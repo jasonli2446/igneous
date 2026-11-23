@@ -236,8 +236,9 @@ SOURCES: list[dict] = [
      "reads": "The contact cards in a .vcf export from Google Contacts, Apple Contacts or iCloud: names, phone numbers, "
               "email addresses, organizations and postal addresses. Each number and address on a card becomes the "
               "person the card names, so a number in Messages and the same person's email are one person, and a "
-              "card with only a name and a number joins the mail of that name. Syncing Google Contacts or Contacts "
-              "later adds no one twice.",
+              "card with only a name and a number joins the mail of that name. Importing a newer export updates the "
+              "cards (a renamed contact too) and removes none. Syncing Google Contacts or Contacts later adds no one "
+              "twice. The cards Google Takeout's Contacts holds are the same cards, and count here.",
      "steps": ["Google Contacts: open contacts.google.com, select the contacts to export (none selected exports them "
                "all), then click Export, choose vCard (for iOS Contacts), and Export.",
                "Apple: in Contacts on a Mac select All Contacts, then File, Export, Export vCard. On icloud.com open "
@@ -316,9 +317,9 @@ SOURCES: list[dict] = [
 # The persona's records are stored under the sources its exports come through (its Takeout calendar as gcal).
 PERSONA_STORED = ("email", "fs", *source_catalog.of_connector("takeout"), "gcal", "linkedin", "ai_chats", "vcard")
 # Records an export stores under another source, as that source stores them (Takeout's calendar events are Google
-# Calendar's, its contacts a contacts export's cards): source -> the Takeout product its records from the export name.
-# They count for the export.
-VIA_TAKEOUT = {"gcal": "Calendar", "vcard": "Contacts"}
+# Calendar's): source -> the Takeout product its records from the export name. They count for the export. Takeout's
+# contacts are a contacts export's cards (vcard), the same record however a card came, and count there.
+VIA_TAKEOUT = {"gcal": "Calendar"}
 # The IGNEOUS_LLM_SOURCES ids that cover all of the persona.
 PERSONA_IDS = "email,fs,takeout,gcal,linkedin,ai_chats,vcard"
 BY_ID = {s["id"]: s for s in SOURCES}
