@@ -5,7 +5,7 @@ from pipeline_data import day, event, local_models, mail, put, rows  # noqa: F40
 from sqlalchemy import text
 
 from igneous import pipeline
-from igneous.graph import topics
+from igneous.graph import derived_invariants, topics
 
 pytestmark = pytest.mark.usefixtures("local_models")
 ME = "me@x.test"
@@ -90,7 +90,12 @@ def test_a_folder_a_thread_is_about_joins_it_instead_of_being_a_second_project(d
     assert not {"Search activity", "Your flight is confirmed"} & set(trip)
     assert rows(db, "SELECT key LIKE 'project:lisbon 2025:%', status, merged_into FROM thread_registry "
                     "WHERE origin = 'entities'") == [(True, "merged", "thread:lisbon")]
-    pipeline.run(db, WITH_THREADS)  # a second run changes nothing
+    one_thing = ("joined_project_stands", "evidence_is_member")
+    assert [v for v in derived_invariants.check(db) if v.code in one_thing] == []
+    db.execute(text("""INSERT INTO nodes (type, key, name, props) SELECT 'Project', key, name, '{"derived": true}'
+                       FROM thread_registry WHERE origin = 'entities'"""))  # what check-graph would catch
+    assert [v.code for v in derived_invariants.check(db) if v.code in one_thing] == ["joined_project_stands"]
+    pipeline.run(db, WITH_THREADS)  # a second run changes nothing (and the folder's Project goes again)
     assert rows(db, "SELECT name FROM nodes WHERE type = 'Project'") == [("Lisbon · Mar 2025",)]
     assert held(db, "thread:lisbon") == trip
 

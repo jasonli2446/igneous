@@ -7,6 +7,9 @@
   dropped_edge_live       a link the verifier dropped is in the graph as well as in edges_dropped
   orphan_org_thread       an org thread the backbone made for an organization that no longer stands for it
   empty_umbrella          an umbrella no thread sits under
+  joined_project_stands   the Project of a folder, series or chat that joined a thread still stands beside it
+  evidence_is_member      a record linked to a Project as its evidence (a notice, a search, a place) and as a derived
+                          member at once
 """
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -84,7 +87,24 @@ def orphan_project_violations(s: Session) -> list[Violation]:
                           ORDER BY p.id"""))]
 
 
+def one_thing_violations(s: Session) -> list[Violation]:
+    """One real thing, one Project (graph/entities.py): an anchor's Project that joined a thread (its key a registry
+    row of origin 'entities') never stands beside it, and a Project's evidence is never one of its derived members."""
+    joined = [Violation(code="joined_project_stands", node_id=r.id, details={"key": r.key, "thread": r.merged_into},
+                        message="the Project of an anchor that joined a thread still stands beside it")
+              for r in s.execute(text("""
+                  SELECT n.id, n.key, r.merged_into FROM nodes n
+                  JOIN thread_registry r ON r.key = n.key AND r.origin = 'entities'
+                  WHERE n.type = 'Project' ORDER BY n.id"""))]
+    return joined + [Violation(code="evidence_is_member", edge_id=r.id, details={"src": r.src, "dst": r.dst},
+                               message="a record is a Project's evidence and one of its members at once")
+                     for r in s.execute(text("""
+                         SELECT e.id, e.src, e.dst FROM edges e
+                         JOIN edges m ON m.src = e.src AND m.dst = e.dst AND m.type = 'PART_OF' AND m.extractor <> 'user'
+                         WHERE e.type = 'RELATED_TO' AND e.props->>'role' = 'evidence' ORDER BY e.id"""))]
+
+
 def check(s: Session) -> list[Violation]:
     """Every check above, in order."""
     return [*rejected_pair_violations(s), *registry_violations(s), *alias_violations(s), *dropped_violations(s),
-            *orphan_project_violations(s)]
+            *orphan_project_violations(s), *one_thing_violations(s)]
