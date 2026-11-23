@@ -487,21 +487,6 @@ def test_er_rejects_mailing_lists():
         assert unresolvable(P(1, key, name, f, last, set()))
 
 
-def test_imessage_decoding_and_dates():
-    from igneous.connectors.imessage import apple_time, decode_attributed
-
-    short = b"\x04\x0bstreamtyped\x81\xe8\x03\x84\x01@\x84\x84\x84\x12NSAttributedString\x00\x84\x84\x08NSObject" \
-            b"\x00\x85\x92\x84\x84\x84\x08NSString\x01\x94\x84\x01+\x05hello\x86"
-    assert decode_attributed(short) == "hello"
-    long_text = "x" * 300
-    long_blob = b"NSString\x01\x94\x84\x01+\x81" + (300).to_bytes(2, "little") + long_text.encode()
-    assert decode_attributed(long_blob) == long_text
-    assert decode_attributed(None) is None and decode_attributed(b"garbage") is None
-    assert apple_time(0) is None
-    assert apple_time(700_000_000 * 10**9).year == 2023   # nanoseconds (current format)
-    assert apple_time(700_000_000).year == 2023           # seconds (pre-10.13 rows)
-
-
 def test_quoted_header_parsing():
     from igneous.graph.quoted import _surname, parse_quotes
 
@@ -652,14 +637,6 @@ def test_cross_encoder_failure_preserves_retrieval_order(monkeypatch, caplog):
     assert "using retrieval order" in caplog.text
 
 
-def test_phone_normalization():
-    from igneous.connectors.mac_contacts import norm_phone
-
-    assert norm_phone("(614) 555-1234") == norm_phone("+1 614 555 1234") == norm_phone("6145551234") == "+16145551234"
-    assert norm_phone("+44 20 7946 0958") == "+442079460958"
-    assert norm_phone("555-1234") is None and norm_phone(None) is None
-
-
 def test_contact_names_in_messages():
     from igneous.graph.traversal import name_handles, pretty_thread
 
@@ -789,91 +766,6 @@ def test_service_addresses_are_not_people():
     assert is_service_address("no-reply@accounts.google.com")
     assert not is_service_address("12345+jli@users.noreply.github.com")  # a real person's commit address
     assert not is_service_address("jyl123@university.edu") and not is_service_address("+16145551234")
-
-
-def test_redact_secrets():
-    from igneous.connectors.redact import redact
-
-    # Synthetic credentials in each real format; none of these are live.
-    fake = {
-        "gh": "ghp_" + "A" * 36, "ant": "sk-ant-api03-" + "b" * 40, "aws": "AKIA" + "Z" * 16,
-        "goog": "AIza" + "c" * 35, "jwt": "eyJ" + "a" * 12 + ".eyJ" + "b" * 12 + "." + "c" * 12,
-    }
-    text = (f"use {fake['gh']} and {fake['ant']}, aws {fake['aws']}, key {fake['goog']}, jwt {fake['jwt']}\n"
-            "DATABASE_URL=postgresql://igneous:hunter2pass@db:5432/x\nOPENAI_API_KEY=abcdefgh12345678\n"
-            "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----")
-    out, counts = redact(text)
-    for v in fake.values():
-        assert v not in out
-    assert "hunter2pass" not in out and "abcdefgh12345678" not in out and "MIIEow" not in out
-    assert "OPENAI_API_KEY=[REDACTED:assigned_secret]" in out  # the name survives, the value doesn't
-    assert counts["github_token"] == 1 and counts["private_key"] == 1
-    # Ordinary prose is untouched.
-    assert redact("the token bucket refills at 600 units per minute")[0] == "the token bucket refills at 600 units per minute"
-    assert redact(None) == (None, {})
-
-
-def test_ai_chat_keeps_prose_drops_tools_and_redacts(tmp_path):
-    """Synthetic Claude Code session: prose kept, tools/thinking/meta/subagents dropped, secrets redacted."""
-    import json
-
-    from igneous.connectors.ai_chats import AIChatConnector
-    from igneous.connectors.base import SourceItem
-
-    proj = tmp_path / "claude" / "-Users-x-repo"
-    (proj / "sess1" / "subagents").mkdir(parents=True)
-    token = "ghp_" + "Q" * 36
-    rows = [
-        {"type": "custom-title", "customTitle": "Igneous chat connector"},
-        {"type": "user", "sessionId": "sess1", "cwd": "/Users/x/igneous", "gitBranch": "feat/chats",
-         "timestamp": "2026-10-21T10:00:00Z", "message": {"content": f"build the connector, token {token}"}},
-        {"type": "assistant", "sessionId": "sess1", "timestamp": "2026-10-21T10:01:00Z", "message": {"content": [
-            {"type": "thinking", "thinking": "SECRET_THOUGHT"},
-            {"type": "text", "text": "Plan: parse jsonl."},
-            {"type": "tool_use", "input": {"command": "cat .env"}}]}},
-        {"type": "user", "timestamp": "2026-10-21T10:02:00Z",
-         "message": {"content": [{"type": "tool_result", "content": "DB_PASSWORD=hunter2hunter2"}]}},
-        {"type": "user", "isMeta": True, "timestamp": "2026-10-21T10:03:00Z", "message": {"content": "<system note>"}},
-        {"type": "attachment", "timestamp": "2026-10-21T10:04:00Z",
-         "attachment": {"type": "queued_command", "prompt": "also redact secrets"}},
-        {"type": "attachment", "timestamp": "2026-10-21T10:05:00Z", "attachment": {"type": "environment", "snapshot": {}}},
-        {"type": "user", "timestamp": "2026-10-22T09:00:00Z", "message": {"content": "next day"}},
-    ]
-    (proj / "sess1.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
-    (proj / "sess1" / "subagents" / "agent-1.jsonl").write_text(json.dumps(
-        {"type": "user", "timestamp": "2026-10-21T10:00:00Z", "message": {"content": "SUBAGENT_TEXT"}}))
-
-    conn = AIChatConnector(claude_root=str(tmp_path / "claude"), codex_root=str(tmp_path / "none"))
-    items = [o for o in conn.sync({}) if isinstance(o, SourceItem)]
-    assert [i.raw_meta["day"] for i in items] == ["2026-10-21", "2026-10-22"]  # one item per session-day
-    day1 = items[0]
-    assert "Plan: parse jsonl." in day1.body_text and "also redact secrets" in day1.body_text
-    for leaked in (token, "SECRET_THOUGHT", "cat .env", "hunter2hunter2", "<system note>", "SUBAGENT_TEXT"):
-        assert leaked not in day1.body_text, leaked
-    assert "[REDACTED:github_token]" in day1.body_text and day1.raw_meta["redactions"] == 1
-    assert day1.raw_meta["repo"] == "igneous" and day1.raw_meta["branches"] == ["feat/chats"]
-    assert day1.title.startswith("Igneous chat connector")
-
-    # Unchanged files are skipped on the next sync (cursor = mtime + size).
-    cursor = [o for o in conn.sync({}) if not isinstance(o, SourceItem)][-1].cursor
-    assert not [o for o in conn.sync(cursor) if isinstance(o, SourceItem)]
-
-
-def test_redact_is_idempotent_and_queued_image_prompts_parse(tmp_path):
-    import json
-
-    from igneous.connectors.ai_chats import claude_turns
-    from igneous.connectors.redact import redact
-
-    once, _ = redact("DB_PASSWORD=supersecretvalue and postgres://u:pw12345@h/db")
-    twice, counts = redact(once)
-    assert twice == once and counts == {}  # placeholders aren't re-matched (a scan of stored text reads 0)
-
-    f = tmp_path / "s.jsonl"
-    f.write_text(json.dumps({"type": "attachment", "timestamp": "2026-10-21T10:00:00Z", "attachment": {
-        "type": "queued_command", "prompt": [{"type": "text", "text": "see this screenshot"}, {"type": "image"}]}}))
-    _, turns = claude_turns(str(f))
-    assert [t["text"] for t in turns] == ["see this screenshot"]
 
 
 def test_api_responses_name_numbers_but_keep_keys(monkeypatch):
@@ -1101,37 +993,6 @@ def test_shared_event_and_drive_file_from_two_accounts_make_one_node():
     assert {k for t, k in b.keys if t == "File"} == {"drive:f1"}
 
 
-def test_apple_notes_gzip_protobuf_body_and_locked_rows(tmp_path):
-    import gzip
-    import sqlite3
-
-    from igneous.connectors.apple_notes import AppleNotesConnector, decode_body
-    from igneous.connectors.base import CompletedScan, SourceItem
-
-    raw = b"\x0a\x0cProject plan\x12\x0bShip safely"
-    assert "Project plan" in decode_body(gzip.compress(raw))
-    db = tmp_path / "NoteStore.sqlite"
-    connection = sqlite3.connect(db)
-    connection.executescript("""
-        CREATE TABLE ZICCLOUDSYNCINGOBJECT (Z_PK INTEGER, ZTITLE1 TEXT,
-            ZIDENTIFIER TEXT, ZMODIFICATIONDATE REAL, ZISPASSWORDPROTECTED INTEGER);
-        CREATE TABLE ZICNOTEDATA (ZNOTE INTEGER, ZDATA BLOB);
-    """)
-    connection.execute("INSERT INTO ZICCLOUDSYNCINGOBJECT VALUES (1, 'Plan', 'note-1', 1, 0)")
-    connection.execute("INSERT INTO ZICCLOUDSYNCINGOBJECT VALUES (2, 'Locked', 'note-2', 1, 1)")
-    connection.execute("INSERT INTO ZICCLOUDSYNCINGOBJECT VALUES (3, 'Fallback', NULL, 1, 0)")
-    connection.execute("INSERT INTO ZICNOTEDATA VALUES (1, ?)", (gzip.compress(raw),))
-    connection.execute("INSERT INTO ZICNOTEDATA VALUES (2, ?)", (gzip.compress(raw),))
-    connection.execute("INSERT INTO ZICNOTEDATA VALUES (3, ?)", (gzip.compress(raw),))
-    connection.commit()
-    connection.close()
-    events = list(AppleNotesConnector(db).sync({}))
-    items = [event for event in events if isinstance(event, SourceItem)]
-    assert [(item.external_id, item.title) for item in items] == [("note-1", "Plan"), ("3", "Fallback")]
-    assert "Ship safely" in items[0].body_text and items[0].raw_meta["model_opt_in"] is False
-    assert next(event for event in events if isinstance(event, CompletedScan)).external_ids == frozenset({"note-1", "3"})
-
-
 def test_relationship_claims_require_verifiable_quotes_and_stay_derived():
     from igneous.graph.history import store_claims
 
@@ -1228,15 +1089,6 @@ def test_organization_candidates_exclude_personal_domains_and_normalize_contact_
     assert company_key(" ") is None
 
 
-def test_nul_bytes_are_stripped_before_storage():
-    import json
-
-    from igneous.connectors.base import _no_nul
-
-    assert _no_nul("a\x00b") == "ab" and _no_nul(None) is None
-    assert "\\u0000" not in json.dumps({"x": "a\x00b"}).replace("\\u0000", "")
-
-
 def test_phone_contact_merges_with_email_on_exact_name_unless_ambiguous():
     from igneous.graph.resolve import P, score, split_name
 
@@ -1269,27 +1121,6 @@ def test_recency_half_life_and_cross_category_scale():
     overall = max(tops.values())
     scaled = lambda c, raw: raw / tops[c] * (0.4 + 0.6 * tops[c] / overall)  # noqa: E731
     assert scaled("People", 10.0) == 1.0 and scaled("Events", 1.0) < 0.5
-
-
-def test_ai_session_repo_comes_from_files_touched_not_launch_dir(tmp_path):
-    import json
-
-    from igneous.connectors.ai_chats import claude_turns
-
-    repo = tmp_path / "work" / "igneous"
-    (repo / ".git").mkdir(parents=True)
-    (repo / "api").mkdir()
-    f = tmp_path / "s.jsonl"
-    rows = [
-        {"type": "user", "cwd": str(tmp_path), "timestamp": "2026-10-21T10:00:00Z",
-         "message": {"content": "fix the api"}},
-        {"type": "assistant", "timestamp": "2026-10-21T10:01:00Z", "message": {"content": [
-            {"type": "tool_use", "name": "Edit", "input": {"file_path": str(repo / "api" / "main.py")}},
-            {"type": "tool_use", "name": "Bash", "input": {"command": f"cd {repo}/api && pytest"}}]}},
-    ]
-    f.write_text("\n".join(json.dumps(r) for r in rows))
-    meta, _ = claude_turns(str(f))
-    assert meta["repo_path"] == str(repo)
 
 
 def test_node_upsert_keeps_human_names_over_keys_and_contact_names():

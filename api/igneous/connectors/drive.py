@@ -1,8 +1,6 @@
 """Google Drive connector: full backfill plus incremental Changes API sync."""
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
 
@@ -117,7 +115,6 @@ class DriveConnector:
             "parser": parsed.parser,
             "boundaries": parsed.boundaries,
         }
-        digest = hashlib.sha256(data + b"\0" + json.dumps(raw_meta, sort_keys=True).encode()).hexdigest()
         return SourceItem(
             source=self.name,
             external_id=_external_id(self.account, file["id"]),
@@ -126,7 +123,6 @@ class DriveConnector:
             occurred_at=_when(file.get("modifiedTime") or file.get("createdTime")),
             mime=parsed.mime,
             raw_meta=raw_meta,
-            content_hash=digest,
         )
 
     def _backfill(self) -> Iterator[SourceItem | Checkpoint | CompletedScan]:

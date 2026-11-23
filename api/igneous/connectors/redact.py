@@ -1,9 +1,10 @@
 """Strip credentials from text before it is stored or sent to a model.
 
-AI chat transcripts are full of pasted secrets (tokens, keys, connection strings). Anything matching here is
-replaced with `[REDACTED:<kind>]` at ingestion time, so it never reaches source_items, chunks, embeddings,
-or a prompt. Patterns are deliberately broad: a false positive costs a few characters of context; a false
-negative leaks a credential.
+Mail, chats and AI transcripts are full of pasted secrets (tokens, keys, connection strings). The sync runner
+(`base.run_sync`) passes every item's title and text through here before storing it, so a match is replaced with
+`[REDACTED:<kind>]` and never reaches source_items, chunks, embeddings or a prompt. A connector that shortens text
+redacts it first, so a secret cut in half can't slip through. Patterns are deliberately broad: a false positive
+costs a few characters of context; a false negative leaks a credential.
 """
 import re
 
@@ -23,11 +24,19 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
     ("private_key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)),
     # user:password@host in any URL scheme (postgres://, mongodb+srv://, https://...)
     ("url_credentials", re.compile(r"(?<=://)(?!\[REDACTED)[^\s:/@]+:[^\s@/]+(?=@)")),
-    # KEY=value / "key": "value" where the name says it's a secret
+    # KEY=value, key: value, and JSON's "key": "value" (escaped quotes too) where the name says it's a secret
     ("assigned_secret", re.compile(
         r"(?i)\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|AUTH)[A-Z0-9_]*)"
-        r"(\s*[:=]\s*['\"]?)(?!\[REDACTED)([^\s'\",;]{8,})")),
+        r"((?:\\?['\"])?\s*[:=]\s*(?:\\?['\"])?)(?!\[REDACTED)([^\s'\",;]{8,})")),
 ]
+# scheme://user:password@ or scheme://token@ at the start of a URL
+USERINFO = re.compile(r"^([a-z][a-z0-9+.-]*://)[^/@\s]*@", re.I)
+
+
+def url_without_credentials(url: str) -> str:
+    """A URL without the user name and password tools embed in it (`https://user:token@host/...`, as a git remote
+    often is), and with anything else that looks like a credential redacted."""
+    return redact(USERINFO.sub(r"\1", url.strip()))[0] or ""
 
 
 def redact(text: str | None) -> tuple[str | None, dict[str, int]]:

@@ -1,17 +1,27 @@
-"""Connector contract and the sync runner that makes every connector resumable and idempotent."""
+"""Connector contract and the sync runner that makes every connector resumable and idempotent.
+
+A connector yields SourceItems with Checkpoints between them, and Tombstones or a final CompletedScan for what was
+deleted. `run_sync` is the storage boundary: it stores each item without NUL characters and with every credential
+in its title and text redacted (`redact.py`), then upserts it, skipping it when its content hash is unchanged.
+"""
 import hashlib
 import json
+from bisect import bisect_left
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Protocol
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous.connectors.redact import redact, redact_moving
+
 
 @dataclass
 class SourceItem:
+    """One record. `raw_meta["boundaries"]`, when a parser recorded them, are offsets into `body_text` (pages,
+    sections, slides, sheets); `raw_meta["redactions"]` counts the credentials removed from the item's text."""
     source: str
     external_id: str
     title: str | None
@@ -19,15 +29,57 @@ class SourceItem:
     occurred_at: datetime | None = None
     mime: str | None = None
     raw_meta: dict = field(default_factory=dict)
-    content_hash: str = ""
 
-    def __post_init__(self):
-        if not self.content_hash:
-            h = hashlib.sha256()
-            h.update((self.title or "").encode())
-            h.update((self.body_text or "").encode())
-            h.update(json.dumps(self.raw_meta, sort_keys=True, default=str).encode())
-            self.content_hash = h.hexdigest()
+    @property
+    def content_hash(self) -> str:
+        """What the upsert compares to skip an unchanged item: a hash of the title, text and metadata."""
+        h = hashlib.sha256()
+        h.update((self.title or "").encode())
+        h.update((self.body_text or "").encode())
+        h.update(json.dumps(self.raw_meta, sort_keys=True, default=str).encode())
+        return h.hexdigest()
+
+
+def _without_nul(value, positions: list[int] | None = None):
+    """`value` without NUL characters, which Postgres text can't hold (some PDFs and Office files extract with
+    them), in strings at any depth. With `positions` (offsets into a string), also where each lands."""
+    if isinstance(value, str):
+        if "\x00" not in value:
+            return value if positions is None else (value, positions)
+        nuls = [i for i, c in enumerate(value) if c == "\x00"]
+        clean = value.replace("\x00", "")
+        return clean if positions is None else (clean, [p - bisect_left(nuls, p) for p in positions])
+    if isinstance(value, dict):
+        return {_without_nul(k): _without_nul(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_without_nul(v) for v in value]
+    return value if positions is None else (value, positions)
+
+
+def _count(redactions) -> int:
+    """A redaction count as stored: a number, or (on items stored before counts were totals) one per kind."""
+    if isinstance(redactions, dict):
+        return sum(v for v in redactions.values() if isinstance(v, int))
+    return redactions if isinstance(redactions, int) else 0
+
+
+def stored(item: SourceItem) -> SourceItem:
+    """The item as it is stored: no NUL characters, no credentials in its title or text, and its boundaries
+    moved with the text. Removals are added to `raw_meta["redactions"]`."""
+    meta = _without_nul(item.raw_meta)
+    bounds = meta.get("boundaries") if isinstance(meta.get("boundaries"), list) else []
+    marks = [b[k] for b in bounds for k in ("start", "end")]
+    body, marks = _without_nul(item.body_text, marks)
+    body, body_found, marks = redact_moving(body, marks)
+    title, title_found = redact(_without_nul(item.title))
+    found = sum(body_found.values()) + sum(title_found.values())
+    if bounds:
+        meta["boundaries"] = [{**b, "start": marks[2 * i], "end": marks[2 * i + 1]} for i, b in enumerate(bounds)]
+    if found:
+        meta["redactions"] = _count(meta.get("redactions")) + found
+        if bounds:
+            meta["boundaries_redacted"] = True  # the chunker trusts boundaries that moved with the redactions
+    return replace(item, title=title, body_text=body, raw_meta=meta)
 
 
 @dataclass
@@ -79,10 +131,6 @@ ON CONFLICT (source, external_id) DO UPDATE SET
 WHERE source_items.content_hash <> EXCLUDED.content_hash
 RETURNING (xmax = 0) AS inserted
 """)
-
-
-def _no_nul(t: str | None) -> str | None:
-    return t.replace("\x00", "") if t else t
 
 
 def load_cursor(s: Session, connector: str, account: str) -> dict:
@@ -140,9 +188,9 @@ def run_sync(s: Session, connector: Connector, account: str = "default", limit: 
 
     A Checkpoint commits what came before it and never implies a complete scan, so an exception, a stopped process
     or `limit` (which stops at the first checkpoint after that many items) can store additions and updates but never
-    deletes an item the scan had not reached.
+    deletes an item the scan had not reached. `redactions` counts the credentials removed from the items read.
     """
-    stats = {"inserted": 0, "updated": 0, "unchanged": 0, "deleted": 0}
+    stats = {"inserted": 0, "updated": 0, "unchanged": 0, "deleted": 0, "redactions": 0}
     cursor = load_cursor(s, connector.name, account)
     seen = 0
     for obj in connector.sync(cursor):
@@ -160,11 +208,11 @@ def run_sync(s: Session, connector: Connector, account: str = "default", limit: 
             if limit is not None and seen >= limit:
                 break
             continue
+        item = stored(obj)
         row = s.execute(UPSERT, {
-            "source": obj.source, "external_id": obj.external_id, "content_hash": obj.content_hash,
-            # Postgres text can't hold NUL; some PDFs and Office files extract with them.
-            "mime": obj.mime, "title": _no_nul(obj.title), "body_text": _no_nul(obj.body_text),
-            "raw_meta": json.dumps(obj.raw_meta, default=str).replace("\\u0000", ""), "occurred_at": obj.occurred_at,
+            "source": item.source, "external_id": item.external_id, "content_hash": item.content_hash,
+            "mime": item.mime, "title": item.title, "body_text": item.body_text,
+            "raw_meta": json.dumps(item.raw_meta, default=str), "occurred_at": item.occurred_at,
         }).first()
         if row is None:
             stats["unchanged"] += 1
@@ -172,6 +220,7 @@ def run_sync(s: Session, connector: Connector, account: str = "default", limit: 
             stats["inserted"] += 1
         else:
             stats["updated"] += 1
+        stats["redactions"] += _count(item.raw_meta.get("redactions"))
         seen += 1
     s.commit()
     return stats

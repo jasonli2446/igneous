@@ -127,7 +127,7 @@ def import_ai_export(file: UploadFile, provider: Annotated[str | None, Form()] =
     items = export_items(kind, convs)
     stats = run_sync(s, ExportConnector(items), account=kind)
     return {"provider": kind, "conversations": len(convs), "items_inserted": stats["inserted"],
-            "items_updated": stats["updated"], "redactions": sum(i.raw_meta["redactions"] for i in items)}
+            "items_updated": stats["updated"], "redactions": stats["redactions"]}
 
 
 @app.post("/import/takeout")

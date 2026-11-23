@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem
-from igneous.connectors.redact import redact_moving
+from igneous.connectors.redact import url_without_credentials
 from igneous.parsers import parse_document
 
 CHECKPOINT_EVERY = 100
@@ -49,8 +49,8 @@ def _in(external_id: str, scopes: Iterable[str]) -> bool:
 
 
 def _git_remote(directory: Path) -> str | None:
-    """The first remote URL in a checkout's git config. A worktree's `.git` file points at its gitdir, whose
-    `commondir` holds the shared config."""
+    """The first remote URL in a checkout's git config, without the user name and token an HTTPS remote may
+    embed. A worktree's `.git` file points at its gitdir, whose `commondir` holds the shared config."""
     git = directory / ".git"
     try:
         if git.is_file():
@@ -59,7 +59,7 @@ def _git_remote(directory: Path) -> str | None:
                 git = (git / (git / "commondir").read_text(errors="replace").strip()).resolve()
         for line in (git / "config").read_text(errors="replace").splitlines():
             if line.strip().startswith("url ="):
-                return line.split("=", 1)[1].strip()
+                return url_without_credentials(line.split("=", 1)[1])
     except OSError:
         return None
     return None
@@ -197,20 +197,13 @@ class FilesystemConnector:
         body, mime = None, None
         parsed = parse_document(data, path.name)
         if parsed.status == "ok":
-            # Redaction changes lengths: page and section offsets move with it.
-            marks = [b[k] for b in parsed.boundaries for k in ("start", "end")]
-            body, redactions, marks = redact_moving(parsed.text, marks)
-            boundaries = [{**b, "start": marks[2 * i], "end": marks[2 * i + 1]} for i, b in enumerate(parsed.boundaries)]
-            mime = parsed.mime
-            meta.update({"parser": parsed.parser, "boundaries": boundaries, "redactions": redactions,
-                         "boundaries_redacted": True})
+            body, mime = parsed.text, parsed.mime
+            meta.update({"parser": parsed.parser, "boundaries": parsed.boundaries})
         else:
             meta.update({"parser": None, "parse_status": parsed.status})
         return external_id, SourceItem(
             source=self.name, external_id=external_id, title=path.name, body_text=body,
-            occurred_at=datetime.fromtimestamp(stat.st_mtime, UTC), mime=mime, raw_meta=meta,
-            content_hash=hashlib.sha256(data + b"\0" + external_id.encode() + b"\0" + str(fingerprint).encode()).hexdigest(),
-        ), fingerprint
+            occurred_at=datetime.fromtimestamp(stat.st_mtime, UTC), mime=mime, raw_meta=meta), fingerprint
 
     def _repo(self, root: _Root, directory: Path, previous: dict) -> _Seen | None:
         """A git checkout is one evidence-bearing item (its name and remote), not an import of its files."""
@@ -232,6 +225,4 @@ class FilesystemConnector:
             source=self.name, external_id=repo_id, title=name, body_text=None,
             occurred_at=datetime.fromtimestamp(stat.st_mtime, UTC),
             raw_meta={"path": f"{root.key}/{below}", "folders": [root.key, f"{root.key}/{below}"],
-                      "kind": "repo", "repo": name, "remote": remote, "model_opt_in": False},
-            content_hash=hashlib.sha256((repo_id + str(fingerprint) + remote).encode()).hexdigest(),
-        ), fingerprint
+                      "kind": "repo", "repo": name, "remote": remote, "model_opt_in": False}), fingerprint

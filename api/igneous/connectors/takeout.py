@@ -800,7 +800,7 @@ def run_import(s, paths: list[Path], progress: Callable[..., None] | None = None
 
     conn = TakeoutConnector(paths, progress)
     stats = run_sync(s, conn, account="default")
-    return {**stats, **conn.report}
+    return {**conn.report, **stats}  # the stored items' redaction count, which includes the parser's
 
 
 # ---- locating input ----
