@@ -48,8 +48,15 @@ CLAIMS = {
                                 "the project). Asking about it, hearing about it afterwards, or planning a different "
                                 "one (another year) is NOT taking part",
     ("RELATED_TO", "threads"): "this person is connected to this thread (talked about it, helped, was told about it)",
+    ("RELATED_TO", "threads", "evidence"): "this record (A) shows that this thread of the person's life (B) happened: "
+                                           "it is about the thread itself while it was going on, like a booking, a "
+                                           "confirmation, a ticket or a notice for it, a search or a page about it, or a "
+                                           "visit to a place in it. A record that only shares a word with it is NOT",
     ("PART_OF", "entities"): "the item belongs to this project",
     ("INVOLVED_IN", "entities"): "this person works on or takes part in this project",
+    ("RELATED_TO", "entities"): "this record (A) shows this project (B) going on: it is about the project itself, like "
+                                "a notice or a confirmation for it, or a search or a page about it. A record that only "
+                                "shares a word with it is NOT",
     ("WORKED_AT", "organizations"): "this person worked at / was a member of this organization",
     ("SAME_AS", "er"): "these two identities are the same human (judge from each one's name, identifier, who it "
                        "talks with and its topics; two addresses of one person rarely share messages)",
@@ -71,6 +78,8 @@ def claim_of(edge: dict) -> tuple:
     """The claim an edge makes: (type, extractor), or its variant for the kind of node at A."""
     if (edge["type"], edge["extractor"]) == ("PART_OF", "threads") and edge["src_type"] in ("Thread", "Event"):
         return ("PART_OF", "threads", "group")
+    if (edge["type"], edge["extractor"]) == ("RELATED_TO", "threads") and edge["src_type"] != "Person":
+        return ("RELATED_TO", "threads", "evidence")
     return (edge["type"], edge["extractor"])
 
 

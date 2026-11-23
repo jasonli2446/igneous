@@ -21,8 +21,9 @@ from igneous.graph import threads
 
 
 @pytest.mark.usefixtures("life")
-def test_every_gold_thread_is_found_once_under_its_parent_and_the_long_stages_say_how_far_they_are(db):
-    from eval.threads_eval import score
+def test_every_gold_thread_is_found_once_under_its_parent_and_the_long_stages_say_how_far_they_are(db, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(API) / "eval"))  # the eval's modules import each other by name
+    from threads_eval import score
 
     states = []
     pipeline.run(db, progress=lambda state, force=False: states.append(dict(state)))

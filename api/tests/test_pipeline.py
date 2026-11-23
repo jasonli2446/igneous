@@ -23,7 +23,7 @@ def owner_ids(s) -> set[int]:
 
 def test_the_stage_list_is_the_dependency_order():
     assert pipeline.NAMES == ("redact", "spine", "chunk", "embed", "extract", "self", "resolve", "thread_flags",
-                              "introductions", "topics", "entities", "profile", "organizations", "threads", "backbone",
+                              "introductions", "topics", "profile", "organizations", "threads", "entities", "backbone",
                               "verify", "corrections")
     sources = [st.name for st in pipeline.STAGES if not st.derived]
     assert sources == ["redact", "spine", "chunk", "embed", "extract"]  # everything after them publishes together

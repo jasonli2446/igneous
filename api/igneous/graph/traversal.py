@@ -991,7 +991,8 @@ def _own_content(s: Session, node: int) -> list[int]:
 def fallback_neighbors(s: Session, node: int, exclude: set[int], k: int) -> list[int]:
     """The node's strongest connections when its own rules found too few: direct links first (a verifier keep or a
     stated link before an unchecked one, then by confidence), then what its records link to (an org's people, a file's
-    conversation). People are identity heads; nothing hidden, no service, no code file, never what it is part of."""
+    conversation). People are identity heads; nothing hidden, no service, no code file, never what it is part of, and
+    never a record that is only a project's evidence (a booking, a search: graph/threads.py `evidence`)."""
     if k <= 0:
         return []
     ntype = s.execute(text("SELECT type FROM nodes WHERE id = :n"), {"n": node}).scalar()
@@ -1000,9 +1001,11 @@ def fallback_neighbors(s: Session, node: int, exclude: set[int], k: int) -> list
             -- Never the node's own parent (what it's part of): opening the Lab must not list State University in it.
             SELECT e.dst AS o, e.props, e.extractor, e.confidence FROM edges e
             WHERE e.src = ANY(:ids) AND e.type NOT IN ('SAME_AS', 'HAS_CHUNK', 'PART_OF')
+              AND e.props->>'role' IS DISTINCT FROM 'evidence'
             UNION ALL
             SELECT e.src, e.props, e.extractor, e.confidence FROM edges e
             WHERE e.dst = ANY(:ids) AND e.type NOT IN ('SAME_AS', 'HAS_CHUNK')
+              AND e.props->>'role' IS DISTINCT FROM 'evidence'
               AND NOT (e.type = 'PART_OF' AND e.src = (SELECT (props->>'thread')::bigint FROM nodes WHERE id = :n))),
         direct AS MATERIALIZED (
             SELECT o, (CASE WHEN props->>'verdict' = 'keep' OR extractor IN ('user', 'profile', 'contacts', 'spine')

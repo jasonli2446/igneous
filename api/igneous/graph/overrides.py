@@ -21,7 +21,10 @@ it builds. The edges with extractor 'user' are exactly what these intents say: o
 
 `apply` is a pure function of these rows. It completes undos first (an undo marks its row `undone_at`; apply reverses
 the correction and forgets the row), puts every Project back to its derived state (its props.original_name, neither
-renamed nor hidden), and applies every correction again. It runs as the pipeline's last step and, when no rebuild is
+renamed nor hidden), and applies every correction again. A Project can be folded into another by your merge, or by a
+rebuild that finds the two are one thing (graph/derived.py `merges`): a name you gave it then names the one it went
+into, unless you named that one yourself, while a hide follows only your merges, so a rebuild never hides a Project
+because something you hid turned out to be part of it. It runs as the pipeline's last step and, when no rebuild is
 running, right after each correction (graph/corrections.py). It bumps nothing: whoever publishes bumps the version.
 """
 import json
@@ -102,7 +105,7 @@ def apply(s: Session) -> dict:
     p = plan(load(s))  # with what the undos gave back (a link you added, then took out)
     _registry(s, p)
     folded = merges(s)
-    return {"undone": len(undone), "merged": _merge(s, p, folded), "projects": _projects(s, p),
+    return {"undone": len(undone), "merged": _merge(s, p, folded), "projects": _projects(s, p, folded),
             "links": _links(s, p, folded)}
 
 
@@ -216,18 +219,29 @@ def _reverse(s: Session, r: dict) -> None:
         _unmerge(s, r)
 
 
-def _projects(s: Session, p: Plan) -> int:
-    """Every Project back to its derived name, neither renamed nor hidden; then your renames and hides. A Project the
-    backbone stage found to be the same as an organization's thread (props.same_as_org) is hidden too. Only rows that
-    change are written."""
+def given_names(p: Plan, folded: dict[str, str]) -> dict[str, str]:
+    """Project key -> the name you gave it: a name you gave the Project itself, else one you gave a Project folded into
+    it (a merge, or a rebuild that found the two are one thing: `derived.merges`), the first by key. A hide follows only
+    your own merges (`plan`): a Project a rebuild folds into another never hides it."""
+    out = {k: v for k, v in p.renames.items() if follow(folded, k) == k}
+    for k, v in sorted(p.renames.items()):
+        out.setdefault(follow(folded, k), v)
+    return out
+
+
+def _projects(s: Session, p: Plan, folded: dict[str, str]) -> int:
+    """Every Project back to its derived name, neither renamed nor hidden; then your renames (`given_names`) and hides. A
+    Project the backbone stage found to be the same as an organization's thread (props.same_as_org) is hidden too. Only
+    rows that change are written."""
+    renames = given_names(p, folded)
     changed = []
     for nid, natural, name, props in s.execute(text(
             "SELECT id, type || ':' || key, name, props FROM nodes WHERE type = 'Project' ORDER BY id")):
         props = props or {}
         target = {k: v for k, v in props.items() if k not in ("renamed", "hidden")}
         new_name = props.get("original_name") or name
-        if natural in p.renames:
-            new_name, target["renamed"] = p.renames[natural], True
+        if natural in renames:
+            new_name, target["renamed"] = renames[natural], True
         if natural in p.hidden or props.get("same_as_org"):
             target["hidden"] = True
         if (new_name, target) != (name, props):

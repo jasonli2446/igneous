@@ -10,6 +10,8 @@ once. So a thread is found, not configured:
      long-running things named outright (a repository, a course code, a calendar series, a named group chat).
   3. Members: records that name one of its defining terms (inside its span, give or take a month, unless it is
      ongoing); people who took part (its group chat, its events) or talk about it in its small conversations.
+     Evidence: a notice sent to you (a booking, a confirmation; never marketing), a search, a page you visited or a
+     place you went that names it while it happened shows it happened, without being part of it (`evidence`).
   4. Overlapping candidates (same window, mostly the same records) merge into one.
   5. Judge: with the model enabled and sources opted in (IGNEOUS_LLM_SOURCES), one cached structured call per
      candidate decides keep / kind (trip, class, job, hobby, project, ... free text) / the name you would use / its
@@ -26,6 +28,8 @@ runs attach new records to it by its defining terms, with no model call, and jud
             thing) stands on its own again.
   merged    a facet of the thread it was folded into (merged_into): two found to be one (graph/resolve_threads.py), or
             a merge you made (merged_by 'user'). Its own terms and span keep finding its records, for that thread.
+            The entities stage keeps one too (origin 'entities', no terms) for each folder, series or chat a thread is
+            about: that stage adds its records itself, and the row makes what you said about it hold for the thread.
 
 A failed model call writes no row (the candidate is judged on a later run), and the budget (JUDGE_BUDGET model calls)
 is spent only on candidates that are new. Profile projects (graph/profile.py) are pinned rows: built whenever a record
@@ -34,8 +38,9 @@ names them. Terms, candidates, keys and names come out the same whatever the ord
 Writes `Project` nodes (props.derived 'threads', through graph/derived.py's Writer, so a name you gave one stays and a
 link you rejected is never written), PART_OF item -> thread and INVOLVED_IN person -> thread with their evidence; a
 thread no registry row builds any more is deleted. Then: duplicates resolved and related threads linked
-(resolve_threads), umbrellas over them (an org, lab or program several threads sit under), the hierarchy you stated
-(thread_parents), and the group chats and calendar series that are about a thread.
+(resolve_threads), each thread's evidence (RELATED_TO record -> thread, role 'evidence'), umbrellas over them (an org,
+lab or program several threads sit under), the hierarchy you stated (thread_parents), and the group chats and
+calendar series that are about a thread.
 """
 import hashlib
 import json
@@ -65,6 +70,7 @@ PAD = timedelta(days=30)  # around a thread's or anchor's own dates: planning be
 
 # Where the threads of a life show up: messages, calendars, documents, code, AI chats and browsing.
 SOURCES = source_catalog.LIFE
+PLACES = source_catalog.values({"places"})  # where you went: evidence a thread happened, never a member
 
 # Kinds of thread that don't happen in one window (the judge names kinds freely, so match words).
 ONGOING = re.compile(r"^(?!.*\b(project|application|trip|event)\b).*\b(hobby|hobbies|club|sport|recurring|friend|friends|"
@@ -132,8 +138,8 @@ def _items(s: Session) -> list:
         FROM source_items si
         LEFT JOIN nodes n ON n.source_item_id = si.id AND n.type IN ('Message', 'File', 'Event')
         WHERE si.source = ANY(:src) AND si.occurred_at IS NOT NULL
-          -- Notifications and marketing never make or join a thread (they stay searchable and as evidence):
-          -- a promo that mentions "Chinatown" isn't part of anything.
+          -- Notifications and marketing never make or join a thread: a promo that mentions "Chinatown" isn't part
+          -- of anything. A notice that names a thread while it happened is its evidence (`evidence`).
           AND COALESCE(si.item_class, 'conversation') NOT IN ('notification', 'marketing')
         ORDER BY si.id, n.id
     """), {"src": list(SOURCES)}).all()
@@ -442,7 +448,7 @@ def _seed_candidate(s: Session, seed: dict, items_by_id: dict) -> dict | None:
             "anchor": anchor}
 
 
-def _pattern(t: str) -> str:
+def term_pattern(t: str) -> str:
     """A defining term as a whole-word pattern; a course code matches with or without its space, never without its
     department."""
     code = course_code(t)
@@ -452,21 +458,26 @@ def _pattern(t: str) -> str:
     return re.escape(t)
 
 
+def window(row) -> tuple[datetime, datetime] | None:
+    """When a registry row's records happen: its span give or take PAD, or None when they count whenever they happened
+    (a hobby, club or friend group, a pinned project, a row with no span)."""
+    if row.span_start and row.span_end and row.origin in ("burst", "name") and not ONGOING.search(row.kind or ""):
+        return row.span_start - PAD, row.span_end + PAD
+    return None
+
+
 def registered(rows, items: list) -> dict[str, dict]:
     """Every registry row's records now, in one pass over the items: those naming one of its defining terms, inside
-    its span (+/- PAD) unless it is ongoing (a hobby, club or friend group counts every mention whenever it
-    happened). Deterministic, which is what keeps a found thread found."""
+    its window (`window`). Deterministic, which is what keeps a found thread found."""
     specs = []
     for row in rows:
         # A bare number ("395") is shared by different courses, rooms and years: never a defining term alone.
         terms = sorted({t.lower() for t in (row.terms or []) if len(t) >= 3 and not t.strip().isdigit()})
         if not terms:
             continue
-        lo = hi = None
-        if row.span_start and row.span_end and row.origin in ("burst", "name") and not ONGOING.search(row.kind or ""):
-            lo, hi = row.span_start - PAD, row.span_end + PAD
+        lo, hi = window(row) or (None, None)
         # Whole words: a short defining term ("eta") must not match inside other words ("beta", "theta").
-        pattern = re.compile(r"(?<![a-z0-9])(" + "|".join(_pattern(t) for t in terms) + r")(?![a-z0-9])")
+        pattern = re.compile(r"(?<![a-z0-9])(" + "|".join(term_pattern(t) for t in terms) + r")(?![a-z0-9])")
         specs.append((row.key, pattern, lo, hi))
     out: dict[str, dict] = {k: {} for k, *_ in specs}
     for it in items:
@@ -477,6 +488,53 @@ def registered(rows, items: list) -> dict[str, dict]:
             if pattern.search(hay):
                 out[key][it.id] = it
     return out
+
+
+def _evidence_items(s: Session) -> list:
+    """Records that can show a thread happened but never be part of one: a notice sent to you (a booking, a
+    confirmation, a ticket; marketing never counts), what you searched and browsed, and the places you went."""
+    return s.execute(text("""
+        SELECT DISTINCT ON (si.id) si.id, si.source, si.occurred_at, coalesce(si.title, '') AS title,
+               left(coalesce(si.body_text, ''), 4000) AS body, n.id AS node_id
+        FROM source_items si JOIN nodes n ON n.source_item_id = si.id AND n.type IN ('Message', 'File', 'Event')
+        WHERE si.occurred_at IS NOT NULL
+          AND ((si.source = ANY(:life) AND si.item_class = 'notification') OR si.source = ANY(:places))
+        ORDER BY si.id, n.id
+    """), {"life": list(SOURCES), "places": list(PLACES)}).all()
+
+
+def evidence(s: Session, w: Writer, rows: list, held: dict[str, set[int]], items_by_id: dict) -> int:
+    """Link each thread to the records that only show it happened (`_evidence_items`): one that names a defining term
+    of the thread (or of a facet of it) while it happened is RELATED_TO the thread, with props.role 'evidence'. It is
+    never a member (no PART_OF: it counts toward no record total, person or judgment) and never shown as a node, but it
+    is among the records the thread is made of (items.sources_of) and the verifier checks it. While it happened: inside
+    the window of the row whose term it names, or, for a row without one, within PAD of the thread's own records.
+    Returns how many links were written."""
+    into = {r.key: r.merged_into for r in rows if r.status == "merged" and r.merged_into}
+    found = registered([r for r in rows if r.status in ("active", "merged") and r.origin != "entities"],
+                       _evidence_items(s))
+    by_key = {r.key: r for r in rows}
+    ids = dict(s.execute(text("SELECT key, id FROM nodes WHERE type = 'Project' AND key = ANY(:k)"),
+                         {"k": sorted(held)}).all())
+    linked: set[tuple[int, int]] = set()
+    for key, its in sorted(found.items()):
+        thread = follow(into, key)
+        if thread not in ids or not its:
+            continue
+        span = None
+        if window(by_key[key]) is None:
+            dates = sorted(items_by_id[i].occurred_at for i in held.get(thread, ()) if i in items_by_id)
+            if not dates:
+                continue
+            span = (dates[0] - PAD, dates[-1] + PAD)
+        for it in _by_time(its.values()):
+            if span and not span[0] <= it.occurred_at <= span[1]:
+                continue
+            if w.edge(it.node_id, ids[thread], "RELATED_TO",
+                      {"why": f"names {by_key[key].terms[0]} while it happened", "role": "evidence"},
+                      confidence=0.5, source_item_id=it.id, evidence=[(it.id, "evidence", {})]):
+                linked.add((it.node_id, ids[thread]))
+    return len(linked)
 
 
 def _named_from(row) -> str:
@@ -580,7 +638,9 @@ def _build(w: Writer, row, rows: list, found: dict[str, dict]) -> set[int]:
     """Build one active row's thread from its records and those of its facets (the rows merged into it), and return
     the records it holds (none when it has too few to be built: fewer than 3, or none for a pinned row)."""
     into = {r.key: r.merged_into for r in rows if r.status == "merged" and r.merged_into}
-    facets = sorted((r for r in rows if r.status == "merged" and follow(into, r.key) == row.key), key=lambda r: r.key)
+    # The entities stage's rows (an anchor this thread is about) add their records themselves, after this stage.
+    facets = sorted((r for r in rows if r.status == "merged" and r.origin != "entities"
+                     and follow(into, r.key) == row.key), key=lambda r: r.key)
     members = dict(found.get(row.key, {}))
     facet_of: dict[int, str] = {}
     for f in facets:
@@ -662,11 +722,13 @@ def run(s: Session, log=print, report=None) -> dict:
     found = registered([r for r in rows if r.status in ("active", "merged")], items)
     built: list[str] = []
     claimed: set[int] = set()
+    held: dict[str, set[int]] = {}  # each thread built: its records
     for row in sorted((r for r in rows if r.status == "active"), key=lambda r: (not r.pinned, r.key)):
         members = _build(w, row, rows, found)
         if members:
             built.append(row.key)
             claimed |= members
+            held[row.key] = members
     stats["threads"] = len(built)
 
     # 2. New candidates: name seeds first (long-running), then bursts; only what known threads don't cover. A kept
@@ -711,7 +773,8 @@ def run(s: Session, log=print, report=None) -> dict:
         if not keep:
             stats["rejected"] += 1
             continue
-        claimed |= _build(w, row, rows, found)
+        held[key] = _build(w, row, rows, found)
+        claimed |= held[key]
         built.append(key)
         stats["new"] += 1
 
@@ -727,7 +790,8 @@ def run(s: Session, log=print, report=None) -> dict:
         for row in (r for r in rows if r.key in survivors):
             s.execute(text("""DELETE FROM edges e USING nodes t WHERE t.id = e.dst AND t.type = 'Project'
                               AND t.key = :k AND e.extractor = :x"""), {"k": row.key, "x": EXTRACTOR})
-            _build(w, row, rows, found)
+            held[row.key] = _build(w, row, rows, found)
+    stats["evidence"] = evidence(s, w, _rows(s), held, items_by_id)
     w.refresh()  # threads folded into others: a rejection of either holds for the survivor
     w.prune()
     stats["umbrellas"] = umbrellas(s, w)
@@ -914,6 +978,7 @@ def _short_named(s: Session, w: Writer) -> int:
                array_remove(array_agg(DISTINCT COALESCE(c.canonical_id, e.src)), NULL) AS people
         FROM nodes p JOIN thread_registry r ON r.key = p.key
         LEFT JOIN edges e ON e.dst = p.id AND e.type IN ('INVOLVED_IN', 'RELATED_TO')
+                          AND e.props->>'role' IS DISTINCT FROM 'evidence'  -- people, not the records it is shown by
         LEFT JOIN canonical c ON c.node_id = e.src
         WHERE p.type = 'Project' AND r.status = 'active' AND p.props ? 'start' GROUP BY p.id, r.terms
         ORDER BY p.id""")).mappings().all()

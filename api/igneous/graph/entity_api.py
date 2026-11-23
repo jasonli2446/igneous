@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from igneous.db import get_session
 from igneous.graph import corrections, overrides
 from igneous.graph.corrections import apply_now, recording
+from igneous.graph.derived import merges
 from igneous.graph.visibility import group_conversation, not_service
 
 router = APIRouter()
@@ -86,11 +87,18 @@ def entity(node_id: int = Path(ge=1), items: int = Query(30, ge=1, le=200), s: S
     events.sort(key=lambda x: (x["date"] is None, str(x["date"])), reverse=False)
     rows.sort(key=lambda x: str(x["date"] or ""), reverse=True)
     props = p["props"] or {}
-    # The corrections that shape it (your rename, your hide, what you merged into it), each undone by its id.
+    # The corrections that shape it (your rename, your hide, what you merged into it), each undone by its id. A name
+    # you gave a Project folded into it names it too, unless you named it yourself (overrides.given_names).
+    key = f"Project:{p['key']}"
     shaped = [dict(r) for r in s.execute(text("""
-        SELECT id AS override_id, op, value, created_at FROM overrides
-        WHERE undone_at IS NULL AND op IN ('rename', 'hide', 'merge') AND node_keys[1] = :k ORDER BY id
-    """), {"k": f"Project:{p['key']}"}).mappings()]
+        SELECT id AS override_id, op, value, created_at, node_keys[1] AS target FROM overrides
+        WHERE undone_at IS NULL AND ((op IN ('rename', 'hide', 'merge') AND node_keys[1] = :k)
+                                     OR (op = 'rename' AND node_keys[1] = ANY(:folded)))
+        ORDER BY id
+    """), {"k": key, "folded": sorted(k for k, v in merges(s).items() if v == key)}).mappings()]
+    named = sorted({r["target"] for r in shaped if r["op"] == "rename"})
+    shaped = [{k: v for k, v in r.items() if k != "target"} for r in shaped
+              if r["op"] != "rename" or r["target"] == (key if key in named else named[0])]
     return {"id": p["id"], "name": p["name"], "key": p["key"], "aliases": _aliases(props, p["name"]),
             "anchors": props.get("anchors", []), "hidden": bool(props.get("hidden")),
             "people": people, "groups": groups, "events": events, "items": rows[:items],
