@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from igneous.config import settings
 from igneous.rag import search
 from igneous.rag.search import Filters, dense, lexical
 
@@ -37,9 +38,10 @@ class Corpus:
                               "RETURNING id"), {"k": key, "n": body, "i": item}).scalar_one()
         for src, dst, kind in ((sender, node, "SENT"), (node, self.me, "RECEIVED")):
             s.execute(text("INSERT INTO edges (src, dst, type) VALUES (:a, :b, :t)"), {"a": src, "b": dst, "t": kind})
-        self.chunks[key] = s.execute(text("""INSERT INTO chunks (source_item_id, node_id, ord, text, embedding)
-                                             VALUES (:i, :n, 0, :t, CAST(:v AS vector)) RETURNING id"""),
-                                     {"i": item, "n": node, "t": body, "v": vector}).scalar_one()
+        self.chunks[key] = s.execute(text("""
+            INSERT INTO chunks (source_item_id, node_id, ord, text, embedding, embedding_model)
+            VALUES (:i, :n, 0, :t, CAST(:v AS vector), :m) RETURNING id"""),
+            {"i": item, "n": node, "t": body, "v": vector, "m": settings.embedding_model}).scalar_one()
         self.items[key] = item
 
 
@@ -68,6 +70,12 @@ def test_negated_terms_exclude_and_the_rest_are_ored(corpus):
     assert lexical(s, "-prices", Filters()) == []  # nothing left to rank by
     # The dense leg drops them too: the nearest vector here is the negated one.
     assert _names(corpus, dense(s, "gas -prices", Filters())) == {"supply", "storage"}
+
+
+def test_dense_search_compares_only_vectors_from_the_configured_model(corpus):
+    s = corpus.s
+    s.execute(text("UPDATE chunks SET embedding_model = 'another/model' WHERE id = :c"), {"c": corpus.chunks["prices"]})
+    assert _names(corpus, dense(s, "gas", Filters())) == {"supply", "power", "storage"}
 
 
 @pytest.mark.parametrize("params", [

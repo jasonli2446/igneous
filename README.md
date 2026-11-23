@@ -65,9 +65,10 @@ export AWS_REGION=us-east-1           # default if unset
 
 Without the key, `/ask` returns 503 and extraction is skipped; everything else works. The default chat model is
 `us.anthropic.claude-sonnet-5-5` (`IGNEOUS_LLM_MODEL`), with `IGNEOUS_LLM_CHEAP_MODEL` for high-volume yes/no judgments.
-Embeddings and the reranker run locally (FastEmbed), so the first search or pipeline run downloads small model files.
-A model reads only the sources in `IGNEOUS_LLM_SOURCES` ([Model calls](#model-calls)); local documents and Apple
-Notes also need `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`.
+Embeddings and the reranker run locally (FastEmbed) for every source, so the first search or pipeline run downloads
+small model files into `data/models` (`IGNEOUS_MODEL_CACHE_DIR` moves them). A hosted model reads only the sources in
+`IGNEOUS_LLM_SOURCES` ([Model calls](#model-calls)); local documents and Apple Notes also need
+`IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true` for that, while search indexes them on this computer either way.
 
 ### 4. Start the API and the web app
 
@@ -164,7 +165,9 @@ conservatively lemmatizes keys, merges only high-similarity local-embedding dupl
 three shared messages; moved `ABOUT` edges keep their original provenance. Extraction, like every model call,
 reads only sources listed in `IGNEOUS_LLM_SOURCES`; set it to `email` before `make demo`, then use `EXTRACT=0` to
 skip calls or `EXTRACT=500` to process more. Everything is incremental: re-running only processes what changed.
-`docker compose up` also runs the api and web in containers.
+Every chunk opens with its record's title (an email's subject, a file's name, a conversation's name). When the chunk
+layout changes (`LAYOUT` in `api/igneous/rag/chunking.py`), each item is chunked again once and only chunks whose text
+changed are embedded again. `docker compose up` also runs the api and web in containers.
 
 ## Layout
 
@@ -202,7 +205,9 @@ cd api && uv run igneous sync imessage --since-days 90 && uv run igneous pipelin
 - Enron has no `In-Reply-To`/`References` headers. Threads are keyed on subject + participants; `REPLIES_TO` is inferred and sparse.
 - Enron stores one email in several folders with different Message-IDs. Messages dedupe on a content fingerprint (`raw_meta.fingerprint`).
 - Embeddings stay local (`bge-small-en-v1.5`, 384-d, FastEmbed); Bedrock as a second index was dropped
-  (`docs/decisions/0002-bedrock-interop.md`).
+  (`docs/decisions/0002-bedrock-interop.md`). Each chunk records the model behind its vector: setting
+  `IGNEOUS_EMBEDDING_MODEL` to another 384-dimensional model re-embeds every chunk on the next pipeline run, and search
+  compares only vectors from the configured model meanwhile; another dimension needs a migration.
 
 ## Model calls
 

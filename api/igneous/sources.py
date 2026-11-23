@@ -99,14 +99,16 @@ SOURCES: list[dict] = [
      "cli": "igneous sync ai_chats"},
     {"id": "fs", "kind": "local", "name": "Local files", "group": "On this computer",
      "reads": "Metadata for every non-secret file in the folders you choose, plus text from readable documents. "
-              "Secrets are skipped and document text is redacted.",
+              "Secrets are skipped and document text is redacted. Search indexes the text on this computer; a hosted "
+              "model reads it only if you opt it in (below).",
      "steps": ["Set IGNEOUS_FILESYSTEM_ROOTS to a comma-separated list of folders (in api/.env or the API's "
                "environment), then restart the API. With no setting, existing Documents, Desktop, Downloads, and "
                "iCloud Drive folders are used.",
                "Press Sync now. Each sync reconciles deletions without reopening unchanged file bodies."],
      "cli": "igneous sync fs --path ~/Documents/notes"},
     {"id": "notes", "kind": "local", "name": "Apple Notes", "group": "On this computer",
-     "reads": "Unlocked Notes.app titles and bodies from the local database. Bodies are redacted.",
+     "reads": "Unlocked Notes.app titles and bodies from the local database. Bodies are redacted. Search indexes them "
+              "on this computer; a hosted model reads them only if you opt them in (below).",
      "steps": [*FDA_STEPS, "Press Sync now. Locked notes are skipped."], "cli": "igneous sync notes"},
     {"id": "email", "kind": "local", "name": "Enron demo mailbox", "group": "Demo",
      "reads": "The public Enron email corpus. For demos and evaluation only; never mix it with your own data.",

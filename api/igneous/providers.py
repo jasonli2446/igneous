@@ -39,18 +39,19 @@ class ChatResult:
 
 
 class FastEmbedProvider:
-    """Local ONNX embedding model; loaded only on its first request."""
+    """Local ONNX embedding model, downloaded into `cache_dir` and loaded on its first request."""
 
-    def __init__(self, model_name: str, batch_size: int):
+    def __init__(self, model_name: str, batch_size: int, cache_dir: str):
         self.model_name = model_name
         self.batch_size = batch_size
+        self.cache_dir = cache_dir
         self._instance: Any | None = None
 
     def _model(self):
         if self._instance is None:
             from fastembed import TextEmbedding
 
-            self._instance = TextEmbedding(self.model_name)
+            self._instance = TextEmbedding(self.model_name, cache_dir=self.cache_dir)
         return self._instance
 
     def embed(self, texts: list[str], *, query: bool = False) -> list[list[float]]:
@@ -62,18 +63,19 @@ class FastEmbedProvider:
 
 
 class CrossEncoderProvider:
-    """Local ONNX cross-encoder for relevance scores aligned with ``docs``."""
+    """Local ONNX cross-encoder for relevance scores aligned with ``docs``, downloaded into `cache_dir`."""
 
-    def __init__(self, model_name: str, batch_size: int):
+    def __init__(self, model_name: str, batch_size: int, cache_dir: str):
         self.model_name = model_name
         self.batch_size = batch_size
+        self.cache_dir = cache_dir
         self._instance: Any | None = None
 
     def _model(self):
         if self._instance is None:
             from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-            self._instance = TextCrossEncoder(self.model_name)
+            self._instance = TextCrossEncoder(self.model_name, cache_dir=self.cache_dir)
         return self._instance
 
     def rerank(self, query: str, docs: list[str]) -> list[float]:
@@ -165,12 +167,12 @@ class BedrockProvider:
 
 @lru_cache(maxsize=1)
 def _embedder() -> FastEmbedProvider:
-    return FastEmbedProvider(settings.embedding_model, settings.embedding_batch_size)
+    return FastEmbedProvider(settings.embedding_model, settings.embedding_batch_size, settings.models_dir)
 
 
 @lru_cache(maxsize=1)
 def _reranker() -> CrossEncoderProvider:
-    return CrossEncoderProvider(settings.reranker_model, settings.rerank_batch_size)
+    return CrossEncoderProvider(settings.reranker_model, settings.rerank_batch_size, settings.models_dir)
 
 
 @lru_cache(maxsize=1)

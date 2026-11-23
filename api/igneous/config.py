@@ -18,18 +18,21 @@ class Settings(BaseSettings):
     web_url: str = "http://localhost:3000"
     # Comma-separated filesystem roots used by ``igneous sync fs`` when --path is omitted.
     filesystem_roots: str = ""
-    # Local documents and Apple Notes never go to an embedding or chat model unless explicitly enabled.
+    # Local files and Apple Notes reach a hosted model only with this on as well as listed in llm_sources. Search
+    # embeds and reranks every source on this computer either way.
     local_sources_model_enabled: bool = False
     # Drive API page size for files.list and changes.list (1-1000).
     drive_page_size: int = 100
     # Gmail API quota units per minute the connector paces itself to. Google publishes 15,000; a project in
     # Testing mode is cut off near 730, so the default stays under that. Raise it to your project's quota.
     gmail_units_per_min: float = 600
-    # chunks.embedding is vector(384) (migration 0001): a model with another dimension, or another model's vector
-    # space, needs a migration that changes the column and re-embeds every chunk.
+    # The local embedding model. chunks.embedding is vector(384) (migration 0001), so it must make 384-dimensional
+    # vectors; changing it to another such model re-embeds every chunk on the next pipeline run (rag/embed.py).
     embedding_model: str = "BAAI/bge-small-en-v1.5"
-    embedding_dim: int = 384
     embedding_batch_size: int = 128
+    # Where FastEmbed keeps the embedding and reranker models it downloads. Empty: <data_dir>/models, which a
+    # container keeps whenever it keeps the data folder. A relative path is relative to the api folder.
+    model_cache_dir: str = ""
     # Ask's local cross-encoder: it scores the retrieved and graph-expanded passages together (at most
     # reranker_pool_size of them, which is also how many passages Ask retrieves) and keeps the best. Off, or when
     # its model can't load, Ask keeps retrieval order and holds places for graph neighbours (rag/qa.py).
@@ -50,11 +53,18 @@ class Settings(BaseSettings):
     # backoff. It is the only retry layer.
     hosted_retries: int = 2
 
-    @field_validator("data_dir")
+    @field_validator("data_dir", "model_cache_dir")
     @classmethod
     def _relative_to_api(cls, value: str) -> str:
+        if not value:
+            return value
         path = Path(value).expanduser()
         return str(path if path.is_absolute() else (API_DIR / path).resolve())
+
+    @property
+    def models_dir(self) -> str:
+        """The folder FastEmbed downloads its models into: model_cache_dir, or <data_dir>/models."""
+        return self.model_cache_dir or str(Path(self.data_dir) / "models")
 
 
 settings = Settings()

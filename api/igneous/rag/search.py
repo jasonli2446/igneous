@@ -6,6 +6,7 @@ from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from igneous.config import settings
 from igneous.rag.embed import embed_query
 
 RRF_K = 60
@@ -95,7 +96,8 @@ def lexical(s: Session, q: str, f: Filters, n: int = POOL) -> list[int]:
 
 
 def dense(s: Session, q: str, f: Filters, n: int = POOL) -> list[int]:
-    """Nearest passages to the query's embedding; a negated word or phrase excludes the passages that contain it."""
+    """Nearest passages to the query's embedding, among vectors from the same model (IGNEOUS_EMBEDDING_MODEL; others
+    wait for the embed stage); a negated word or phrase excludes the passages that contain it."""
     positive, negation, negation_params = _negations(q)
     if not positive.strip():
         return []
@@ -103,9 +105,10 @@ def dense(s: Session, q: str, f: Filters, n: int = POOL) -> list[int]:
     s.execute(text("SET LOCAL hnsw.ef_search = 100"))
     return list(s.execute(text(f"""
         SELECT c.id FROM chunks c JOIN source_items si ON si.id = c.source_item_id
-        WHERE c.embedding IS NOT NULL {negation} {where}
+        WHERE c.embedding_model = :embedding_model {negation} {where}
         ORDER BY c.embedding <=> CAST(:v AS vector) LIMIT :n
-    """), {"v": str(embed_query(positive)), "n": n, **negation_params, **params}).scalars())
+    """), {"v": str(embed_query(positive)), "embedding_model": settings.embedding_model, "n": n,
+           **negation_params, **params}).scalars())
 
 
 def rrf(*rankings: list[int]) -> list[tuple[int, float]]:
