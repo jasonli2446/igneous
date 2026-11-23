@@ -9,8 +9,8 @@ from igneous import sources
 from igneous.db import SessionLocal
 
 app = typer.Typer(no_args_is_help=True)
-schedule_app = typer.Typer(no_args_is_help=True, help="macOS: sync your connected sources and rebuild the graph "
-                                                      "every 30 minutes.")
+schedule_app = typer.Typer(no_args_is_help=True, help="macOS: sync the sources you have set up and rebuild the "
+                                                      "graph every 30 minutes.")
 app.add_typer(schedule_app, name="schedule")
 
 # Commands that never open the database (the schedule group checks in `schedule run`, the one that does).
@@ -35,7 +35,8 @@ def _require_schema() -> None:
 
 @schedule_app.command("install")
 def schedule_install():
-    """Install the 30-minute macOS incremental sync LaunchAgent."""
+    """Install the macOS LaunchAgent that, every 30 minutes, syncs each source you have set up (never the Enron demo)
+    and then rebuilds the graph if anything is new."""
     from igneous import schedule
     path = schedule.install([sys.executable, "-m", "igneous.cli"])
     print(f"installed {path}; logs: ~/Library/Logs/igneous.log")
@@ -57,7 +58,8 @@ def schedule_uninstall():
 
 @schedule_app.command("run", hidden=True)
 def schedule_run():
-    """LaunchAgent entry point; sources are serialized before one incremental pipeline rebuild."""
+    """The LaunchAgent's entry point: sync each set-up source in turn, then rebuild if anything is new. Prints each
+    source's outcome as JSON."""
     from igneous import schedule
 
     _require_schema()

@@ -1,11 +1,17 @@
-"""macOS LaunchAgent for paced, serialized incremental syncs."""
+"""The scheduled sync (macOS LaunchAgent): every 30 minutes, sync each source you have set up, one at a time, then
+rebuild the graph if anything is new.
+
+A source counts as set up once it has items or a sync left its cursor, so sources whose requirements merely happen to
+pass (a Documents folder, a downloaded Enron corpus) are never read uninvited, and the Demo group never is. Each sync
+is a job like the Sources page's, so the page shows it running, and a source the page is already syncing is skipped.
+"""
 import os
 import platform
 import plistlib
 import subprocess
-import time
 from pathlib import Path
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from igneous import jobs, sources
@@ -57,43 +63,60 @@ def status() -> dict:
     return {"installed": path.exists(), "path": str(path), "interval_minutes": INTERVAL // 60}
 
 
-def _wait(job_id: str) -> dict:
-    while True:
-        with SessionLocal() as s:
-            job = jobs.get(s, job_id)
-        if job and job["status"] != "running":
-            return job
-        time.sleep(0.2)
+def due(s: Session) -> list[dict]:
+    """The Sources page rows of the syncable sources you have set up, outside the Demo group, in page order."""
+    return [row for row in sources.describe(s)
+            if row["id"] in sources.SYNCABLE and row["group"] != "Demo" and (row["items"] or row["last_sync"])]
+
+
+def _pipeline_due(s: Session, changed: bool) -> bool:
+    """Whether to rebuild: a sync changed something, the last rebuild didn't finish, or items changed (or were
+    deleted) since it started."""
+    if changed:
+        return True
+    last = s.execute(text("SELECT status, started_at FROM jobs WHERE source = 'pipeline' "
+                          "ORDER BY started_at DESC LIMIT 1")).first()
+    if last is None or last.status != "succeeded":
+        return True
+    return bool(s.execute(text("SELECT EXISTS (SELECT 1 FROM source_items WHERE updated_at > :t) "
+                               "OR EXISTS (SELECT 1 FROM dirty_rebuild)"), {"t": last.started_at}).scalar())
+
+
+def _outcome(job: dict) -> dict:
+    return {"status": job["status"], "result": job["result"], **({"error": job["error"]} if job["error"] else {})}
 
 
 def run(s: Session) -> dict[str, dict]:
-    """Sync eligible connected sources one at a time, then rebuild once.
-
-    Skips sources the browser/API is already syncing: connector cursors stay safe,
-    and Gmail's connector retains its own quota pacing.
-    """
-    active = {j["source"] for j in jobs.latest_by_source(s).values() if j["status"] == "running"}
+    """Sync every set-up source in turn, then rebuild once if anything is new. Returns each source's outcome:
+    {"status", "result", "error"} for a job that ran, or {"skipped": why}."""
+    jobs.fail_interrupted(s)  # a scheduled sync killed mid-run (sleep, shutdown) left its jobs running
+    rows = due(s)
+    s.commit()  # no transaction stays open while the syncs run
     result: dict[str, dict] = {}
-    for source in sources.SYNCABLE:
-        if source in active:
-            result[source] = {"skipped": "already running"}
+    changed = False
+    for row in rows:
+        sid = row["id"]
+        if row["status"] == "syncing":
+            result[sid] = {"skipped": "already syncing"}
             continue
-        info = next(item for item in sources.describe(s) if item["id"] == source)
-        if not info["can_sync"]:
+        if not row["can_sync"]:
+            result[sid] = {"skipped": row["message"] or "not ready to sync"}
             continue
         try:
-            job = jobs.start("sync", source, lambda session, progress, source=source: sources.sync(
-                source, session, progress=progress))
+            job = jobs.run("sync", sid, lambda session, progress, sid=sid: sources.sync(sid, session, progress=progress))
         except jobs.JobBusy:
-            result[source] = {"skipped": "already running"}
+            result[sid] = {"skipped": "already syncing"}
             continue
-        result[source] = _wait(job["id"])["result"] or {}
+        result[sid] = _outcome(job)
+        stats = job["result"] or {}
+        changed |= any(stats.get(k) for k in ("inserted", "updated", "deleted"))
+    if not _pipeline_due(s, changed):
+        result["pipeline"] = {"skipped": "nothing new since the last rebuild"}
+        return result
     try:
-        job = jobs.start("pipeline", "pipeline", sources.run_pipeline)
+        result["pipeline"] = _outcome(jobs.run("pipeline", "pipeline", sources.run_pipeline))
     except jobs.JobBusy:
         result["pipeline"] = {"skipped": "already running"}
-    else:
-        result["pipeline"] = _wait(job["id"])["result"] or {}
     return result
 
 

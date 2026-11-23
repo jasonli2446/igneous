@@ -54,7 +54,7 @@ class NamedResponse(JSONResponse):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Refuse to serve a database whose schema isn't the code's, and fail jobs a previous API process left running."""
+    """Refuse to serve a database whose schema isn't the code's, and fail the running jobs whose process died."""
     if problem := schema_status():
         raise RuntimeError(problem)
     with SessionLocal() as s:

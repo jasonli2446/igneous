@@ -1,10 +1,12 @@
-"""Git remotes without credentials.
+"""Git remotes without credentials; jobs that record their owner.
 
 A remote such as https://user:token@github.com/me/repo.git was stored with its user name and token in the Local
 files repo item (`source_items.raw_meta.remote`) and copied to the repository's node (`nodes.props.remote`). The
-user info is removed from both, as the connector removes it before storing a remote.
+user info is removed from both, as the connector removes it before storing a remote. The scrub can't be undone: a
+downgrade leaves the remotes as they are.
 
-The scrub can't be undone: a downgrade leaves the remotes as they are.
+A job (kind sync, import or pipeline; source a Sources page id or 'pipeline') records the host and process that run
+it, so a process starting up fails only the running jobs whose process died, never one another process still runs.
 
 Revision ID: 0009
 Revises: 0008
@@ -28,7 +30,8 @@ SCRUB = rf"""
 
 def upgrade():
     op.execute(SCRUB)
+    op.execute("ALTER TABLE jobs ADD COLUMN owner_host text, ADD COLUMN owner_pid integer")
 
 
 def downgrade():
-    pass
+    op.execute("ALTER TABLE jobs DROP COLUMN owner_pid, DROP COLUMN owner_host")
