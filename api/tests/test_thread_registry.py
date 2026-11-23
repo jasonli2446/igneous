@@ -241,10 +241,21 @@ def test_course_seeds_are_whole_course_codes_and_a_series_needs_its_key(db):
                                                                   "to": [{"email": ME}]}, at(i), "invoice")
     for i, title in enumerate(("Dentist", "Haircut", "Oil change", "Library return")):  # one-off events, no series
         event(f"once{i}", title, 30 + i)
+    for i in range(5):  # a room, a suite and an error code are numbered like a course, and are none
+        event(f"room{i}", f"Standup in Room 101 ({i})", 40 + i)
+        put(db, "gmail", f"lease{i}", "Suite 200 lease renewal", {"from": [{"email": "office@lease.test"}],
+                                                                   "to": [{"email": ME}]}, at(40 + i), "lease")
+        put(db, "gmail", f"err{i}", "HTTP 404 on the login page", {"from": [{"email": "ci@ops.test"}],
+                                                                    "to": [{"email": ME}]}, at(40 + i), "error")
+    db.execute(text("""INSERT INTO nodes (type, key, name, props) VALUES ('Thread', 'chat:games', 'Board games',
+                                                                          '{"group": true}')"""))
     db.commit()
-    assert [(sd["how"], sd["name"]) for sd in threads.name_seeds(db)] == [("course", "CS 401"),
-                                                                         ("series", "CS 401 lecture")]
+    # Courses first: a class's project or group chat is part of it.
+    assert [(sd["how"], sd["name"]) for sd in threads.name_seeds(db)] == [
+        ("course", "CS 401"), ("chat", "Board games"), ("series", "CS 401 lecture")]
     assert threads.course_codes("Team sync JUNE 2025, cs401 and MATH 221") == ["CS 401", "MATH 221"]
+    assert threads.course_codes("Room 101, Gate 210, suite 200, HTTP 404") == []
+    assert threads.course_code("ROOM 101") is None and threads.course_code("ENVS 410") == "ENVS 410"
 
 
 @pytest.mark.usefixtures("local_models")

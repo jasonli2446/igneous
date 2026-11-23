@@ -84,12 +84,18 @@ ONGOING = re.compile(r"^(?!.*\b(project|application|trip|event)\b).*\b(hobby|hob
                      r"group|team|community|band|league|lessons|practice)\b", re.I)
 
 # A course code: a department of 2-5 letters and a 3-digit number, each a whole word ("CS 401", "cs401", "MATH 221";
-# not "June 2025" or "Invoice 2025"). A month is never a department.
+# not "June 2025" or "Invoice 2025"). A month is never a department, nor a word that numbers a place or a thing ("Room
+# 101", "Suite 200", "Gate 210", "HTTP 404").
 MONTHS = frozenset({"jan", "feb", "mar", "apr", "may", "jun", "june", "jul", "july", "aug", "sep", "sept", "oct",
                     "nov", "dec"})
+NOT_DEPARTMENTS = MONTHS | {
+    "room", "rm", "suite", "ste", "unit", "apt", "floor", "gate", "route", "hwy", "exit", "page", "pg", "box", "ext",
+    "no", "nr", "ref", "pin", "lot", "seat", "row", "line", "issue", "error", "err", "http", "rfc", "model", "step",
+    "phase", "part", "item", "order", "vol", "fig"}
 COURSE = r"([A-Za-z]{2,5})\s?(\d{3})"
 COURSE_CODE = re.compile(rf"\b{COURSE}\b")
-COURSE_SQL = r"\m[A-Za-z]{2,5} ?[0-9]{3}\M"  # the same, as a Postgres regular expression
+# A course code as a class's own titles write it, the department in capitals, as a Postgres regular expression.
+COURSE_TITLE_SQL = r"\m[A-Z]{2,5} ?[0-9]{3}\M"
 COURSE_TITLES = source_catalog.values({"mail", "calendar"})  # where a class is named in titles: mail, calendar
 TERM_GAP = timedelta(days=45)  # a course's mentions with no longer gap between them are one term
 MOSTLY = 0.5  # of a candidate's records naming a course code inside its term, for the candidate to be part of it
@@ -99,12 +105,12 @@ PART = "part"  # thread_registry.merged_by of a class's part (its project, its d
 def course_code(text_: str) -> str | None:
     """The course code `text_` is ("CS 401" for "cs401"), or None."""
     m = re.fullmatch(COURSE, (text_ or "").strip())
-    return f"{m.group(1).upper()} {m.group(2)}" if m and m.group(1).lower() not in MONTHS else None
+    return f"{m.group(1).upper()} {m.group(2)}" if m and m.group(1).lower() not in NOT_DEPARTMENTS else None
 
 
 def course_codes(text_: str) -> list[str]:
     """Every course code in `text_`, as course_code spells it."""
-    return [f"{d.upper()} {n}" for d, n in COURSE_CODE.findall(text_ or "") if d.lower() not in MONTHS]
+    return [f"{d.upper()} {n}" for d, n in COURSE_CODE.findall(text_ or "") if d.lower() not in NOT_DEPARTMENTS]
 
 
 # Capitalized phrases (1-3 words), or course codes.
@@ -393,8 +399,9 @@ def _belongs(c: dict, verdict: dict) -> list:
 
 def name_seeds(s: Session) -> list[dict]:
     """Long-running things named outright: repositories, course codes (in the titles of your mail, from any mail
-    source, and your calendar: a class's own notices count, a promo naming a course doesn't), recurring calendar
-    series, named group chats. A burst finds a trip; a name finds a semester-long course or a year-long project."""
+    source, and your calendar, the department in capitals: a class's own notices count, a promo naming a course
+    doesn't), recurring calendar series, named group chats. A burst finds a trip; a name finds a semester-long course
+    or a year-long project. Courses come first: a class's project or group chat is part of it (`_course_part`)."""
     rows = s.execute(text("""
         SELECT 'repo' AS how, lower(raw_meta->>'repo') AS name FROM source_items
         WHERE source IN ('github', 'ai_chats', 'fs') AND coalesce(raw_meta->>'repo', '') <> ''
@@ -411,10 +418,10 @@ def name_seeds(s: Session) -> list[dict]:
         SELECT 'chat', name FROM nodes WHERE type = 'Thread' AND COALESCE((props->>'group')::bool, false)
           AND name !~ '[0-9]{4}' AND name !~ ',' AND length(name) >= 3
         ORDER BY 1, 2
-    """), {"course": f"({COURSE_SQL})", "titled": list(COURSE_TITLES)}).all()
+    """), {"course": f"({COURSE_TITLE_SQL})", "titled": list(COURSE_TITLES)}).all()
     seeds: list[dict] = []
     seen = set()
-    for how, name in rows:
+    for how, name in sorted(rows, key=lambda r: (r[0] != "course", r[0], r[1] or "")):
         n = (name or "").strip()
         if how == "course":
             n = course_code(n) or ""  # a month is no department
