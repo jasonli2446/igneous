@@ -23,9 +23,10 @@ it builds. The edges with extractor 'user' are exactly what these intents say: o
 the correction and forgets the row), puts every Project back to its derived state (its props.original_name, neither
 renamed nor hidden), and applies every correction again. A Project can be folded into another by your merge, or by a
 rebuild that finds the two are one thing (graph/derived.py `merges`): a name you gave it then names the one it went
-into (the latest name you gave any of them), unless you named that one yourself, while a hide follows only your merges,
-so a rebuild never hides a Project because something you hid turned out to be part of it. It runs as the pipeline's last step and, when no rebuild is
-running, right after each correction (graph/corrections.py). It bumps nothing: whoever publishes bumps the version.
+into (the latest name you gave any of them), unless you named that one yourself, while a hide follows only your
+merges, so a rebuild never hides a Project because something you hid turned out to be part of it. It runs as the
+pipeline's last step and, when no rebuild is running, right after each correction (graph/corrections.py). It bumps
+nothing: whoever publishes bumps the version.
 """
 import json
 from dataclasses import dataclass, field
