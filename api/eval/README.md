@@ -198,8 +198,8 @@ On the default seed with the model off (2026-11-23), after `make persona` (one p
 | Records that must not be in their thread, but are | 1 | 1 |
 | Placed right (under its school or job, or under nothing) | 6 of 10 | 6 of 10 |
 | Who took part: missing or wrongly there | 0 | 0 |
-| Identities: clusters P / R | 1.00 / 0.94 | 1.00 / 0.94 |
-| Identities: pairs ≥ 0.5, P / R | 1.00 / 0.83 | 1.00 / 0.83 |
+| Identities: clusters P / R | 1.00 / 0.96 | 1.00 / 0.96 |
+| Identities: pairs ≥ 0.5, P / R | 1.00 / 0.74 | 1.00 / 0.74 |
 | Ask retrieval, recall@10 over 13 answerable questions: hybrid / dense / lexical | 0.85 / 0.77 / 0.85 | the same |
 
 - Every gold thread holds all its records but Heron (4 of its 6: below).
@@ -220,6 +220,10 @@ On the default seed with the model off (2026-11-23), after `make persona` (one p
   ones); the threads stage's "Heron · May-Jul 2025" holds all 6, under Northwind Robotics.
 - The leak is a "remember Lisbon?" chat six months after the trip: the folder-named "Lisbon 2025" takes in every
   record that mentions Lisbon.
+- Five people's phone numbers come from her contacts export: Dana's, Owen's and her mother's cards tie each number to
+  an address; Priya's and her brother Nico's hold only a number and a name, which resolution joins to their mail. All
+  five join their person. A number joins one identity of its person (the card's address, or the mail of that name),
+  so the pairs it makes with the others (Dana's number and her LinkedIn profile) count only in the clusters row.
 - The only identity left apart is classmate Alex Chen's LinkedIn profile: two people share the name, so the name
   alone joins neither.
 - Retrieval moves by a question or two between builds of the same seed (hybrid recall@10 from 0.77 to 0.92 over
