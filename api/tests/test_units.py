@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 import pytest
@@ -35,6 +36,11 @@ def test_synthetic_cross_source_corpus_is_deterministic_and_valid(tmp_path):
     assert NOTICE in (first / "README.md").read_text()
     assert NOTICE in (first / "calendar.ics").read_text()
     assert "phillip.allen@enron.com" in (first / "files/2001-05-14-forecast-memo.md").read_text()
+    # The counts come from the generator, so a manifest without them (written by hand, or by another version)
+    # still verifies by its files.
+    manifest = first / "manifest.json"
+    manifest.write_text(json.dumps({"files": json.loads(manifest.read_text())["files"]}))
+    assert verify(first) == {"documents": 5, "calendar_events": 2}
     calendar = (first / "calendar.ics").read_text()
     (first / "calendar.ics").write_text(calendar.replace("END:VEVENT\nEND:VCALENDAR", "END:VCALENDAR"))
     with pytest.raises(ValueError, match=r"calendar\.ics"):

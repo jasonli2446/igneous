@@ -11,7 +11,7 @@ from pathlib import Path
 
 from bs4 import BeautifulSoup
 
-from igneous.connectors.base import Checkpoint, SourceItem
+from igneous.connectors.base import Checkpoint, SourceItem, Tombstone
 
 CHECKPOINT_EVERY = 100  # also the granularity of `sync --limit` (it stops at the first checkpoint past the limit)
 
@@ -91,21 +91,25 @@ class MaildirConnector:
             raise ValueError(f"No mailbox {', '.join(missing)} in {self.root} (it has {len(found)}).")
         return sorted(set(self.mailboxes))
 
-    def _paths(self, box: str) -> list[str]:
-        """The mailbox's message files. A file whose name starts with a dot is not a message: Finder leaves
-        .DS_Store and ._ files in a folder you open."""
+    def _paths(self, box: str) -> tuple[list[str], list[str]]:
+        """The mailbox's message files, and the files in it that aren't messages: a name that starts with a dot
+        (Finder leaves .DS_Store and ._ files in a folder you open)."""
         # Sorted as the strings the cursor compares, never as Path objects (which order "a/1" before "a-b/1").
-        return sorted(p.relative_to(self.root).as_posix() for p in (self.root / box).rglob("*")
-                      if p.is_file() and not p.name.startswith("."))
+        files = sorted(p.relative_to(self.root).as_posix() for p in (self.root / box).rglob("*") if p.is_file())
+        dotted = [rel for rel in files if rel.rsplit("/", 1)[-1].startswith(".")]
+        return [rel for rel in files if not rel.rsplit("/", 1)[-1].startswith(".")], dotted
 
-    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint]:
+    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | Tombstone]:
         done = dict(cursor.get("mailboxes") or {})
         if shared := cursor.get("last_path"):
             done.setdefault(shared.split("/", 1)[0], shared)
         n = 0
         for box in self._boxes():
             after = done.get(box)
-            for rel in self._paths(box):
+            messages, not_messages = self._paths(box)
+            for rel in not_messages:  # an earlier reader stored them as mail, wherever the cursor is now
+                yield Tombstone(self.name, rel)
+            for rel in messages:
                 if after and rel <= after:
                     continue
                 yield parse_message((self.root / rel).read_bytes(), external_id=rel)

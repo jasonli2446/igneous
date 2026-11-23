@@ -104,6 +104,16 @@ def test_gemini_takeout_groups_a_day_and_strips_html():
     assert "<p>" not in body and "Answer" in body and "Assistant feature" not in body
 
 
+def test_a_time_without_a_zone_is_utc():
+    """The tools write UTC times. One written without its zone is UTC too, never the database server's local time,
+    and it sorts among the others."""
+    data = [{"header": "Gemini Apps", "title": "Prompted later", "time": "2025-05-01T15:00:00.000Z"},
+            {"header": "Gemini Apps", "title": "Prompted earlier", "time": "2025-05-01T14:00:00"}]
+    _, _, (item,) = export_items_of(data, zip_name="Takeout/My Activity/Gemini Apps/MyActivity.json")
+    assert item.occurred_at == datetime(2025, 5, 1, 14, tzinfo=UTC)
+    assert item.body_text.index("earlier") < item.body_text.index("later")
+
+
 def test_export_rejects_unknown_and_html_uploads():
     for raw in (b'{"a": 1}', b"<html></html>", b"[]"):
         with pytest.raises(ExportError):

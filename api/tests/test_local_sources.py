@@ -58,12 +58,18 @@ def test_a_resumed_mailbox_skips_nothing_whatever_the_folder_names(db, tmp_path,
     assert stored(db, "email") == ["x/a-b/1.", "x/a/1."]
 
 
-def test_files_finder_leaves_in_a_mailbox_are_not_messages(tmp_path):
+def test_files_finder_leaves_in_a_mailbox_are_not_messages(db, tmp_path):
+    """Finder leaves .DS_Store and ._ files in a folder you open. They are not read, and one an earlier reader
+    stored as mail is removed, though the mailbox's cursor is past it."""
     root = maildir(tmp_path, "allen-p/inbox/1.")
     (root / "allen-p" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
     (root / "allen-p" / "inbox" / "._1.").write_bytes(b"\x00\x05\x16\x07")
     events = list(MaildirConnector(root, ["allen-p"]).sync({}))
     assert [e.external_id for e in events if isinstance(e, SourceItem)] == ["allen-p/inbox/1."]
+    run_sync(db, MaildirConnector(root, ["allen-p"]))
+    store(db, email_maildir.parse_message(b"Bud1", "allen-p/.DS_Store"))  # as the earlier reader stored it
+    assert run_sync(db, MaildirConnector(root, ["allen-p"]))["deleted"] == 1
+    assert stored(db, "email") == ["allen-p/inbox/1."]
 
 
 def test_an_unknown_mailbox_is_an_error(tmp_path):
@@ -455,6 +461,43 @@ def test_a_session_file_deleted_mid_sync_is_skipped_and_leaves_the_cursor(tmp_pa
     events = list(conn.sync(cursor))
     assert not [o for o in events if isinstance(o, SourceItem)]
     assert sorted(os.path.basename(p) for p in events[-1].cursor["files"]) == ["s1.jsonl", "s2.jsonl"]
+
+
+def test_transcripts_and_git_configs_are_read_as_utf8_whatever_the_locale(tmp_path):
+    """Claude Code, Codex and git write UTF-8. A process whose locale names another encoding (a scheduled job
+    started without LANG, say) still reads them as UTF-8: a prompt keeps its accents, and a remote its path."""
+    (tmp_path / "claude.jsonl").write_text(json.dumps({
+        "type": "user", "timestamp": "2026-10-21T10:00:00Z", "message": {"content": "café crème, 日本"}},
+        ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "codex.jsonl").write_text(json.dumps({
+        "type": "response_item", "timestamp": "2026-10-21T10:00:00Z", "payload": {
+            "type": "message", "role": "user", "content": [{"type": "input_text", "text": "déjà vu"}]}},
+        ensure_ascii=False), encoding="utf-8")
+    gitdir = tmp_path / "main" / ".git"  # a worktree: its .git file names its gitdir, whose commondir has the config
+    (gitdir / "worktrees" / "wt").mkdir(parents=True)
+    (gitdir / "config").write_text('[remote "origin"]\n\turl = https://example.com/josé/repo.git\n', encoding="utf-8")
+    (gitdir / "worktrees" / "wt" / "commondir").write_text("../..\n", encoding="utf-8")
+    (tmp_path / "wt").mkdir()
+    (tmp_path / "wt" / ".git").write_text(f"gitdir: {gitdir / 'worktrees' / 'wt'}\n", encoding="utf-8")
+    script = """
+import json, os, sys
+from pathlib import Path
+from igneous.connectors.ai_chats import claude_turns, codex_turns
+from igneous.connectors.filesystem import _git_remote
+folder = Path(sys.argv[1])
+with open(os.devnull) as nothing:
+    default = nothing.encoding
+print(json.dumps([default, claude_turns(str(folder / "claude.jsonl"))[1][0]["text"],
+                  codex_turns(str(folder / "codex.jsonl"))[1][0]["text"], _git_remote(folder / "wt")]))
+"""
+    env = {k: v for k, v in os.environ.items() if k.startswith("IGNEOUS_")} | {
+        "PATH": os.environ["PATH"], "LC_ALL": "C", "PYTHONCOERCECLOCALE": "0", "PYTHONUTF8": "0"}
+    done = subprocess.run([sys.executable, "-X", "utf8=0", "-c", script, str(tmp_path)], env=env,
+                          capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert done.returncode == 0, done.stderr
+    default, claude, codex, remote = json.loads(done.stdout)
+    assert default.lower().replace("-", "") != "utf8"  # the child's default encoding really is another one
+    assert (claude, codex, remote) == ("café crème, 日本", "déjà vu", "https://example.com/josé/repo.git")
 
 
 def test_queued_prompts_with_images_keep_their_text(tmp_path):
