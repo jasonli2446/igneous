@@ -322,8 +322,14 @@ def test_a_class_found_under_its_project_and_its_demo_day_is_one_thread(db):
     assert chats <= held  # the team chat's days name only the project or the event
     plan = db.execute(text("SELECT id FROM source_items WHERE external_id = 'plan'")).scalar_one()
     assert plan not in held  # the autumn's planning note is outside the term
-    parts = db.execute(text("SELECT name FROM thread_registry WHERE status = 'merged' ORDER BY name")).scalars()
-    assert [p.split(" · ")[0] for p in parts] == ["Demo Day", "Harborline"]
+    parts = db.execute(text("""SELECT name, merged_by FROM thread_registry WHERE status = 'merged'
+                               AND origin <> 'entities' ORDER BY name""")).all()
+    assert [(n.split(" · ")[0], by) for n, by in parts] == [("Demo Day", "part"), ("Harborline", "part")]
+    # Its folder and its team chat are about it: they join it, never a Project beside it.
+    joined = db.execute(text("SELECT name FROM thread_registry WHERE origin = 'entities' ORDER BY name")).scalars()
+    assert list(joined) == ["Harborline team", "cs481"]
+    assert db.execute(text("""SELECT count(*) FROM nodes WHERE type = 'Project'
+                              AND props->>'derived' IN ('true', 'threads')""")).scalar() == 1
     before = (name, held)
     pipeline.run(db)
     assert (course_thread(db)[1], records(db, tid)) == before  # a second run changes nothing
@@ -331,8 +337,9 @@ def test_a_class_found_under_its_project_and_its_demo_day_is_one_thread(db):
 
 @pytest.mark.usefixtures("local_models")
 def test_a_class_found_as_two_threads_before_comes_together(db):
-    """A registry from before the course was seeded holds the project and the event as threads of their own: they
-    name one course in one term, so they are one thread, with no model."""
+    """A registry from before the course was seeded holds the project and the event as threads of their own, and you
+    named the project: they name one course in one term, so they are one thread, with no model. They are its parts,
+    not the class: the name you gave the project doesn't name the class."""
     capstone(db)
     for key, term, a, b in (("thread:harborline", "Harborline", at(104), at(130)),
                             ("thread:demo-day", "Demo Day", at(166), at(172))):
@@ -340,13 +347,18 @@ def test_a_class_found_as_two_threads_before_comes_together(db):
                                                         judged)
                            VALUES (:k, :n, 'thread', ARRAY[CAST(:t AS text)], :a, :b, 'active', 'burst', false)"""),
                    {"k": key, "n": f"{term} · then", "t": term, "a": a, "b": b})
+    db.execute(text("""INSERT INTO overrides (op, node_keys, value)
+                       VALUES ('rename', '{Project:thread:harborline}', 'Harbor shuttle app')"""))
     db.commit()
     pipeline.run(db)
     tid, name = course_thread(db)
-    assert name.startswith("CS 481")  # the class keeps the thread; its project and its event fold in
+    assert name.startswith("CS 481")  # the class keeps the thread and its name; its project and its event fold in
     aliases = set(db.execute(text("SELECT jsonb_array_elements_text(props->'aliases') FROM nodes WHERE id = :t"),
                              {"t": tid}).scalars())
     assert {"Harborline · then", "Demo Day · then"} <= aliases
+    assert db.execute(text("""SELECT key, merged_by FROM thread_registry WHERE key IN ('thread:harborline',
+                              'thread:demo-day') ORDER BY key""")).all() == [
+        ("thread:demo-day", "part"), ("thread:harborline", "part")]
 
 
 def test_a_shared_course_code_within_one_term_is_one_thread():

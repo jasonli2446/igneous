@@ -91,7 +91,7 @@ def entity(node_id: int = Path(ge=1), items: int = Query(30, ge=1, le=200), s: S
     # by its id. A name you gave a Project folded into it names it too, unless you named it yourself
     # (overrides.given_names): then the renames listed are those of the Project that name came from.
     key = f"Project:{p['key']}"
-    named = overrides.given_names(overrides.load(s), merges(s)).get(key)
+    named = overrides.given_names(overrides.load(s), merges(s, parts=False)).get(key)
     shaped = [dict(r) for r in s.execute(text("""
         SELECT id AS override_id, op, value, created_at FROM overrides
         WHERE undone_at IS NULL AND ((op IN ('hide', 'merge') AND node_keys[1] = :k)

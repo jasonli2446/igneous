@@ -42,14 +42,17 @@ def follow(folded: dict[str, str], key: str) -> str:
     return key
 
 
-def merges(s: Session) -> dict[str, str]:
-    """Every Project folded into another, by natural key: the registry's merged rows (threads found to be one, and the
-    Project of a folder, series or chat that joined the thread it is about: graph/entities.py) and merges you made in
-    the inspector, each mapped to the Project it ends up in."""
+def merges(s: Session, parts: bool = True) -> dict[str, str]:
+    """Every Project folded into another, by natural key: the registry's merged rows (threads found to be one, a class's
+    project or demo day folded in as its part, and the Project of a folder, series or chat that joined the thread it
+    is about: graph/entities.py) and merges you made in the inspector, each mapped to the Project it ends up in. With
+    `parts` False a part stays itself: it is not the class, so a name you gave it names nothing else
+    (graph/overrides.py `given_names`)."""
     from igneous.graph import overrides
 
     folded = {f"Project:{k}": f"Project:{m}" for k, m in s.execute(text(
-        "SELECT key, merged_into FROM thread_registry WHERE status = 'merged' AND merged_into IS NOT NULL"))}
+        "SELECT key, merged_into FROM thread_registry WHERE status = 'merged' AND merged_into IS NOT NULL"
+        + ("" if parts else " AND merged_by IS DISTINCT FROM 'part'")))}
     folded.update(overrides.plan(overrides.load(s)).merges)
     return {k: follow(folded, k) for k in folded}
 

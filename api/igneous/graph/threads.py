@@ -28,12 +28,15 @@ runs attach new records to it by its defining terms, with no model call, and jud
             be read, within the run's budget, unless you renamed it (one you merged others into stays, whatever
             the judge says)
   rejected  judged not a thread; never built, never judged again. What had been merged into it (found to be the same
-            thing) stands on its own again; the entities stage places again an anchor that had joined it.
+            thing, or a part of it) stands on its own again; the entities stage places again an anchor that had
+            joined it.
   merged    a facet of the thread it was folded into (merged_into): two found to be one (graph/resolve_threads.py), a
-            part of a class (registered as its facet, unjudged), or a merge you made (merged_by 'user'). Its own terms
-            and span keep finding its records, for that thread. The entities stage keeps one too (origin 'entities', no
-            terms) for each folder, series or chat a thread is about: that stage adds its records itself, and the row
-            makes what you said about it hold for the thread.
+            part of a class (merged_by 'part': its project or its demo day, registered as its facet unjudged, or found
+            by graph/resolve_threads.py), or a merge you made (merged_by 'user'). Its own terms and span keep finding its
+            records, for that thread. A part is not the class: a name you gave it doesn't name the class
+            (graph/derived.py `merges`). The entities stage keeps one too (origin 'entities', no terms) for each folder,
+            series or chat a thread is about: that stage adds its records itself, and the row makes what you said about
+            it hold for the thread.
 
 A failed model call writes no row (the candidate is judged on a later run), and the budget (JUDGE_BUDGET model calls)
 is spent only on candidates that are new. Profile projects (graph/profile.py) are pinned rows: built whenever a record
@@ -90,6 +93,7 @@ COURSE_SQL = r"\m[A-Za-z]{2,5} ?[0-9]{3}\M"  # the same, as a Postgres regular e
 COURSE_TITLES = source_catalog.values({"mail", "calendar"})  # where a class is named in titles: mail, calendar
 TERM_GAP = timedelta(days=45)  # a course's mentions with no longer gap between them are one term
 MOSTLY = 0.5  # of a candidate's records naming a course code inside its term, for the candidate to be part of it
+PART = "part"  # thread_registry.merged_by of a class's part (its project, its demo day): a facet, never the class
 
 
 def course_code(text_: str) -> str | None:
@@ -769,9 +773,10 @@ def run(s: Session, log=print, report=None) -> dict:
                     status = :st, updated_at = now() WHERE key = :k
             """), {"k": row.key, "n": (verdict.get("name") or row.name)[:80], "kind": verdict.get("kind"), "t": terms,
                    "c": verdict.get("confidence"), "st": "active" if keep else "rejected"})
-            if not keep:  # what was found to be the same thing stands on its own again; an anchor that joined it
-                # (origin 'entities') is the entities stage's, which places it again when it runs
-                s.execute(text("""UPDATE thread_registry SET status = 'active', merged_into = NULL, updated_at = now()
+            if not keep:  # what was found to be the same thing, or a part of it, stands on its own again; an anchor
+                # that joined it (origin 'entities') is the entities stage's, which places it again when it runs
+                s.execute(text("""UPDATE thread_registry SET status = 'active', merged_into = NULL, merged_by = NULL,
+                                      updated_at = now()
                                   WHERE status = 'merged' AND merged_into = :k AND origin <> 'entities'"""),
                           {"k": row.key})
             stats["rejudged"] += 1
@@ -808,22 +813,23 @@ def run(s: Session, log=print, report=None) -> dict:
                                       span_start=span[0], span_end=span[1], status="merged", merged_into=part,
                                       origin="name" if c.get("seed") else "burst", confidence=None,
                                       anchor=c.get("seed"), anchor_name=c.get("seed_name"), judged=False,
-                                      pinned=False, merged_by=None)
+                                      pinned=False, merged_by=PART)
                 s.execute(text("""
                     INSERT INTO thread_registry (key, name, kind, terms, span_start, span_end, status, merged_into,
-                                                 origin, confidence, anchor, anchor_name, judged)
+                                                 origin, confidence, anchor, anchor_name, judged, merged_by)
                     VALUES (:key, :name, :kind, :terms, :span_start, :span_end, :status, :merged_into, :origin,
-                            :confidence, :anchor, :anchor_name, :judged)
+                            :confidence, :anchor, :anchor_name, :judged, :merged_by)
                 """), {k: getattr(row, k) for k in ("key", "name", "kind", "terms", "span_start", "span_end", "status",
                                                     "merged_into", "origin", "confidence", "anchor", "anchor_name",
-                                                    "judged")})
+                                                    "judged", "merged_by")})
                 by_key[key] = row
                 rows.append(row)
                 found[key] = registered([row], items).get(key, {})
                 # The class again, with its new part.
                 s.execute(text("""DELETE FROM edges e USING nodes t WHERE t.id = e.dst AND t.type = 'Project'
                                   AND t.key = :k AND e.extractor = :x"""), {"k": part, "x": EXTRACTOR})
-                claimed |= _build(w, by_key[part], rows, found)
+                held[part] = _build(w, by_key[part], rows, found)
+                claimed |= held[part]
                 stats["parts"] += 1
             continue
         fresh = {k: v for k, v in c["items"].items() if k not in claimed}

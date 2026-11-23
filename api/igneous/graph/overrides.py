@@ -23,8 +23,9 @@ it builds. The edges with extractor 'user' are exactly what these intents say: o
 the correction and forgets the row), puts every Project back to its derived state (its props.original_name, neither
 renamed nor hidden), and applies every correction again. A Project can be folded into another by your merge, or by a
 rebuild that finds the two are one thing (graph/derived.py `merges`): a name you gave it then names the one it went
-into (the latest name you gave any of them), unless you named that one yourself, while a hide follows only your merges,
-so a rebuild never hides a Project because something you hid turned out to be part of it. It runs as the pipeline's last step and, when no rebuild is
+into (the latest name you gave any of them), unless you named that one yourself or it went in as a part (a class's
+project), while a hide follows only your merges, so a rebuild never hides a Project because something you hid turned
+out to be part of it. It runs as the pipeline's last step and, when no rebuild is
 running, right after each correction (graph/corrections.py). It bumps nothing: whoever publishes bumps the version.
 """
 import json
@@ -106,8 +107,9 @@ def apply(s: Session) -> dict:
     p = plan(rows)
     _registry(s, p)
     folded = merges(s)
-    return {"undone": len(undone), "merged": _merge(s, p, folded),
-            "projects": _projects(s, p, given_names(rows, folded)), "links": _links(s, p, folded)}
+    named = given_names(rows, merges(s, parts=False))
+    return {"undone": len(undone), "merged": _merge(s, p, folded), "projects": _projects(s, p, named),
+            "links": _links(s, p, folded)}
 
 
 def _registry(s: Session, p: Plan) -> None:
@@ -223,8 +225,8 @@ def _reverse(s: Session, r: dict) -> None:
 def given_names(rows: list[dict], folded: dict[str, str]) -> dict[str, dict]:
     """Project key -> the rename of yours (its override row) that names it: the latest you gave the Project itself, else
     the latest you gave a Project folded into it (a merge of yours, or a rebuild that found the two are one thing:
-    `derived.merges`). A hide follows only your own merges (`plan`): a Project a rebuild folds into another never hides
-    it."""
+    `derived.merges` without parts, since a class's project is not the class). A hide follows only your own merges
+    (`plan`): a Project a rebuild folds into another never hides it."""
     own: dict[str, dict] = {}
     inherited: dict[str, dict] = {}
     for r in sorted(rows, key=lambda r: r["id"]):
