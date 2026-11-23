@@ -17,6 +17,9 @@ from igneous.connectors.macos import read_only
 
 DEFAULT_DB = Path.home() / "Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=UTC)
+# How a note's item is made from its row. A note's fingerprint carries it, so changing what the item holds (bump it
+# then) reads every note again at the next sync, not only the notes edited since.
+READER = 2
 LOCK_FLAGS = ("ZISPASSWORDPROTECTED", "ZISLOCKED", "ZISENCRYPTED")
 
 
@@ -158,10 +161,12 @@ class AppleNotesConnector:
                     continue
                 external_id = str(identity if identity is not None else primary_key)
                 observed.add(external_id)
-                # The title lives beside the body, not in it: a renamed note must read as changed too.
-                fingerprint = hashlib.sha256(bytes(blob_value or b"") + b"\0" + str(title_value).encode()).hexdigest()
-                current[external_id] = fingerprint
-                if previous.get(external_id) == fingerprint:
+                # What the item is made of (the title lives beside the body, so a renamed note reads as changed) and
+                # how (READER).
+                fingerprint = hashlib.sha256(b"\0".join([str(READER).encode(), bytes(blob_value or b""),
+                                                         str(title_value).encode(), str(modified_value).encode()]))
+                current[external_id] = fingerprint.hexdigest()
+                if previous.get(external_id) == current[external_id]:
                     continue
                 body = decode_body(blob_value)
                 if not body:

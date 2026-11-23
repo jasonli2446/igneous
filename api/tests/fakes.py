@@ -1,7 +1,9 @@
-"""In-memory stand-ins for the Google and GitHub APIs the connectors call. Each records its calls."""
+"""In-memory stand-ins for the Google and GitHub APIs the connectors call (each records its calls), and for macOS
+refusing a database."""
 import base64
 import io
 import json
+import sqlite3
 from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
@@ -181,3 +183,10 @@ class FakePeople:
     def people(self):
         return SimpleNamespace(connections=lambda: SimpleNamespace(
             list=lambda **kwargs: Request({"connections": self.connections})))
+
+
+def refused_by_macos(*args, **kwargs):
+    """`sqlite3.connect` as macOS answers an app without Full Disk Access: the file can't be opened."""
+    error = sqlite3.OperationalError("unable to open database file")
+    error.sqlite_errorcode = sqlite3.SQLITE_CANTOPEN
+    raise error

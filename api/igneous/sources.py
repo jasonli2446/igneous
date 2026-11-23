@@ -11,6 +11,7 @@ inside the functions that use them.
 """
 import glob
 import os
+import sqlite3
 import sys
 import time
 from collections.abc import Callable
@@ -333,13 +334,13 @@ def model_use(sid: str, allowed: frozenset[str]) -> dict:
 
 def _sqlite_readable(path: str) -> str | None:
     """None if readable, else a plain-language reason (the Full Disk Access case is the usual one)."""
-    if not os.path.exists(path):
-        return f"{path} not found."
     try:
         with macos.read_only(path):
             pass
     except PermissionError:
         return "macOS is blocking access. Grant Full Disk Access (steps above), restart the API, and check again."
+    except (FileNotFoundError, sqlite3.DatabaseError) as e:
+        return str(e)
     return None
 
 

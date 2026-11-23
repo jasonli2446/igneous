@@ -7,6 +7,7 @@ import time
 import click
 import pytest
 from conftest import finished_job
+from fakes import refused_by_macos
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from typer.testing import CliRunner
@@ -169,7 +170,7 @@ def test_igneous_import_ai_export(db, tmp_path):
     assert db.execute(text("SELECT external_id FROM source_items")).scalars().all() == ["claude_ai/u1/2025-04-01"]
 
 
-def test_requirements_report_missing_client_secret_and_blocked_messages(monkeypatch, tmp_path):
+def test_requirements_report_missing_client_secret_and_why_messages_cant_be_read(monkeypatch, tmp_path):
     monkeypatch.setattr(sources.settings, "data_dir", str(tmp_path))
     ok, message = sources.check_requirements("gmail")
     assert not ok and "client_secret.json" in message
@@ -184,9 +185,12 @@ def test_requirements_report_missing_client_secret_and_blocked_messages(monkeypa
     ok, message = sources.check_requirements("imessage")
     assert not ok and "not found" in message
 
-    blocked = tmp_path / "chat.db"
-    blocked.write_text("not sqlite")
-    monkeypatch.setattr(sources.imessage, "DEFAULT_DB", blocked)
+    damaged = tmp_path / "chat.db"
+    damaged.write_text("not sqlite")
+    monkeypatch.setattr(sources.imessage, "DEFAULT_DB", damaged)
+    ok, message = sources.check_requirements("imessage")
+    assert not ok and "chat.db is not a database Igneous can read" in message and "Full Disk Access" not in message
+    monkeypatch.setattr(sources.macos.sqlite3, "connect", refused_by_macos)
     ok, message = sources.check_requirements("imessage")
     assert not ok and "Full Disk Access" in message
 

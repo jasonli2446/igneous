@@ -1,20 +1,22 @@
 """Sources read from files on this computer: the Enron maildir, Messages, Contacts, Notes and AI coding chats."""
 import gzip
+import hashlib
 import json
 import os
 import sqlite3
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from fakes import refused_by_macos
 from sqlalchemy import text
 
 from igneous.connectors import email_maildir
 from igneous.connectors.ai_chats import AIChatConnector, claude_turns
 from igneous.connectors.apple_notes import AppleNotesConnector, decode_body
-from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem, run_sync
+from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem, run_sync, save_cursor, store
 from igneous.connectors.email_maildir import MaildirConnector
 from igneous.connectors.imessage import APPLE_EPOCH, MessagesConnector, apple_time, decode_attributed
 from igneous.connectors.mac_contacts import MacContactsConnector, norm_phone
@@ -223,6 +225,30 @@ def test_a_notes_date_comes_from_the_column_its_macos_version_uses(tmp_path):
         assert item.occurred_at == expected, column
 
 
+def test_notes_an_earlier_reader_stored_are_read_again_once(db, tmp_path):
+    """An earlier reader dated a macOS note by its row number, kept a model_opt_in flag, and fingerprinted only the
+    body and title. Such a note, unchanged since, is read again once, and stored as this reader makes it."""
+    when = datetime(2025, 3, 9, 15, 30, tzinfo=UTC)
+    path, blob = tmp_path / "NoteStore.sqlite", gzip.compress(PLAN)
+    connection = sqlite3.connect(path)
+    connection.executescript("""
+        CREATE TABLE ZICCLOUDSYNCINGOBJECT (Z_PK INTEGER, ZTITLE1 TEXT, ZIDENTIFIER TEXT, ZMODIFICATIONDATE1 REAL);
+        CREATE TABLE ZICNOTEDATA (ZNOTE INTEGER, ZDATA BLOB);
+    """)
+    connection.execute("INSERT INTO ZICCLOUDSYNCINGOBJECT VALUES (7, 'Plan', 'note-7', ?)",
+                       ((when - APPLE_EPOCH).total_seconds(),))
+    connection.execute("INSERT INTO ZICNOTEDATA VALUES (7, ?)", (blob,))
+    connection.commit()
+    connection.close()
+    store(db, SourceItem("notes", "note-7", "Plan", decode_body(blob), APPLE_EPOCH + timedelta(seconds=7), "text/plain",
+                         {"path": "notes/note-7", "folders": ["notes"], "parser": "apple-notes", "model_opt_in": False}))
+    save_cursor(db, "notes", "default", {"notes": {"note-7": hashlib.sha256(blob + b"\0" + b"Plan").hexdigest()}})
+    assert run_sync(db, AppleNotesConnector(path))["updated"] == 1
+    note = db.execute(text("SELECT occurred_at, raw_meta FROM source_items WHERE external_id = 'note-7'")).one()
+    assert note.occurred_at == when and "model_opt_in" not in note.raw_meta
+    assert run_sync(db, AppleNotesConnector(path))["updated"] == 0
+
+
 def test_a_notes_store_without_its_tables_is_an_error_not_every_note_deleted(db, tmp_path):
     path = notes_db(tmp_path / "NoteStore.sqlite", [(1, "Plan", "note-1", 0, PLAN)])
     run_sync(db, AppleNotesConnector(path))
@@ -236,7 +262,7 @@ def test_a_notes_store_without_its_tables_is_an_error_not_every_note_deleted(db,
     assert stored(db, "notes") == ["note-1"]
 
 
-def test_the_mac_databases_are_closed_after_a_sync_and_a_blocked_one_says_why(db, tmp_path, monkeypatch):
+def test_the_mac_databases_are_closed_after_a_sync_and_their_errors_say_what_is_wrong(db, tmp_path, monkeypatch):
     from igneous.connectors import macos
 
     chats = chat_db(tmp_path / "chat.db")
@@ -263,10 +289,63 @@ def test_the_mac_databases_are_closed_after_a_sync_and_a_blocked_one_says_why(db
             connection.execute("SELECT 1")
     monkeypatch.setattr(macos.sqlite3, "connect", connect)
 
-    blocked = tmp_path / "blocked.db"
-    blocked.write_bytes(b"not a database")
+    # A file that isn't a database, a missing one and a refused one are three different problems.
+    copied = tmp_path / "copied.sqlite"
+    copied.write_bytes(b"not a database" * 100)
+    with pytest.raises(sqlite3.DatabaseError, match=r"copied\.sqlite is not a database Igneous can read") as damaged:
+        list(AppleNotesConnector(copied).sync({}))
+    assert "Full Disk Access" not in str(damaged.value)
+    with pytest.raises(FileNotFoundError, match=r"chat\.db not found"):
+        list(MessagesConnector(tmp_path / "gone" / "chat.db").sync({}))
+    monkeypatch.setattr(macos.sqlite3, "connect", refused_by_macos)
     with pytest.raises(PermissionError, match="Full Disk Access"):
-        list(AppleNotesConnector(blocked).sync({}))
+        list(AppleNotesConnector(notes).sync({}))
+
+
+def test_your_own_mac_records_are_read_closed_and_skipped_when_unreadable(db, tmp_path, monkeypatch):
+    """Who you are comes partly from the Mac: the handles Messages sends from and Contacts' card for you. Their
+    databases are opened like the connectors' (any folder name, always closed), and one that can't be read leaves
+    the other signals."""
+    from igneous.connectors import macos
+    from igneous.graph import self_identity
+
+    library = tmp_path / "Library ?#%20 x"  # a name the database's URI must encode
+    chats, book = library / "chat.db", library / "Sources" / "A1" / "AddressBook-v22.abcddb"
+    book.parent.mkdir(parents=True)
+    connection = sqlite3.connect(chats)
+    connection.executescript("""
+        CREATE TABLE message (is_from_me INTEGER, destination_caller_id TEXT);
+        INSERT INTO message VALUES (1, 'Me@Example.com'), (1, '(614) 555-0199'), (0, 'them@example.com');
+    """)
+    connection.close()
+    connection = sqlite3.connect(book)
+    connection.executescript("""
+        CREATE TABLE ZABCDRECORD (Z_PK INTEGER, ZCONTAINERWHERECONTACTISME INTEGER);
+        CREATE TABLE ZABCDPHONENUMBER (ZOWNER INTEGER, ZFULLNUMBER TEXT);
+        CREATE TABLE ZABCDEMAILADDRESS (ZOWNER INTEGER, ZADDRESS TEXT);
+        INSERT INTO ZABCDRECORD VALUES (1, 1), (2, NULL);
+        INSERT INTO ZABCDEMAILADDRESS VALUES (1, ' me@example.com'), (2, 'sam@example.com');
+    """)
+    connection.close()
+    monkeypatch.setattr(self_identity, "CHAT_DB", str(chats))
+    monkeypatch.setattr(self_identity, "CONTACT_DBS", str(library / "Sources" / "*" / "AddressBook-v22.abcddb"))
+    opened, connect = [], sqlite3.connect
+
+    def recording(*args, **kwargs):
+        opened.append(connect(*args, **kwargs))
+        return opened[-1]
+
+    monkeypatch.setattr(macos.sqlite3, "connect", recording)
+    mac = [signal for signal in self_identity._signals(db) if signal[0] in ("imessage_handle", "me_card")]
+    assert sorted(mac) == [("imessage_handle", "+16145550199"), ("imessage_handle", "me@example.com"),
+                           ("me_card", "me@example.com")]
+    assert len(opened) == 2
+    for connection in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+    chats.write_bytes(b"not a database" * 100)
+    assert [signal for signal in self_identity._signals(db) if signal[0] in ("imessage_handle", "me_card")] == [
+        ("me_card", "me@example.com")]
 
 
 def test_the_locked_flag_is_chosen_the_same_way_every_run(tmp_path):
