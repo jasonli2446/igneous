@@ -1030,9 +1030,13 @@ def settle(s: Session, cards: dict) -> dict:
           AND NOT EXISTS (SELECT 1 FROM spine_edge_support x WHERE x.edge_id = e.id)
         RETURNING e.id, e.src, e.dst, e.type, e.valid_from
     """), {"q": edge_q}).all() if edge_q else []
-    # What nothing holds any more: node_held is the one rule, which a deleted record's trigger follows too.
-    doomed = s.execute(text("SELECT id FROM nodes WHERE id = ANY(:q) AND NOT node_held(id, NULL) ORDER BY id"),
-                       {"q": node_q}).scalars().all() if node_q else []
+    # What nothing holds any more: node_held is the one rule, which a deleted record's trigger follows too. (Most
+    # queued nodes have support again; the anti-join spares them the function call.)
+    doomed = s.execute(text("""
+        SELECT n.id FROM nodes n WHERE n.id = ANY(:q)
+          AND NOT EXISTS (SELECT 1 FROM spine_node_support x WHERE x.node_id = n.id) AND NOT node_held(n.id, NULL)
+        ORDER BY n.id
+    """), {"q": node_q}).scalars().all() if node_q else []
     orphans = set()
     if doomed:
         # Replies that quoted a message about to go may now quote another one unambiguously.
