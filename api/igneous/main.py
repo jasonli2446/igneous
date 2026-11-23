@@ -156,8 +156,9 @@ async def _start_import(source: str | Callable[[], str], req: ImportRequest, pre
 
 @app.post("/import/ai-export")
 async def import_ai_export(request: Request):
-    """Import a ChatGPT or Claude.ai export (or Gemini's MyActivity.json from Takeout) as a background job; poll
-    /jobs/{id}. Send a multipart `file` (the zip as emailed, or the conversations.json inside it) or JSON/form
+    """Import a ChatGPT or Claude.ai export (or Gemini's MyActivity.json from Takeout) as a background job, the job of
+    the entry it shows under (Google Takeout for Gemini's); poll /jobs/{id}. Send a multipart `file` (the zip as
+    emailed, or the conversations.json inside it) or JSON/form
     `{"path": ...}` to read it in place, and `provider` (chatgpt, claude_ai, gemini) only if it isn't recognised.
     The job reads one conversation at a time and stores only the redacted day-items; the upload is removed when it
     ends. Its result: {provider, conversations, inserted, updated, unchanged, redactions}."""
@@ -173,7 +174,7 @@ async def import_ai_export(request: Request):
         found["provider"] = ai_exports.preflight(files[0], req.provider)
         return lambda sess, progress: ai_exports.run_import(sess, files[0], found["provider"], progress)
 
-    return await _start_import(lambda: found["provider"], req, prepare)
+    return await _start_import(lambda: sources.EXPORT_ENTRY[found["provider"]], req, prepare)
 
 
 @app.post("/import/takeout")
@@ -197,7 +198,9 @@ async def import_takeout(request: Request):
 @app.get("/sources")
 def list_sources(s: Session = Depends(get_session)):
     """Every connector and import format with plain-language setup, requirement checks, and live status, plus
-    whether hosted model calls are on and which sources they may read."""
+    whether hosted model calls are on and which sources they may read. A job whose process stopped (a command whose
+    terminal closed) shows as failed, never as running."""
+    jobs.fail_interrupted(s)
     return {"sources": sources.describe(s), "model": model_status()}
 
 
@@ -307,6 +310,8 @@ def github_token(body: GithubToken, s: Session = Depends(get_session)):
 
 @app.get("/jobs")
 def list_jobs(s: Session = Depends(get_session)):
+    """The latest jobs, newest first; one whose process stopped shows as failed, as on GET /sources."""
+    jobs.fail_interrupted(s)
     return {"jobs": [sources.job_view(j) for j in jobs.recent(s)]}
 
 

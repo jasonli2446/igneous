@@ -109,7 +109,9 @@ upload or path box inline) and **On this computer** (Messages, Contacts, Claude 
 Notes). Each entry says what it reads, shows its status and last sync or import, and lists the steps to connect it.
 Messages, Contacts and Apple Notes, the scheduled sync, and opening a local file from the reader work on macOS only.
 The page shows `GET /sources`, the registry in `api/igneous/sources.py`. That registry also builds each source's
-connector, so **Sync now**, `igneous sync` and the scheduled sync read a source the same way. Everything is read-only.
+connector, so **Sync now**, `igneous sync` and the scheduled sync read a source the same way, each as the same job: the
+page shows a source syncing whichever of them started it, and a second sync of it is refused until the first ends.
+Everything is read-only.
 
 Connect or import at least one source, then press **Rebuild** under "Build the graph". Rebuild runs the same pipeline as
 `igneous pipeline` (without model extraction): it reads what is new in your sources into people, conversations and
@@ -176,6 +178,9 @@ Then uncomment `IGNEOUS_DATABASE_URL` in `api/.env` (step 3) and restart the API
 
 Everything on the Sources page has a CLI equivalent (run from `api/`; `uv run igneous --help` lists all commands).
 The CLI uses the same `IGNEOUS_DATABASE_URL`, so `igneous sync ...` fills whichever database `api/.env` selects.
+A command that syncs, imports or builds runs as the job its button on the Sources page starts (`igneous pipeline`,
+`extract` and `resolve` as Rebuild's), so the page shows it, and while one runs, the same job from the page, the
+scheduled sync or another command is refused: the command says so and exits with 1.
 
 ```bash
 cd api

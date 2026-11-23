@@ -7,7 +7,7 @@ from pipeline_data import card, day, event, linkedin_profile, local_models, mail
 from sqlalchemy import text
 from typer.testing import CliRunner
 
-from igneous import cli, llm, pipeline
+from igneous import cli, jobs, llm, pipeline
 from igneous.graph import overrides
 
 pytestmark = pytest.mark.usefixtures("local_models")  # embeddings without a model download, no hosted calls
@@ -85,6 +85,9 @@ def test_the_cli_prints_a_line_per_stage(db):
     out = CliRunner().invoke(cli.app, ["pipeline", "--stage", "spine", "--stage", "self"])
     assert out.exit_code == 0, out.output
     assert [line.split()[0] for line in out.output.splitlines()] == ["redact", "spine", "self", "corrections"]
+    build = jobs.latest_by_source(db)["pipeline"]  # Rebuild's job: the Sources page shows the run as it shows one
+    assert (build["kind"], build["status"], build["progress"]["steps"]) == ("pipeline", "succeeded", 4)
+    assert set(build["result"]) == {"redact", "spine", "self", "corrections"}
 
 
 def test_a_first_build_has_the_backbone_and_never_makes_you_a_member_of_your_projects(db):

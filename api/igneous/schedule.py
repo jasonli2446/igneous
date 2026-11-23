@@ -3,7 +3,8 @@ rebuild the graph if anything is new.
 
 A source counts as set up once it has items or a sync left its cursor, so sources whose requirements merely happen to
 pass (a Documents folder, a downloaded Enron corpus) are never read uninvited, and the Demo group never is. Each sync
-is a job like the Sources page's, so the page shows it running, and a source the page is already syncing is skipped.
+is a job like the Sources page's, so the page shows it running, and a source already syncing (Sync now, `igneous
+sync`) is skipped; so is the rebuild while another build runs.
 """
 import os
 import platform
@@ -14,7 +15,7 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from igneous import jobs, sources
+from igneous import jobs, pipeline, sources
 from igneous.config import API_DIR
 from igneous.db import SessionLocal
 
@@ -71,11 +72,15 @@ def due(s: Session) -> list[dict]:
 
 def _pipeline_due(s: Session, changed: bool) -> bool:
     """Whether to rebuild: a sync changed something, the last rebuild didn't finish, items changed since it started,
-    or a change (such as a deletion) is still pending for a stage (graph/dirty.py)."""
+    or a change (such as a deletion) is still pending for a stage (graph/dirty.py). A build job that succeeded counts
+    as a rebuild only when it ran every stage a rebuild runs (its result names each, pipeline.run): one that ran some
+    (`igneous pipeline --stage`, `igneous extract`, `igneous resolve`) leaves the rest behind."""
     if changed:
         return True
-    last = s.execute(text("SELECT status, started_at FROM jobs WHERE source = 'pipeline' "
-                          "ORDER BY started_at DESC LIMIT 1")).first()
+    last = s.execute(text("""SELECT status, started_at FROM jobs
+                             WHERE source = 'pipeline' AND (status <> 'succeeded' OR result ?& CAST(:stages AS text[]))
+                             ORDER BY started_at DESC LIMIT 1"""),
+                     {"stages": [st.name for st in pipeline.plan()]}).first()
     if last is None or last.status != "succeeded":
         return True
     return bool(s.execute(text("SELECT EXISTS (SELECT 1 FROM source_items WHERE updated_at > :t) "
