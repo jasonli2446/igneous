@@ -40,7 +40,9 @@ and the production build for the web app. CI runs them too, and audits the locke
 ### 3. Configuration (`api/.env`)
 
 Every API setting is an environment variable with the prefix `IGNEOUS_`; you can put them in `api/.env`
-(git-ignored; read wherever a command starts, and an environment variable overrides it). A minimal file:
+(git-ignored; read wherever a command starts, and an environment variable overrides it). `api/.env.example` lists
+every setting with its default and what it means, all commented out: `cp api/.env.example api/.env`, then
+uncomment what you change. The ones most setups touch:
 
 ```bash
 # Which database to use. Omit for the Enron demo DB "igneous". Use a separate DB for your own data (see below).
@@ -79,8 +81,8 @@ make web    # terminal 2: cd web && npm install && npm run dev                 (
 ```
 
 Always run the API with `--reload`; otherwise you test stale code. Both Make targets already do. The web app talks to
-`http://localhost:8000` unless `NEXT_PUBLIC_API_URL` is set. `docker compose up` runs the API and web in containers
-instead, against the `igneous` database; the API container reads `api/.env` for its other settings.
+`http://localhost:8000` unless `NEXT_PUBLIC_API_URL` is set (`web/.env.example`). `docker compose up` runs the API and
+web in containers instead, against the `igneous` database; the API container reads `api/.env` for its other settings.
 
 ### 5. Open the Sources page and follow it
 
