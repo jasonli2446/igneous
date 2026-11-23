@@ -106,17 +106,23 @@ export type LinkOption = { label: string; type: string; src: number; dst: number
 
 // ---- Corrections ----
 
-/** When a correction applies: now, or when the rebuild that is running publishes (`note` says so in words). */
-export type Applied = { applied: "now" } | { applied: "on_publish"; note: string };
-/** A node pair a correction touched (identity heads, as the graph shows them), and whether any link still joins it. */
-export type Pair = { a: number; b: number; still_linked: boolean };
+/** When a correction applies: now; when the rebuild that is running publishes (GET /graph/version says when); or
+ *  with the next rebuild, when it couldn't apply now and none is running. `note` says which in words. */
+export type Applied = { applied: "now" } | { applied: "on_publish" | "next_rebuild"; note: string };
+/** A node pair a correction touched (identity heads, as the graph shows them), and whether a link the graph draws
+ *  joins it once the correction applies: null until then. */
+export type Pair = { a: number; b: number; still_linked: boolean | null };
 /** A correction's answer: when it applies and the pairs it touched (none for a rename, a hide or a merge). */
 export type Settled = Applied & { pairs?: Pair[] };
 
 type PairCorrection = Applied & { override_id: number; pairs: Pair[] };
 export type Rejected = PairCorrection & { removed: number; also_removed: number; edges: number[] };
 export type EntityCorrected = Applied & { override_id: number; id: number };
-export type LinkAdded = Applied & { id: number | null; src: number; dst: number; type: string; override_id: number | null };
+/** A connection you added: `id` is its link once it applies (null until then); `override_id` undoes it (null for a
+ *  Project put under a Project, which removeLink takes out). */
+export type LinkAdded = Applied & {
+  id: number | null; src: number; dst: number; type: string; override_id: number | null; pairs: Pair[];
+};
 export type Undone = Applied & { undone: number; op: string; pairs: Pair[] };
 
 // ---- Search and Ask ----
@@ -164,10 +170,11 @@ export type SearchMode = "hybrid" | "lexical" | "dense";
 export type SearchOptions = { sources?: string[]; person?: string; from?: string; to?: string; mode?: SearchMode };
 
 type AskCommon = { filters: AppliedFilters; timing: { retrieve_s: number; total_s?: number } };
-/** An answer, or why there is none. `no_opted_in_sources`: nothing the question may read is opted in to the hosted
- *  model, so nothing was sent and `answer` says how to change that. */
+/** An answer, or why there is none. With a `reason` nothing was sent to the hosted model, and `answer` says how to
+ *  change that: `no_opted_in_sources` (nothing the question may read is opted in) or `model_not_set_up` (hosted calls
+ *  are off, or no key is saved). */
 export type AskResult = AskCommon & (
-  | { reason: "no_opted_in_sources"; answerable: false; answer: string; citations: Hit[]; evidence: Hit[] }
+  | { reason: "no_opted_in_sources" | "model_not_set_up"; answerable: false; answer: string; citations: Hit[]; evidence: Hit[] }
   | { reason?: undefined; answerable: boolean; answer: string; citations: Hit[]; evidence: Hit[] }
 );
 
@@ -360,7 +367,8 @@ export const api = {
   askSuggestions: (signal?: AbortSignal) => get<string[]>("/ask/suggestions", {}, signal),
 
   // ---- The graph
-  graphVersion: (signal?: AbortSignal) => get<{ version: string }>("/graph/version", {}, signal),
+  /** The graph's change token, and whether a rebuild is running (a correction made now applies when it publishes). */
+  graphVersion: (signal?: AbortSignal) => get<{ version: string; rebuilding: boolean }>("/graph/version", {}, signal),
   view: (seed?: number, signal?: AbortSignal) => get<View>("/graph/view", { seed }, signal),
   expandNode: (seed: number, node: number, visible: number[], signal?: AbortSignal) =>
     get<Subgraph>("/graph/expand", { seed, node, visible }, signal),
@@ -375,7 +383,8 @@ export const api = {
   entity: (id: number, signal?: AbortSignal) => get<EntityDetail>(`/graph/entity/${id}`, {}, signal),
   item: (id: number, signal?: AbortSignal) => get<ItemDetail>(`/items/${id}`, {}, signal),
   openItem: (id: number) => send<{ opened: string }>("POST", `/items/${id}/open`),
-  suggestions: (signal?: AbortSignal) => get<{ suggestions: Suggestion[] }>("/graph/suggestions", {}, signal),
+  /** The links to check, most confident first: the first 50 of `total`. */
+  suggestions: (signal?: AbortSignal) => get<{ suggestions: Suggestion[]; total: number }>("/graph/suggestions", {}, signal),
   linkOptions: (a: number, b: number, signal?: AbortSignal) =>
     get<{ options: LinkOption[] }>("/graph/link/options", { a, b }, signal),
 

@@ -12,7 +12,7 @@ import {
   API, ApiError, api, type GEdge, type GNode, type LinkAdded, type NodeDetail, type Pair, type Settled, type Subgraph,
   type Thing,
 } from "@/lib/api";
-import { type Corrected, pairKey } from "@/lib/corrections";
+import { type Corrected, type LinkChange, linkKey, pairKey } from "@/lib/corrections";
 import { nodeColor, sectionOf } from "@/lib/graph-style";
 import { useLiveSearch, useRequest } from "@/lib/hooks";
 
@@ -20,14 +20,17 @@ import { useLiveSearch, useRequest } from "@/lib/hooks";
 const Graph3D = dynamic(() => import("@/components/Graph3D"), { ssr: false });
 
 /** Something added on top of the centre's view, hanging off the node `by`: an expansion (`by`'s connections), a node
- *  opened from the panel, or a link you made. Layers apply in the order they were added. */
+ *  opened from the panel, or a link you made (keyed by `linkKey`). Layers apply in the order they were added. */
 type Layer = { key: string; kind: "expand" | "open" | "link"; by: number; nodes: GNode[]; edges: GEdge[] };
-/** The centre (the API's seed), its view, the layers on top, and the node pairs corrections took apart (`cut`: no link
- *  joins them on screen). */
-type Shown = { seed: number; base: Subgraph; layers: Layer[]; cut: ReadonlySet<string> };
-/** What a correction just did. `note`: it applies when the rebuild that is running publishes, so the notice stays
- *  until then. */
-type Toast = { text: string; note?: string; undo?: () => Promise<Settled> };
+/** The centre (the API's seed), its view, the layers on top, the node pairs corrections took apart (`cut`: no link
+ *  joins them on screen), and the links you made that corrections took away (`gone`, by layer key). */
+type Shown = { seed: number; base: Subgraph; layers: Layer[]; cut: ReadonlySet<string>; gone: ReadonlySet<string> };
+/** What a correction changes on screen once it applies: the node pairs it touched, and a link you made that it
+ *  takes away or draws (with the layer that draws it, for a link just made). */
+type Effect = { pairs: Pair[]; link?: LinkChange & { layer?: Layer } };
+/** What a correction just did, how to undo it, and the link it changed. `note`: it applies later (when the running
+ *  rebuild publishes, or with the next rebuild), so the notice stays until you dismiss it. */
+type Toast = { text: string; note?: string; undo?: () => Promise<Settled>; link?: Effect["link"] };
 /** What went wrong, and what Retry does again. */
 type Failure = { text: string; retry?: () => void };
 /** How a new centre changes the trail: added to it, or back to the previous one. */
@@ -42,15 +45,15 @@ const edgeKey = (e: GEdge) => `${e.src}-${e.dst}-${e.type}`;
 const asNode = ({ id, type, name, key, category }: NodeDetail): GNode =>
   ({ id, type, name, key, category, kind: "entity", strength: 0.5, expandable: true });
 
-/** What is on screen: the centre's view plus every layer whose node is still shown, each node and link once, and no
- *  link between a pair a correction took apart. A node opened from the panel or linked by you hangs off one node
- *  only: when that pair is taken apart, it leaves with the link. */
-function compose(base: Subgraph, layers: Layer[], cut: ReadonlySet<string>) {
+/** What is on screen: the centre's view plus every layer whose node is still shown, each node and link once, no link
+ *  between a pair a correction took apart, and no link you made that a correction took away. A node opened from the
+ *  panel or linked by you hangs off one node only: when that pair is taken apart, it leaves with the link. */
+function compose(base: Subgraph, layers: Layer[], { cut, gone }: Pick<Shown, "cut" | "gone">) {
   const nodes = new Map(base.nodes.map((n) => [n.id, n]));
   const edges = new Map(base.edges.map((e) => [edgeKey(e), e]));
   const live: Layer[] = [];
   for (const layer of layers) {
-    if (!nodes.has(layer.by)) continue;
+    if (!nodes.has(layer.by) || gone.has(layer.key)) continue;
     if (layer.kind !== "expand" && cut.has(pairKey(layer.by, layer.nodes[0].id))) continue;
     live.push(layer);
     for (const n of layer.nodes) if (!nodes.has(n.id)) nodes.set(n.id, n);
@@ -65,7 +68,7 @@ function compose(base: Subgraph, layers: Layer[], cut: ReadonlySet<string>) {
 function fold(shown: Shown, id: number) {
   let rest = shown.layers.filter((l) => l.by !== id || l.kind === "link");
   for (;;) {
-    const { live } = compose(shown.base, rest, shown.cut);
+    const { live } = compose(shown.base, rest, shown);
     if (live.length === rest.length) return rest;
     rest = live;
   }
@@ -79,15 +82,31 @@ function merge(current: Layer[], replayed: Layer[], before: Layer[]) {
   return current.flatMap((l) => fresh.get(l.key) ?? (had.has(l.key) ? [] : [l]));
 }
 
-/** The pairs taken apart once a correction's answer is in: a pair no link joins any more is cut, one joined again is
- *  not (a link the API draws comes back with the refresh that follows). */
-function recut(cut: ReadonlySet<string>, pairs: Pair[] = []) {
-  const next = new Set(cut);
-  for (const p of pairs) {
-    if (p.still_linked) next.delete(pairKey(p.a, p.b));
-    else next.add(pairKey(p.a, p.b));
+/** What is on screen once corrections have applied, in order. A pair the answer says no drawn link joins is taken
+ *  apart and one it says a link joins again is joined; a pair whose outcome wasn't known when it was answered (it
+ *  waited for a rebuild) is taken apart, and the refresh that follows joins it again if the API draws a link between
+ *  it. A link you made is taken away, or drawn again (with its layer, when it was just made). */
+function settled(s: Shown, effects: Effect[]): Shown {
+  const cut = new Set(s.cut), gone = new Set(s.gone);
+  let layers = s.layers;
+  for (const { pairs, link } of effects) {
+    for (const p of pairs) {
+      if (p.still_linked) cut.delete(pairKey(p.a, p.b));
+      else cut.add(pairKey(p.a, p.b));
+    }
+    if (!link) continue;
+    if (!link.shown) {
+      gone.add(link.key);
+      continue;
+    }
+    gone.delete(link.key);
+    const { layer } = link;
+    if (layer) {
+      layers = [...layers.filter((l) => l.key !== layer.key), layer];
+      cut.delete(pairKey(layer.by, layer.nodes[0].id));
+    }
   }
-  return next;
+  return { ...s, layers, cut, gone };
 }
 
 export default function Explorer() {
@@ -110,6 +129,8 @@ export default function Explorer() {
   const [toast, setToast] = useState<Toast | null>(null);
   // A correction waits for the running rebuild to publish: the graph version is checked more often until it does.
   const [awaiting, setAwaiting] = useState(false);
+  // What corrections that wait for a rebuild change on screen once they apply, in the order they were made.
+  const pending = useRef<Effect[]>([]);
   // Bumped by every correction and undo, and when the graph changes, so the open panel shows the result.
   const [revision, setRevision] = useState(0);
   const [query, setQuery] = useState("");
@@ -117,22 +138,22 @@ export default function Explorer() {
 
   // A new centre bumps the generation and aborts every request in flight: no reply for an older centre ever lands.
   const generation = useRef(0);
-  const inFlight = useRef<Record<"seed" | "expand" | "refresh" | "open", AbortController | null>>(
-    { seed: null, expand: null, refresh: null, open: null });
+  const inFlight = useRef<Record<"seed" | "expand" | "refresh" | "open" | "link", AbortController | null>>(
+    { seed: null, expand: null, refresh: null, open: null, link: null });
   // The graph version the centre's view was built at; the poll below refreshes the view when the API's moves on.
   const builtAt = useRef<{ seed: number; version: string } | null>(null);
   const self = useRef<number | null>(null); // your own node: its graph lives at "/", every other centre at /?seed=
   const enterFor = useRef<string | null>(null); // Enter was pressed while this query's matches were on their way
   const started = useRef(false);
 
-  const { data, live } = useMemo(() => (shown ? compose(shown.base, shown.layers, shown.cut) : { data: EMPTY, live: [] }), [shown]);
+  const { data, live } = useMemo(() => (shown ? compose(shown.base, shown.layers, shown) : { data: EMPTY, live: [] }), [shown]);
   const expanded = useMemo(() => new Set(live.filter((l) => l.kind === "expand").map((l) => l.by)), [live]);
   const seed = shown?.seed;
   const current = trail[trail.length - 1];
   const previous = trail[trail.length - 2];
   // The links the verifier was unsure about, for you to answer; fetched again after every correction.
-  const toCheck = useRequest("suggestions", (signal) => api.suggestions(signal).then((r) => r.suggestions), revision);
-  const checkCount = toCheck.data?.length ?? 0;
+  const toCheck = useRequest("suggestions", (signal) => api.suggestions(signal), revision);
+  const checkCount = toCheck.data?.total ?? 0;
 
   /** Centre the graph on `id` (null: you). Every caller sets the loading state first: see go(). */
   async function load(id: number | null, step: Step, open = false) {
@@ -150,7 +171,7 @@ export default function Explorer() {
         setEmpty(g.reason);
         return;
       }
-      const next: Shown = { seed: g.seed, base: { nodes: g.nodes, edges: g.edges }, layers: [], cut: NONE };
+      const next: Shown = { seed: g.seed, base: { nodes: g.nodes, edges: g.edges }, layers: [], cut: NONE, gone: NONE };
       // The API centres on you when asked for no one; you are also the person keyed OWNER_KEY, found by name.
       const centre = g.nodes.find((n) => n.id === g.seed);
       if (id === null || centre?.key === OWNER_KEY) self.current = g.seed;
@@ -185,17 +206,20 @@ export default function Explorer() {
     void load(id, step, open);
   }
 
-  // Next keeps this page alive while you use the other tabs and runs its effects again when you come back. Only the
-  // first mount loads (the centre the URL names, or you), so the graph is as you left it when you return.
-  const openFirst = useEffectEvent(() => {
+  // Next keeps this page alive while you use the other tabs and runs its effects again when you come back. The first
+  // mount loads the centre the URL names, or you; coming back keeps the graph as you left it, unless the URL names
+  // another centre (Search links a person to /?seed=).
+  const onShow = useEffectEvent(() => {
     const asked = Number(new URLSearchParams(window.location.search).get("seed"));
-    void load(Number.isSafeInteger(asked) && asked > 0 ? asked : null, "push");
+    const named = Number.isSafeInteger(asked) && asked > 0 ? asked : null;
+    if (!started.current) {
+      started.current = true;
+      void load(named, "push");
+    } else if (named !== null && named !== seed) {
+      go(named, "push");
+    }
   });
-  useEffect(() => {
-    if (started.current) return;
-    started.current = true;
-    openFirst();
-  }, []);
+  useEffect(() => onShow(), []);
 
   // The URL names the centre, so a reload or a shared link opens the same graph. It is written again when this
   // page is shown, since the Graph tab links to plain "/".
@@ -214,7 +238,7 @@ export default function Explorer() {
     inFlight.current.expand = request;
     setError(null);
     try {
-      const visible = compose(from.base, from.layers, from.cut).data.nodes.map((n) => n.id);
+      const visible = compose(from.base, from.layers, from).data.nodes.map((n) => n.id);
       const got = await api.expandNode(from.seed, id, visible, request.signal);
       // A group whose members are all on screen returns only links (no new nodes): keep them, they're the point.
       if (mine !== generation.current || (!got.nodes.length && !got.edges.length)) return;
@@ -250,7 +274,7 @@ export default function Explorer() {
       const base = { nodes: view.nodes, edges: view.edges };
       const layers: Layer[] = [];
       for (const layer of from.layers) {
-        const on = compose(base, layers, from.cut).data.nodes;
+        const on = compose(base, layers, from).data.nodes;
         if (!on.some((n) => n.id === layer.by)) continue;
         if (layer.kind === "expand") {
           const got = await api.expandNode(from.seed, layer.by, on.map((n) => n.id), request.signal);
@@ -279,16 +303,30 @@ export default function Explorer() {
   }
 
   // The graph is long-lived: check the API's change token now and every 30 s (every 3 s while a correction waits for
-  // a rebuild to publish; only while this page is shown), and refresh the graph and the open panel in place when it
-  // moved, e.g. after a rebuild on the Sources page.
+  // the running rebuild to publish; only while this page is shown), and refresh the graph and the open panel in place
+  // when it moved, e.g. after a rebuild on the Sources page. Once it moved with no rebuild running, every correction
+  // made before is on the graph, those that waited for a rebuild among them.
   const checkVersion = useEffectEvent(async (signal: AbortSignal) => {
     const built = builtAt.current;
     if (!built || built.seed !== seed) return;
-    const { version } = await api.graphVersion(signal);
-    if (signal.aborted || builtAt.current !== built || version === built.version) return;
-    if (awaiting) {
-      setAwaiting(false);
-      setToast({ text: "The rebuild published: your corrections are on the graph." });
+    const { version, rebuilding } = await api.graphVersion(signal);
+    if (signal.aborted || builtAt.current !== built) return;
+    if (version === built.version) {
+      if (awaiting && !rebuilding) {
+        setAwaiting(false);
+        setToast({ text: "The rebuild stopped before it published.",
+          note: "Your corrections are saved and apply with the next rebuild." });
+      }
+      return;
+    }
+    if (!rebuilding) {
+      const waited = pending.current;
+      pending.current = [];
+      if (waited.length) setShown((s) => (s ? settled(s, waited) : s));
+      if (awaiting) {
+        setAwaiting(false);
+        setToast({ text: "The rebuild published: your corrections are on the graph." });
+      }
     }
     setRevision((n) => n + 1);
     await refresh();
@@ -303,15 +341,15 @@ export default function Explorer() {
     return () => { window.clearInterval(timer); request.abort(); };
   }, [seed, awaiting]);
 
-  // A connection picked in the panel joins the graph you're on, linked to what you were looking at: only a search
-  // or Back changes the centre.
+  // A connection picked in the panel joins the graph you're on, linked to what you were looking at (or to the centre,
+  // when a correction took that pair apart): only a search or Back changes the centre.
   async function openFromPanel(id: number, from: number | null = selected) {
     setWhy(null);
     setChecking(false);
     if (data.nodes.some((n) => n.id === id)) return setSelected(id);
     const at = shown;
     if (!at) return;
-    const anchor = from !== null && data.nodes.some((n) => n.id === from) ? from : at.seed;
+    const anchor = from !== null && data.nodes.some((n) => n.id === from) && !at.cut.has(pairKey(from, id)) ? from : at.seed;
     const mine = generation.current;
     inFlight.current.open?.abort();
     const request = new AbortController();
@@ -332,39 +370,60 @@ export default function Explorer() {
     }
   }
 
-  /** Show what a correction's answer means now: the pairs it took apart or joined again and, once it applies, the
-   *  graph and the open panel brought up to date. One that applies when a rebuild publishes waits for it. */
-  function settle(answer: Settled) {
-    setShown((s) => (s ? { ...s, cut: recut(s.cut, answer.pairs) } : s));
+  /** Show what a correction's answer means. Once it applies: the pairs it took apart or joined again and the link
+   *  it changed, then the graph and the open panel brought up to date; applying it applied every correction made
+   *  before it, those that waited for a rebuild among them. One that applies later waits, for the running rebuild to
+   *  publish (the version check watches it) or for the next rebuild. */
+  function settle(answer: Settled, link?: Effect["link"]) {
+    const effect: Effect = { pairs: answer.pairs ?? [], link };
     setRevision((n) => n + 1);
-    if (answer.applied === "now") void refresh();
-    else setAwaiting(true);
+    if (answer.applied !== "now") {
+      pending.current = [...pending.current, effect];
+      if (answer.applied === "on_publish") setAwaiting(true);
+      return;
+    }
+    const effects = [...pending.current, effect];
+    pending.current = [];
+    setAwaiting(false);
+    setShown((s) => (s ? settled(s, effects) : s));
+    void refresh();
   }
 
   /** After a correction: say what changed and when it applies (with Undo when it can be undone), show the result in
    *  the open panel, and bring the graph up to date. `keep` is the node to stay on when the correction moved it. */
-  function corrected({ text, answer, undo, keep }: Corrected) {
-    setToast({ text, undo, note: answer.applied === "on_publish" ? answer.note : undefined });
+  function corrected({ text, answer, undo, keep, link }: Corrected) {
+    setToast({ text, undo, link, note: answer.applied === "now" ? undefined : answer.note });
     if (keep !== undefined) setSelected(keep);
-    settle(answer);
+    settle(answer, link);
   }
 
-  // A connection you added: shown at once, the other end joining the graph if it wasn't on it (once it applies: one
-  // that waits for a rebuild shows when it publishes). Undo forgets it; a Project put under a Project, which has no
-  // correction of its own, is taken out instead.
+  // A connection you made: drawn once it applies, hanging off the node whose panel you made it in, with the other end
+  // joining the graph if it wasn't on it. Undo takes it away again (a Project put under a Project, which has no
+  // correction of its own, is taken out instead).
   async function linked(from: number, other: Thing, answer: LinkAdded) {
-    const { id, override_id: overrideId } = answer;
+    const { id, src, dst, type, override_id: overrideId } = answer;
+    const key = linkKey(src, dst, type);
     const undo = overrideId !== null ? () => api.undoCorrection(overrideId) : id !== null ? () => api.removeLink(id) : undefined;
-    corrected({ text: `Connected to ${other.name}.`, answer, undo });
-    if (id === null) return;
+    setToast({ text: `Connected to ${other.name}.`, undo, link: { key, shown: true },
+      note: answer.applied === "now" ? undefined : answer.note });
+    // The other end as the graph draws it: on screen already, or read now (only for the centre it was made on).
+    const mine = generation.current;
+    inFlight.current.link?.abort();
+    const request = new AbortController();
+    inFlight.current.link = request;
+    let layer: Layer | undefined;
     try {
-      const node = data.nodes.find((n) => n.id === other.id) ?? asNode(await api.node(other.id));
-      const layer: Layer = { key: `l${id}`, kind: "link", by: from, nodes: [node],
-        edges: [{ id, src: answer.src, dst: answer.dst, type: answer.type, weight: 1, origin: "user", stated: true }] };
-      setShown((s) => (s ? { ...s, layers: [...s.layers.filter((l) => l.key !== layer.key), layer] } : s));
+      const node = data.nodes.find((n) => n.id === other.id) ?? asNode(await api.node(other.id, request.signal));
+      if (mine === generation.current) {
+        layer = { key, kind: "link", by: from, nodes: [node],
+          edges: [{ id: id ?? -(800000 + node.id), src, dst, type, weight: 1, origin: "user", stated: true }] };
+      }
     } catch (e) {
-      setError({ text: `Connected, but couldn't show it on the graph. (${String(e)})` });
+      if (!request.signal.aborted) setError({ text: `Connected, but couldn't show it on the graph. (${String(e)})` });
+    } finally {
+      if (inFlight.current.link === request) inFlight.current.link = null;
     }
+    settle(answer, { key, shown: true, layer });
   }
 
   async function undoLast() {
@@ -373,14 +432,14 @@ export default function Explorer() {
     setToast(null);
     try {
       const answer = await t.undo();
-      setToast({ text: "Undone.", note: answer.applied === "on_publish" ? answer.note : undefined });
-      settle(answer);
+      setToast({ text: "Undone.", note: answer.applied === "now" ? undefined : answer.note });
+      settle(answer, t.link && { key: t.link.key, shown: !t.link.shown });
     } catch (e) {
       setError({ text: `Couldn't undo that. (${String(e)})` });
     }
   }
 
-  // A notice goes after 8 s, unless its correction waits for a rebuild to publish.
+  // A notice goes after 8 s, unless what it says applies later (it stays until you dismiss it).
   useEffect(() => {
     if (!toast || toast.note) return;
     const timer = window.setTimeout(() => setToast(null), 8000);
@@ -614,7 +673,8 @@ export default function Explorer() {
             onOpenAction={(id) => openFromPanel(id)}
             onCorrectedAction={corrected} />
         ) : checking ? (
-          <Suggestions items={toCheck.data} error={toCheck.error} onRetryAction={toCheck.retry} onCloseAction={closePanel}
+          <Suggestions items={toCheck.data?.suggestions} total={checkCount} error={toCheck.error} onRetryAction={toCheck.retry}
+            onCloseAction={closePanel}
             onWhyAction={(a, b) => setWhy({ a, b })} onCorrectedAction={corrected} />
         ) : selected !== null ? (
           <Inspector key={selected} id={selected} revision={revision} expanded={expanded.has(selected)}

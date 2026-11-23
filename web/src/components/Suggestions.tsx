@@ -7,9 +7,10 @@ import type { Corrected } from "@/lib/corrections";
 import { relationLabel } from "@/lib/graph-style";
 
 /** The links the verifier was unsure about, most confident first, for you to answer. Each answer is a label the
- *  verifier learns from: "Right" keeps the link for good, "Wrong" removes it (with Undo), "Why" opens its evidence. */
-export default function Suggestions({ items, error, onRetryAction, onCloseAction, onWhyAction, onCorrectedAction }: {
-  items: Suggestion[] | undefined; error: unknown; onRetryAction: () => void; onCloseAction: () => void;
+ *  verifier learns from: "Right" keeps the link for good, "Wrong" removes it (with Undo), "Why?" opens its evidence.
+ *  `items` are the first of `total`; each answered one makes room for the next. */
+export default function Suggestions({ items, total, error, onRetryAction, onCloseAction, onWhyAction, onCorrectedAction }: {
+  items: Suggestion[] | undefined; total: number; error: unknown; onRetryAction: () => void; onCloseAction: () => void;
   onWhyAction: (a: number, b: number) => void;
   onCorrectedAction: (c: Corrected) => void;
 }) {
@@ -19,7 +20,7 @@ export default function Suggestions({ items, error, onRetryAction, onCloseAction
   const answer = async (s: Suggestion, right: boolean) => {
     setBusy(s.edge);
     setFailed(null);
-    const link = `${s.src_name} ${relationLabel(s.type)} ${s.dst_name}`;
+    const link = claim(s);
     try {
       if (right) {
         onCorrectedAction({ text: `Kept: ${link}.`, answer: await api.edgeIsRight(s.edge) });
@@ -53,25 +54,37 @@ export default function Suggestions({ items, error, onRetryAction, onCloseAction
       )}
       {items?.length === 0 && <p className="text-xs text-muted">Nothing to check right now.</p>}
       {items && items.length > 0 && (
-        <ul className="space-y-2">
-          {items.map((s) => (
-            <li key={s.edge} className="rounded-md border border-line p-2.5" aria-label={`${s.src_name} ${relationLabel(s.type)} ${s.dst_name}`}>
-              <p className="text-sm font-medium break-words">
-                {s.src_name} <span className="font-normal text-muted">{relationLabel(s.type)}</span> {s.dst_name}
-              </p>
-              {s.reason && <p className="mt-1 text-xs leading-relaxed text-soft">{s.reason}</p>}
-              {s.confidence !== null && (
-                <p className="mt-0.5 text-[11px] text-muted">The checks&apos; confidence: {Math.round(s.confidence * 100)}%</p>
-              )}
-              <div className="mt-2 flex gap-2 text-xs">
-                <button type="button" disabled={busy !== null} onClick={() => void answer(s, true)} className="btn">Right</button>
-                <button type="button" disabled={busy !== null} onClick={() => void answer(s, false)} className="btn">Wrong</button>
-                <button type="button" onClick={() => onWhyAction(s.src, s.dst)} className="btn-link ml-auto">Why?</button>
-              </div>
-            </li>
-          ))}
-        </ul>
+        <>
+          {total > items.length && <p className="text-xs text-muted">The {items.length} most confident of {total}.</p>}
+          <ul className="space-y-2">
+            {items.map((s) => (
+              <li key={s.edge} className="rounded-md border border-line p-2.5" aria-label={claim(s)}>
+                <p className="text-sm font-medium break-words">
+                  {s.src_name} <span className="font-normal text-muted">{relationLabel(s.type)}</span> {s.dst_name}
+                </p>
+                {s.reason && <p className="mt-1 text-xs leading-relaxed text-soft">{s.reason}</p>}
+                {s.confidence !== null && (
+                  <p className="mt-0.5 text-[11px] text-muted">The checks&apos; confidence: {Math.round(s.confidence * 100)}%</p>
+                )}
+                {/* Each button names the link it answers: the list repeats them for every link. */}
+                <div className="mt-2 flex gap-2 text-xs">
+                  <button type="button" disabled={busy !== null} onClick={() => void answer(s, true)}
+                    aria-label={`Right: ${claim(s)}`} className="btn">Right</button>
+                  <button type="button" disabled={busy !== null} onClick={() => void answer(s, false)}
+                    aria-label={`Wrong: ${claim(s)}`} className="btn">Wrong</button>
+                  <button type="button" onClick={() => onWhyAction(s.src, s.dst)} aria-label={`Why? ${claim(s)}`}
+                    className="btn-link ml-auto">Why?</button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </div>
   );
+}
+
+/** What a link says, in words ("Ana Ames introduced Sam Lee"). */
+function claim(s: Suggestion) {
+  return `${s.src_name} ${relationLabel(s.type)} ${s.dst_name}`;
 }

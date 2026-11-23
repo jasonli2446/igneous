@@ -4,9 +4,9 @@ import { useState } from "react";
 import { SourceRows } from "@/components/SourceList";
 import { InlineError, Skeleton } from "@/components/ui";
 import { api, type WhyEdge } from "@/lib/api";
-import type { Corrected } from "@/lib/corrections";
+import { type Corrected, linkKey } from "@/lib/corrections";
 import { formatDay, formatDayRange } from "@/lib/dates";
-import { relationLabel } from "@/lib/graph-style";
+import { addedBy, relationLabel } from "@/lib/graph-style";
 import { useRequest } from "@/lib/hooks";
 import { useSourceLabel } from "@/lib/sources";
 
@@ -14,8 +14,9 @@ type Answer = "wrong" | "right" | "remove";
 
 /** One link: who and how, where it came from (the API says, in plain words), the verifier's reason when it has
  *  judged it, and the items it came from. An inferred link can be called wrong, one the verifier was unsure about
- *  also right, and one you added removed. */
+ *  also right, and one you or an agent added (marked with who) removed. */
 function EdgeCard({ e, terms, onAnswer, busy }: { e: WhyEdge; terms: string[]; onAnswer: (e: WhyEdge, a: Answer) => void; busy: boolean }) {
+  const by = addedBy(e.origin);
   return (
     <li className="rounded-md border border-line p-2.5">
       <div className="flex items-start gap-2">
@@ -23,7 +24,9 @@ function EdgeCard({ e, terms, onAnswer, busy }: { e: WhyEdge; terms: string[]; o
           {e.src_name} <span className="font-normal text-muted">{relationLabel(e.type)}</span> {e.dst_name}
         </span>
         {e.verdict === "unsure" && <span className="shrink-0 rounded bg-hover px-1.5 py-px text-[10px] text-muted">To check</span>}
-        {e.origin === "user" && <span className="shrink-0 rounded bg-hover px-1.5 py-px text-[10px] text-muted">Yours</span>}
+        {by && (
+          <span className="shrink-0 rounded bg-hover px-1.5 py-px text-[10px] text-muted">{by === "you" ? "Yours" : `Added by ${by}`}</span>
+        )}
       </div>
       {e.reason
         ? <p className="mt-1 text-xs leading-relaxed text-soft">{e.reason}</p>
@@ -37,11 +40,11 @@ function EdgeCard({ e, terms, onAnswer, busy }: { e: WhyEdge; terms: string[]; o
           <button type="button" disabled={busy} onClick={() => onAnswer(e, "right")}
             className="text-muted hover:text-accent hover:underline disabled:opacity-50">This is right</button>
         )}
-        {!e.stated && (
+        {!e.stated && !by && (
           <button type="button" disabled={busy} onClick={() => onAnswer(e, "wrong")}
             className="text-muted hover:text-danger hover:underline disabled:opacity-50">This is wrong</button>
         )}
-        {e.origin === "user" && (
+        {by && (
           <button type="button" disabled={busy} onClick={() => onAnswer(e, "remove")}
             className="text-muted hover:text-danger hover:underline disabled:opacity-50">Remove</button>
         )}
@@ -72,7 +75,7 @@ export default function WhyConnected({ a, b, revision, onCloseAction, onOpenActi
   };
 
   // "This is wrong": your verdict removes the link and keeps it gone on every rebuild. "This is right" answers a link
-  // the verifier was unsure about. "Remove" takes out a link you added.
+  // the verifier was unsure about. "Remove" takes out a link you or an agent added; its Undo brings it back.
   const answer = (edge: WhyEdge, a: Answer) => {
     if (a === "wrong") {
       run("Couldn't remove it.", async () => {
@@ -86,7 +89,10 @@ export default function WhyConnected({ a, b, revision, onCloseAction, onOpenActi
     } else {
       run("Couldn't remove it.", async () => {
         const res = await api.removeLink(edge.id);
-        return { text: "Removed the connection you added.", answer: res, undo: () => api.undoCorrection(res.override_id) };
+        const by = addedBy(edge.origin);
+        return { text: by === "you" ? "Removed the connection you added." : `Removed the connection ${by} added.`,
+          answer: res, undo: () => api.undoCorrection(res.override_id),
+          link: { key: linkKey(edge.src, edge.dst, edge.type), shown: false } };
       });
     }
   };

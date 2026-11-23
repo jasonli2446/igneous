@@ -1,21 +1,26 @@
 // The corrections check: drives the Graph page's corrections the way a person would and checks each against the API's
 // contract, then Ask, Search and Sources. It fails on any console error or warning.
 //
-//   1. A correction while a rebuild runs: the notice says it applies when the rebuild publishes, the link stays until
-//      then, and it is gone once the rebuild publishes; then it is undone from the panel.
-//   2. A link you added: "+ Connect to…" never offers "same person"; the link shows as yours with Remove, whose Undo
-//      brings it back; then it is taken out again.
+//   1. A correction while a rebuild runs: the notice says it applies when the rebuild publishes, the link and what it
+//      brought on the graph stay until then, and both are gone once it publishes; then it is undone from the panel.
+//   2. Links you added: "+ Connect to…" never offers "same person"; someone not on the graph joins it with the link,
+//      leaves with Undo and joins again when you connect them once more; a link to a top connection shows as yours in
+//      the Why panel, is removed there and brought back with Undo.
 //   3. "Same person as…" asks you to confirm (the check goes back without merging).
 //   4. A person split: "Not the same person" on one of a person's other identities, then Undo.
 //   5. A project renamed and hidden, each undone from its panel once the notice has gone.
 //   6. A suggestion answered: the check marks one inferred link "unsure", as the verifier does when the records don't
 //      settle it (there are no verdicts without the model), and answers it "Right" under "Links to check".
-//   7. Ask, Search and Sources: one title each, a labelled question, the search in the URL, every labelled section.
+//   7. Ask, Search and Sources: one title each, the labelled question and the state Ask is in, the search in the URL
+//      (a new search, then Back), a person Search names opened on the Graph page kept from before, every labelled
+//      section on the Sources page, and the Sources page loaded again when it is shown again.
 //
-// Needs the API and the web app running against a database you can write to, and psql: the check holds the rebuild
-// before it derives (the deriving lock, as another rebuild would) so the correction lands while it runs, and marks the
-// suggestion directly in the database. Everything it changes it undoes, so the database ends as it started. From web/:
-//   DATABASE_URL=postgresql://igneous:igneous@localhost:5432/igneous_persona API_URL=http://localhost:8000 \
+// It writes to the database the API reads, so run it on a copy of one (web/README.md shows how). Whatever happens, the
+// check leaves the database as it found it: it lets go of the rebuild it holds and waits for it, undoes every
+// correction its clicks made (each by the override id the API answered, newest first), and puts back the verdict it
+// planted. The rebuild itself is real: it derives the graph again, as any rebuild does. The check prints counts and
+// the names you give it, never a name or an address it finds. From web/, with the API and the web app running:
+//   DATABASE_URL=postgresql://igneous:igneous@localhost:5432/<your copy> API_URL=http://localhost:8000 \
 //     WEB_URL=http://localhost:3000 npm run corrections
 // The names come from the synthetic persona (make persona); CHECK_PAIR, CHECK_LINK, CHECK_SPLIT, CHECK_PROJECT and
 // CHECK_QUERY override them.
@@ -28,20 +33,26 @@ const API = (process.env.API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 const DATABASE = process.env.DATABASE_URL?.replace("postgresql+psycopg://", "postgresql://");
 // A person and a top connection of theirs joined by an inferred link (Ruth Adeyemi introduced them).
 const [PERSON, OTHER] = (process.env.CHECK_PAIR ?? "Owen Brandt|Mira Castellanos").split("|");
-// A person and one of their top connections, for a link you add.
-const [LINKER, LINKED] = (process.env.CHECK_LINK ?? "Dana Kimura|Rafael Ortiz").split("|");
+// For links you add: a person, one of their top connections (its Why is a button on their panel), and someone not on
+// their graph (joining the graph with the link shows it drawn).
+const [LINKER, LINKED, AWAY] = (process.env.CHECK_LINK ?? "Dana Kimura|Rafael Ortiz|Kevin Osei").split("|");
 // A person with another address merged into them.
 const SPLIT = process.env.CHECK_SPLIT ?? "Dana Kimura";
 // A project, to rename and hide (none, CHECK_PROJECT="", skips that step: the Enron demo has no project of its own).
 const PROJECT = process.env.CHECK_PROJECT ?? "Tidepool";
-// A search with results.
+// A search with results, people among them.
 const QUERY = process.env.CHECK_QUERY ?? "lisbon";
 const TIMEOUT = 30_000;
 const SOFTWARE_GL = /GL Driver Message \(OpenGL, Performance, /;
 
 const problems = [];
-const cleanups = [];
 let step = "start";
+// What the check changed, for the clean-up: the corrections its clicks made, the rebuild it holds, the verdict it
+// planted.
+const made = new Set();
+let release = null;
+let rebuild = null;
+let planted = null;
 
 function check(ok, what) {
   if (!ok) throw new Error(what);
@@ -85,6 +96,18 @@ async function apiJson(path, init) {
   return r.json();
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Run a step whose locators carry a name or an address the check found: a failure says what didn't happen, never
+ *  what it was looking for. */
+async function quietly(what, run) {
+  try {
+    return await run();
+  } catch (e) {
+    throw new Error(`${what} (${e.name === "TimeoutError" ? "timed out" : "failed"})`);
+  }
+}
+
 async function main() {
   check(DATABASE, "set DATABASE_URL to the database the API reads (the check writes to it and undoes what it writes)");
   await sql("SELECT 1");
@@ -95,15 +118,63 @@ async function main() {
     await graph(page);
     await pages(page);
   } finally {
-    for (const undo of cleanups.reverse()) await undo().catch((e) => problems.push(`[cleanup] ${e.message}`));
     await browser.close();
+    await cleanUp();
   }
+}
+
+/** Put the database back as the check found it, whatever step it stopped at. */
+async function cleanUp() {
+  const was = step;
+  step = "clean-up";
+  try {
+    await release?.();
+    if (rebuild) {
+      const deadline = Date.now() + 300_000;
+      while ((await apiJson(`/jobs/${rebuild}`)).status === "running") {
+        check(Date.now() < deadline, "the rebuild the check started is still running");
+        await sleep(500);
+      }
+    }
+    // Newest first, each the way its notice's Undo would: through the API, which applies it now.
+    const ids = [...made].sort((a, b) => b - a);
+    const active = ids.length ? (await sql(`SELECT id FROM overrides WHERE undone_at IS NULL AND id = ANY(CAST(:'ids' AS bigint[]))
+                                            ORDER BY id DESC`, { ids: `{${ids.join(",")}}` })).split("\n").filter(Boolean) : [];
+    for (const id of active) await apiJson(`/overrides/${id}`, { method: "DELETE" });
+    if (planted) await unplant();
+    if (active.length) console.log(`ok  clean-up (undid ${active.length} correction${active.length === 1 ? "" : "s"} a failed step left)`);
+  } catch (e) {
+    problems.push(`[clean-up after "${was}"] ${e.message}`);
+  } finally {
+    step = was;
+  }
+}
+
+/** The verdict the suggestion step planted (or the user's label that answered it) gives way to what was there. */
+async function unplant() {
+  const { edge, a, b, type, extractor, props, previous } = planted;
+  await sql(`
+    DELETE FROM edge_verdicts WHERE src_key = :'a' AND dst_key = :'b' AND type = :'t' AND extractor = :'x';
+    INSERT INTO edge_verdicts SELECT * FROM jsonb_populate_record(NULL::edge_verdicts, CAST(:'previous' AS jsonb))
+      WHERE CAST(:'previous' AS jsonb) <> 'null';
+    UPDATE edges SET props = CAST(:'props' AS jsonb) WHERE id = :'edge';
+    UPDATE graph_version SET version = version + 1;`,
+  { a, b, t: type, x: extractor, previous: JSON.stringify(previous), props: JSON.stringify(props), edge });
+  planted = null;
 }
 
 async function graph(page) {
   const search = page.getByRole("combobox", { name: "Search the graph" });
   const panel = page.getByRole("complementary", { name: "Details" });
   const notice = (text) => page.getByRole("status").filter({ hasText: text });
+  const status = page.getByRole("status").filter({ hasText: /^Centred on / });
+
+  /** How many things are on the graph, from the page's status line. */
+  async function onGraph() {
+    const m = ((await status.textContent({ timeout: TIMEOUT })) ?? "").match(/, (\d+) on the graph\.$/);
+    check(m, "no status line");
+    return Number(m[1]);
+  }
 
   /** Search for a name and open the best match that carries exactly that name (you are listed as "You"). */
   async function open(name) {
@@ -112,9 +183,16 @@ async function graph(page) {
     await panel.getByRole("heading", { level: 2, name }).waitFor({ timeout: TIMEOUT });
   }
 
+  // Every correction the page makes answers with the id that undoes it: the clean-up undoes each one still standing.
+  page.on("response", async (r) => {
+    if (!r.url().startsWith(API) || !["POST", "DELETE"].includes(r.request().method())) return;
+    const id = (await r.json().catch(() => null))?.override_id;
+    if (Number.isInteger(id)) made.add(id);
+  });
+
   step = "open the graph";
   await page.goto(`${WEB}/`, { waitUntil: "networkidle" });
-  await page.getByRole("status").filter({ hasText: /^Centred on / }).waitFor({ timeout: TIMEOUT });
+  await status.waitFor({ timeout: TIMEOUT });
   check(await page.title() === "Graph · Igneous", `page title is "${await page.title()}"`);
   pass();
 
@@ -127,54 +205,71 @@ async function graph(page) {
   check(await earlier.count() === 0, "the pair already has a correction; undo it on the page first");
   await wrong.first().waitFor({ timeout: TIMEOUT });
   const links = await wrong.count();
-  const release = await holdDeriving();
-  cleanups.push(release);
-  const { id: rebuild } = await apiJson("/pipeline/run", { method: "POST" });
-  await until(page, "the rebuild to wait to derive", async () => Number(await sql(`
-    SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted
-      AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`)) > 0, 120_000);
+  const before = await onGraph();
+  release = await holdDeriving();
+  ({ id: rebuild } = await apiJson("/pipeline/run", { method: "POST" }));
+  await until(page, "the rebuild to wait to derive", async () => (await apiJson("/graph/version")).rebuilding &&
+    Number(await sql(`SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted
+                        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`)) > 0, 120_000);
   await wrong.first().click();
   await notice(/applies when it publishes/).waitFor({ timeout: TIMEOUT });
   await earlier.waitFor({ timeout: TIMEOUT });
   check(await wrong.count() === links, "the link left before the rebuild published");
+  check(await onGraph() === before, "the graph changed before the rebuild published");
   await release();
   await notice(/^The rebuild published/).waitFor({ timeout: 120_000 });
   await until(page, "the link gone once the rebuild published", async () => (await wrong.count()) < links);
+  // What the link brought on the graph leaves with it (the other end, when nothing else drew it).
+  const published = await onGraph();
+  check(published <= before, `${before} on the graph before, ${published} once it published`);
   const job = await until(page, "the rebuild to finish", async () => {
     const j = await apiJson(`/jobs/${rebuild}`);
     return j.status !== "running" && j;
   });
   check(job.status === "succeeded", `the rebuild ${job.status}: ${job.error}`);
+  rebuild = null;
   await panel.getByRole("button", { name: "Undo removal" }).click({ timeout: TIMEOUT });
   await until(page, "the correction undone from the panel", async () => (await earlier.count()) === 0 && (await wrong.count()) === links);
-  pass(`"applies when it publishes" shown, ${links} -> ${links - 1}+ removed on publish, undone from the panel`);
+  pass(`"applies when it publishes" shown; ${links} -> ${links - 1}+ links and ${before} -> ${published} on the graph once it published; undone from the panel`);
 
-  step = `a link you added between ${LINKER} and ${LINKED}`;
+  step = `links you added from ${LINKER}`;
   const since = await sql("SELECT now()");
   const left = async () => Number(await sql("SELECT count(*) FROM overrides WHERE created_at >= :'since'", { since }));
   await page.keyboard.press("Escape");
   await open(LINKER);
+  const alone = await onGraph();
   let offered = [];
-  async function connect() {
+  /** "+ Connect to…" `other` from the open panel, the first kind of connection offered. */
+  async function connect(other) {
     await panel.getByRole("button", { name: "+ Connect to…" }).click();
-    await panel.getByRole("textbox", { name: "Search for the thing to connect" }).fill(LINKED);
-    await panel.getByRole("list", { name: "Things to connect to" }).getByRole("button", { name: new RegExp(`^${escape(LINKED)}`) })
+    await panel.getByRole("textbox", { name: "Search for the thing to connect" }).fill(other);
+    await panel.getByRole("list", { name: "Things to connect to" }).getByRole("button", { name: new RegExp(`^${escape(other)}`) })
       .first().click({ timeout: TIMEOUT });
     const kinds = panel.getByRole("radiogroup", { name: "Kind of connection" }).getByRole("radio");
     await kinds.first().waitFor({ timeout: TIMEOUT });
     offered = await kinds.allTextContents();
     check(!offered.some((k) => /same person/i.test(k)), `"+ Connect to…" offered ${offered.join(", ")}`);
     await panel.getByRole("button", { name: "Connect", exact: true }).click();
-    await notice(`Connected to ${LINKED}.`).waitFor({ timeout: TIMEOUT });
+    await notice(`Connected to ${other}.`).waitFor({ timeout: TIMEOUT });
   }
-  await connect();
-  await notice(`Connected to ${LINKED}.`).getByRole("button", { name: "Undo" }).click();
-  await notice("Undone.").waitFor({ timeout: TIMEOUT });
-  check(await left() === 0, "undoing the link you added left a correction behind");
-  await connect();
+  // Someone not on the graph joins it with the link, leaves with its Undo, and joins again when you connect them once
+  // more: the pair the Undo took apart is joined by the new link.
+  for (const round of ["added", "added again"]) {
+    await connect(AWAY);
+    await until(page, `${AWAY} on the graph, ${round}`, async () => (await onGraph()) === alone + 1);
+    await notice(`Connected to ${AWAY}.`).getByRole("button", { name: "Undo" }).click();
+    await notice("Undone.").waitFor({ timeout: TIMEOUT });
+    await until(page, `${AWAY} off the graph again`, async () => (await onGraph()) === alone);
+    check(await left() === 0, "undoing the link you added left a correction behind");
+  }
+  pass(`offered ${offered.join(", ")}; ${AWAY} ${alone} -> ${alone + 1} on the graph each time it was connected, and back with Undo`);
+
+  step = `a link you added to ${LINKED}, removed from the Why panel and brought back`;
+  await connect(LINKED);
   await panel.getByRole("button", { name: `Why is ${LINKED} connected?` }).click({ timeout: TIMEOUT });
   const remove = panel.getByRole("button", { name: "Remove", exact: true });
   await remove.waitFor({ timeout: TIMEOUT });
+  await panel.getByText("Yours", { exact: true }).waitFor({ timeout: TIMEOUT });
   await remove.click();
   await notice("Removed the connection you added.").getByRole("button", { name: "Undo" }).click({ timeout: TIMEOUT });
   await notice("Undone.").waitFor({ timeout: TIMEOUT });
@@ -185,7 +280,7 @@ async function graph(page) {
   check(added, "the link you added has no correction to undo");
   check((await apiJson(`/overrides/${added}`, { method: "DELETE" })).applied === "now", "undoing the link didn't apply");
   check(await left() === 0, "the link you added left a correction behind");
-  pass(`offered ${offered.join(", ")}; added and undone, added, removed and brought back, undone`);
+  pass("shown as yours, removed, brought back with Undo, undone");
 
   step = "same person asks first";
   await page.keyboard.press("Escape");
@@ -202,18 +297,24 @@ async function graph(page) {
   step = `a person split (${SPLIT})`;
   await page.keyboard.press("Escape");
   await open(SPLIT);
-  const known = panel.getByRole("listitem").filter({ has: page.getByRole("button", { name: "Not the same person" }) });
+  const known = panel.getByRole("button", { name: /^Not the same person: / });
   await known.first().waitFor({ timeout: TIMEOUT });
-  const label = (await known.first().locator("span").first().textContent()).split(" · ")[0];
-  const row = panel.getByRole("listitem").filter({ hasText: label });
-  await row.getByRole("button", { name: "Not the same person" }).click();
-  await row.getByRole("button", { name: "Separate them" }).click();
-  await notice(`${label} is no longer ${SPLIT}.`).waitFor({ timeout: TIMEOUT });
-  await until(page, `${label} split off`, async () => (await row.count()) === 0);
-  await notice(`${label} is no longer ${SPLIT}.`).getByRole("button", { name: "Undo" }).click();
-  await until(page, `${label} back in ${SPLIT}`, async () => (await row.count()) === 1);
+  const identities = await known.count();
+  const label = (await known.first().getAttribute("aria-label")).slice("Not the same person: ".length);
+  const row = panel.getByRole("button", { name: `Not the same person: ${label}`, exact: true });
+  const splitNotice = notice(`${label} is no longer ${SPLIT}.`);
+  await quietly("separate the identity", async () => {
+    await row.click();
+    await panel.getByRole("group", { name: `Separate ${label}`, exact: true }).getByRole("button", { name: "Separate them" }).click();
+    await splitNotice.waitFor({ timeout: TIMEOUT });
+  });
+  // It leaves the list, with whatever was joined to the person only through it.
+  await until(page, "the identity split off", async () => (await row.count()) === 0);
+  const kept = await known.count();
+  await quietly("undo the split from its notice", () => splitNotice.getByRole("button", { name: "Undo" }).click());
+  await until(page, "the identity back", async () => (await row.count()) === 1);
   await until(page, "the split's correction forgotten once undone", async () => (await left()) === 0);
-  pass(`${label} split off and joined again`);
+  pass(`one of ${identities} other identities split off (${identities - kept} left the list) and joined again`);
 
   step = `a project's corrections undone from its panel (${PROJECT || "no project named"})`;
   if (PROJECT) await project();
@@ -242,39 +343,57 @@ async function graph(page) {
 
   step = "a suggestion answered";
   await page.keyboard.press("Escape");
-  const planted = JSON.parse(await sql(`
-    SELECT json_build_object('edge', e.id, 'a', a.type || ':' || a.key, 'b', b.type || ':' || b.key, 'type', e.type,
-                             'extractor', e.extractor, 'props', COALESCE(e.props, '{}'))
-    FROM edges e JOIN nodes a ON a.id = e.src JOIN nodes b ON b.id = e.dst
-    WHERE e.extractor NOT IN ('spine', 'user', 'profile', 'contacts', 'self', 'github', 'linkedin')
-      AND e.type <> 'SAME_AS' AND a.type IN ('Person', 'Project') AND b.type IN ('Person', 'Project')
-      AND (a.props->>'hidden') IS DISTINCT FROM 'true' AND (b.props->>'hidden') IS DISTINCT FROM 'true'
-      AND (a.props->>'kind') IS DISTINCT FROM 'service' AND (b.props->>'kind') IS DISTINCT FROM 'service'
-      AND NOT EXISTS (SELECT 1 FROM edge_verdicts v WHERE v.src_key = a.type || ':' || a.key
-                      AND v.dst_key = b.type || ':' || b.key AND v.type = e.type AND v.extractor = e.extractor)
-    ORDER BY (e.type = 'INTRODUCED') DESC, e.id DESC LIMIT 1`) || "null");
-  check(planted, "no inferred link between two people or projects to ask about");
-  const keys = { a: planted.a, b: planted.b, t: planted.type, x: planted.extractor };
-  await sql(`INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, reason, confidence, source)
-             VALUES (:'a', :'b', :'t', :'x', 'web-check', 'unsure', 'The records don''t settle it.', 0.5, 'model')`, keys);
-  cleanups.push(() => sql(`
-    DELETE FROM edge_verdicts WHERE src_key = :'a' AND dst_key = :'b' AND type = :'t' AND extractor = :'x';
-    UPDATE edges SET props = CAST(:'props' AS jsonb) WHERE id = :'edge';
-    UPDATE graph_version SET version = version + 1;`, { ...keys, props: JSON.stringify(planted.props), edge: planted.edge }));
+  // An inferred link between two people or projects that nobody labelled yourself, marked "unsure" as the verifier
+  // marks one it can't settle (most confident first: the page lists it among the first). Any verdict it had comes back.
+  const candidates = JSON.parse(await sql(`
+    SELECT COALESCE(json_agg(c), '[]') FROM (
+      SELECT e.id AS edge, a.type || ':' || a.key AS a, b.type || ':' || b.key AS b, e.type, e.extractor,
+             COALESCE(e.props, '{}') AS props, to_jsonb(v) AS previous
+      FROM edges e JOIN nodes a ON a.id = e.src JOIN nodes b ON b.id = e.dst
+      LEFT JOIN edge_verdicts v ON v.src_key = a.type || ':' || a.key AND v.dst_key = b.type || ':' || b.key
+        AND v.type = e.type AND v.extractor = e.extractor
+      WHERE e.extractor NOT IN ('spine', 'user', 'profile', 'contacts', 'self', 'github', 'linkedin')
+        AND e.extractor NOT LIKE 'agent:%' AND e.type <> 'SAME_AS'
+        AND a.type IN ('Person', 'Project') AND b.type IN ('Person', 'Project')
+        AND COALESCE(v.source, '') <> 'user' AND COALESCE(v.verdict, '') <> 'unsure'
+      ORDER BY (v IS NULL) DESC, (e.type = 'INTRODUCED') DESC, e.id DESC LIMIT 20) c`));
+  let listed = -1;
+  for (const c of candidates) {
+    planted = c;
+    await sql(`INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, reason, confidence, source)
+               VALUES (:'a', :'b', :'t', :'x', 'web-check', 'unsure', 'The records don''t settle it.', 1.0, 'model')
+               ON CONFLICT (src_key, dst_key, type, extractor) DO UPDATE SET verdict = 'unsure', evidence = 'web-check',
+                 reason = EXCLUDED.reason, confidence = 1.0, source = 'model'`,
+    { a: c.a, b: c.b, t: c.type, x: c.extractor });
+    listed = (await apiJson("/graph/suggestions")).suggestions.findIndex((s) => s.edge === c.edge);
+    if (listed >= 0) break;
+    await unplant(); // a hidden end, or one person under two addresses: the page never asks about it
+  }
+  check(listed >= 0, `none of ${candidates.length} inferred links between two people or projects can be asked about`);
   await page.reload({ waitUntil: "networkidle" });
   await page.getByRole("button", { name: /^Links to check/ }).click({ timeout: TIMEOUT });
   await panel.getByRole("heading", { level: 2, name: "Links to check" }).waitFor({ timeout: TIMEOUT });
-  const asked = panel.getByRole("listitem").filter({ has: page.getByRole("button", { name: "Right" }) });
-  check(await asked.count() === 1, `${await asked.count()} links to check, not the 1 marked`);
-  const claim = await asked.first().getAttribute("aria-label");
-  await asked.first().getByRole("button", { name: "Right" }).click();
-  await notice(`Kept: ${claim}.`).waitFor({ timeout: TIMEOUT });
-  await panel.getByText("Nothing to check right now.").waitFor({ timeout: TIMEOUT });
+  // The page lists them in the API's order: the planted one is at its place.
+  const asked = panel.getByRole("listitem").filter({ has: page.getByRole("button", { name: /^Right: / }) });
+  await asked.first().waitFor({ timeout: TIMEOUT });
+  const claim = await asked.nth(listed).getAttribute("aria-label");
+  const before6 = (await apiJson("/graph/suggestions")).total;
+  const same = panel.getByRole("listitem", { name: claim, exact: true });
+  const twins = await same.count();
+  await quietly("answer the planted link Right", async () => {
+    await asked.nth(listed).getByRole("button", { name: `Right: ${claim}`, exact: true }).click();
+    await notice(`Kept: ${claim}.`).waitFor({ timeout: TIMEOUT });
+  });
+  await until(page, "the answered link gone from the list", async () => (await same.count()) === twins - 1);
   const label_ = await sql(`SELECT verdict || ' ' || source FROM edge_verdicts
-                            WHERE src_key = :'a' AND dst_key = :'b' AND type = :'t' AND extractor = :'x'`, keys);
+                            WHERE src_key = :'a' AND dst_key = :'b' AND type = :'t' AND extractor = :'x'`,
+  { a: planted.a, b: planted.b, t: planted.type, x: planted.extractor });
   check(label_ === "keep user", `the answer is stored as "${label_}", not your keep`);
-  check((await apiJson("/graph/suggestions")).suggestions.length === 0, "the suggestion is still listed");
-  pass(`"${claim}" kept, stored as your label`);
+  const after6 = await apiJson("/graph/suggestions");
+  check(!after6.suggestions.some((s) => s.edge === planted.edge), "the answered suggestion is still listed");
+  check(after6.total === before6 - 1, `${before6} links to check before the answer, ${after6.total} after`);
+  await unplant();
+  pass(`the planted link kept and stored as your label; ${before6} -> ${after6.total} to check`);
 }
 
 async function pages(page) {
@@ -282,7 +401,7 @@ async function pages(page) {
   await page.goto(`${WEB}/ask`, { waitUntil: "networkidle" });
   check(await page.title() === "Ask · Igneous", `page title is "${await page.title()}"`);
   check(await page.getByRole("heading", { level: 1 }).count() === 1, "not one h1");
-  await page.getByLabel("Your question").fill(`What did I plan with ${LINKED}?`);
+  await page.getByLabel("Your question").fill(`What did I plan with ${LINKER}?`);
   await page.getByRole("button", { name: "Ask", exact: true }).click();
   const states = { "no sources opted in": page.getByText("Nothing to ask yet"),
     "model not set up": page.getByText("The hosted model isn't set up"), answer: page.getByText(/cited of \d+ evidence passages/),
@@ -319,6 +438,24 @@ async function pages(page) {
   await page.getByRole("dialog").waitFor({ state: "detached", timeout: TIMEOUT });
   pass(`?q=${QUERY}, ?q=${LINKED}, Back, the Reader`);
 
+  step = "a person Search names, opened on the Graph page kept from before";
+  const nav = page.getByRole("navigation");
+  const status = page.getByRole("status").filter({ hasText: /^Centred on / });
+  await page.goto(`${WEB}/`, { waitUntil: "networkidle" });
+  const centre = ((await status.textContent({ timeout: TIMEOUT })) ?? "").match(/^Centred on (.+), \d+ on the graph\.$/)?.[1];
+  await nav.getByRole("link", { name: "Search", exact: true }).click();
+  await page.getByRole("searchbox", { name: "Search for" }).fill(QUERY);
+  await page.getByRole("searchbox", { name: "Search for" }).press("Enter");
+  const people = page.getByRole("region", { name: "People involved" }).getByRole("link");
+  await people.first().waitFor({ timeout: TIMEOUT });
+  const names = await people.allTextContents();
+  const pick = names.findIndex((n) => n !== centre);
+  check(pick >= 0, "Search names nobody but the person the graph is on");
+  await people.nth(pick).click();
+  await until(page, "the Graph page centred on the person Search named", async () =>
+    (await status.textContent()).startsWith(`Centred on ${names[pick]},`) && new URL(page.url()).searchParams.has("seed"));
+  pass(`centred on the ${ordinal(pick + 1)} person Search named`);
+
   step = "Sources";
   await page.goto(`${WEB}/settings`, { waitUntil: "networkidle" });
   check(await page.title() === "Sources · Igneous", `page title is "${await page.title()}"`);
@@ -329,7 +466,14 @@ async function pages(page) {
     .filter((id) => !document.getElementById(id)));
   check(broken.length === 0, `aria-labelledby names no element: ${broken.join(", ")}`);
   const groups = await page.getByRole("region").count();
-  pass(`${groups} labelled sections`);
+  // Shown again from another tab, it loads the sources and jobs again.
+  let loads = 0;
+  page.on("request", (r) => { if (new URL(r.url()).pathname === "/jobs" && r.url().startsWith(API)) loads += 1; });
+  await nav.getByRole("link", { name: "Ask", exact: true }).click();
+  await page.getByRole("heading", { level: 1, name: "Ask" }).waitFor({ timeout: TIMEOUT });
+  await nav.getByRole("link", { name: "Sources", exact: true }).click();
+  await until(page, "the Sources page loaded again when shown again", async () => loads > 0);
+  pass(`${groups} labelled sections; loaded again when shown again`);
 }
 
 async function until(page, what, test, timeout = TIMEOUT) {
@@ -354,6 +498,10 @@ function pass(detail) {
   console.log(`ok  ${step}${detail ? ` (${detail})` : ""}`);
 }
 
+function ordinal(n) {
+  return ["first", "second", "third"][n - 1] ?? `#${n}`;
+}
+
 function escape(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -362,7 +510,7 @@ main().then(
   () => {
     for (const p of problems) console.error(p);
     if (problems.length) {
-      console.error(`FAIL: ${problems.length} console error(s) or warning(s)`);
+      console.error(`FAIL: ${problems.length} console error(s) or warning(s), or a clean-up that didn't finish`);
       process.exit(1);
     }
     console.log("PASS: the corrections check finished with no console errors or warnings");

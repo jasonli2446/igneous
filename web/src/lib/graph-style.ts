@@ -1,6 +1,9 @@
-// Every color the app draws with outside the stylesheet: section hues for nodes, and the theme's colors for the 3D
-// graph. Kept free of WebGL imports so it is safe to load during server rendering (importing it from Graph3D would
-// drag three.js into SSR and crash with "window is not defined").
+// Every color the app draws with outside the stylesheet (section hues for nodes, and the theme's colors for the 3D
+// graph), and the words for node types, link types and who added a link. Kept free of WebGL imports so it is safe to
+// load during server rendering (importing it from Graph3D would drag three.js into SSR and crash with "window is not
+// defined").
+
+import type { Origin } from "@/lib/api";
 
 // Each section keeps one hue across the graph and the panels, so a glance tells you what kind of thing a dot is.
 const SECTION_HUE: Record<string, string> = {
@@ -71,4 +74,11 @@ const RELATION: Record<string, string> = {
 
 export function relationLabel(type: string) {
   return RELATION[type] ?? type.toLowerCase().replaceAll("_", " ");
+}
+
+/** Who added a link, which they can take out again: "you", or the agent's name; null for a link read from your data
+ *  or inferred. */
+export function addedBy(origin: Origin): string | null {
+  if (origin === "user") return "you";
+  return origin.startsWith("agent:") ? origin.slice("agent:".length) : null;
 }

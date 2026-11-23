@@ -161,8 +161,10 @@ function IdentityRow({ person, name, identity, onSplitAction }: {
           <span className="text-soft">{label}</span>
           {identity.name && identity.name !== name && <span className="text-muted"> · {identity.name}</span>}
         </span>
+        {/* Named for its identity: the list repeats it for every one. */}
         {state === "idle" && (
-          <button type="button" onClick={() => setState("confirm")} className="shrink-0 text-muted hover:text-danger hover:underline">
+          <button type="button" onClick={() => setState("confirm")} aria-label={`Not the same person: ${label}`}
+            className="shrink-0 text-muted hover:text-danger hover:underline">
             Not the same person
           </button>
         )}

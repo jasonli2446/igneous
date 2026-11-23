@@ -1,6 +1,6 @@
 // GET /sources as every page shares it: what a record from each stored source value is called (one label map, the
-// names the Sources page uses), and whether the hosted model is set up. Fetched once per page load; the Sources page,
-// which polls it, keeps it current.
+// names the Sources page uses), and each source's entry. Fetched once per page load; the Sources page, which loads it
+// again whenever it is shown and while something runs, keeps it current.
 
 import { useSyncExternalStore } from "react";
 import { api, type SourcesAnswer } from "@/lib/api";

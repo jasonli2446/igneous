@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useState } from "react";
 import ImportForm from "@/components/ImportForms";
 import { InlineError, Skeleton } from "@/components/ui";
 import { API, api, type Job, type ModelStatus, type PipelineJob, type SourceInfo } from "@/lib/api";
@@ -332,6 +332,10 @@ export default function SourcesPage() {
   const [starting, setStarting] = useState(false);
   const page = loaded.data;
   const reload = () => setTick((n) => n + 1);
+
+  // Next keeps this page alive while you use the other tabs. What it shows goes stale meanwhile (a sync or a rebuild
+  // runs on, the scheduled sync adds items), so hiding it marks it stale, and it loads again when it is shown.
+  useLayoutEffect(() => () => setTick((n) => n + 1), []);
 
   // Every page names records and reads the model's state from GET /sources: hand them this fresher answer.
   useEffect(() => {
