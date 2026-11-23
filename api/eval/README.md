@@ -81,10 +81,34 @@ n=5 is small, and model answers vary by several points from run to run on the sa
 under about 5 points as noise. The blind A/B grading of answer quality is still to do;
 `results/2026-10-18-answers.jsonl` has the pairs.
 
-Retrieval alone, measured again 2026-11-23 at commit `63994a9` on a fresh build (`results/2026-11-23.json`, no model
-calls): recall@10 0.829 hybrid, 0.800 dense, 0.386 lexical; on the 20 multi-hop questions 0.65 hybrid, 0.70 dense.
-Search ranks as it did on 2026-10-18 (that code scores the same on this build), so the differences from the table
-come from the build.
+### What Ask shows the model, and how long finding it takes
+
+Measured 2026-11-23 on the six-mailbox baseline built with main at `16494f3` (`results/2026-11-23.json`, commit
+`877e045`, no model calls). Recall@10 on this build: 0.814 hybrid, 0.800 dense, 0.414 lexical; on the 20 multi-hop
+questions 0.65 hybrid, 0.75 dense. **Evidence recall** is the share of the 70 answerable questions with a gold email
+among the passages Ask would show the model (`qa.gather`); the seconds are for finding them, before any model call.
+
+| Ask's evidence | evidence recall | p50 / p95 |
+|---|---|---|
+| hybrid + graph + cross-encoder, pool 8 | 0.871 | 1.55 s / 3.81 s |
+| hybrid + graph + cross-encoder, **pool 16 (default)** | **0.886** | 3.04 s / 5.17 s |
+| hybrid + graph + cross-encoder, pool 24 | 0.886 | 5.38 s / 8.00 s |
+| hybrid + graph + cross-encoder, pool 32 | 0.886 | 4.53 s / 9.41 s |
+| hybrid + graph, no cross-encoder (graph slots), any pool | 0.871 | 0.42 s / 1.02 s |
+| dense only, no graph (the baseline) | 0.771 | 0.04 s / 0.06 s |
+
+How the defaults follow: a pool of 16 finds every gold email 24 and 32 find, at about half their p95, so it is
+`IGNEOUS_RERANKER_POOL_SIZE`'s default. The cross-encoder adds one question of 70 over the graph slots, at about seven
+times the time; whether that question, and the order it gives the passages, improves the answers is for the
+model-graded run (#190) to say, and `IGNEOUS_RERANKER_ENABLED=false` trades it for sub-second retrieval meanwhile. The
+graph itself is worth ten questions over the baseline. These timings were taken while other jobs kept the 4-core
+machine at a load of about 6 to 8: an idle machine is faster, the ratios hold.
+
+The cross-encoder reads the first 1,000 characters of each passage (`rerank.SCORED_CHARS`): the title every chunk
+opens with and the start of its text. Reading only 600, 1,000 or 1,500 characters chose evidence with the same recall
+(0.886) as reading whole passages (about 1,400 characters on average), and the cross-encoder took 20 to 60% less time
+at the same machine load. Rerun with
+`IGNEOUS_LLM_SOURCES=email uv run python eval/run_eval.py --no-qa --pools 8,16,24,32`.
 
 ## Entity resolution (criterion 3)
 

@@ -1,9 +1,9 @@
 {
   "date": "2026-11-23",
   "provenance": {
-    "commit": "63994a954981bbb67f53255e3a394ffe811bcdfa",
+    "commit": "877e045f6219d668110200efab01dc89ac6c74ea",
     "uncommitted_changes": false,
-    "database": "igneous_baseline205",
+    "database": "igneous_baseline",
     "corpus": {
       "source_items": {
         "email": 26259
@@ -23,9 +23,12 @@
       "graph_slots": 3,
       "expand_per_hit": 2,
       "reranker_pool_size": 32,
-      "llm_sources": []
+      "llm_sources": [
+        "email"
+      ]
     },
-    "configs": {}
+    "configs": {},
+    "conditions": "six-mailbox baseline built with main at 16494f3; timings taken while other jobs kept the 4-core machine at a load of about 6 to 8"
   },
   "questions": {
     "answerable": 70,
@@ -33,12 +36,59 @@
     "gold_not_in_database": []
   },
   "recall@10": {
-    "hybrid": 0.829,
+    "hybrid": 0.814,
     "dense": 0.8,
-    "lexical": 0.386
+    "lexical": 0.414
   },
   "recall@10_multihop": {
     "hybrid": 0.65,
-    "dense": 0.7
+    "dense": 0.75
+  },
+  "evidence": {
+    "full@8": {
+      "evidence_recall": 0.871,
+      "p50_s": 1.55,
+      "p95_s": 3.81
+    },
+    "full@16": {
+      "evidence_recall": 0.886,
+      "p50_s": 3.04,
+      "p95_s": 5.17
+    },
+    "full@24": {
+      "evidence_recall": 0.886,
+      "p50_s": 5.38,
+      "p95_s": 8.0
+    },
+    "full@32": {
+      "evidence_recall": 0.886,
+      "p50_s": 4.53,
+      "p95_s": 9.41
+    },
+    "graph@8": {
+      "evidence_recall": 0.871,
+      "p50_s": 0.41,
+      "p95_s": 0.93
+    },
+    "graph@16": {
+      "evidence_recall": 0.871,
+      "p50_s": 0.42,
+      "p95_s": 1.02
+    },
+    "graph@24": {
+      "evidence_recall": 0.871,
+      "p50_s": 0.43,
+      "p95_s": 1.09
+    },
+    "graph@32": {
+      "evidence_recall": 0.871,
+      "p50_s": 0.5,
+      "p95_s": 1.1
+    },
+    "baseline": {
+      "evidence_recall": 0.771,
+      "p50_s": 0.04,
+      "p95_s": 0.06
+    }
   }
 }
