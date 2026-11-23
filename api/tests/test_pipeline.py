@@ -1,6 +1,7 @@
 """One stage runner for `igneous pipeline` and Rebuild: the stage list, its dependency order, progress, `--stage`."""
 import json
 
+import click
 import pytest
 from pipeline_data import card, day, event, linkedin_profile, local_models, mail, rows  # noqa: F401
 from sqlalchemy import text
@@ -49,11 +50,12 @@ def test_the_cli_validates_stages_against_the_list_and_generates_its_help(db):
     stage = next(p for p in command.params if p.name == "stage")
     assert tuple(stage.type.choices) == pipeline.NAMES
     runner = CliRunner()
-    assert "--stage" in runner.invoke(cli.app, ["pipeline", "--help"]).output
+    # Rich styles help and errors whenever it sees a terminal, and Typer forces one under CI: compare the text.
+    assert "--stage" in click.unstyle(runner.invoke(cli.app, ["pipeline", "--help"]).output)
     unknown = runner.invoke(cli.app, ["pipeline", "--stage", "spines"])
-    assert unknown.exit_code == 2 and "'spines' is not one of" in unknown.output
+    assert unknown.exit_code == 2 and "'spines' is not one of" in click.unstyle(unknown.output)
     no_count = runner.invoke(cli.app, ["pipeline", "--stage", "extract"])
-    assert no_count.exit_code == 2 and "--extract N" in no_count.output
+    assert no_count.exit_code == 2 and "--extract N" in click.unstyle(no_count.output)
 
 
 def test_progress_names_each_stage_with_its_label_step_and_counts(db):
