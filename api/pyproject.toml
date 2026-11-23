@@ -52,3 +52,6 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "typer.Option", "t
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A warning fails the test that raised it: fix its cause. Only a warning the project can't fix (one inside a
+# dependency) gets an "ignore:<message>:<category>:<module>" entry here, naming it exactly, with the reason.
+filterwarnings = ["error"]

@@ -76,7 +76,9 @@ Export formats are sources too: add the entry to `SOURCES` and an inline form in
 pytest is hermetic (`api/tests/conftest.py`): settings start from their defaults, no model credentials reach it,
 and each run uses its own `igneous_test_<pid>` database, so parallel runs are safe. DB-backed tests request `db` (an
 empty graph rolled back after the test; every `SessionLocal` session joins it) or `committed_db` (for code that
-commits from other threads or processes).
+commits from other threads or processes). A warning fails the test that raised it (`filterwarnings = ["error"]` in
+`api/pyproject.toml`): fix its cause, such as a file or connection left open; only a dependency's warning gets an
+`ignore` entry there, naming it exactly, with the reason.
 CI also fails on known advisories in the locked dependencies (`make audit` runs the same audit). Upgrade the affected
 package (`uv lock --upgrade-package <name>`; `npm update <name>`, or its version in `web/package.json`) rather than
 ignore the advisory.
