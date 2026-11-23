@@ -1,15 +1,104 @@
 """Google connectors (Drive, Calendar, Contacts, Gmail) against in-memory API fakes. No network."""
-from fakes import FakeCalendar, FakeDrive, FakePeople, http_error
+import time
 
+import pytest
+from fakes import FakeCalendar, FakeDrive, FakeGmail, FakePeople, http_error
+
+from igneous.connectors import gmail
 from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem, Tombstone
 from igneous.connectors.drive import DriveConnector, _is_skippable_download_error
 from igneous.connectors.gcal import CalendarConnector, ContactsConnector
+from igneous.connectors.gmail import GmailConnector
 
 DOC = "application/vnd.google-apps.document"
 
 
 def items(events) -> list[SourceItem]:
     return [e for e in events if isinstance(e, SourceItem)]
+
+
+@pytest.fixture(autouse=True)
+def unpaced(monkeypatch):
+    """The fakes answer instantly; pacing them to the real quota would only slow the tests down."""
+    monkeypatch.setattr(gmail, "QUOTA", gmail.TokenBucket(rate=1e9, burst=1e9))
+
+
+# ---- Gmail ----
+
+def gmail_sync(fake: FakeGmail, cursor: dict, **kwargs) -> list:
+    return list(GmailConnector(None, "me@x.com", service=fake, **kwargs).sync(cursor))
+
+
+def test_gmail_backfill_resumes_mid_page(monkeypatch):
+    monkeypatch.setattr(gmail, "CHECKPOINT_EVERY", 2)
+    fake = FakeGmail({f"m{i}": ["INBOX"] for i in range(6)}, pages=[[f"m{i}" for i in range(5)], ["m5"]],
+                     history_id="h1")
+    events = gmail_sync(fake, {}, since_days=None)
+    assert [i.external_id for i in items(events)] == [f"m{i}" for i in range(6)]
+    mid = [c.cursor for c in events if isinstance(c, Checkpoint) and "backfill_offset" in c.cursor]
+    assert mid[1]["backfill_page"] is None and mid[1]["backfill_offset"] == 4 and mid[1]["history_id"] == "h1"
+    fake.calls.clear()
+    resumed = gmail_sync(fake, mid[1])
+    assert [i.external_id for i in items(resumed)] == ["m4", "m5"]  # after m3, not from m0
+    assert resumed[-1].cursor["history_id"] == "h1" and "backfill_q" not in resumed[-1].cursor
+
+
+def test_gmail_lists_everything_since_the_last_sync_when_its_history_id_expired():
+    last_sync = int(time.time()) - 30 * 86400  # a month away: well past Gmail's week of history
+    fake = FakeGmail({"m1": ["INBOX"]}, pages=[["m1"]], history=[http_error(404, "notFound")], history_id="h9")
+    events = gmail_sync(fake, {"history_id": "h1", "synced_at": last_sync, "all_mail": False, "after": None})
+    (listing,) = [kwargs for call, kwargs in fake.calls if call == "list"]
+    assert f"after:{last_sync - gmail.CLOCK_MARGIN}" in listing["q"]
+    assert [i.external_id for i in items(events)] == ["m1"] and events[-1].cursor["history_id"] == "h9"
+
+
+def test_gmail_history_skips_what_the_backfill_skips():
+    fake = FakeGmail({"promo": ["CATEGORY_PROMOTIONS", "INBOX"], "spam": ["SPAM"], "draft": ["DRAFT"],
+                      "kept": ["INBOX", "CATEGORY_PERSONAL"]}, history=[{"history": [{"id": "11", "messagesAdded": [
+                          {"message": {"id": "promo", "labelIds": ["CATEGORY_PROMOTIONS", "INBOX"]}},
+                          {"message": {"id": "spam"}},  # no labels in the history entry: format=raw has them
+                          {"message": {"id": "draft", "labelIds": ["DRAFT"]}},
+                          {"message": {"id": "kept", "labelIds": ["INBOX"]}}]}], "historyId": "12"}])
+    events = gmail_sync(fake, {"history_id": "10", "synced_at": 1, "all_mail": False, "after": None})
+    assert [i.external_id for i in items(events)] == ["kept"]
+    assert ("get", {"id": "promo"}) not in fake.calls  # skipped before spending quota on it
+    assert events[-1].cursor["history_id"] == "12" and events[-1].cursor["all_mail"] is False
+
+
+def test_gmail_remembers_all_mail_and_relists_when_the_choice_changes():
+    history = {"history": [{"id": "11", "messagesAdded": [
+        {"message": {"id": "promo", "labelIds": ["CATEGORY_PROMOTIONS"]}}]}], "historyId": "12"}
+    fake = FakeGmail({"promo": ["CATEGORY_PROMOTIONS"]}, history=[history])
+    remembered = {"history_id": "10", "synced_at": 1, "all_mail": True, "after": 5}
+    assert [i.external_id for i in items(gmail_sync(fake, remembered))] == ["promo"]  # no flag: the account's choice
+
+    fake = FakeGmail({"promo": ["CATEGORY_PROMOTIONS"]}, pages=[["promo"]])
+    events = gmail_sync(fake, {**remembered, "all_mail": False}, all_mail=True)
+    (listing,) = [kwargs for call, kwargs in fake.calls if call == "list"]
+    assert "category:promotions" not in listing["q"] and "after:5" in listing["q"]
+    assert [i.external_id for i in items(events)] == ["promo"] and events[-1].cursor["all_mail"] is True
+
+
+def test_gmail_fetches_a_message_that_leaves_a_skipped_label():
+    fake = FakeGmail({"moved": ["INBOX", "CATEGORY_PERSONAL"], "read": ["INBOX"]}, history=[{"history": [
+        {"id": "11", "labelsRemoved": [
+            {"message": {"id": "moved", "labelIds": ["INBOX", "CATEGORY_PERSONAL"]}, "labelIds": ["CATEGORY_PROMOTIONS"]},
+            {"message": {"id": "read", "labelIds": ["INBOX"]}, "labelIds": ["UNREAD"]}]}], "historyId": "11"}])
+    events = gmail_sync(fake, {"history_id": "10", "synced_at": 1})
+    assert [i.external_id for i in items(events)] == ["moved"]
+    assert fake.calls[0][1]["historyTypes"] == ["messageAdded", "labelRemoved"]
+
+
+def test_gmail_checkpoints_fall_between_history_records(monkeypatch):
+    monkeypatch.setattr(gmail, "CHECKPOINT_EVERY", 2)
+    added = lambda *ids: [{"message": {"id": i, "labelIds": ["INBOX"]}} for i in ids]  # noqa: E731
+    fake = FakeGmail({i: ["INBOX"] for i in "abcd"}, history=[{"history": [
+        {"id": "11", "messagesAdded": added("a", "b", "c")}, {"id": "12", "messagesAdded": added("d")}],
+        "historyId": "12"}])
+    events = gmail_sync(fake, {"history_id": "10", "synced_at": 1})
+    order = [e.external_id if isinstance(e, SourceItem) else e.cursor["history_id"] for e in events]
+    # Resuming from "11" continues after the whole record, so its checkpoint comes after all three messages.
+    assert order == ["a", "b", "c", "11", "d", "12"]
 
 
 # ---- Drive ----

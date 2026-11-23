@@ -1,4 +1,5 @@
 """In-memory stand-ins for the Google API clients the connectors call. Each records its calls."""
+import base64
 from types import SimpleNamespace
 
 from googleapiclient.errors import HttpError
@@ -85,6 +86,49 @@ class FakeCalendar:
     def _events(self, **kwargs):
         self.calls.append(kwargs)
         return Request(self.responses.pop(0))
+
+
+class FakeGmail:
+    """users().getProfile/messages().list/messages().get/history().list over `messages` (id -> labelIds).
+
+    `pages` are the messages.list pages (lists of ids) and `history` the history.list responses in turn (a dict, or
+    an exception to raise). Every message's raw form is a minimal RFC 822 mail."""
+
+    def __init__(self, messages: dict[str, list[str]], pages: list[list[str]] | None = None,
+                 history: list | None = None, history_id: str = "100"):
+        self.labels, self.pages, self.history_responses = messages, pages or [], list(history or [])
+        self.history_id = history_id
+        self.calls: list[tuple[str, dict]] = []
+
+    def users(self):
+        return self
+
+    def getProfile(self, userId):
+        return Request({"historyId": self.history_id})
+
+    def messages(self):
+        return SimpleNamespace(list=self._list, get=self._get)
+
+    def history(self):
+        return SimpleNamespace(list=self._history)
+
+    def _list(self, pageToken=None, **kwargs):
+        self.calls.append(("list", {"pageToken": pageToken, **kwargs}))
+        index = int(pageToken or 0)
+        page = {"messages": [{"id": i} for i in self.pages[index]]} if self.pages else {}
+        return Request({**page, **({"nextPageToken": str(index + 1)} if index + 1 < len(self.pages) else {})})
+
+    def _get(self, id, **kwargs):
+        self.calls.append(("get", {"id": id}))
+        if id not in self.labels:
+            return Request(http_error(404, "notFound"))
+        raw = f"Message-ID: <{id}@x>\nFrom: a@x.com\nTo: b@x.com\nSubject: {id}\n\nbody {id}\n".encode()
+        return Request({"id": id, "threadId": f"t-{id}", "labelIds": self.labels[id],
+                        "raw": base64.urlsafe_b64encode(raw).decode(), "internalDate": "1700000000000"})
+
+    def _history(self, **kwargs):
+        self.calls.append(("history", kwargs))
+        return Request(self.history_responses.pop(0))
 
 
 class FakePeople:

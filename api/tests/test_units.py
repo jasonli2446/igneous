@@ -688,47 +688,6 @@ def test_cross_encoder_failure_preserves_retrieval_order(monkeypatch, caplog):
     assert "using retrieval order" in caplog.text
 
 
-def test_gmail_backfill_resumes_mid_page(monkeypatch):
-    """Regression: a mid-page checkpoint saved only the page token, so resuming re-fetched the page."""
-    from igneous.connectors import gmail
-    from igneous.connectors.base import Checkpoint
-
-    monkeypatch.setattr(gmail, "CHECKPOINT_EVERY", 2)
-    monkeypatch.setattr(gmail, "_retry", lambda call, units=5, tries=6: call)
-    fetched = []
-
-    class Conn(gmail.GmailConnector):
-        def __init__(self):
-            self.query, self.since_days, self.account = "", None, "x"
-            pages = {None: {"messages": [{"id": f"m{i}"} for i in range(5)], "nextPageToken": "p2"},
-                     "p2": {"messages": [{"id": "m5"}]}}
-
-            class Svc:
-                def users(_):
-                    class U:
-                        def getProfile(_, userId):
-                            return {"historyId": "h1"}
-
-                        def messages(_):
-                            class M:
-                                def list(_, pageToken=None, **k):
-                                    return pages[pageToken]
-                            return M()
-                    return U()
-            self.svc = Svc()
-
-        def _fetch(self, msg_id):
-            fetched.append(msg_id)
-            return None
-
-    out = list(Conn()._backfill())
-    mid = [c.cursor for c in out if isinstance(c, Checkpoint) and "backfill_offset" in c.cursor]
-    assert mid[1] == {"history_id": "h1", "backfill_page": None, "backfill_offset": 4, "backfill_q": ""}
-    fetched.clear()
-    list(Conn()._backfill(mid[1]))
-    assert fetched == ["m4", "m5"]  # resumes after m3, not from m0
-
-
 def test_phone_normalization():
     from igneous.connectors.mac_contacts import norm_phone
 

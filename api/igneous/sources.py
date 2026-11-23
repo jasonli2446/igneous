@@ -294,7 +294,7 @@ def build(source_id: str, s: Session, account: str | None, progress: Callable[..
         done = 0
         for acct in targets:
             acct, creds = google_auth.load(s, acct)
-            conn = _google_connector(source_id, creds, acct, None, False)
+            conn = _google_connector(source_id, creds, acct, None, None)
             stats = jobs.run_connector(s, conn, acct, lambda p, d=done: progress({"items": d + p["items"]}))
             for k in total:
                 total[k] += stats[k]

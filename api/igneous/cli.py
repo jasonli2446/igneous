@@ -72,7 +72,9 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | maccontac
          limit: int = typer.Option(None, help="stop at the first checkpoint after this many items (resumable)"),
          since_days: int = typer.Option(None, help="first sync only: how far back to go (imessage, gmail, gcal)"),
          account: str = typer.Option(None, help="google: which connected account (default: every connected one)"),
-         all_mail: bool = typer.Option(False, help="gmail: include Promotions/Social/Forums (skipped by default)")):
+         all_mail: bool = typer.Option(None, "--all-mail/--no-all-mail",
+                                       help="gmail: include Promotions/Social/Forums (skipped by default); the "
+                                            "account remembers the choice")):
     """Pull items into source_items; fs deliberately performs a fresh complete scan."""
     from igneous.connectors.base import run_sync
 
@@ -138,12 +140,11 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | maccontac
         print(run_sync(s, conn, account=account or "default", limit=limit), f"in {time.time() - t:.1f}s")
 
 
-def _google_connector(connector: str, creds, account: str, since_days: int | None, all_mail: bool):
+def _google_connector(connector: str, creds, account: str, since_days: int | None, all_mail: bool | None):
     if connector == "gmail":
         from igneous.connectors.gmail import GmailConnector
 
-        return GmailConnector(creds, account, since_days=since_days or 90,
-                              query=None if all_mail else GmailConnector.DEFAULT_QUERY)
+        return GmailConnector(creds, account, since_days=since_days or 90, all_mail=all_mail)
     if connector == "drive":
         from igneous.connectors.drive import DriveConnector
 
