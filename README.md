@@ -94,8 +94,9 @@ Notes). Each entry says what it reads, shows its status and last sync or import,
 The list comes from `GET /sources`, so the page and the CLI never drift apart. Everything is read-only.
 
 Connect or import at least one source, then press **Rebuild** under "Build the graph". Rebuild runs the same pipeline as
-`igneous pipeline`: it reads your sources into people, threads and events, chunks and embeds text, finds topics and
-entities, works out which person is you, and merges duplicates. It is incremental, so it is safe to press again after
+`igneous pipeline` (without model extraction): it reads what is new in your sources into people, conversations and
+events, chunks and embeds text, then works out which person is you, merges duplicate people, and finds your projects,
+life threads and organizations again, publishing them all at once when it finishes. It is safe to press again after
 each sync or import; the first run takes a few minutes (embedding is the slow part). Then open **Graph**, **Ask** and
 **Search**.
 
@@ -146,8 +147,9 @@ uv run igneous import takeout ~/Downloads/takeout-*.zip     # or --downloads to 
 uv run igneous import linkedin ~/Downloads/Basic_LinkedInDataExport.zip   # a zip or an extracted folder
 # ChatGPT and Claude.ai exports are uploaded on the Sources page.
 
-uv run igneous pipeline                             # build the graph from whatever is new (same as Rebuild)
+uv run igneous pipeline                             # read what is new and rebuild the graph (same as Rebuild)
 uv run igneous pipeline --extract 200               # also LLM-extract up to 200 newest messages (costs money)
+uv run igneous pipeline --stage resolve             # only some stages (in pipeline order); --help lists them
 uv run igneous schedule install                     # macOS: incremental sync every 30 minutes
 ```
 
@@ -163,13 +165,16 @@ Re-run it safely to restore the exact fixture, or validate an existing output wi
 cd api && uv run igneous verify-synthetic-corpus ../data/synthetic-cross-source
 ```
 
-`igneous pipeline` runs spine -> chunk -> embed -> extract -> topics -> entities -> profile -> threads -> backbone -> self
--> resolve -> organizations -> verify (`api/igneous/pipeline.py`, the same list Rebuild runs). The topics stage lowercases and
-conservatively lemmatizes keys, merges only high-similarity local-embedding duplicates, and adds `RELATED_TO` after
-three shared messages; moved `ABOUT` edges keep their original provenance. Extraction, like every model call,
-reads only sources listed in `IGNEOUS_LLM_SOURCES`; set it to `email` before `make demo`, then use `EXTRACT=0` to
-skip calls or `EXTRACT=500` to process more. Everything is incremental: re-running only processes what changed.
-`docker compose up` also runs the api and web in containers.
+`igneous pipeline` runs spine -> chunk -> embed -> extract -> self -> resolve -> thread_flags -> introductions -> topics
+-> entities -> profile -> threads -> backbone -> organizations -> verify -> corrections (`api/igneous/pipeline.py`, the
+same list Rebuild runs, without extract). The order is what each stage reads: who you are and which identities are one
+person come before everything that counts people, your resume before the threads placed under it, the verifier after
+every link it checks, and your corrections last, so they always win. The source stages (spine through extract) only
+read what is new; the stages after them recompute what is derived. The topics stage lowercases and conservatively
+lemmatizes keys, merges only high-similarity local-embedding duplicates, and adds `RELATED_TO` after three shared
+messages; moved `ABOUT` edges keep their original provenance. Extraction, like every model call, reads only sources
+listed in `IGNEOUS_LLM_SOURCES`; set it to `email` before `make demo`, then use `EXTRACT=0` to skip calls or
+`EXTRACT=500` to process more. `docker compose up` also runs the api and web in containers.
 
 ## Layout
 
@@ -180,7 +185,7 @@ skip calls or `EXTRACT=500` to process more. Everything is incremental: re-runni
 | `api/igneous/rag/` | `chunking.py`, `embed.py` (local ONNX, 384-d), `search.py` hybrid lexical + dense with RRF, `rerank.py` optional local cross-encoder, `qa.py` graph-augmented answers with citations |
 | `api/igneous/llm.py` | structured model calls and the rule for what a model may read (`allowed_sources`, `visible_nodes`); `providers.py` talks to Bedrock |
 | `api/eval/` | gold questions, ER labels, harnesses, results (see `api/eval/README.md`) |
-| `api/igneous/pipeline.py` | per-stage watermarks; every stage is incremental and safe to re-run |
+| `api/igneous/pipeline.py` | the stage list in dependency order and the one runner `igneous pipeline` and Rebuild share |
 | `api/igneous/main.py` | FastAPI app: search, ask, the explorer's `/graph/*` routes, sources, sync and import jobs (the full list at <http://localhost:8000/docs>) |
 | `api/migrations/` | the whole schema, as plain SQL migrations (`0001_core_schema.py` onward); app code never creates tables |
 | `web/` | Next.js: the 3D explorer (`Graph3D.tsx`, 3d-force-graph) with the inspector and why-view, Ask, Search, and the Sources page |
@@ -200,7 +205,12 @@ cd api && uv run igneous sync imessage --since-days 90 && uv run igneous pipelin
 ## Adding a stage or connector
 
 - **Connector:** implement `sync(cursor) -> Iterator[SourceItem | Checkpoint]` (see `connectors/base.py`), register it in `cli.py`.
-- **Pipeline stage:** read rows newer than `watermark(s, STAGE)`, write, then `advance(...)`. See `rag/chunking.py`.
+- **Pipeline stage:** add it to `STAGES` in `api/igneous/pipeline.py`, after every stage whose output it reads, with
+  the label the Sources page shows while it runs. A source stage (spine, chunk, embed, extract) reads only what is new
+  and commits as it goes. A derived stage runs inside the publishing transaction: it never commits, rolls back or bumps
+  the graph version, rebuilds only the rows it owns (its extractor), stores paid model results with
+  `llm.cache_store` as they arrive, and leaves corrections to the last step. `igneous pipeline --stage NAME` runs it
+  alone, then publishes.
 
 ## Known gaps in the baseline
 

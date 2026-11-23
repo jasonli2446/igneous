@@ -70,6 +70,9 @@ Export formats are sources too: add the entry to `SOURCES` and an inline form in
   code. The API, the CLI and the MCP server refuse to run on any schema but head (`db.schema_status`).
 - Adding, renaming or removing a setting in `api/igneous/config.py`, or changing its default, means the same edit in
   `api/.env.example` (a one-line meaning, then the default, commented out); `tests/test_env_example.py` checks.
+- Derived stages (self through corrections, `api/igneous/pipeline.py`) publish in one transaction: never commit, roll
+  back or bump the graph version inside one. A correction endpoint takes `entity_api.correction_session`, so it never
+  runs while a rebuild publishes.
 
 ## Checks before any PR
 

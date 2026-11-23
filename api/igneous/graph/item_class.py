@@ -91,10 +91,7 @@ def user_keys(s: Session) -> frozenset[str]:
     keys = {r[0] for r in s.execute(text("""
         SELECT DISTINCT lower(raw_meta->'from'->0->>'email') FROM source_items
         WHERE source = 'gmail' AND raw_meta->'labels' @> '["SENT"]'""")) if r[0]}
-    try:
-        keys |= {r[0].lower() for r in s.execute(text("SELECT account FROM oauth_tokens WHERE provider = 'google'"))}
-    except Exception:  # the table is created on first connect
-        s.rollback()
+    keys |= {r[0].lower() for r in s.execute(text("SELECT account FROM oauth_tokens WHERE provider = 'google'"))}
     return frozenset(k for k in keys if not is_service_address(k))
 
 
@@ -176,6 +173,13 @@ def backfill(s: Session, keys: frozenset[str] | None = None) -> int:
             s.execute(text("UPDATE source_items SET item_class = :c WHERE id = :id"), out)
             done += len(out)
         s.commit()
+
+
+def refresh_thread_flags(s: Session) -> int:
+    """Recompute which threads are conversations and group conversations, and hide what isn't, from merged
+    identities: the pipeline's thread_flags stage, after entity resolution. Returns rows changed."""
+    n = s.execute(SYNC_THREAD_FLAG, {"keys": sorted(user_keys(s))}).rowcount
+    return n + s.execute(SYNC_MESSAGE_HIDDEN).rowcount
 
 
 def apply(s: Session) -> int:

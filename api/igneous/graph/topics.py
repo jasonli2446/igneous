@@ -1,7 +1,8 @@
 """Conservative normalization and relationship discovery for open-vocabulary Topic nodes.
 
-Topic merges are deliberately destructive only at the node level: every ABOUT edge is re-pointed to the
-surviving node, retaining its extractor, source item, span, model, and confidence provenance unchanged.
+Topic merges are deliberately destructive only at the node level: every edge of the merged topic is re-pointed to
+the surviving node, retaining its extractor, source item, span, model, and confidence provenance unchanged. When the
+survivor already has the same record's edge from the same extractor, that edge stands for both.
 """
 import json
 import re
@@ -75,24 +76,27 @@ def similar_pairs(topics: list[Topic], vectors: Iterable[list[float]], threshold
                 yield topic, other, similarity
 
 
-def _merge(s: Session, survivor: int, duplicate: int, reason: dict) -> bool:
-    """Move evidence only when it cannot collide with an existing provenance-bearing edge."""
-    collision = s.execute(text("""
-        SELECT 1
-        FROM edges old JOIN edges current
-          ON current.src = old.src AND current.type = old.type AND current.extractor = old.extractor
-         AND current.dst = :survivor
-        WHERE old.dst = :duplicate
-        LIMIT 1
-    """), {"survivor": survivor, "duplicate": duplicate}).first()
-    if collision:
-        return False
-    s.execute(text("UPDATE edges SET dst = :survivor WHERE dst = :duplicate"),
-              {"survivor": survivor, "duplicate": duplicate})
+def _merge(s: Session, survivor: int, duplicate: int, reason: dict) -> None:
+    """Fold `duplicate` into `survivor`: its edges move over, except the ones the survivor already has (same other
+    end, type and extractor) and those between the two; then the duplicate node goes."""
+    params = {"survivor": survivor, "duplicate": duplicate}
+    s.execute(text("DELETE FROM edges WHERE src = :duplicate AND dst = :survivor"), params)
+    s.execute(text("DELETE FROM edges WHERE src = :survivor AND dst = :duplicate"), params)
+    s.execute(text("""
+        DELETE FROM edges e WHERE e.dst = :duplicate AND EXISTS (
+            SELECT 1 FROM edges x WHERE x.dst = :survivor AND x.src = e.src AND x.type = e.type
+                                    AND x.extractor = e.extractor)
+    """), params)
+    s.execute(text("""
+        DELETE FROM edges e WHERE e.src = :duplicate AND EXISTS (
+            SELECT 1 FROM edges x WHERE x.src = :survivor AND x.dst = e.dst AND x.type = e.type
+                                    AND x.extractor = e.extractor)
+    """), params)
+    s.execute(text("UPDATE edges SET dst = :survivor WHERE dst = :duplicate"), params)
+    s.execute(text("UPDATE edges SET src = :survivor WHERE src = :duplicate"), params)
     s.execute(text("UPDATE nodes SET props = props || CAST(:props AS jsonb) WHERE id = :id"),
               {"id": survivor, "props": json.dumps({"topic_normalized": True, "merge_reason": reason})})
     s.execute(text("DELETE FROM nodes WHERE id = :id"), {"id": duplicate})
-    return True
 
 
 def _related(s: Session, minimum: int) -> int:
@@ -115,25 +119,32 @@ def _related(s: Session, minimum: int) -> int:
 
 
 def run(s: Session, threshold: float = SIMILARITY_THRESHOLD, minimum: int = MIN_COOCCURRENCES) -> dict:
-    """Normalize Topic keys, merge obvious duplicates, and regenerate co-occurrence RELATED_TO edges."""
+    """Merge Topic nodes that are one topic (one normalized key, or near-identical names that share a word), key
+    each by its normalized name, and regenerate co-occurrence RELATED_TO edges."""
     topics = [Topic(*row) for row in s.execute(text(
         "SELECT id, key, name FROM nodes WHERE type = 'Topic' ORDER BY id")).all()]
-    merged = skipped = 0
+    merged = 0
 
-    # Exact normalized keys need no embedding call and are safe even on an offline first run.
+    # Exact normalized keys need no embedding call and are safe even on an offline first run. The survivor is the
+    # topic already holding the key, else the oldest; it keeps its stored key when a topic outside the group (whose
+    # own name normalizes elsewhere) holds the normalized one.
     groups: dict[str, list[Topic]] = {}
     for topic in topics:
         key = normalize_key(topic.name)
         if key:
             groups.setdefault(key, []).append(topic)
+    held = {topic.key: topic.id for topic in topics}
     for key, group in groups.items():
-        survivor = group[0]
-        for duplicate in group[1:]:
-            if _merge(s, survivor.id, duplicate.id, {"normalized_key": key}):
+        survivor = next((t for t in group if t.key == key), group[0])
+        for duplicate in group:
+            if duplicate.id != survivor.id:
+                _merge(s, survivor.id, duplicate.id, {"normalized_key": key})
+                held.pop(duplicate.key, None)
                 merged += 1
-            else:
-                skipped += 1
-        s.execute(text("UPDATE nodes SET key = :key WHERE id = :id"), {"key": key, "id": survivor.id})
+        if survivor.key != key and key not in held:
+            s.execute(text("UPDATE nodes SET key = :key WHERE id = :id"), {"key": key, "id": survivor.id})
+            held.pop(survivor.key, None)
+            held[key] = survivor.id
 
     remaining = [Topic(*row) for row in s.execute(text(
         "SELECT id, key, name FROM nodes WHERE type = 'Topic' ORDER BY id")).all()]
@@ -145,11 +156,7 @@ def run(s: Session, threshold: float = SIMILARITY_THRESHOLD, minimum: int = MIN_
             if first.id in removed or second.id in removed:
                 continue
             survivor, duplicate = (first, second) if first.id < second.id else (second, first)
-            if _merge(s, survivor.id, duplicate.id, {"similarity": round(similarity, 4)}):
-                removed.add(duplicate.id)
-                merged += 1
-            else:
-                skipped += 1
-    related = _related(s, minimum)
-    s.commit()
-    return {"topics_merged": merged, "merge_collisions_skipped": skipped, "related_to": related}
+            _merge(s, survivor.id, duplicate.id, {"similarity": round(similarity, 4)})
+            removed.add(duplicate.id)
+            merged += 1
+    return {"topics_merged": merged, "related_to": _related(s, minimum)}

@@ -60,11 +60,8 @@ def is_relay_name(name: str | None) -> bool:
 def _signals(s: Session) -> list[tuple[str, str]]:
     """(signal, identity key) pairs. Keys match how spine keys Person nodes."""
     out: list[tuple[str, str]] = []
-    try:
-        for (acct,) in s.execute(text("SELECT account FROM oauth_tokens WHERE provider = 'google'")):
-            out.append(("google_account", acct.lower()))
-    except Exception:  # no Google connected (the table is created on first connect)
-        s.rollback()
+    for (acct,) in s.execute(text("SELECT account FROM oauth_tokens WHERE provider = 'google'")):
+        out.append(("google_account", acct.lower()))
     for (addr,) in s.execute(text("""
         SELECT DISTINCT lower(raw_meta->'from'->0->>'email') FROM source_items
         WHERE source = 'gmail' AND raw_meta->'labels' @> '["SENT"]'
@@ -164,5 +161,4 @@ def run(s: Session) -> dict:
         """), {"a": a, "b": b, "ex": EXTRACTOR, "p": json.dumps({"signals": [signal]})})
         linked.setdefault(key, []).append(signal)
     services += s.execute(ONE_WAY_SENDERS, {"me": me}).rowcount
-    s.commit()
     return {"self_links": len(linked), "signals": sum(len(v) for v in linked.values()), "services": services}

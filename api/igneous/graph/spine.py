@@ -553,8 +553,6 @@ def run(s: Session) -> int:
         name_from_headers(s)        # each address's most common display name, across all mail
         quoted.run(s)               # exact parents from quoted "Original Message" headers first
         s.execute(INFER_REPLIES)    # then the subject+participant heuristic for whatever is left
-        from igneous.graph.history import derive_introductions
-        derive_introductions(s)     # deterministic, source-cited three-person introductions
     backfill_temporal(s)
     s.commit()
     from igneous.graph import item_class
