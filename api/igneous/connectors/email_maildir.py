@@ -92,8 +92,11 @@ class MaildirConnector:
         return sorted(set(self.mailboxes))
 
     def _paths(self, box: str) -> list[str]:
+        """The mailbox's message files. A file whose name starts with a dot is not a message: Finder leaves
+        .DS_Store and ._ files in a folder you open."""
         # Sorted as the strings the cursor compares, never as Path objects (which order "a/1" before "a-b/1").
-        return sorted(p.relative_to(self.root).as_posix() for p in (self.root / box).rglob("*") if p.is_file())
+        return sorted(p.relative_to(self.root).as_posix() for p in (self.root / box).rglob("*")
+                      if p.is_file() and not p.name.startswith("."))
 
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint]:
         done = dict(cursor.get("mailboxes") or {})

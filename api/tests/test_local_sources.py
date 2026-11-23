@@ -56,6 +56,14 @@ def test_a_resumed_mailbox_skips_nothing_whatever_the_folder_names(db, tmp_path,
     assert stored(db, "email") == ["x/a-b/1.", "x/a/1."]
 
 
+def test_files_finder_leaves_in_a_mailbox_are_not_messages(tmp_path):
+    root = maildir(tmp_path, "allen-p/inbox/1.")
+    (root / "allen-p" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    (root / "allen-p" / "inbox" / "._1.").write_bytes(b"\x00\x05\x16\x07")
+    events = list(MaildirConnector(root, ["allen-p"]).sync({}))
+    assert [e.external_id for e in events if isinstance(e, SourceItem)] == ["allen-p/inbox/1."]
+
+
 def test_an_unknown_mailbox_is_an_error(tmp_path):
     root = maildir(tmp_path, "allen-p/inbox/1.")
     with pytest.raises(ValueError, match="No mailbox nobody-x"):
