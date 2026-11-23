@@ -189,31 +189,37 @@ IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous
   uv run python eval/persona_eval.py
 ```
 
-On the default seed with the model off (2026-11-23), after `make persona` (one pipeline run) and after a second run:
+On the default seed with the model off (2026-11-23, main at `178431b`), after `make persona` (one pipeline run) and
+after a second run:
 
 | | One run | Two runs |
 |---|---|---|
 | Gold threads found | 12 of 12 | 12 of 12 |
-| Found twice or more (another Project for the same thing) | 10 | 10 |
+| Found twice or more (another Project for the same thing) | 11 | 10 |
 | Records that must not be in their thread, but are | 1 | 1 |
-| Placed right (under its school or job, or under nothing) | 3 of 10 | 7 of 10 |
+| Placed right (under its school or job, or under nothing) | 7 of 10 | 7 of 10 |
 | Who took part: missing or wrongly there | 0 | 0 |
 | Identities: clusters P / R | 1.00 / 0.94 | 1.00 / 0.94 |
 | Identities: pairs ≥ 0.5, P / R | 1.00 / 0.83 | 1.00 / 0.83 |
-| Ask retrieval, recall@10 over 13 answerable questions: hybrid / dense / lexical | 0.85 / 0.69 / 0.85 | the same |
+| Ask retrieval, recall@10 over 13 answerable questions: hybrid / dense / lexical | 0.77 / 0.62 / 0.85 | the same |
 
-- Every duplicate is a Project the entities stage named from a folder or chat ("Lisbon 2025", "CS 341 Operating
-  Systems", "tidepool") beside the thread the threads stage found for the same thing; CS 481 is also split in two
-  threads ("Harborline", "Demo Day").
+- Most duplicates are a Project the entities stage named from a folder ("Lisbon 2025", "CS 341 Operating Systems",
+  "tidepool") beside the thread the threads stage found for the same thing; CS 481 is also split in two threads
+  ("Harborline", "Demo Day").
+- Each organization is two nodes: the company LinkedIn's connections name (`org:lakeshore-university`) and the one
+  found by email domain (`lakeshore.example.edu`). The first run ties Mira's LinkedIn positions to the company nodes,
+  so the backbone gives both nodes a thread, and only the domain's holds anything; the second run ties the school to
+  its domain node (the one with more links by then), and its empty thread goes.
+- The placements are by email domain: the classes, the Heron field trials and the hiring thread go under the right
+  organization, and the Lisbon and Iceland trips and Tidepool under Lakeshore University too, since most of their
+  people write from the school's domain.
 - The leak is a "remember Lisbon?" chat six months after the trip: the folder-named "Lisbon 2025" takes in every
   record that mentions Lisbon.
-- One run places nothing. The profile stage, which runs first, ties LinkedIn's employers to LinkedIn's company nodes;
-  the organizations stage then finds the same organizations by email domain, and on the next run the profile stage
-  ties the employers to those. With a domain to go on, the backbone puts the classes, the Heron field trials and the
-  hiring thread under the right organization, and also the Lisbon and Iceland trips and Tidepool under Lakeshore
-  University, since most of their people write from the school's domain.
 - The only identity left apart is classmate Alex Chen's LinkedIn profile: two people share the name, so the name
   alone joins neither.
+- Retrieval moves by a question or two between builds of the same seed (hybrid recall@10 from 0.77 to 0.92 over
+  three builds): lexical search orders equal scores by however the rows were stored, and the vector index (HNSW) is
+  approximate.
 - With the model off, threads keep their fallback names ("Lisbon · Jan-Mar 2025", kind "thread"). `--qa` needs the
   model.
 

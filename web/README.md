@@ -68,10 +68,9 @@ The names it searches for come from the demo mailbox (`WALK_PEOPLE`, `WALK_PAIR`
 On the synthetic persona (`make persona`), name its people:
 
 ```bash
-WALK_PEOPLE="Dana Kimura|Priya Raman" WALK_PAIR="Mira Castellanos|Owen Brandt" \
-  WALK_SEEDS="Dana Kimura|Priya Raman|Owen Brandt|Rafael Ortiz|Mira Castellanos" npm run walkthrough
+WALK_PEOPLE="Dana Kimura|Priya Raman" WALK_PAIR="Owen Brandt|Mira Castellanos" \
+  WALK_SEEDS="Dana Kimura|Priya Raman|Owen Brandt|Rafael Ortiz|Sofia Lindgren" npm run walkthrough
 ```
 
-The first of `WALK_PEOPLE` must not be the database's owner: the owner's graph lives at `/`, so centring on them
-writes no `?seed=` to wait for. Owen Brandt is linked to Mira by the introduction Ruth Adeyemi made, an inferred link
-the correction can remove.
+Mira, the owner, is never searched for (search lists her as "You"); she is only the pair's other end, linked to Owen
+Brandt by the introduction Ruth Adeyemi made, an inferred link the correction can remove.

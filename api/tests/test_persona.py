@@ -237,16 +237,19 @@ def test_a_slice_builds_its_graph_through_the_sources_registry_and_the_pipeline(
     assert thread("Lisbon trip").props["kind"] == "trip"
     assert {"Dana Kimura", "Sofia Lindgren", "Rafael Ortiz"} <= took_part("Lisbon trip")
     assert "Theo Marsh" not in took_part("Lisbon trip")
-    # Classes, under the school on Mira's LinkedIn; the job: the hiring is Northwind's own thread.
-    school = db.execute(text("""SELECT p.id FROM nodes p JOIN nodes o ON o.id = (p.props->>'org')::bigint
-                                WHERE p.type = 'Project' AND o.name = 'Lakeshore University'""")).scalar_one()
+    # Classes, under the school on Mira's LinkedIn; the job: the hiring is Northwind's own thread. An organization
+    # can be two nodes (the company LinkedIn names, and the one found by its email domain), each with a thread.
+    def standing_for(org: str) -> dict[int, dict]:
+        return dict(db.execute(text("""SELECT p.id, p.props FROM nodes p JOIN nodes o ON o.id = (p.props->>'org')::bigint
+                                       WHERE p.type = 'Project' AND o.name = :o"""), {"o": org}).all())
+
+    schools = set(standing_for("Lakeshore University"))
     for course in ("CS 362", "ENVS 210"):
         assert thread(course).props["kind"] == "class"
-        assert school in db.execute(text("SELECT dst FROM edges WHERE src = :c AND type = 'PART_OF'"),
-                                    {"c": thread(course).id}).scalars().all(), course
-    job = db.execute(text("""SELECT p.props FROM nodes p JOIN nodes o ON o.id = (p.props->>'org')::bigint
-                             WHERE p.type = 'Project' AND o.name = 'Northwind Robotics'""")).scalar_one()
-    assert job["kind"] == "job" and job["records"] >= 6
+        assert schools & set(db.execute(text("SELECT dst FROM edges WHERE src = :c AND type = 'PART_OF'"),
+                                        {"c": thread(course).id}).scalars()), course
+    assert any(job.get("kind") == "job" and (job.get("records") or 0) >= 6
+               for job in standing_for("Northwind Robotics").values())
     assert {"Priya Raman", "Alex Chen"} <= took_part("Heron field trials")  # on the depth-drift thread with Mira
     # The side project, pinned from the LinkedIn export's projects.
     tidepool = thread("Tidepool").props

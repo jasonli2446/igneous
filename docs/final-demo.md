@@ -91,7 +91,7 @@ What is in them, so you know what to click:
 | Open **Sources** | Setup lives in the UI: each source says what it reads and how to connect it. The persona came in through five of them: its mailbox, Google Takeout, LinkedIn, ChatGPT and Local files; the Demo group says how it was made. Rebuild runs the whole pipeline. |
 | Open **Graph** | It opens on Mira. The first ring is only what matters most: her school and workplace, her sustained projects and trips, and her closest people. Closeness is recency-weighted, so it reflects her life now. One-off emails, newsletters and bots are never nodes. |
 | Click **Lakeshore University** | It opens to her classes: CS 341 through the CS 481 capstone. Nobody configured this; it comes from her resume and LinkedIn plus which threads involve the school's people and dates. |
-| Click **Northwind Robotics** | The job: the Heron field trials, and the colleagues she wrote and chatted with. |
+| Click **Northwind Robotics** | The job: how she was hired and the Heron field trials. Open Heron for the colleagues she wrote and chatted with. |
 | Click the **Lisbon trip** | Who went comes from the trip's own group chat, not from everyone who mentioned it: Dana, Sofia and Rafael. Theo, who never went, isn't on it, and a "remember Lisbon?" message six months later isn't part of it. |
 | Click **Dana Kimura** | One person, three identities: her school address, her personal address and her LinkedIn profile. And the two Alex Chens stay two people. |
 | Click a **line** between two nodes | Why they're connected: the kind of link, who made it (a rule, the AI checker, or you), its reason, and the exact records. Open any record. |
@@ -141,6 +141,7 @@ Pick 3–4. Each needs no setup beyond registration. Speak as Mira: the server's
    > Using igneous: what's under Northwind Robotics, and who did I work with on the Heron field trials?
 
    Expect: `find` → `open_node` on the org (its projects) → `open_node` on the project (Jonah, Priya, Alex Chen).
+   `find` lists Northwind Robotics twice; the projects are under one of them (see the last table).
 
 4. **Explain a link** (shows trust):
    > Using igneous: why is Dana Kimura connected to the Lisbon trip? Cite the records. Two records is enough.
@@ -197,7 +198,7 @@ in a fresh session before recording: times depend on the model and on the warm c
 | Threads are named like "Lisbon · Jan-Mar 2025" and all sit under Projects | The model hasn't read the persona: set `AWS_BEARER_TOKEN_BEDROCK` and the opt-ins (step 2), then Rebuild once. |
 | Lakeshore University also opens to a trip or Tidepool | They were placed by email domain (most of their people write from the school's address). The model's checker judges each placement; without it nothing does. Either way it's the moment for **This is wrong**. |
 | Search shows two Lisbons (or two Icelands, two Tidepools, a class twice) | The other one is a documents folder made a project ("Lisbon 2025"): it takes in every record that mentions Lisbon, fare newsletters and her mother's mail included. Open the trip thread ("Lisbon · Jan-Mar 2025" without the model). |
-| Search shows Lakeshore University or Northwind Robotics twice | One is the company her LinkedIn connections list, the other the organization found by its email domain. The one on Mira's first ring holds the threads: open it from there. |
+| Lakeshore University or Northwind Robotics shows twice, on her first ring or in search | One is the company her LinkedIn connections name, the other the organization found by its email domain, which holds the threads (in MCP, `find` lists both). Open the one with classes or projects under it. |
 | Group chats show as "Google Chat Space AAAA…" | The Takeout reader doesn't read a chat's name yet, only its folder's. Open one: its members and messages are right. |
 | `me` lists Northwind only from July 2026 | The profile keeps one position per organization; the internship from January 2025 is in her LinkedIn export and resume. |
 | First tool call says "waiting for MCP servers" | Another configured server is slow; igneous still connects. Remove the slow one before recording. |
