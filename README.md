@@ -32,9 +32,9 @@ Every table comes from a migration. After pulling, run `uv run alembic upgrade h
 API, the CLI and the MCP server check the schema first and refuse to run on any other, with the reason and the fix:
 a database behind the code, one migrated by newer code, no schema yet, or Postgres not reachable.
 
-Upgrading past migration 0012 (which records which records each node and edge come from): the next Rebuild or
-`igneous pipeline` reads every record into the graph once more, about 40 seconds for the six Enron baseline mailboxes
-(26k records), and then deletes what no record supports. Chunks and embeddings are kept.
+Upgrading to migration 0012 from an earlier one (0012 tracks which records each node and edge come from): the next
+Rebuild or `igneous pipeline` reads every record into the graph once more, about a minute for the six Enron baseline
+mailboxes (26k records), and then deletes what no record supports. Chunks and embeddings are kept.
 
 Tests (`make test`) never use that database or your personal one, nor your `api/.env` or model credentials: each
 run creates, migrates and finally drops its own `igneous_test_<pid>` database on the same server
