@@ -4,21 +4,13 @@
 row is its own head. Only Person nodes are merged. The owner is the Person keyed 'me' (created by the spine and the
 self stage), and is always the head of its own cluster.
 
-Every reader follows one rule: a person is their identity head. Every Person id the API returns is a head, and
-each identity's records count for that head.
+Every reader follows one rule: a person is their identity head. Every Person id the API returns is a head, and the
+records of every identity in a cluster count for its head (`members`, `members_sql`).
 """
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 OWNER_KEY = "me"
-
-
-class NotFound(LookupError):
-    """No node has this id."""
-
-    def __init__(self, node_id: int):
-        super().__init__(f"No node {node_id}")
-        self.node_id = node_id
 
 
 def self_id(s: Session) -> int | None:
@@ -36,21 +28,12 @@ def head(s: Session, node_id: int) -> int:
     return s.execute(text(f"SELECT {head_sql(':id')}"), {"id": node_id}).scalar_one()
 
 
-def heads(s: Session, node_ids) -> dict[int, int]:
-    """{node: its identity head} for each of `node_ids`."""
-    ids = sorted({int(i) for i in node_ids})
-    if not ids:
-        return {}
-    return dict(s.execute(text("""
-        SELECT x, COALESCE(c.canonical_id, x) FROM unnest(CAST(:ids AS bigint[])) AS x
-        LEFT JOIN canonical c ON c.node_id = x"""), {"ids": ids}).all())
+class NotFound(LookupError):
+    """No node has this id."""
 
-
-def members(s: Session, node_id: int) -> list[int]:
-    """Every identity in `node_id`'s cluster, `node_id` included ([node_id] when it isn't merged)."""
-    ids = s.execute(text(f"SELECT node_id FROM canonical WHERE canonical_id = {head_sql(':id')}"),
-                    {"id": node_id}).scalars().all()
-    return sorted({node_id, *ids})
+    def __init__(self, node_id: int):
+        super().__init__(f"No node {node_id}")
+        self.node_id = node_id
 
 
 def node(s: Session, node_id: int) -> dict:
@@ -61,6 +44,30 @@ def node(s: Session, node_id: int) -> dict:
     if row is None:
         raise NotFound(node_id)
     return dict(row)
+
+
+def heads(s: Session, node_ids) -> dict[int, int]:
+    """{node: its identity head} for each of `node_ids`."""
+    ids = sorted({int(i) for i in node_ids})
+    if not ids:
+        return {}
+    return dict(s.execute(text("""
+        SELECT x, COALESCE(c.canonical_id, x) FROM unnest(CAST(:ids AS bigint[])) AS x
+        LEFT JOIN canonical c ON c.node_id = x"""), {"ids": ids}).all())
+
+
+def members_sql(expr: str) -> str:
+    """SQL for the set of every identity in the cluster of the node id `expr` (a bound parameter or a column), the
+    node itself included, for `IN`."""
+    h = head_sql(expr)
+    return f"(SELECT {h} UNION SELECT node_id FROM canonical WHERE canonical_id = {h})"
+
+
+def members(s: Session, node_id: int) -> list[int]:
+    """Every identity in `node_id`'s cluster, `node_id` included ([node_id] when it isn't merged)."""
+    ids = s.execute(text(f"SELECT node_id FROM canonical WHERE canonical_id = {head_sql(':id')}"),
+                    {"id": node_id}).scalars().all()
+    return sorted({node_id, *ids})
 
 
 def card_keys(meta: dict) -> list[str]:

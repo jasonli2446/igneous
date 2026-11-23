@@ -7,7 +7,8 @@
   database it names. `test_db` creates and migrates it once per run and drops it when the run ends; databases left
   behind by runs that died are dropped first. Two runs at once (two worktrees, two agents) never touch each other.
 - `db` gives a test a clean graph inside one transaction that is rolled back afterwards. Every session the code under
-  test opens through `igneous.db.SessionLocal` (API routes and MCP tools included) joins that transaction.
+  test opens through `igneous.db.SessionLocal` (API routes and MCP tools included) joins that transaction. Readers'
+  results cached per graph version (graph/dirty.py) start empty too.
 - `committed_db` is for code that commits from another thread or process (jobs, subprocesses): it empties every
   table, and what the test writes is really committed.
 
@@ -102,10 +103,13 @@ def test_db():
 
 
 def _empty(s) -> None:
+    from igneous.graph import dirty
+
     tables = s.execute(text("""SELECT tablename FROM pg_tables
                                WHERE schemaname = 'public' AND tablename <> 'alembic_version'""")).scalars().all()
     s.execute(text(f"TRUNCATE {', '.join(tables)} RESTART IDENTITY CASCADE"))
     s.execute(text("INSERT INTO graph_version (id) VALUES (true)"))  # the one row migration 0007 seeds
+    dirty.forget()  # every test's graph starts at the same version: no reader's answer carries over
 
 
 @pytest.fixture

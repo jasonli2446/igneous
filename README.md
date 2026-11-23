@@ -289,7 +289,9 @@ Fourteen read-only tools: `me` (the big picture), `find` (a name to node ids), `
 lower-level `get_node`, `neighbors`, `correspondents` and `evidence`.
 
 `timeline(node_id, other_node_id=None, limit=50)` returns dated activity or a pair's direct relationship history,
-with source item ids and no source text. `commitments(node_id, status="open", limit=50)` returns existing promises
+with source item ids and no source text. A record named by its title (a message, an event, a conversation named after
+its subject) keeps its name only when its source is in `IGNEOUS_LLM_SOURCES`, since tool results reach the client's
+model. `commitments(node_id, status="open", limit=50)` returns existing promises
 from that node's records, with who/what, status and source spans. For a person it includes messages they sent or
 received; check `who` before attributing a promise. Both resolve merged identities, accept limits from 1 to 200,
 and work without model credentials. Commitments also accepts `resolved` or `all` for status.

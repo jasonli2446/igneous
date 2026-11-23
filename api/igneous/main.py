@@ -8,7 +8,7 @@ from typing import Literal
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.encoders import jsonable_encoder
+from fastapi import Path as PathParam
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -22,37 +22,17 @@ from igneous.connectors import secrets
 from igneous.db import SessionLocal, get_session, schema_status
 from igneous.graph import identity
 from igneous.graph.entity_api import router as entity_router
-from igneous.graph.history import commitments, decisions, relationship_history
-from igneous.graph.traversal import GraphFilters, expand, explain, neighborhood, network, people, view
+from igneous.graph.find import TYPES as FIND_TYPES
+from igneous.graph.find import find
+from igneous.graph.history import commitments
+from igneous.graph.summary import summarize
+from igneous.graph.traversal import expand, explain, view
 from igneous.items import router as items_router
 from igneous.llm import ProviderError, ProviderUnavailable, model_status
 from igneous.rag import qa
 from igneous.rag.constraints import apply, describe, person_by_address_or_name
 from igneous.rag.search import Filters, experts, hybrid
-from igneous.timeline import EntityNotFoundError, timeline
-
-
-class NamedResponse(JSONResponse):
-    """Every string the API returns shows contact names instead of phone numbers, wherever a number has a saved
-    contact. Identity fields (`key`, `external_id`) stay raw so clients can still address things by them."""
-    KEEP = frozenset({"key", "external_id", "chat", "handle"})
-
-    def render(self, content) -> bytes:
-        from igneous.db import SessionLocal
-        from igneous.graph.traversal import handle_names, name_handles
-        with SessionLocal() as s:
-            named = handle_names(s)
-
-        def walk(v, field=None):
-            if isinstance(v, str):
-                # Names for known numbers everywhere; unknown numbers shortened to their last 4 digits too.
-                return v if field in self.KEEP else name_handles(v, named, mask=True)
-            if isinstance(v, dict):
-                return {k: walk(x, k) for k, x in v.items()}
-            if isinstance(v, list):
-                return [walk(x, field) for x in v]
-            return v
-        return super().render(walk(jsonable_encoder(content)))
+from igneous.timeline import timeline
 
 
 @asynccontextmanager
@@ -67,7 +47,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="Igneous", version="0.1.0", default_response_class=NamedResponse, lifespan=lifespan)
+app = FastAPI(title="Igneous", version="0.1.0", lifespan=lifespan)
 # Added last, LocalOnly runs first: a foreign Host or Origin is refused before CORS or any route sees it.
 app.add_middleware(WebAppCORS, allow_methods=["*"], allow_headers=["*"])
 app.add_middleware(LocalOnly)
@@ -75,21 +55,16 @@ app.include_router(entity_router)
 app.include_router(items_router)
 
 
+@app.exception_handler(identity.NotFound)
+def node_not_found(_request: Request, e: identity.NotFound) -> JSONResponse:
+    """A route given the id of no node answers 404, whatever reader found it missing."""
+    return JSONResponse({"detail": str(e)}, status_code=404)
+
+
 @app.get("/health")
 def health(s: Session = Depends(get_session)):
     s.execute(text("SELECT 1"))
     return {"ok": True}
-
-
-@app.get("/stats")
-def stats(s: Session = Depends(get_session)):
-    q = lambda sql: s.execute(text(sql)).all()  # noqa: E731
-    return {
-        "source_items": dict(q("SELECT source, count(*) FROM source_items GROUP BY 1")),
-        "nodes": dict(q("SELECT type, count(*) FROM nodes GROUP BY 1")),
-        "edges": dict(q("SELECT type, count(*) FROM edges GROUP BY 1")),
-        "chunks": s.execute(text("SELECT count(*) AS total, count(embedding) AS embedded FROM chunks")).one()._asdict(),
-    }
 
 
 SearchMode = Literal["hybrid", "lexical", "dense"]
@@ -383,15 +358,9 @@ def ask_suggestions(s: Session = Depends(get_session)):
 @app.get("/timeline")
 def relationship_timeline(a: int = Query(..., ge=1), b: int | None = Query(None, ge=1),
                           limit: int = Query(50, ge=1, le=200), s: Session = Depends(get_session)):
-    """Dated, bounded direct edges for two entities, or one entity's dated activity.
-
-    Evidence is metadata-only: this endpoint never returns source titles, bodies,
-    external IDs, raw metadata, or extracted text spans.
-    """
-    try:
-        return timeline(s, a=a, b=b, limit=limit)
-    except EntityNotFoundError as e:
-        raise HTTPException(404, f"Entity {e.args[0]} not found") from e
+    """Dated links between two nodes, or one node's dated activity, newest first: graph metadata and source item ids,
+    never record text (igneous/timeline.py). 404 for an unknown node."""
+    return timeline(s, a=a, b=b, limit=limit)
 
 
 @app.get("/graph/version")
@@ -412,163 +381,53 @@ def list_commitments(status: str = Query("open", pattern="^(open|resolved|all)$"
     return {"commitments": commitments(s, status=status, limit=limit)}
 
 
-@app.get("/decisions")
-def list_decisions(limit: int = Query(50, ge=1, le=200), s: Session = Depends(get_session)):
-    """Model-derived decisions with verified source-local citations only."""
-    return {"decisions": decisions(s, limit=limit)}
-
-
-@app.get("/relationships/history")
-def past_relationships(person: int = Query(..., ge=1), before: datetime | None = None,
-                       days: int = Query(90, ge=1, le=730), limit: int = Query(20, ge=1, le=100),
-                       s: Session = Depends(get_session)):
-    """Who this person talked to in a bounded historical window, with item citations only."""
-    try:
-        # Validate upfront so unknown IDs don't misleadingly look like a quiet relationship window.
-        from igneous.timeline import _entity
-        entity = _entity(s, person)
-    except EntityNotFoundError as e:
-        raise HTTPException(404, f"Entity {e.args[0]} not found") from e
-    if entity["type"] != "Person":
-        raise HTTPException(422, "person must identify a Person node")
-    return {"relationships": relationship_history(s, person, before=before, days=days, limit=limit)}
-
-
-@app.get("/graph/search")
-def graph_search(q: str, type: str | None = None, limit: int = Query(20, le=100),
-                 s: Session = Depends(get_session)):
-    """Find seed nodes by name or key. Merged identities collapse to their canonical node (one Kenneth Lay,
-    not ten addresses); `aliases` counts the folded-in identities."""
-    rows = s.execute(text("""
-        WITH hit AS (
-            SELECT COALESCE(c.canonical_id, n.id) AS id FROM nodes n LEFT JOIN canonical c ON c.node_id = n.id
-            WHERE (n.name ILIKE :like OR n.key ILIKE :like) AND (CAST(:type AS text) IS NULL OR n.type = :type)
-              AND n.type <> 'Message' AND NOT COALESCE((n.props->>'hidden')::bool, false)
-            GROUP BY 1)
-        SELECT n.id, n.type, n.name, n.key,
-               (SELECT count(*) FROM edges e WHERE e.src = ANY(m.ids) OR e.dst = ANY(m.ids)) AS degree,
-               cardinality(m.ids) - 1 AS aliases
-        FROM hit JOIN nodes n ON n.id = hit.id
-        CROSS JOIN LATERAL (SELECT array_append(array_agg(node_id), hit.id) AS ids FROM canonical
-                            WHERE canonical_id = hit.id AND node_id <> hit.id) m
-        ORDER BY degree DESC LIMIT :limit
-    """), {"like": f"%{q}%", "type": type, "limit": limit}).mappings().all()
-    return {"nodes": [dict(r) for r in rows]}
+FindType = Literal[FIND_TYPES]
 
 
 @app.get("/graph/find")
-def graph_find(q: str, seed: int | None = None, limit: int = Query(8, ge=1, le=20), s: Session = Depends(get_session)):
-    """Explorer "Jump to": a few well-ranked things (people, projects, groups, events, orgs, places, files)
-    for the query, deduped by identity. Messages are never returned; use /search for those."""
-    from igneous.graph.find import find
-    return {"results": find(s, q, seed, limit)}
-
-
-@app.get("/graph/subgraph")
-def graph_subgraph(seed: list[int] = Query(...), hops: int = Query(1, le=3), limit: int = Query(300, le=5000),
-                   source: str | None = None, types: list[str] | None = Query(None),
-                   since: datetime | None = Query(None, alias="from"), until: datetime | None = Query(None, alias="to"),
-                   s: Session = Depends(get_session)):
-    return neighborhood(s, seed, hops=hops, limit=limit, filters=GraphFilters(source, types, since, until))
-
-
-@app.get("/graph/people")
-def graph_people(seed: int, limit: int = Query(60, le=500), s: Session = Depends(get_session)):
-    return people(s, seed, limit=limit)
-
-
-@app.get("/graph/network")
-def graph_network(seed: int, people: int = Query(50, le=200), hubs: int = Query(30, le=100),
-                  s: Session = Depends(get_session)):
-    """People plus the group chats, threads, and events that join them (clusters, not a star)."""
-    return network(s, seed, people_limit=people, hub_limit=hubs)
-
-
-_VIEW_CACHE: dict[tuple, dict] = {}
+def graph_find(q: str = Query(..., min_length=1, max_length=200), seed: int | None = Query(None, ge=1),
+               limit: int = Query(8, ge=1, le=20), types: list[FindType] | None = Query(None),
+               s: Session = Depends(get_session)):
+    """Explorer "Jump to" and the pickers: a few well-ranked things (people, projects, groups, events, orgs, places,
+    folders, files) named like `q`, each identity once, ranked by closeness to `seed` (default: you); `types`
+    (repeatable) keeps only those. Messages are never returned; use /search for those."""
+    return {"results": find(s, q, seed, limit, types)}
 
 
 @app.get("/graph/view")
-def graph_view(seed: int | None = None, per: int = Query(6, le=20), s: Session = Depends(get_session)):
-    """The single graph: seed (default: you) -> categories that exist in the data -> their top members."""
-    if seed is None:
-        seed = identity.self_id(s)
-        if seed is None:
-            raise HTTPException(404, "No self node yet: run `igneous pipeline --stage self`.")
-    # Ranking every relationship takes seconds on a large mailbox; the result only changes when the graph does,
-    # so cache it per (seed, per) and graph version (bumped once per published rebuild and by every correction).
-    from igneous.graph import dirty
-    key = (seed, per, dirty.version(s))
-    hit = _VIEW_CACHE.get(key)
-    if hit is None:
-        hit = view(s, seed, per=per)
-        _VIEW_CACHE.clear() if len(_VIEW_CACHE) > 64 else None
-        _VIEW_CACHE[key] = hit
-    return hit
+def graph_view(seed: int | None = Query(None, ge=1), per: int = Query(6, ge=1, le=20),
+               s: Session = Depends(get_session)):
+    """The opening view for a centre (default: you): your orgs, then the strongest people, groups and sustained
+    projects, each linked to the centre, with what is part of what and the ties among them. Every edge carries its
+    `origin` and whether it is `stated`. With no seed and no one to open on, `{seed: null, nodes: [], edges: [], empty:
+    true, reason}`: 'nothing_built' (connect a source on the Sources page and press Rebuild) or 'no_owner' (no source
+    says which person is you, or nothing links you to anyone yet: search for someone to start from). 404 for an unknown
+    seed."""
+    return view(s, seed, per)
 
 
 @app.get("/graph/expand")
-def graph_expand(seed: int, node: int, visible: list[int] = Query([]), k: int = Query(6, le=20),
-                 offset: int = 0, s: Session = Depends(get_session)):
-    """Reveal a node's top connections that aren't already on screen."""
-    return expand(s, seed, node, visible, k=k, offset=offset)
+def graph_expand(node: int = Query(..., ge=1), seed: int | None = Query(None, ge=1),
+                 visible: list[int] = Query([], max_length=2000), k: int = Query(6, ge=1, le=20),
+                 s: Session = Depends(get_session)):
+    """Reveal a node's top connections that aren't on screen (`visible`) yet, around the centre `seed`. 404 for an
+    unknown node or seed."""
+    return expand(s, seed, node, visible, k=k)
 
 
 @app.get("/graph/explain")
-def graph_explain(a: int, b: int, s: Session = Depends(get_session)):
-    """Why a and b are connected: shared conversations (counts, dates, latest excerpt) and shared events."""
-    return explain(s, a, b)
-
-
-@app.get("/graph/node/{node_id}")
-def graph_node(node_id: int, s: Session = Depends(get_session)):
-    n = s.execute(text("SELECT id, type, key, name, props, source_item_id FROM nodes WHERE id = :id"),
-                  {"id": node_id}).mappings().first()
-    if not n:
-        raise HTTPException(404)
-    degree = dict(s.execute(text("""
-        SELECT type, count(*) FROM edges WHERE src = :id OR dst = :id GROUP BY 1
-    """), {"id": node_id}).all())
-    source = None
-    if n["source_item_id"]:
-        source = s.execute(text("""
-            SELECT id, source, external_id, title, body_text, occurred_at, raw_meta
-            FROM source_items WHERE id = :id
-        """), {"id": n["source_item_id"]}).mappings().first()
-    return {**dict(n), "degree": degree, "source_item": dict(source) if source else None}
+def graph_explain(a: int = Query(..., ge=1), b: int = Query(..., ge=1), s: Session = Depends(get_session)):
+    """Why a and b are connected: shared conversations and events, their latest messages together, the links between
+    them (each with its `origin`, `stated` and, in plain words, `how` it was made) or the shortest path, and your
+    corrections to the pair. 404 for an unknown node, 422 when a and b are one."""
+    try:
+        return explain(s, a, b)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
 
 
 @app.get("/graph/node/{node_id}/summary")
-def graph_node_summary(node_id: int, s: Session = Depends(get_session)):
+def graph_node_summary(node_id: int = PathParam(ge=1), s: Session = Depends(get_session)):
     """2-4 plain sentences on how this node connects to the rest of the graph, its top connections, and the
     source items the summary drew on. Cached; a deterministic summary stands in when the model is off."""
-    from igneous.graph.summary import summarize
-    out = summarize(s, node_id)
-    if out is None:
-        raise HTTPException(404)
-    return out
-
-
-@app.get("/graph/node/{node_id}/evidence")
-def graph_evidence(node_id: int, limit: int = Query(50, le=200), s: Session = Depends(get_session)):
-    """Model-derived edges touching this node, each with the source text around its span ("why do you
-    believe this"). Deterministic edges are omitted: their evidence is the header itself."""
-    rows = s.execute(text("""
-        SELECT e.id, e.type, e.src, e.dst, e.confidence, e.model, e.extractor, e.extractor_version, e.props,
-               e.span_start, e.span_end, si.id AS source_item_id, si.title, si.occurred_at, si.external_id,
-               substr(si.body_text, greatest(1, e.span_start + 1 - 160),
-                      least(e.span_end - e.span_start, 400) + least(e.span_start, 160) + 160) AS window,
-               greatest(0, e.span_start - 160) AS window_start,
-               (SELECT name FROM nodes WHERE id = CASE WHEN e.src = ANY(:ids) THEN e.dst ELSE e.src END) AS other_name,
-               (SELECT type FROM nodes WHERE id = CASE WHEN e.src = ANY(:ids) THEN e.dst ELSE e.src END) AS other_type
-        FROM edges e JOIN source_items si ON si.id = e.source_item_id
-        WHERE (e.src = ANY(:ids) OR e.dst = ANY(:ids)) AND e.extractor <> 'spine' AND e.span_start IS NOT NULL
-        ORDER BY si.occurred_at DESC NULLS LAST LIMIT :limit
-    """), {"ids": identity.members(s, node_id), "limit": limit}).mappings().all()
-    out = []
-    for r in rows:
-        d = dict(r)
-        # Offsets of the span inside `window`, so the client can highlight without re-searching.
-        d["hl_start"] = r["span_start"] - r["window_start"]
-        d["hl_end"] = min(r["span_end"], r["span_start"] + 400) - r["window_start"]
-        out.append(d)
-    return {"evidence": out}
+    return summarize(s, node_id)
