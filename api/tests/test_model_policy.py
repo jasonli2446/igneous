@@ -46,7 +46,7 @@ class Recorder:
 
 
 def _wipe(s):
-    for table in ("edge_verdicts", "edges_dropped", "thread_registry", "thread_parents", "dirty_nodes", "dirty_rebuild"):
+    for table in ("edge_verdicts", "edges_dropped", "thread_registry", "thread_parents"):
         if s.execute(text("SELECT to_regclass(:t)"), {"t": table}).scalar():
             s.execute(text(f"TRUNCATE {table}"))
     s.execute(text(f"TRUNCATE {', '.join(TABLES)} RESTART IDENTITY CASCADE"))
@@ -339,7 +339,7 @@ def test_extraction_reads_only_opted_in_messages(graph, monkeypatch):
 def test_entity_screening_sends_only_names_grounded_in_opted_in_records(graph, monkeypatch):
     """Candidate names go to the model only when an anchor appears in opted-in records: a folder of Drive files may
     be screened with Drive opted in; a folder of local files never is."""
-    from igneous.graph import dirty, entities
+    from igneous.graph import entities
 
     with SessionLocal() as s:
         for folder, source in (("Robotics Lab", "drive"), ("Zephyr Secret", "fs")):
@@ -348,7 +348,6 @@ def test_entity_screening_sends_only_names_grounded_in_opted_in_records(graph, m
                 item = _item(s, source, f"{folder}/{n}", f"{folder} file {n}", "notes", T0)
                 _edge(s, fid, _node(s, "File", f"{source}:{folder}/{n}", f"{folder} file {n}", item=item), "CONTAINS",
                       item=item)
-        dirty.mark_rebuild(s)
         s.commit()
     rec = _record_prompts(monkeypatch, "gmail,drive")
     with SessionLocal() as s:
@@ -379,3 +378,58 @@ def test_thread_namer_sees_only_terms_its_shown_records_contain(monkeypatch):
     threads._judge(session, c)
     assert len(rec.prompts) == 1 and "Shared terms: Atlas\n" in rec.prompts[0]
     assert "Zephyr" not in rec.prompts[0] and rec.leaked() == []
+
+
+def test_commitment_checks_read_only_opted_in_messages(db, monkeypatch):
+    """The promise and a reply are mail (opted in); a text in the same thread never is, nor is a promise made in one."""
+    from types import SimpleNamespace
+
+    from igneous.graph import history
+    from igneous.rag import embed
+
+    def no_local_model(_query):
+        raise RuntimeError("no local model")
+
+    thread = _node(db, "Thread", "t:deck", "Deck")
+    nodes = {}
+    for ref, source, body, days in (("promise", "gmail", "I will send the deck by Monday.", 0),
+                                    ("reply", "gmail", "Deck received, thanks.", 1),
+                                    ("text", "imessage", "PRIVATEMARKER the deck is late again", 2),
+                                    ("texted", "imessage", "PRIVATEMARKER I will call Pat Private tonight.", 3)):
+        item = _item(db, source, ref, "Deck", body, T0 + timedelta(days=days))
+        nodes[ref] = (item, _node(db, "Message", f"{source}:{ref}", "Deck", item=item), body)
+        _edge(db, nodes[ref][1], thread, "IN_THREAD", item=item)
+    for ref, what in (("promise", "send the deck"), ("texted", "call Pat Private")):
+        item, node, body = nodes[ref]
+        history.store_claims(db, SimpleNamespace(id=item, node_id=node, occurred_at=T0), body,
+                             {"commitments": [{"who": "sender", "what": what, "by_when": None,
+                                               "quote": body.removeprefix("PRIVATEMARKER ")}], "decisions": []}, "m")
+    rec = Recorder()
+    monkeypatch.setattr(llm, "chat", rec)
+    monkeypatch.setattr(llm.settings, "llm_enabled", True)
+    monkeypatch.setattr(llm.settings, "llm_sources", "gmail")
+    monkeypatch.setattr(embed, "embed_query", no_local_model)
+    history.refresh_commitment_status(db)
+    assert len(rec.prompts) == 1
+    assert "send the deck" in rec.prompts[0] and "Deck received" in rec.prompts[0]
+    assert rec.leaked() == []
+
+
+def test_naming_a_domain_reads_only_its_peoples_opted_in_mail(db, monkeypatch):
+    """Ana signs her mail (opted in); her mail in a source never opted in stays out of the prompt."""
+    from igneous.graph import organizations
+
+    ana = _node(db, "Person", "ana@acme.test", "Ana Ames")
+    for ref, source, body in (("g1", "gmail", "See you Monday.\n--\nAna Ames, Acme Robotics"),
+                              ("e1", "email", "PRIVATEMARKER thanks, Pat Private")):
+        item = _item(db, source, ref, "Hi", body, T0)
+        _edge(db, ana, _node(db, "Message", f"{source}:{ref}", "Hi", item=item), "SENT", item=item)
+    rec = Recorder()
+    monkeypatch.setattr(llm, "chat", rec)
+    monkeypatch.setattr(llm.settings, "llm_enabled", True)
+    monkeypatch.setattr(llm.settings, "llm_sources", "")
+    assert organizations.model_name(db, "acme.test") is None and rec.prompts == []
+    monkeypatch.setattr(llm.settings, "llm_sources", "gmail")
+    assert organizations.model_name(db, "acme.test") is None  # the recorder answers with an empty name
+    assert len(rec.prompts) == 1 and "Domain: acme.test" in rec.prompts[0] and "Acme Robotics" in rec.prompts[0]
+    assert rec.leaked() == []

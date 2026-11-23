@@ -11,9 +11,9 @@ sampled. These are PROPOSALS: criterion 3 requires human-verified labels, so a t
 label, set reviewed=1) before the number goes in the report.
 
 `score` judges the resolver's real decisions on the database it runs on: the deployed clusters (what the graph shows
-after the resolve stage) and the pairwise decision at a threshold (`candidates()`, with its rules for names shared by
-two or three identities). It uses human-reviewed rows if any exist, else the AI-reviewed ones, else all rows, says
-which, and leaves out pairs naming an identity this database doesn't have.
+after the resolve stage) and the pairwise decision at a threshold (the scores of `candidates()`, after its precision
+rules). It uses human-reviewed rows if any exist, else the AI-reviewed ones, else all rows, and says which. A pair
+naming an identity this database doesn't have is reported both ways: left out, and counted as not merged.
 """
 import argparse
 import csv
@@ -207,21 +207,25 @@ def prf(rows: list[dict], same) -> dict:
 
 
 def score(thresholds=(THRESHOLD,), rows: list[dict] | None = None) -> dict:
-    """P/R/F1 of the deployed clusters and of the pairwise decision at each threshold, on every scored pair and on
-    the pairs the AI reviewer was confident about."""
+    """P/R/F1 of the deployed clusters and of the pairwise decision at each threshold: on the pairs whose identities
+    are both in this database ("present"), on every labeled pair with the others counted as not merged ("every
+    labeled"), and on the present pairs the AI reviewer was confident about."""
     rows, which = labeled(rows if rows is not None else list(csv.DictReader(OUT.open())))
     with SessionLocal() as s:
         ids = person_ids(s)
         pairs, heads = decisions(s)
     present = [r for r in rows if r["a_key"] in ids and r["b_key"] in ids]
-    subsets = {"all": present}
+    subsets = {"present": present, "every labeled": rows}
     if which.startswith("AI"):
         subsets["reviewer confident"] = [r for r in present if "(unsure)" not in r["reviewer"]]
+
+    def clustered(r: dict) -> bool:
+        return r["a_key"] in ids and r["b_key"] in ids and heads[r["a_key"]] == heads[r["b_key"]]
+
     out = {"labels": which, "pairs_labeled": len(rows), "pairs_not_in_database": len(rows) - len(present), "results": []}
     for subset, use in subsets.items():
         if heads is not None:
-            out["results"].append({"decision": "clusters", "subset": subset,
-                                   **prf(use, lambda r: heads[r["a_key"]] == heads[r["b_key"]])})
+            out["results"].append({"decision": "clusters", "subset": subset, **prf(use, clustered)})
         for t in thresholds:
             out["results"].append({"decision": f"pairs >= {t}", "subset": subset,
                                    **prf(use, lambda r, t=t: pairs.get(frozenset((r["a_key"], r["b_key"])), 0.0) >= t)})
@@ -231,8 +235,8 @@ def score(thresholds=(THRESHOLD,), rows: list[dict] | None = None) -> dict:
 def show(report: dict) -> None:
     print(f"{report['pairs_labeled']} {report['labels']} pairs")
     if report["pairs_not_in_database"]:
-        print(f"left out {report['pairs_not_in_database']} pairs naming an identity this database doesn't have "
-              "(people that model extraction finds, keyed name:...)")
+        print(f"{report['pairs_not_in_database']} pairs name an identity this database doesn't have (people that model "
+              "extraction finds, keyed name:...): left out of 'present', counted as not merged in 'every labeled'")
     if not any(r["decision"] == "clusters" for r in report["results"]):
         print("no clusters yet: run `igneous pipeline` (its resolve stage) to score what the graph shows")
     for r in report["results"]:

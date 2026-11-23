@@ -101,21 +101,30 @@ uv run python eval/er_labels.py score --sweep   # P/R/F1 of the resolver on this
 uv run python eval/er_labels.py review          # independent second pass (resumable; skips reviewed rows)
 ```
 
-`score` judges the resolver's real decisions: the **deployed clusters**, the identities the graph shows as one person
-after the resolve stage, and the **pairwise decision** at a threshold (`resolve.candidates()`, which adds the rule
-that an exact full name carried by only two or three identities merges on the name). Measured 2026-11-23 on a fresh
-baseline (sync, then the spine, self and resolve stages) with the resolver at commit `3a03ed6`. 7 of the 235
-AI-reviewed pairs name a `name:` identity that only model extraction creates, so they are left out:
+`score` judges the resolver's real decisions, matching each labeled pair by its two keys: the **deployed clusters**,
+the identities the graph shows as one person after the resolve stage, and the **pairwise decision** at a threshold
+(the scores of `resolve.candidates()`, after its precision rules). Measured 2026-11-23 on the baseline built with
+`EXTRACT=0`, resolved by the resolver at commit `c21abbe`. 7 of the 235 AI-reviewed pairs name a `name:` identity
+that only model extraction creates; "present" leaves them out, "every labeled" counts them as not merged:
 
 | Decision | Labels | Pairs | Precision | Recall | F1 |
 |---|---|---|---|---|---|
-| **Deployed clusters** | AI-reviewed | 228 | 0.938 | 0.962 | **0.950** |
-| Pairwise, threshold 0.5 | AI-reviewed | 228 | 0.933 | 0.962 | 0.947 |
-| Pairwise, threshold 0.6 | AI-reviewed | 228 | 0.961 | 0.785 | 0.864 |
-| Deployed clusters | AI-reviewed, reviewer confident | 186 | 0.971 | 0.971 | 0.971 |
+| **Deployed clusters** | AI-reviewed, present | 228 | 0.949 | 0.943 | **0.946** |
+| Deployed clusters | AI-reviewed, every labeled | 235 | 0.949 | 0.925 | 0.937 |
+| Pairwise, threshold 0.5 | AI-reviewed, present | 228 | 0.943 | 0.943 | 0.943 |
+| Pairwise, threshold 0.5 | AI-reviewed, every labeled | 235 | 0.943 | 0.925 | 0.934 |
+| Pairwise, threshold 0.6 | AI-reviewed, present | 228 | 0.983 | 0.728 | 0.836 |
+| Deployed clusters | AI-reviewed, reviewer confident, present | 186 | 0.978 | 0.957 | 0.968 |
 
-The threshold is 0.5 because raising it buys little precision for much recall. Structural guards hold at 0.5: Larry
-Taylor stays separate from Liz Taylor, and Kenneth Lay is one node (10 email identities on a build without extraction).
+Two addresses merge only on corroboration: correspondents they share (counted on merged identities, each weighted by
+how few people it corresponds with, never you or an automated sender), the same organizational domain, or the same
+local part. An exact full name alone never merges two addresses, because in personal mail every namesake shares you:
+here that keeps one false pair apart (Donna Jones at Enron and at Williams) and three true ones too (Katherine Brown,
+Ed Robinson and Adam Bayer, each at Enron and at another domain, with no correspondent in common). A phone or a name
+extracted from text still joins on its exact name when no other bearer has it, and automated senders are never
+candidates (two "Customer Service" mailboxes). The threshold is 0.5 because raising it buys little precision for much
+recall. On that build the resolver scores 558 links; Larry Taylor stays separate from Liz Taylor, and Kenneth Lay is
+one node (10 email identities).
 
 ## Life threads and projects
 

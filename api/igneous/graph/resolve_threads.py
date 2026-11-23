@@ -308,7 +308,6 @@ def run(s: Session, log=print) -> dict:
         """), {"a": min(ia, ib), "b": max(ia, ib), "x": EXTRACTOR, "v": VERSION, "c": v.get("confidence"),
                "p": json.dumps({"why": v.get("label") or "related", "reason": v.get("reason")})})
     stats["merged_away"] = len(folded_into)
-    s.commit()
     if log:
         log(json.dumps(stats))
     return stats

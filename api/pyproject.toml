@@ -2,7 +2,7 @@
 name = "igneous"
 version = "0.1.0"
 description = "A creation layer for personal knowledge graphs"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
@@ -12,9 +12,12 @@ dependencies = [
     "alembic>=1.14",
     "pydantic-settings>=2.6",
     "typer>=0.15",
-    "fastembed>=0.9",
+    # 0.9.0 caps Pillow below 13, and Pillow 12 has known advisories.
+    "fastembed>=0.9.1",
     "beautifulsoup4>=4.12",
-    "anthropic>=1.15.0",
+    # 2.x sends API version 2026-10-21, which Bedrock accepts only for Claude 4.7 and later models;
+    # llm_cheap_model is Claude Haiku 4.5.
+    "anthropic>=1.15.0,<2",
     "mcp>=2.3",
     "google-auth-oauthlib>=1.5.0",
     "google-api-python-client>=2.201.0",
@@ -49,3 +52,6 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "typer.Option", "t
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A warning fails the test that raised it: fix its cause. Only a warning the project can't fix (one inside a
+# dependency) gets an "ignore:<message>:<category>:<module>" entry here, naming it exactly, with the reason.
+filterwarnings = ["error"]

@@ -5,8 +5,9 @@ they work on any graph that has trips, projects and an owner. Swap in your own n
 
 ## Before you start (5 min, once)
 
-1. **Freeze the graph.** Don't press Rebuild or run the pipeline during the demo: a rebuild re-creates
-   trips and their members, and a view taken mid-rebuild is half empty. Finish any rebuild first.
+1. **Freeze the graph.** Don't press Rebuild or run the pipeline during the demo: the explorer keeps the
+   previous graph while a rebuild runs, then switches to the new one when it publishes, and trips and their
+   members can change under you. Finish any rebuild first.
 2. **Start the stack.**
    ```bash
    make db                          # Postgres
@@ -146,10 +147,10 @@ Adding "two records is enough" to prompt 4 keeps it short; without it the agent 
 - **Trust:** an AI checker reviews each derived link against its evidence and keeps what it read; your
   corrections are permanent, undoable and teach it; high-volume checks run on a cheap model, merges and
   naming on a stronger one.
-- **Eval (Enron, `api/eval/README.md`):** measured 2026-10-18 at commit `3478204`: hybrid recall@10 0.81 vs 0.41
-  lexical; answered citing the gold source 87% (baseline 74%), counting only questions it answered; abstained on
-  12/12 unanswerable; p50 2.2 s. Entity resolution, deployed clusters on AI-reviewed labels (2026-11-23, fresh
-  build): P 0.94 / R 0.96.
+- **Eval (Enron, `api/eval/README.md`):** Q&A measured 2026-10-18 at commit `3478204`: hybrid recall@10 0.81 vs
+  0.41 lexical; answered citing the gold source on 87% of answerable questions (baseline 74%); abstained on 12/12
+  unanswerable; p50 2.2 s. Entity resolution, deployed clusters on every AI-reviewed pair: P 0.95 / R 0.93 (never
+  on a name alone).
 - **Privacy:** local, read-only, per-source opt-in before any model sees content, secrets encrypted or
   git-ignored. The MCP server is read-only.
 
@@ -158,7 +159,7 @@ Adding "two records is enough" to prompt 4 keeps it short; without it the agent 
 | Symptom | Fix |
 |---|---|
 | First tool call says "waiting for MCP servers" | Another configured server is slow; igneous still connects. Remove the slow one before recording. |
-| A trip or org opens with almost nothing | A rebuild is running or just crashed. Let it finish (or re-run `threads`, `backbone`). |
+| A trip or org opens with almost nothing | Its records arrived after the last build. Press Rebuild (or run `igneous pipeline`); the graph switches over when it publishes. |
 | `ask` returns "ask is unavailable" | The MCP env is missing the Bedrock token; re-run the `claude mcp add` with `-e AWS_BEARER_TOKEN_BEDROCK=...`. |
 | `ask` says no source is opted in | The MCP env has no `IGNEOUS_LLM_SOURCES`; re-run the `claude mcp add` with `-e IGNEOUS_LLM_SOURCES=...`. |
 | `me` takes ~10 s | First call after a graph change; it's cached after that. Warm it before recording. |

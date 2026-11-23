@@ -6,6 +6,7 @@ so every stored edge points at real text (criterion 2).
 """
 import json
 import re
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import text
@@ -104,8 +105,9 @@ ON CONFLICT (src, dst, type, extractor) DO NOTHING
 
 
 def store(s: Session, item, body: str, out: dict) -> dict:
-    """Write one item's extraction. Mentions attach to the Message node; people resolve to an existing Person
-    by exact name when there is exactly one (cheap ER; the real resolver is #entity-resolution)."""
+    """Write one item's extraction. Mentions attach to the Message node. A person resolves to an existing Person by
+    exact name when exactly one has it, else to a `name:<slug>` node that entity resolution may merge; an
+    organization is keyed `org:<slug>`, the node a contact card, LinkedIn or your resume gives that company."""
     stats = {"mentions": 0, "dropped": 0, "topics": 0, "commitments": 0, "decisions": 0, "dropped_claims": 0}
     common = {"at": item.occurred_at, "extractor": EXTRACTOR, "version": VERSION, "model": settings.llm_model,
               "sid": item.id}
@@ -122,7 +124,8 @@ def store(s: Session, item, body: str, out: dict) -> dict:
                                 {"n": name}).scalars().all()
                 target = ids[0] if len(ids) == 1 else None
             if target is None:
-                target = s.execute(UPSERT_NODE, {"type": typ, "key": f"name:{_key(name)}", "name": name,
+                key = f"org:{_key(name)}" if typ == "Organization" else f"name:{_key(name)}"
+                target = s.execute(UPSERT_NODE, {"type": typ, "key": key, "name": name,
                                                  "props": json.dumps({"origin": EXTRACTOR})}).scalar_one()
             s.execute(INSERT_EDGE, {**common, "src": item.node_id, "dst": target, "type": "MENTIONS",
                                     "props": json.dumps({"role": m.get("role"), "quote": m["quote"]}),
@@ -145,8 +148,9 @@ def store(s: Session, item, body: str, out: dict) -> dict:
     return stats
 
 
-def run(s: Session, limit: int = 200, log=print) -> int:
-    """Extract the newest opted-in source items. Empty ``IGNEOUS_LLM_SOURCES`` means no automatic model calls."""
+def run(s: Session, limit: int = 200, log=print, progress: Callable[[int, int], None] | None = None) -> int:
+    """Extract the newest opted-in source items, committing each as it is stored; `progress(done, total)` after each.
+    Empty ``IGNEOUS_LLM_SOURCES`` means no automatic model calls."""
     sources = llm.allowed_sources()
     if not sources:
         log("  extraction skipped: set IGNEOUS_LLM_SOURCES to opt in a source")
@@ -178,7 +182,7 @@ def run(s: Session, limit: int = 200, log=print) -> int:
     with ThreadPoolExecutor(WORKERS) as pool:
         futures = {r.id: pool.submit(extract_one, bodies[r.id].strip()) for r in rows
                    if len(bodies[r.id].strip()) >= MIN_CHARS}
-        for r in rows:
+        for done, r in enumerate(rows, 1):
             f = futures.get(r.id)
             if f is not None:
                 try:
@@ -195,6 +199,8 @@ def run(s: Session, limit: int = 200, log=print) -> int:
             s.execute(text("UPDATE source_items SET raw_meta = raw_meta || CAST(:m AS jsonb) WHERE id = :id"),
                       {"m": json.dumps({f"extracted_v{VERSION}": True}), "id": r.id})
             s.commit()
+            if progress:
+                progress(done, len(rows))
     # Conservative and cached: only explicit later confirmation can resolve a derived promise.
     from igneous.graph.history import refresh_commitment_status
     totals["resolved"] = refresh_commitment_status(s)

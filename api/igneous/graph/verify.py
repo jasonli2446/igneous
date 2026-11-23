@@ -8,8 +8,10 @@ made someone "part of" a game, two different people merged by name, or a project
 
 Verdicts are stored in `edge_verdicts`, keyed by the edge's natural identity ('Type:key' of both ends, edge
 type, extractor) so they survive stages that rebuild their edges every run, and by a hash of the evidence, so
-an edge is re-judged only when its evidence changes. After each run the verdict is copied onto the live edge
-(props.verdict / reason / confidence); traversal hides 'drop' and shows 'unsure' as a suggestion.
+an edge is re-judged only when its evidence changes. Each batch is stored the moment the model answers, in a
+transaction of its own, so a rebuild that fails later loses its graph write but never a paid judgment. Every run
+then copies the verdicts onto the live edges (props.verdict / reason / confidence); traversal hides 'drop' and
+shows 'unsure' as a suggestion.
 
 The user's corrections are verdicts too (source='user'): an unlink in the inspector writes 'drop', and the
 model sees the user's most similar past corrections as examples, so a kind of mistake corrected once is
@@ -263,7 +265,7 @@ def apply_verdicts(s: Session) -> int:
     """), {"stated": list(STATED)}).scalars().all()
     if "SAME_AS" in moved:
         from igneous.graph.resolve import refresh_canonical
-        refresh_canonical(s, commit=False)
+        refresh_canonical(s)
     return len(moved) + s.execute(text("""
         UPDATE edges e SET props = e.props || jsonb_build_object('verdict', v.verdict, 'reason', v.reason,
                                                                   'confidence', v.confidence, 'verified_by', v.source)
@@ -275,15 +277,35 @@ def apply_verdicts(s: Session) -> int:
     """), {"stated": list(STATED)}).rowcount
 
 
+UPSERT_VERDICT = text("""
+    INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, confidence, reason)
+    VALUES (:a, :b, :t, :x, :d, :v, :c, :r)
+    ON CONFLICT (src_key, dst_key, type, extractor) DO UPDATE SET evidence = EXCLUDED.evidence,
+        verdict = EXCLUDED.verdict, confidence = EXCLUDED.confidence, reason = EXCLUDED.reason, updated_at = now()
+    WHERE edge_verdicts.source <> 'user'
+""")
+
+
+def _store(rows: list[dict]) -> None:
+    """Store one batch of the model's verdicts now, in a transaction of its own (like llm.cache_store), never in
+    the rebuild's: a paid judgment outlives a rebuild that fails or is killed later. Corrections never write while
+    a rebuild publishes (pipeline.hold_off_publishing), so this never waits on one."""
+    from igneous.db import SessionLocal
+
+    with SessionLocal() as vs:
+        vs.execute(UPSERT_VERDICT, rows)
+        vs.commit()
+
+
 def run(s: Session, log=print, budget: int = BUDGET) -> dict:
-    """Judge every derived edge that has no verdict for its current evidence; then apply all verdicts."""
+    """Judge every derived edge that has no verdict for its current evidence, storing each batch's verdicts as they
+    arrive; then apply all verdicts to the graph in the caller's transaction."""
     from igneous.llm import allowed_sources, visible_nodes
 
     stats = {"judged": 0, "keep": 0, "drop": 0, "unsure": 0, "cached": 0, "calls": 0, "not_shared": 0}
     sources = allowed_sources()
     if not settings.llm_enabled or not sources:
         stats["applied"] = apply_verdicts(s)
-        s.commit()
         return stats
     known = {(r[0], r[1], r[2], r[3]): (r[4], r[5]) for r in s.execute(text(
         "SELECT src_key, dst_key, type, extractor, evidence, source FROM edge_verdicts"))}
@@ -324,21 +346,16 @@ def run(s: Session, log=print, budget: int = BUDGET) -> dict:
             batch = items[i:i + BATCH]
             results = _judge_batch(s, claim, batch, sources)
             stats["calls"] += 1
+            verdicts = []
             for (edge, _desc, digest), r in zip(batch, results, strict=False):
-                s.execute(text("""
-                    INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, confidence, reason)
-                    VALUES (:a, :b, :t, :x, :d, :v, :c, :r)
-                    ON CONFLICT (src_key, dst_key, type, extractor) DO UPDATE SET evidence = EXCLUDED.evidence,
-                        verdict = EXCLUDED.verdict, confidence = EXCLUDED.confidence, reason = EXCLUDED.reason,
-                        updated_at = now()
-                    WHERE edge_verdicts.source <> 'user'
-                """), {"a": edge["src_key"], "b": edge["dst_key"], "t": edge["type"], "x": edge["extractor"],
-                       "d": digest, "v": r["verdict"], "c": r.get("confidence"), "r": (r.get("reason") or "")[:300]})
+                verdicts.append({"a": edge["src_key"], "b": edge["dst_key"], "t": edge["type"], "x": edge["extractor"],
+                                 "d": digest, "v": r["verdict"], "c": r.get("confidence"),
+                                 "r": (r.get("reason") or "")[:300]})
                 stats["judged"] += 1
                 stats[r["verdict"]] = stats.get(r["verdict"], 0) + 1
-            s.commit()
+            if verdicts:
+                _store(verdicts)
     stats["applied"] = apply_verdicts(s)
-    s.commit()
     if log:
         log(json.dumps(stats))
     return stats

@@ -7,6 +7,7 @@ messages). Each step names the thing it proves, so the narration maps to the suc
 
 ```bash
 # api/.env needs IGNEOUS_LLM_SOURCES=email: Ask, extraction and the LightRAG export read only opted-in sources
+make db                                     # Postgres
 make enron && make baseline EXTRACT=500     # ingest, graph, embed (~45 min), extract 500, resolve
 make api    # terminal 1
 make web    # terminal 2 -> http://localhost:3000

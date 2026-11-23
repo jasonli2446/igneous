@@ -1,0 +1,10 @@
+# The image installs its own environment from uv.lock and takes settings from its environment, so the host's
+# environment, settings (they can hold secrets) and caches stay out of it.
+.venv
+.env*
+**/__pycache__
+**/*.py[co]
+.pytest_cache
+.ruff_cache
+.coverage
+htmlcov

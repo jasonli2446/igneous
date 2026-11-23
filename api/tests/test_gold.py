@@ -72,24 +72,33 @@ def _person(s, key, name) -> int:
                      {"k": key, "n": name}).scalar_one()
 
 
-def test_er_pairs_are_judged_by_key_through_the_resolvers_decisions(db, tools, tmp_path):
-    # One name on two addresses with nothing else in common: score() alone says different (0.4), but a name only
-    # two identities carry is merged on the name (candidates() gives it 0.6).
-    a = _person(db, "ann.lee@alpha.test", "Ann Lee")
-    b = _person(db, "ann.lee@beta.test", "Ann Lee")
-    _person(db, "bob.ray@alpha.test", "Bob Ray")
-    _person(db, "bill.ray@alpha.test", "Bill Ray")
+def test_er_pairs_are_judged_by_key_through_the_resolvers_decisions(db, tools):
+    from igneous.graph.resolve import load
+    from igneous.graph.resolve import score as pair_score
+
+    # A phone named like two different people with addresses: score() alone joins it to one of them on the exact
+    # name, but the resolver's decision (candidates()) doesn't, because two people carry that name.
+    _person(db, "ann.lee@alpha.test", "Ann Lee")
+    _person(db, "ann.lee@beta.test", "Ann Lee")
+    _person(db, "+15550001111", "Ann Lee")
+    a, b = _person(db, "ken.lay@enron.com", "Ken Lay"), _person(db, "ken_lay@enron.net", "Ken Lay")  # one local part
+    people = {p.key: p for p in load(db)}
+    assert pair_score(people["+15550001111"], people["ann.lee@alpha.test"])[0] >= 0.5
     rows = [
-        {"a_key": "ann.lee@alpha.test", "b_key": "ann.lee@beta.test", "label": "1", "reviewed": "0", "reviewer": "m"},
-        {"a_key": "bob.ray@alpha.test", "b_key": "bill.ray@alpha.test", "label": "0", "reviewed": "0", "reviewer": "m"},
+        {"a_key": "+15550001111", "b_key": "ann.lee@alpha.test", "label": "0", "reviewed": "0", "reviewer": "m"},
+        {"a_key": "ken.lay@enron.com", "b_key": "ken_lay@enron.net", "label": "1", "reviewed": "0", "reviewer": "m"},
         {"a_key": "name:ken-lay", "b_key": "ken.lay@enron.com", "label": "1", "reviewed": "0", "reviewer": "m"},
     ]
     report = tools.er_labels.score((0.5,), rows)
     assert report["pairs_labeled"] == 3 and report["pairs_not_in_database"] == 1
-    (pairs,) = [r for r in report["results"] if r["subset"] == "all"]  # no clusters before resolution runs
-    assert pairs["decision"] == "pairs >= 0.5" and (pairs["tp"], pairs["fp"], pairs["fn"]) == (1, 0, 0)
+    results = {(r["decision"], r["subset"]): r for r in report["results"]}
+    assert not any(decision == "clusters" for decision, _ in results)  # none before resolution runs
+    present, every = results[("pairs >= 0.5", "present")], results[("pairs >= 0.5", "every labeled")]
+    assert (present["tp"], present["fp"], present["fn"], present["pairs"]) == (1, 0, 0, 2)
+    assert (every["tp"], every["fp"], every["fn"], every["pairs"]) == (1, 0, 1, 3)  # the absent pair isn't merged
     db.execute(text("INSERT INTO canonical (node_id, canonical_id) VALUES (:a, :a), (:b, :a)"), {"a": a, "b": b})
-    clusters = next(r for r in tools.er_labels.score((0.5,), rows)["results"] if r["decision"] == "clusters")
+    results = {(r["decision"], r["subset"]): r for r in tools.er_labels.score((0.5,), rows)["results"]}
+    clusters = results[("clusters", "present")]
     assert (clusters["tp"], clusters["fp"], clusters["fn"], clusters["pairs"]) == (1, 0, 0, 2)
 
 

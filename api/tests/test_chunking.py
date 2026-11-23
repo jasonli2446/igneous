@@ -165,14 +165,16 @@ def test_every_source_is_embedded_locally_and_each_vector_names_its_model(db, mo
         sid, nid = _record(db, source, ext, ext, "text")
         db.execute(text("INSERT INTO chunks (source_item_id, node_id, ord, text) VALUES (:i, :n, 0, :t)"),
                    {"i": sid, "n": nid, "t": f"{ext} text"})
-    assert embed.run(db, log=None) == 3
+    assert embed.run(db) == 3
     assert db.execute(text("SELECT DISTINCT embedding_model FROM chunks")).scalars().all() == [
         embed.settings.embedding_model]
     # Vectors from another model are made again; current ones are left alone.
     db.execute(text("UPDATE chunks SET embedding_model = 'another/model' WHERE text = 'a.md text'"))
     calls.clear()
-    assert embed.run(db, log=None) == 1 and calls == [["a.md text"]]
-    assert embed.run(db, log=None) == 0
+    reported: list[tuple[int, int]] = []
+    assert embed.run(db, progress=lambda done, total: reported.append((done, total))) == 1
+    assert calls == [["a.md text"]] and reported == [(1, 1)]
+    assert embed.run(db) == 0
 
 
 def test_a_model_of_another_dimension_is_refused_before_anything_is_written(db, monkeypatch):
@@ -186,7 +188,7 @@ def test_a_model_of_another_dimension_is_refused_before_anything_is_written(db, 
                {"i": sid, "n": nid})
     monkeypatch.setattr(embed, "embed_texts", lambda texts: [[0.1] * 768 for _ in texts])
     with pytest.raises(RuntimeError, match="768-dimensional"):
-        embed.run(db, log=None)
+        embed.run(db)
     assert db.execute(text("SELECT count(embedding) FROM chunks")).scalar() == 0
 
 
