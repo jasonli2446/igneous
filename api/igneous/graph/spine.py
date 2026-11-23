@@ -850,11 +850,14 @@ BUILDERS = {
 
 # Within a thread, a "Re:" message with no reply header and no quoted parent answers the latest strictly earlier
 # message from a different sender. Window functions, per thread: `last_before` is the last message before the reply;
-# if the reply's own sender wrote it, the parent is the message just before that sender's run of messages.
+# if the reply's own sender wrote it, the parent is the message just before that sender's run of messages. Messages
+# and senders are told apart by their keys, never by row ids, so the same records infer the same replies however the
+# graph was built.
 INFER_REPLIES = text("""
 WITH m AS MATERIALIZED (
-    SELECT it.dst AS thread, it.src AS id, it.valid_from AS at, msg.name AS title,
-           (SELECT min(snd.src) FROM edges snd WHERE snd.dst = it.src AND snd.type = 'SENT') AS sender,
+    SELECT it.dst AS thread, it.src AS id, msg.key, it.valid_from AS at, msg.name AS title,
+           (SELECT min(p.key COLLATE "C") FROM edges snd JOIN nodes p ON p.id = snd.src
+            WHERE snd.dst = it.src AND snd.type = 'SENT') AS sender,
            EXISTS (SELECT 1 FROM edges r WHERE r.src = it.src AND r.type = 'REPLIES_TO'
                    AND r.extractor <> 'spine-inferred') AS has_parent
     FROM edges it JOIN nodes msg ON msg.id = it.src AND msg.type = 'Message'
@@ -862,9 +865,9 @@ WITH m AS MATERIALIZED (
 o AS (
     SELECT m.*, row_number() OVER w AS idx,
            CASE WHEN sender IS DISTINCT FROM lag(sender) OVER w THEN 1 ELSE 0 END AS starts_run
-    FROM m WINDOW w AS (PARTITION BY thread ORDER BY at, id)),
+    FROM m WINDOW w AS (PARTITION BY thread ORDER BY at, key COLLATE "C")),
 r AS (
-    SELECT o.*, sum(starts_run) OVER (PARTITION BY thread ORDER BY at, id) AS run,
+    SELECT o.*, sum(starts_run) OVER (PARTITION BY thread ORDER BY at, key COLLATE "C") AS run,
            max(idx) OVER (PARTITION BY thread ORDER BY at
                           RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW EXCLUDE GROUP) AS last_before
     FROM o),

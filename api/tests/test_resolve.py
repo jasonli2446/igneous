@@ -200,6 +200,40 @@ def test_resolution_reads_the_graph_not_the_order_its_rows_were_stored_in(db):
     assert first["heads"]["samlee@y.test"] == "sam@x.test"  # as much mail each: the first by key heads it
 
 
+def test_resolution_is_the_same_whatever_order_it_reads_people_in(db, monkeypatch):
+    """Resolution reads people in key order, but nothing it decides depends on that order: handed the same people
+    shuffled, it scores the same pairs the same way and forms the same clusters. Rick and Richard Lee write to the same
+    friends (nicknames, either way round); Jordan Lee's phone and a mention of his name could each be the one that
+    joins him."""
+    import random
+
+    from igneous.graph import resolve
+
+    jordan_and_sam(db, reverse=False)
+    rick = {"richard.lee@a.test": "Richard Lee", "rick.lee@b.test": "Rick Lee"}
+    for i, address in enumerate(rick):
+        for k, friend in enumerate(("pat@p.test", "quinn@q.test", "ana@q.test")):
+            mail(db, f"r{i}{k}", address, [friend], f"Notes {k}", day(20 + 4 * i + k), names=rick)
+    build(db)
+    people = resolve.load(db)
+
+    def resolved(order) -> tuple:
+        monkeypatch.setattr(resolve, "load", lambda s: list(order))
+        scores = {(frozenset((a.key, b.key)), score, json.dumps(features, sort_keys=True))
+                  for a, b, score, features in resolve.candidates(db)}
+        resolve.run(db, rescore=True)
+        return scores, outcome(db)
+
+    first = resolved(people)
+    assert cluster(db, "rick.lee@b.test") == set(rick)
+    assert cluster(db, "+16145551234") >= {"name:jordan-lee", "jordan.lee@school.test"}
+    shuffle = random.Random(203).shuffle
+    for _ in range(10):
+        order = list(people)
+        shuffle(order)
+        assert resolved(order) == first
+
+
 def test_scoring_again_reads_no_earlier_scorings_links(db):
     """Cara writes from two addresses to the same two friends, so scoring merges them. Xavi writes to one of Cara's
     addresses from each of his: only Cara's merge makes him share a correspondent with himself, and scoring must not

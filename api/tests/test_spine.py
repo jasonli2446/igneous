@@ -652,6 +652,24 @@ def test_inferred_replies_are_the_same_built_at_once_or_in_steps(db):
     assert edges(db, "REPLIES_TO") == at_once == {("fp-2", "fp-1"), ("fp-3", "fp-2")}
 
 
+def test_replies_sent_at_one_time_are_inferred_the_same_whichever_was_stored_first(db):
+    """Bo and Cy answer Ann at the same minute, and Ann answers after both: which one she answers doesn't depend on
+    which of the two was stored, and so built, first."""
+    people = ("ann@x.test", "bo@x.test", "cy@x.test")
+    said = {1: ("ann@x.test", "Budget", 0), 2: ("bo@x.test", "Re: Budget", 1), 3: ("cy@x.test", "Re: Budget", 1),
+            4: ("ann@x.test", "Re: Budget", 2)}
+
+    def stored(order):
+        db.execute(text("TRUNCATE source_items, nodes, edges, spine_gc_nodes, spine_gc_edges RESTART IDENTITY CASCADE"))
+        for n in order:
+            sender, title, hours = said[n]
+            mail(db, n, sender, [p for p in people if p != sender], title, T0 + timedelta(hours=hours))
+        spine.run(db)
+        return edges(db, "REPLIES_TO")
+
+    assert stored([1, 2, 3, 4]) == stored([1, 3, 2, 4]) == {("fp-2", "fp-1"), ("fp-3", "fp-1"), ("fp-4", "fp-3")}
+
+
 # --- incremental equals at once --------------------------------------------------------------------------------------
 
 CORPUS = [
