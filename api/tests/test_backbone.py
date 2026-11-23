@@ -1,7 +1,7 @@
 """The backbone: your organizations, each once, with the roles you had there, and the threads of your life under the
 org (or the role) they belong to."""
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 from pipeline_data import put, rows
@@ -18,11 +18,17 @@ def me(s, name: str = "Mo Self") -> int:
 
 
 def linkedin(s, positions=(), education=()) -> None:
-    """Your LinkedIn export's profile item, as connectors/linkedin.py stores it."""
-    put(s, "linkedin", "profile", "LinkedIn profile: Mo Self", {"kind": "profile", "person_name": "Mo Self", "profile": {
-        "is_about_owner": True, "person_name": "Mo Self", "projects": [],
-        "experience": [{"org": o, "title": t, "start": a, "end": b, "domain_hint": ""} for o, t, a, b in positions],
-        "education": [{"school": o, "degree": d, "start": a, "end": b} for o, d, a, b in education]}},
+    """Your LinkedIn export's profile item, as connectors/linkedin.py stores it: positions (org, title, start, end,
+    and optionally the description you wrote) and schools (school, degree, start, end)."""
+    positions = [(*p, "")[:5] for p in positions]
+    put(s, "linkedin", "profile", "LinkedIn profile: Mo Self", {
+        "kind": "profile", "person_name": "Mo Self",
+        "positions": [{"org": o, "title": t, "description": d, "location": "", "start": a or None, "end": b or None}
+                      for o, t, a, b, d in positions],
+        "profile": {
+            "is_about_owner": True, "person_name": "Mo Self", "projects": [],
+            "experience": [{"org": o, "title": t, "start": a, "end": b, "domain_hint": ""} for o, t, a, b, _d in positions],
+            "education": [{"school": o, "degree": d, "start": a, "end": b} for o, d, a, b in education]}},
         None, "LinkedIn profile of Mo Self")
 
 
@@ -120,3 +126,72 @@ def test_overlapping_roles_leave_a_thread_both_hold_under_the_org(db):
         "Research Assistant": "State University",
         "CS 401": "BS Computer Science", "Grading": "Teaching Assistant", "Survey": "Research Assistant",
         "Robot Lab": "State University"}
+
+
+ME = "mo@self.test"
+T0 = datetime(2024, 9, 2, 15, tzinfo=UTC)
+
+
+def found(s, name: str, term: str, sender: str, subjects: list[str], start: int, kind: str = "thread",
+          key: str | None = None, named_from: str = "records") -> None:
+    """A thread the threads stage found, with its records: mail from `sender` with these subjects, a week apart from
+    day `start`. Without the model a thread's kind is 'thread' and its name is its term and months."""
+    from pipeline_data import mail
+
+    refs = [f"{term}-{i}" for i in range(len(subjects))]
+    for ref, subject, i in zip(refs, subjects, range(len(subjects)), strict=True):
+        mail(s, ref, sender, [ME], subject, T0 + timedelta(days=start + 7 * i), body=f"{subject}. See you then.")
+    s.commit()
+    from igneous.graph import spine
+    spine.run(s)
+    tid = s.execute(text("""INSERT INTO nodes (type, key, name, props) VALUES ('Project', :k, :n, CAST(:p AS jsonb))
+                            RETURNING id"""), {"k": key or f"thread:{term.lower()}", "n": name, "p": json.dumps({
+                                "derived": "threads", "kind": kind, "terms": [term], "records": len(refs),
+                                "named_from": named_from, "start": (T0 + timedelta(days=start)).isoformat(),
+                                "end": (T0 + timedelta(days=start + 7 * len(refs))).isoformat()})}).scalar_one()
+    s.execute(text("""INSERT INTO edges (src, dst, type, extractor, confidence)
+                      SELECT n.id, :t, 'PART_OF', 'threads', 0.6 FROM nodes n JOIN source_items si ON si.id = n.source_item_id
+                      WHERE n.type = 'Message' AND si.external_id = ANY(:r)"""), {"t": tid, "r": refs})
+
+
+def test_only_what_an_org_holds_goes_under_it_by_its_domain(db):
+    """Mo studied at State University and works at Acme Robotics, and wrote with people at both domains. A class, and
+    the capstone most of whose mail names it, go under the school; a trip and a side project with classmates, and a
+    project with them the model calls a project, don't. At Acme: the hiring thread named for it, the work project the
+    LinkedIn description of the job names, and work the model judged work go under it; a thread whose kind no one
+    knows doesn't."""
+    me(db)
+    linkedin(db, positions=[("Acme Robotics", "Engineer", "2025-01", "", "Built Atlas, the fleet dashboard.")],
+             education=[("State University", "BS", "2021-09", "2025-05")])
+    db.commit()
+    profile.run(db, log=None)
+    db.execute(text("""UPDATE nodes SET props = props || jsonb_build_object('domains', jsonb_build_array(
+                           CASE name WHEN 'State University' THEN 'state.edu' ELSE 'acme.test' END))
+                       WHERE type = 'Organization'"""))
+    found(db, "CS 401 · Sep-Oct 2024", "CS 401", "cy@state.edu", ["CS 401 homework 1", "CS 401 homework 2",
+                                                                  "CS 401 midterm"], 0)
+    found(db, "Harborline · Nov 2024", "Harborline", "cy@state.edu", ["Harborline team (CS 481)", "CS 481: Harborline demo",
+                                                                      "Harborline repo"], 60)
+    found(db, "Lisbon · Mar 2025", "Lisbon", "cy@state.edu", ["Lisbon flights", "Lisbon hostel", "Lisbon!"], 180)
+    found(db, "Spring break trip", "Sintra", "cy@state.edu", ["Sintra day trip", "Sintra tickets", "Sintra photos"],
+          185, kind="trip")
+    found(db, "Tidepool", "Tidepool", "cy@state.edu", ["Tidepool alerts", "Tidepool sensors", "Tidepool launch"], 200,
+          kind="project", key="profile:tidepool", named_from="profile")
+    found(db, "Hackathon app", "Kestrel", "cy@state.edu", ["Kestrel app", "Kestrel demo", "Kestrel bugs"], 210,
+          kind="project")
+    found(db, "Acme · Dec 2024", "Acme", "jo@acme.test", ["Acme interview", "Acme offer", "Acme start date"], 90)
+    found(db, "Atlas · Feb 2025", "Atlas", "jo@acme.test", ["Atlas review", "Atlas bugs", "Atlas launch"], 160)
+    found(db, "Quarterly · Mar 2025", "Quarterly", "jo@acme.test", ["Quarterly plan", "Quarterly numbers",
+                                                                     "Quarterly review"], 190)
+    found(db, "Beacon rollout", "Beacon", "jo@acme.test", ["Beacon rollout", "Beacon fixes", "Beacon done"], 220,
+          kind="work project")
+    backbone.run(db, log=None)
+    assert parents(db) == {"CS 401 · Sep-Oct 2024": "State University", "Harborline · Nov 2024": "State University",
+                           "Acme · Dec 2024": "Acme Robotics", "Atlas · Feb 2025": "Acme Robotics",
+                           "Beacon rollout": "Acme Robotics"}
+    why = dict(rows(db, """SELECT c.name, e.props->>'why' FROM edges e JOIN nodes c ON c.id = e.src
+                           WHERE e.type = 'PART_OF' AND e.extractor = 'backbone'"""))
+    assert why["Harborline · Nov 2024"] == "most of its records name CS 481; 100% of its conversations involve state.edu"
+    assert why["Acme · Dec 2024"] == "named for Acme Robotics; 100% of its conversations involve acme.test"
+    assert why["Atlas · Feb 2025"] == "what you wrote about your Engineer role (since Jan 2025) names Atlas"
+    assert why["Beacon rollout"] == "a work project; 100% of its conversations involve acme.test"

@@ -155,8 +155,9 @@ make persona CLEAN=1  # the same, replacing an igneous_persona that exists
 
 Each export goes through its own source on the Sources page (the "Synthetic persona" entry in the Demo group says
 how), never with raw inserts, and the persona's sync refuses any database other than `igneous_persona` that already
-holds records, so it never mixes with Enron or your own data. The build places the classes and the job's threads
-under Lakeshore University and Northwind Robotics by their email domains. Without a model, threads are named by their
+holds records, so it never mixes with Enron or your own data. The build places the classes under Lakeshore
+University and the job's threads under Northwind Robotics, the Heron field trials under the internship, and leaves
+the trips with classmates and her side project on their own. Without a model, threads are named by their
 term and month ("Lisbon · Jan-Mar 2025"); with `AWS_BEARER_TOKEN_BEDROCK` set and its sources opted in
 (`IGNEOUS_LLM_SOURCES=email,fs,takeout,linkedin,ai_chats`, `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`), a Rebuild
 also names them and checks where each was placed. Its gold set (threads, the identities that are one person, Ask

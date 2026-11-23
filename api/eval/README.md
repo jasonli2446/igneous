@@ -197,7 +197,7 @@ after a second run:
 | Gold threads found (and the two roles at Northwind) | 14 of 14 | 14 of 14 |
 | Found twice or more (another Project for the same thing) | 11 | 10 |
 | Records that must not be in their thread, but are | 1 | 1 |
-| Placed right (under its school, job or role, or under nothing) | 9 of 12 | 9 of 12 |
+| Placed right (under its school, job or role, or under nothing) | 12 of 12 | 12 of 12 |
 | Who took part: missing or wrongly there | 0 | 0 |
 | Identities: clusters P / R | 1.00 / 0.94 | 1.00 / 0.94 |
 | Identities: pairs ≥ 0.5, P / R | 1.00 / 0.83 | 1.00 / 0.83 |
@@ -212,9 +212,11 @@ after a second run:
 - Northwind Robotics shows once, with a thread for each role on Mira's LinkedIn: Software Engineering Intern
   (Jan 2025 - May 2026) and Software Engineer (since Jul 2026). The Heron field trials (June 2025) sit under the
   internship; the hiring, before either role, under the company.
-- The placements are by email domain: the classes, the Heron field trials and the hiring thread go under the right
-  organization, and the Lisbon and Iceland trips and Tidepool under Lakeshore University too, since most of their
-  people write from the school's domain.
+- Each placement is by what the thread is, with the model off too: the classes, and the CS 481 capstone threads
+  most of whose records name CS 481, go under Lakeshore University by its email domain; the hiring thread, named
+  "Northwind", under Northwind Robotics by its; the Heron field trials, which Mira's LinkedIn description of the
+  internship names, under that role. The Lisbon and Iceland trips and Tidepool, a side project her LinkedIn lists as
+  her own, stay under nothing, though most of their people write from the school's domain.
 - The leak is a "remember Lisbon?" chat six months after the trip: the folder-named "Lisbon 2025" takes in every
   record that mentions Lisbon.
 - The only identity left apart is classmate Alex Chen's LinkedIn profile: two people share the name, so the name

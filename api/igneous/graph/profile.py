@@ -13,8 +13,9 @@ you use. So the biggest parts of your life come from there first, and everything
      meets it first, it is one node; graph/organizations.py company_for), with the domain the document gives it
      (props.domain on the link: the organizations stage gives that domain to this organization). One link per
      organization holds every role you had there (props.roles: an internship, then the full-time job; a degree),
-     each its own title and dates, newest first; the link spans them all (valid_from, valid_to), and the backbone
-     gives an organization with several roles a thread for each (graph/backbone.py). These are stated facts
+     each its own title and dates (and, from LinkedIn, the description you wrote for it), newest first; the link
+     spans them all (valid_from, valid_to). The backbone gives an organization with several roles a thread for
+     each, and places under it what your description of a role there names (graph/backbone.py). These are stated facts
      (extractor 'profile'): never judged by the verifier. Projects -> pinned rows in the thread registry (origin
      'profile'), named as you name them and found by their full name, or a word of it that stands for the project in
      your records ("Atlas" for "Atlas Mobile App", not "Mobile").
@@ -73,17 +74,28 @@ SCHEMA = {
 
 def documents(s: Session) -> list:
     """Candidate self-describing documents: resume/CV-titled files, newest first, then the LinkedIn profile
-    (`given`: its structure, already extracted)."""
+    (`given`: its structure, already extracted; `positions`: its positions as the export lists them, each with the
+    description you wrote for it)."""
     return s.execute(text(r"""
-        SELECT id, source, title, occurred_at, body_text, NULL::jsonb AS given FROM source_items
+        SELECT id, source, title, occurred_at, body_text, NULL::jsonb AS given, NULL::jsonb AS positions
+        FROM source_items
         WHERE source IN ('fs', 'drive', 'notes') AND coalesce(body_text, '') <> ''
           AND (title ~* '(resume|résumé|\mcv\M|curriculum vitae|linkedin)')
           AND length(body_text) BETWEEN 400 AND 30000
         UNION ALL
-        SELECT id, source, title, occurred_at, body_text, raw_meta->'profile' FROM source_items
+        SELECT id, source, title, occurred_at, body_text, raw_meta->'profile', raw_meta->'positions' FROM source_items
         WHERE source = 'linkedin' AND external_id = 'profile' AND raw_meta ? 'profile'
         ORDER BY occurred_at DESC NULLS LAST, id DESC
     """)).all()
+
+
+def _described(doc, entry: dict) -> str:
+    """What you wrote about a position in your LinkedIn export (its Description), '' when nothing."""
+    for p in doc.positions or []:
+        if (p.get("org"), p.get("title"), p.get("start") or "") == (entry.get("org"), entry.get("title"),
+                                                                     entry.get("start") or ""):
+            return (p.get("description") or "").strip()
+    return ""
 
 
 def cache_key(body: str) -> str:
@@ -164,6 +176,7 @@ def _merge_role(kept: dict, older: dict) -> None:
     kept["start"] = kept["start"] or older["start"]
     if kept["end"] is None and older["end"] and (kept["at"] is None or older["end"] > kept["at"]):
         kept["end"] = older["end"]
+    kept["description"] = kept["description"] or older["description"]
 
 
 def aliases(s: Session, name: str) -> list[str]:
@@ -226,7 +239,8 @@ def run(s: Session, log=print) -> dict:
             for field in ("domain_hint", "parent", "project"):
                 org[field] = org[field] or (e.get(field) or "").strip()
             role = {"title": ((e.get("degree") if school else e.get("title")) or "").strip(), "school": school,
-                    "start": _date(e.get("start")), "end": _date(e.get("end")), "via": via, "doc": doc.id, "at": at}
+                    "start": _date(e.get("start")), "end": _date(e.get("end")), "via": via, "doc": doc.id, "at": at,
+                    "description": "" if school else _described(doc, e)}
             same = next((r for r in org["roles"] if r["school"] == school and _same_role(r, role)), None)
             if same:
                 _merge_role(same, role)
@@ -296,7 +310,8 @@ def run(s: Session, log=print) -> dict:
         props = {"why": "; ".join(f"{via}: {', '.join(titles)}" for via, titles in vias.items()),
                  "title": roles[0]["title"],
                  "roles": [{"title": r["title"], "start": r["start"], "end": r["end"], "via": r["via"],
-                            "source_item_id": r["doc"], **({"school": True} if r["school"] else {})} for r in roles],
+                            "source_item_id": r["doc"], **({"school": True} if r["school"] else {}),
+                            **({"description": r["description"]} if r["description"] else {})} for r in roles],
                  **({"school": True} if any(r["school"] for r in roles) else {}), **claim(oid)}
         starts = [r["start"] for r in roles if r["start"]]
         edge(self_id, oid, "WORKED_AT", props, min(starts, default=None),
