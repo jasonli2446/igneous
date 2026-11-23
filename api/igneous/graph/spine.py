@@ -41,6 +41,7 @@ from sqlalchemy.orm import Session
 from igneous.connectors.mac_contacts import norm_phone
 from igneous.graph import dirty, item_class, quoted
 from igneous.graph.identity import OWNER_KEY, OWNER_NAME, card_keys
+from igneous.graph.names import natural_name
 from igneous.graph.organizations import company_key
 
 BATCH = 1000
@@ -188,7 +189,8 @@ class Builder:
              record: bool = False, rank: int = RANK_NAMED, fallback: str | None = None) -> tuple[str, str]:
         """The node (type, key), supported by the current record, which names it `name` (as strongly as `rank`, or
         `fallback` until a record names it) and gives it `props` (SPINE_PROPS, or CREATION_PROPS; a value of None
-        gives nothing). `record`: the node is this record (a message, a file, an event occurrence), so its
+        gives nothing). A person's name is taken in the order it is read: "Rangel, Ina" names Ina Rangel
+        (`natural_name`). `record`: the node is this record (a message, a file, an event occurrence), so its
         source_item_id may point here."""
         k = (type_, key)
         n = self.nodes.get(k)
@@ -201,6 +203,8 @@ class Builder:
             n.sid = rid
         if record and type_ in TITLED:
             rank = RANK_STATED  # a message or file is called what its record calls it
+        if name and type_ == "Person":
+            name = natural_name(name)
         if name and name != key:
             support.offer(name, rank)
         if fallback:
@@ -491,8 +495,9 @@ TWO_WORDS = re.compile(r"[^\W\d_] [^\W\d_]")  # a letter, a space, a letter: "Jo
 
 def _header_name(addr: dict, x_from: str | None = None) -> tuple[str, int]:
     """The name a mail header gives an address and its rank: the display name when it reads as a person's (two
-    words, no address), else a weaker one (`_name_from`: a one-word name, X-From, the address's local part)."""
-    shown = (addr.get("name") or "").strip(' "')
+    words, no address; "Rangel, Ina" as "Ina Rangel"), else a weaker one (`_name_from`: a one-word name, X-From, the
+    address's local part)."""
+    shown = natural_name((addr.get("name") or "").strip(' "'))
     if shown and "@" not in shown and TWO_WORDS.search(shown):
         return shown, RANK_HEADER
     return _name_from(addr, x_from), RANK_NAMED
@@ -642,11 +647,12 @@ def build_event(b: Builder, item) -> None:
 
 
 def card_name(title: str | None, keys: list[str]) -> str | None:
-    """The person a card names, or None for a nameless card (its title is only one of its identifiers)."""
+    """The person a card names, in the order a name is read (so cards titled "Rangel, Ina" and "Ina Rangel" name one
+    person), or None for a nameless card (its title is only one of its identifiers)."""
     name = (title or "").strip()
     if not name or "@" in name or name.lower() in keys or norm_phone(name) in keys:
         return None
-    return name
+    return natural_name(name)
 
 
 def contact_cards(s: Session) -> dict[str, dict[int, str | None]]:
