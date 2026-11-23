@@ -6,7 +6,7 @@ IGN := cd api && uv run igneous
 # Messages to LLM-extract per run (needs AWS_BEARER_TOKEN_BEDROCK and IGNEOUS_LLM_SOURCES=email). EXTRACT=0 skips model calls.
 EXTRACT ?= 100
 
-.PHONY: enron synthetic-corpus db migrate demo baseline api web test
+.PHONY: enron synthetic-corpus db migrate demo baseline api web test audit
 
 enron:  ## download the corpus (~450 MB) and extract the mailboxes we use
 	mkdir -p data
@@ -39,3 +39,7 @@ web:
 
 test:
 	cd api && uv run pytest -q
+
+audit:  ## fail on known advisories in the locked Python and npm dependencies, as CI does
+	cd api && bash -o pipefail -c 'uv export --frozen --no-hashes --no-emit-project | uvx pip-audit --strict --disable-pip --no-deps -r /dev/stdin'
+	cd web && npm audit --audit-level=moderate
