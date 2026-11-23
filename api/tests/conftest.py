@@ -2,7 +2,7 @@
 
 - Settings start from their defaults. Neither api/.env nor IGNEOUS_* variables in the shell reach the tests (nor the
   subprocesses they start), and the Bedrock token is removed from the environment, so no test can make a hosted
-  model call or read your data folder.
+  model call or read your data folder. The web app's URL is the test client's (http://testserver).
 - The run's database, igneous_test_<pid>, lives on the Postgres server your configuration points at, never in the
   database it names. `test_db` creates and migrates it once per run and drops it when the run ends; databases left
   behind by runs that died are dropped first. Two runs at once (two worktrees, two agents) never touch each other.
@@ -34,6 +34,8 @@ for _name, _field in Settings.model_fields.items():
     setattr(settings, _name, _field.get_default(call_default_factory=True))
 settings.database_url = _server.set(database=TEST_DB).render_as_string(hide_password=False)
 settings.data_dir = DATA_DIR
+# The web app is where FastAPI's test client calls from, so the API's local-only guard (igneous/access.py) lets it in.
+settings.web_url = "http://testserver"
 
 # Subprocesses (the CLI, the MCP server) build their own Settings: give them every value explicitly, which takes
 # precedence over api/.env, and nothing else from the shell.

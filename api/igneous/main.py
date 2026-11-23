@@ -9,7 +9,6 @@ from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -17,6 +16,7 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from igneous import jobs, source_catalog, sources, uploads
+from igneous.access import LocalOnly, WebAppCORS
 from igneous.config import settings
 from igneous.connectors import secrets
 from igneous.db import SessionLocal, get_session, schema_status
@@ -68,7 +68,9 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Igneous", version="0.1.0", default_response_class=NamedResponse, lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+# Added last, LocalOnly runs first: a foreign Host or Origin is refused before CORS or any route sees it.
+app.add_middleware(WebAppCORS, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(LocalOnly)
 app.include_router(entity_router)
 app.include_router(items_router)
 

@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     # The OAuth client, the key that encrypts stored tokens, and the Enron mailboxes. A relative path is relative
     # to the api folder.
     data_dir: str = "../data"
-    # Where the browser UI lives; the Google sign-in callback sends you back here.
+    # Where the browser UI lives: the only site whose pages may call the API (igneous/access.py), and where the
+    # Google sign-in callback sends you back. The API also answers to this host's name besides localhost.
     web_url: str = "http://localhost:3000"
     # The Local files folders, comma-separated. Empty: the Documents, Desktop, Downloads and iCloud Drive folders
     # that exist (sources.fs_roots).
