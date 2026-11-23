@@ -25,7 +25,7 @@ runs attach new records to it by its defining terms, with no model call, and jud
             be read, within the run's budget, unless you renamed it (one you merged others into stays, whatever
             the judge says)
   rejected  judged not a thread; never built, never judged again. What had been merged into it (found to be the same
-            thing) stands on its own again.
+            thing) stands on its own again; the entities stage places again an anchor that had joined it.
   merged    a facet of the thread it was folded into (merged_into): two found to be one (graph/resolve_threads.py), or
             a merge you made (merged_by 'user'). Its own terms and span keep finding its records, for that thread.
             The entities stage keeps one too (origin 'entities', no terms) for each folder, series or chat a thread is
@@ -711,9 +711,11 @@ def run(s: Session, log=print, report=None) -> dict:
                     status = :st, updated_at = now() WHERE key = :k
             """), {"k": row.key, "n": (verdict.get("name") or row.name)[:80], "kind": verdict.get("kind"), "t": terms,
                    "c": verdict.get("confidence"), "st": "active" if keep else "rejected"})
-            if not keep:  # what was merged into it stands on its own again
+            if not keep:  # what was found to be the same thing stands on its own again; an anchor that joined it
+                # (origin 'entities') is the entities stage's, which places it again when it runs
                 s.execute(text("""UPDATE thread_registry SET status = 'active', merged_into = NULL, updated_at = now()
-                                  WHERE status = 'merged' AND merged_into = :k"""), {"k": row.key})
+                                  WHERE status = 'merged' AND merged_into = :k AND origin <> 'entities'"""),
+                          {"k": row.key})
             stats["rejudged"] += 1
 
     # 1b. Every row's records; a merged row's go to the thread it ends up in.

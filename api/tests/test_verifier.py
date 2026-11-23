@@ -203,6 +203,37 @@ def test_a_group_chat_about_a_thread_is_judged_as_one_with_its_own_records(db, m
 
 
 @pytest.mark.usefixtures("trips")
+def test_a_record_that_only_shows_a_project_going_on_is_judged_as_its_evidence_after_every_other_link(db, monkeypatch):
+    """A search during the trip is the trip's evidence, and one naming the friends' group chat while it is active is
+    the chat's Project's: the verifier judges each under its own claim, after the links people see (who went, what is
+    part of what), so a run that runs out of budget has spent it on those first."""
+    from pipeline_data import put
+
+    put(db, "takeout_activity", "activity/search/portland", "Search activity", {"product": "Search"}, at(64),
+        "[21:02] Searched for portland food carts")
+    put(db, "takeout_activity", "activity/search/crew", "Search activity", {"product": "Search"}, at(70),
+        "[22:40] Searched for road crew playlist")
+    db.commit()
+    monkeypatch.setattr(llm.settings, "llm_sources", life_threads.SOURCES + ",takeout")
+    systems = []
+
+    def model(system, user, schema, **options):
+        if "edges" in schema["properties"]:
+            systems.append(system)
+        return life_threads.model(system, user, schema, **options)
+
+    monkeypatch.setattr(llm, "structured", model)
+    pipeline.run(db)
+    claims = ["(A) shows that this thread of the person's life (B) happened",
+              "this record (A) shows this project (B) going on"]
+    asked = [i for i, system in enumerate(systems) if any(c in system for c in claims)]
+    assert [any(c in systems[i] for i in asked) for c in claims] == [True, True]
+    assert asked == list(range(len(systems) - len(asked), len(systems)))  # the last calls of the run
+    assert verify.claim_of({"type": "RELATED_TO", "extractor": "threads", "src_type": "Person"}) == \
+        ("RELATED_TO", "threads")  # a person who talked about it is no evidence
+
+
+@pytest.mark.usefixtures("trips")
 def test_a_link_its_record_settles_needs_no_model(db, monkeypatch):
     """Nothing opted in: the people in a trip's group chat took part in it, as the chat itself lists them."""
     monkeypatch.setattr(llm.settings, "llm_sources", "")

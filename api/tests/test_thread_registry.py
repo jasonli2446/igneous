@@ -103,6 +103,33 @@ def test_two_threads_found_to_be_one_keep_every_record_on_later_runs(db):
                          ).one() == ("merged", "thread:lisbon")
 
 
+@pytest.mark.usefixtures("trips")
+def test_a_name_you_gave_a_thread_names_the_thread_it_is_found_to_be(db):
+    """A thread you renamed while it stood on its own is found to be the same as another: your name names the one it
+    went into, which lists that rename so it can be undone there, and a name you give that one itself wins."""
+    from fastapi.testclient import TestClient
+
+    from igneous.main import app
+
+    db.execute(text("""
+        INSERT INTO thread_registry (key, name, kind, terms, span_start, span_end, status, origin, judged) VALUES
+            ('thread:lisbon', 'Lisbon trip', 'trip', '{Lisbon}', :a, :b, 'active', 'burst', true),
+            ('thread:wanderers', 'lisbon-trip', 'trip', '{Wanderers}', :c, :d, 'active', 'burst', true)
+    """), {"a": at(185), "b": at(207), "c": at(193), "d": at(260)})
+    db.execute(text("INSERT INTO overrides (op, node_keys, value) VALUES ('rename', '{Project:thread:wanderers}', "
+                    "'Winter getaway') RETURNING id"))
+    db.commit()
+    pipeline.run(db)
+    trip = project(db, "Winter getaway")
+    assert trip is not None and project(db, "lisbon-trip") is None
+    client = TestClient(app)
+    [shown] = client.get(f"/graph/entity/{trip}").json()["corrections"]
+    assert (shown["op"], shown["value"]) == ("rename", "Winter getaway")
+    client.post(f"/graph/entity/{trip}/rename", json={"name": "Lisbon with Cy"})
+    assert project(db, "Lisbon with Cy") == trip
+    assert [c["value"] for c in client.get(f"/graph/entity/{trip}").json()["corrections"]] == ["Lisbon with Cy"]
+
+
 def rejecting(term: str):
     """The synthetic life's model, except that it judges the candidate sharing `term` not a thread."""
     def model(system, user, schema, **options):
@@ -138,6 +165,29 @@ def test_a_thread_judged_not_one_gives_back_what_was_found_to_be_the_same_thing(
         ("thread:lisbon", "rejected", None), ("thread:wanderers", "active", None)]
     wanderers = db.execute(text("SELECT id FROM nodes WHERE key = 'thread:wanderers'")).scalar_one()
     assert len(records(db, wanderers)) == 9  # its chat's six days and the three photo mails
+
+
+@pytest.mark.usefixtures("trips")
+def test_a_thread_judged_not_one_leaves_the_folders_that_joined_it_to_the_entities_stage(db, monkeypatch):
+    """The threads stage alone judges a thread no thread: a folder that had joined it (the entities stage's registry row,
+    which has no terms) is never made a thread of its own, which nothing could build; the entities stage places the
+    folder again when it runs."""
+    from igneous.graph import derived_invariants
+
+    db.execute(text("""
+        INSERT INTO thread_registry (key, name, kind, terms, span_start, span_end, status, origin, judged) VALUES
+            ('thread:lisbon', 'Lisbon · Dec 2025', 'thread', '{Lisbon}', :a, :b, 'active', 'burst', false),
+            ('project:lisbon:1', 'Lisbon', NULL, '{}', NULL, NULL, 'merged', 'entities', false)
+    """), {"a": at(185), "b": at(207)})
+    db.execute(text("UPDATE thread_registry SET merged_into = 'thread:lisbon' WHERE key = 'project:lisbon:1'"))
+    db.commit()
+    monkeypatch.setattr(llm, "structured", rejecting("Lisbon"))
+    pipeline.run(db, ["threads"])
+    assert db.execute(text("SELECT status FROM thread_registry WHERE key = 'thread:lisbon'")).scalar() == "rejected"
+    assert db.execute(text("SELECT status FROM thread_registry WHERE key = 'project:lisbon:1'")).scalar() == "merged"
+    assert "joined_row_unmerged" not in {v.code for v in derived_invariants.check(db)}
+    pipeline.run(db)  # no folder is about the trip any more: its row goes
+    assert db.execute(text("SELECT count(*) FROM thread_registry WHERE origin = 'entities'")).scalar() == 0
 
 
 @pytest.mark.usefixtures("trips")

@@ -1,11 +1,13 @@
 """Derived projects (graph/entities.py) and topic merges (graph/topics.py), built from records through the runner."""
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 from pipeline_data import day, event, local_models, mail, put, rows  # noqa: F401
 from sqlalchemy import text
 
 from igneous import pipeline
-from igneous.graph import derived_invariants, topics
+from igneous.graph import derived_invariants, topics, traversal
 
 pytestmark = pytest.mark.usefixtures("local_models")
 ME = "me@x.test"
@@ -56,8 +58,8 @@ def held(s, key: str) -> dict[str, set[str]]:
 
 def lisbon(s) -> None:
     """The persona's spring break: mail names Lisbon over two weeks, and its folder holds an itinerary that names it and
-    an expenses sheet that doesn't. The airline's booking and a search name it too, as do a fare newsletter, and a
-    chat with the same friends months after the trip."""
+    an expenses sheet that doesn't. The airline's booking, a search and a day of places visited name it too, as do a
+    fare newsletter, a chat with the same friends months after the trip and a day of places visited then."""
     thread(s, "thread:lisbon", "Lisbon", day(0), day(14))
     mail(s, "l1", "dana@x.test", [ME], "Lisbon hostel", day(1), body="I booked the hostel in Lisbon for us.")
     mail(s, "l2", ME, ["dana@x.test"], "Re: Lisbon hostel", day(2), sent=True, body="Lisbon, here we come.")
@@ -69,6 +71,11 @@ def lisbon(s) -> None:
         "[23:08] Searched for lisbon alfama guesthouse")
     bulk(s, "fares", "deals@fares.test", ME, "Fares to Lisbon", day(4), "Fly to Lisbon from $399.", unsubscribe=True)
     mail(s, "later", "dana@x.test", [ME, "sofia@x.test"], "remember Lisbon?", day(190), body="Remember Lisbon? Again?")
+    for n in (8, 190):
+        put(s, "takeout_maps", f"maps/visits/{day(n):%Y-%m-%d}", f"Places visited, {day(n):%Y-%m-%d}",
+            {"kind": "visits", "product": "Maps", "visits": [{"key": f"place:{n}", "name": "Castelo de S. Jorge",
+                                                              "start": day(n).isoformat()}]},
+            day(n), "[10:00] Visited Castelo de S. Jorge, Lisbon")
 
 
 def evidence(s, key: str) -> list[tuple[str]]:
@@ -85,9 +92,15 @@ def test_a_folder_a_thread_is_about_joins_it_instead_of_being_a_second_project(d
     assert trip["Lisbon 2025"] == trip["expenses.xlsx"] == {"entities"}  # the folder, and its file naming nothing
     assert trip["itinerary.md"] == {"threads"}  # held once, by the stage that found it
     assert not {"Fares to Lisbon", "remember Lisbon?"} & set(trip)  # a newsletter, and another time with them
-    # The booking and the search show the trip happened: its evidence, never its members, and a newsletter not even that.
-    assert evidence(db, "thread:lisbon") == [("Search activity",), ("Your flight is confirmed",)]
-    assert not {"Search activity", "Your flight is confirmed"} & set(trip)
+    # The booking, the search and the places you went show the trip happened: its evidence, never its members, never
+    # drawn beside it, and a newsletter, or a place you went months later, not even that.
+    shown = [("Places visited, 2025-03-11",), ("Search activity",), ("Your flight is confirmed",)]
+    assert evidence(db, "thread:lisbon") == shown
+    assert not {name for (name,) in shown} & set(trip)
+    (tid,) = rows(db, "SELECT id FROM nodes WHERE key = 'thread:lisbon'")[0]
+    beside = {name for (name,) in rows(db, "SELECT name FROM nodes WHERE id = ANY(:i)",
+                                           i=traversal.fallback_neighbors(db, tid, set(), 20))}
+    assert "Dana" in beside and not {name for (name,) in shown} & beside
     assert rows(db, "SELECT key LIKE 'project:lisbon 2025:%', status, merged_into FROM thread_registry "
                     "WHERE origin = 'entities'") == [(True, "merged", "thread:lisbon")]
     one_thing = ("joined_project_stands", "evidence_is_member")
@@ -98,6 +111,37 @@ def test_a_folder_a_thread_is_about_joins_it_instead_of_being_a_second_project(d
     pipeline.run(db, WITH_THREADS)  # a second run changes nothing (and the folder's Project goes again)
     assert rows(db, "SELECT name FROM nodes WHERE type = 'Project'") == [("Lisbon · Mar 2025",)]
     assert held(db, "thread:lisbon") == trip
+
+
+def test_a_folder_joins_a_trip_only_when_most_of_it_is_the_trip_and_never_brings_another_times_files(db):
+    """One folder for two trips to one city. The later trip's thread holds one of its files, but most are the earlier
+    trip's: the folder is not the later trip, and none of its files join it. Once most of its files are from the later
+    trip, it joins it, without the earlier trip's files."""
+    thread(db, "thread:lisbon-2027", "Lisbon", day(730), day(744))
+    for i in range(3):
+        mail(db, f"l27-{i}", "dana@x.test", [ME], f"Lisbon again {i}", day(731 + 4 * i), body="Lisbon in March?")
+    doc(db, "Travel/Lisbon/itinerary-2025.md", "# Lisbon itinerary: Alfama, Belem.", day(6))
+    doc(db, "Travel/Lisbon/expenses-2025.xlsx", "Taxi 32. Dinner 88.", day(13))
+    doc(db, "Travel/Lisbon/photos-2025.md", "Tram 28, the castle.", day(14))
+    doc(db, "Travel/Lisbon/itinerary-2027.md", "# Lisbon itinerary: Porto day trip.", day(735))
+    build(db, WITH_THREADS)
+    earlier = {"itinerary-2025.md", "expenses-2025.xlsx", "photos-2025.md"}
+    assert not earlier & set(held(db, "thread:lisbon-2027"))
+    assert projects(db) == [("Lisbon", 1)]  # a folder of both trips stands on its own, Dana's mail naming it
+    for name in ("packing-2027.txt", "budget-2027.xlsx", "notes-2027.md"):
+        doc(db, f"Travel/Lisbon/{name}", "Train to Porto. Pastel de nata.", day(738))
+    db.commit()
+    pipeline.run(db, WITH_THREADS)
+    trip = held(db, "thread:lisbon-2027")
+    assert projects(db) == [] and trip["Lisbon"] == {"entities"}  # four of its seven files are the later trip's
+    assert {"packing-2027.txt", "budget-2027.xlsx", "notes-2027.md"} <= set(trip) and not earlier & set(trip)
+    joined = ("joined_row_unmerged", "joined_file_outside")
+    assert [v for v in derived_invariants.check(db) if v.code in joined] == []
+    db.execute(text("""INSERT INTO edges (src, dst, type, props, extractor, extractor_version)
+                       SELECT f.id, t.id, 'PART_OF', '{"folder": "Lisbon"}', 'entities', '1' FROM nodes f, nodes t
+                       WHERE f.name = 'photos-2025.md' AND t.key = 'thread:lisbon-2027'"""))
+    db.execute(text("UPDATE thread_registry SET status = 'active' WHERE origin = 'entities'"))
+    assert sorted(v.code for v in derived_invariants.check(db) if v.code in joined) == sorted(joined)
 
 
 def test_a_class_folder_joins_its_class_and_a_name_keeps_its_numbers(db):
@@ -160,13 +204,48 @@ def test_what_you_said_about_a_folders_project_holds_when_a_thread_takes_it_in(d
     assert rows(db, "SELECT name FROM nodes WHERE type = 'Project'") == [("Lisbon · Mar 2025",)]
 
 
+def test_a_link_you_confirmed_on_a_folders_project_holds_when_a_thread_takes_it_in(db, monkeypatch):
+    """You said a file is part of a folder's Project ("This is right"). The trip turns up and the folder joins it: a
+    checker that drops every link it judges leaves that one alone, with your verdict on it."""
+    import life_threads
+
+    from igneous import llm
+    from igneous.main import app
+
+    doc(db, "Travel/Lisbon 2025/itinerary.md", "# Lisbon itinerary: Alfama, Belem, Sintra.", day(6))
+    doc(db, "Travel/Lisbon 2025/expenses.xlsx", "Date What Paid EUR. Taxi 32. Dinner 88.", day(13))
+    build(db, WITH_THREADS)
+    expenses = rows(db, """SELECT e.id FROM edges e JOIN nodes f ON f.id = e.src JOIN nodes p ON p.id = e.dst
+                           WHERE f.name = 'expenses.xlsx' AND p.name = 'Lisbon 2025'""")[0][0]
+    TestClient(app).post("/graph/edge/confirm", json={"edge": expenses})
+
+    def dropping(system, user, schema, **options):  # the checker drops whatever it is asked about
+        if "edges" in schema["properties"]:
+            n = len(re.findall(r"^### Edge \d+$", user, re.M))
+            return {"edges": [{"edge": i, "verdict": "drop", "confidence": 0.9, "reason": "not shown"}
+                              for i in range(n)]}, {}
+        return life_threads.model(system, user, schema, **options)
+
+    monkeypatch.setattr(llm, "structured", dropping)
+    monkeypatch.setattr(llm.settings, "llm_sources", "gmail,fs")
+    monkeypatch.setattr(llm.settings, "local_sources_model_enabled", True)
+    lisbon(db)
+    db.commit()
+    pipeline.run(db, [*WITH_THREADS, "verify"])
+    (trip,) = rows(db, "SELECT key FROM nodes WHERE type = 'Project'")[0]
+    links = dict(rows(db, """SELECT f.name, e.props->>'verified_by' FROM edges e JOIN nodes f ON f.id = e.src
+                             JOIN nodes p ON p.id = e.dst WHERE p.key = :k AND e.type = 'PART_OF'""", k=trip))
+    assert links["expenses.xlsx"] == "user" and "itinerary.md" not in links  # yours stays; the checker's drop goes
+    assert not [v for v in derived_invariants.check(db) if v.code == "dropped_edge_live"]
+
+
 def test_a_project_keeps_its_key_when_its_name_is_read_another_way(db):
     """A Project's key holds a correction: a change in how names are read must not orphan it."""
     for i in range(2):
         doc(db, f"Games/Gloomhaven 2/scenario-{i}.md", "Scenario notes.", day(i))
     build(db)
     (folder,) = rows(db, "SELECT id FROM nodes WHERE type = 'Folder' AND name = 'Gloomhaven 2'")[0]
-    old = f"project:gloomhaven:{folder}"  # how the name was read before it kept its numbers
+    old = f"project:gloomhaven:{folder}"  # the key of the same folder read without its number
     db.execute(text("UPDATE nodes SET key = :k WHERE type = 'Project'"), {"k": old})
     db.execute(text("INSERT INTO overrides (op, node_keys, value) VALUES ('rename', :k, 'Board games')"),
                {"k": [f"Project:{old}"]})

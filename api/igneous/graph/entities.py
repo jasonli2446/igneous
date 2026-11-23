@@ -23,12 +23,14 @@ anchor's own records are the ones the spine built it from (graph/spine.py's prov
 subfolders too, a repo's AI sessions and activity, a group chat's days, a series' occurrences.
 
 A candidate is about a thread when one of the thread's defining terms is in its name (a course code with or without its
-space) and the thread holds one of its anchors or their records, or most of those records happened while the thread
-did (whenever, for a thread with no window: graph/threads.py `window`). Its anchors and its folders' files then join
-that thread (PART_OF, with this stage's evidence), each file once, for its nearest folder; who took part stays the
-threads stage's call. Its key stays a row of the thread registry (origin 'entities', merged into the thread), so what
-you said about its Project holds for the thread: a link you rejected or added (graph/derived.py) and a name you gave
-it (graph/overrides.py). A candidate you merged, or merged something into, stands on its own: your merge decides.
+space) and the thread already holds one of its anchors, or most of its anchors' records are the thread's: it holds
+them, or they happened while it did (whenever, for a thread with no window: graph/threads.py `window`). Its anchors then
+join that thread (PART_OF, with this stage's evidence), and so do its folders' files from while the thread happened,
+each once, for its nearest folder: a file from another time in the same folder is no part of it. Who took part stays
+the threads stage's call. Its key stays a row of the thread registry (origin 'entities', merged into the thread), so
+what you said about its Project holds for the thread: a link you rejected, confirmed or added (graph/derived.py,
+graph/verify.py) and a name you gave it (graph/overrides.py). A candidate you merged, or merged something into, stands
+on its own: your merge decides.
 
 A Project of its own holds its anchors (structurally, confidence 1.0), its folders' files, and each record that names it
 (by phrase match on its chunks) when the record shows it belongs: it is one of its anchors' own records, it shares a
@@ -89,25 +91,28 @@ GENERIC_FOLDERS = {
     "icloud drive", "mobile documents", "com~apple~clouddocs", "library", "applications", "users", "career",
     "careers",
 }
-# Words of a name that only says when ("Fall 2024", "Q3", "March 2025"): a time, not a thing.
+# Words of a name that only says when ("Fall 2024", "Q3", "March 2025", "Week 3"): a time, not a thing.
 TIME_WORDS = frozenset({
     "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november",
     "december", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec", "spring",
     "summer", "fall", "autumn", "winter", "q1", "q2", "q3", "q4", "h1", "h2", "quarter", "semester", "term", "year",
+    "month", "week", "day",
 })
 # Records that are yours whoever else is in them: your calendar, your tasks and your AI chats.
 YOURS = frozenset(source_catalog.values({"calendar", "tasks", "ai_chat"}))
 
 CLEAN = re.compile(r"\s*[\(\[].*?[\)\]]\s*|\s+[-\u2013\u2014:|]\s+.*$")
-# An occurrence's number, which names one meeting of a thing rather than the thing.
-COUNTER = re.compile(r"#\s?\d+\b|\b(?:session|meeting|week|part|round|sprint|episode|ep|lecture|game|day|no)\.?\s?#?\d+\b")
+# An occurrence's number, which names one meeting of a thing rather than the thing ("session 4", "week 3", "#12"): the
+# number goes and its word stays. A number of four digits is a year, part of the name ("Demo Day 2026").
+COUNTER = re.compile(r"#\s?\d{1,3}\b|\b(session|meeting|week|part|round|sprint|episode|ep|lecture|game|day)\.?\s?#?\d{1,3}\b")
 
 
 def _norm(name: str) -> str:
     """'Gloomhaven Night (session 4)' -> 'gloomhaven night'; 'Igneous - weekly sync' -> 'igneous';
-    'CS 362 Database Systems' -> 'cs 362 database systems'."""
+    'Sprint 23 planning' -> 'sprint planning'; 'CS 362 Database Systems' -> 'cs 362 database systems';
+    'Demo Day 2026' -> 'demo day 2026'."""
     n = CLEAN.sub("", name or "").strip().lower()
-    n = COUNTER.sub(" ", n)
+    n = COUNTER.sub(lambda m: f" {m.group(1) or ''} ", n)
     n = re.sub(r"\b(weekly|biweekly|daily|monthly|session|meeting|sync|standup|call)\b", " ", n)
     return re.sub(r"\s+", " ", n).strip(" -:")
 
@@ -253,23 +258,29 @@ def _threads(s: Session) -> list[dict]:
     return out
 
 
+def _theirs(t: dict, record: int, at) -> bool:
+    """The record is the thread's: it holds it, or it happened while the thread did (whenever, for a thread with no
+    window: graph/threads.py `window`)."""
+    lo, hi = t["window"] or (None, None)
+    return record in t["records"] or lo is None or (at is not None and lo <= at <= hi)
+
+
 def _about(spellings: list[str], anchors: set[int], own: list[tuple], threads: list[dict]) -> dict | None:
-    """The thread a candidate is about, or None: one of its defining terms is in the candidate's name, and it holds one
-    of the candidate's anchors or their records, or most of those records happened inside its window. Of several, the
-    one holding the most of them, then the one most of them happened in, then the biggest (then the first by key)."""
+    """The thread a candidate is about, or None: one of its defining terms is in the candidate's name, and the thread
+    holds one of the candidate's anchors (the threads stage attached it) or most of the anchors' records are the
+    thread's (`_theirs`). One record the thread holds is not enough: a folder of two trips to one city is the later
+    trip's only if most of its files are. Of several, the one holding the most of its anchors, then the one most of
+    the records are, then the biggest (then the first by key)."""
     names = [_words(sp) for sp in spellings]
-    records = {record for record, _node, _at in own}
-    dates = [at for _record, _node, at in own if at is not None]
     best = None
     for t in threads:
         if not any(t["pattern"].search(n) for n in names):
             continue
-        shared = len(records & t["records"]) + len(anchors & t["attached"])
-        lo, hi = t["window"] or (None, None)
-        inside = sum(1 for at in dates if lo is None or lo <= at <= hi)
-        if not (shared or 2 * inside > len(dates) or (not dates and lo is None)):
+        attached = len(anchors & t["attached"])
+        theirs = sum(1 for record, _node, at in own if _theirs(t, record, at))
+        if not (attached or 2 * theirs > len(own) or (not own and t["window"] is None)):
             continue
-        rank = (shared, inside, len(t["records"]))
+        rank = (attached, theirs, len(t["records"]))
         if best is None or rank > best[0]:
             best = (rank, t)
     return best[1] if best else None
@@ -386,23 +397,23 @@ def _keys(s: Session) -> dict[int, str]:
     return keys
 
 
-def _nearest_files(cands: dict[str, dict], own: dict[int, list[tuple]]) -> dict[str, list[tuple[int, int, str]]]:
+def _nearest_files(cands: dict[str, dict], own: dict[int, list[tuple]]) -> dict[str, list[tuple[int, int, object, str]]]:
     """key -> the files (and repo activity) in its folders, each record once, for its nearest folder among every
-    candidate's: [(node, record, folder name)]."""
+    candidate's: [(node, record, when, folder name)]."""
     folders = {nid: (key, sp) for key, c in cands.items() for nid, how, sp in c["anchors"] if how in ("folder", "repo")}
     anchors = {nid for c in cands.values() for nid, _how, _sp in c["anchors"]}
     nearest: dict[int, tuple] = {}
     for folder in sorted(folders):
-        for record, node, _at in own.get(folder, []):
+        for record, node, at in own.get(folder, []):
             if node is None or node in anchors:
                 continue
             rank = (len(own[folder]), folder)  # the folder holding the fewest records is the nearest
             if node not in nearest or rank < nearest[node][0]:
-                nearest[node] = (rank, folder, record)
-    out: dict[str, list[tuple[int, int, str]]] = defaultdict(list)
-    for node, (_rank, folder, record) in sorted(nearest.items()):
+                nearest[node] = (rank, folder, record, at)
+    out: dict[str, list[tuple[int, int, object, str]]] = defaultdict(list)
+    for node, (_rank, folder, record, at) in sorted(nearest.items()):
         key, spelling = folders[folder]
-        out[key].append((node, record, spelling))
+        out[key].append((node, record, at, spelling))
     return out
 
 
@@ -468,11 +479,13 @@ def run(s: Session, log=print) -> dict:
             if nid in t["attached"]:
                 continue  # the threads stage already holds it
             mine = [r for r, _node, _at in own.get(nid, []) if r in t["records"]] or \
-                [r for r, _node, at in own.get(nid, []) if t["window"] is None or (at and t["window"][0] <= at <= t["window"][1])]
+                [r for r, _node, at in own.get(nid, []) if _theirs(t, r, at)]
             for record in mine[-EVIDENCE:] or [None]:
                 links.add(nid, "PART_OF", how, 0.9, record)
-        for node, record, folder in files.get(key, []):
-            if record not in t["records"]:
+        # Its folders' files from while the thread happened (the ones it holds are linked already): a file of another
+        # time in the same folder is no part of it.
+        for node, record, at, folder in files.get(key, []):
+            if record not in t["records"] and _theirs(t, record, at):
                 links.add(node, "PART_OF", "in its folder", 0.9, record, folder=folder)
         links.write(w, t["id"])
         if log:
@@ -489,7 +502,7 @@ def run(s: Session, log=print) -> dict:
         anchors = {nid for nid, _how, _sp in c["anchors"]}
         for nid, how, _spelling in c["anchors"]:  # structural members
             links.add(nid, "PART_OF", how, 1.0)
-        for node, record, folder in files.get(project_key, []):
+        for node, record, _at, folder in files.get(project_key, []):
             links.add(node, "PART_OF", "in its folder", 0.9, record, folder=folder)
         # Its own calendar series and group chats list who is in it: direct evidence.
         listed = set().union(*(people.get(nid, set()) for nid, how, _sp in c["anchors"]
