@@ -46,8 +46,8 @@ class Settings(BaseSettings):
     # extraction, link checks, thread naming. Empty, the default, sends nothing.
     llm_sources: str = ""
     llm_model: str = "us.anthropic.claude-sonnet-5-5"
-    # High-volume yes/no judgments (verifying edges, pair same/related, umbrellas, summaries) use the cheap model;
-    # nuanced ones (naming threads, picking their records, confirming a merge) use llm_model.
+    # High-volume judgments (verifying edges, pair same/related, umbrellas, summaries, a question's filters) use the
+    # cheap model; nuanced ones (naming threads, picking their records, confirming a merge) use llm_model.
     llm_cheap_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     # How many times the Anthropic SDK retries a failed hosted call (connection errors, 408, 409, 429, 5xx), with
     # backoff. It is the only retry layer.
