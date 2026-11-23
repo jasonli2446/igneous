@@ -112,17 +112,37 @@ def label(name: str | None, node_type: str, named: dict[str, str]) -> str | None
 CATEGORY = {"Person": "People", "Thread": "Groups", "Event": "Events", "Organization": "Organizations",
             "Project": "Projects", "File": "Files", "Folder": "Files", "Topic": "Topics", "Place": "Places"}
 
-# A judged thread's kind ("trip", "TA job", "book club") names its section, by whole words, first match wins.
+# A judged thread's kind ("trip", "TA job", "book club") names its section, by whole words, first match wins, and says
+# what it is for placing it under one of your organizations (graph/backbone.py): a class, work, something of your own
+# (a trip, a hobby, a party, a side project), or nothing either way (a project, an event: whose it is shows elsewhere).
 _KIND_SECTIONS = [
-    (("trip", "travel", "vacation", "visit"), "Trips"),
-    (("course", "class", "lecture", "seminar", "lab section", "coursework"), "Courses"),
-    (("job", "internship", "work", "employment", "ta", "teaching assistant", "role", "position"), "Work"),
-    (("hobby", "game", "sport", "club", "climbing", "music", "campaign"), "Hobbies"),
-    (("project", "client", "startup", "research", "hackathon", "repo", "app", "platform", "thesis"), "Projects"),
-    (("event", "party", "wedding", "concert", "festival"), "Events"),
+    (("trip", "trips", "travel", "travels", "vacation", "holiday", "visit"), "Trips", "personal"),
+    (("course", "class", "lecture", "seminar", "lab section", "coursework", "capstone"), "Courses", "class"),
+    (("job", "internship", "intern", "work", "employment", "ta", "teaching assistant", "role", "position", "hiring",
+      "interview", "onboarding", "field trial", "field trials"), "Work", "work"),
+    (("hobby", "hobbies", "game", "games", "sport", "sports", "club", "climbing", "music", "band", "league",
+      "campaign"), "Hobbies", "personal"),
+    (("side project", "personal project"), "Projects", "personal"),
+    (("project", "client", "startup", "research", "hackathon", "repo", "app", "platform", "thesis"), "Projects", None),
+    (("party", "wedding", "concert", "festival", "hangout"), "Events", "personal"),
+    (("event",), "Events", None),
 ]
 # Sections of things that are not projects: a kind never takes one of these names for itself.
 _RESERVED = frozenset({"People", "Groups", "Files", "Topics", "Places"})
+
+
+def _kind_entry(kind: str | None) -> tuple[str, str | None] | None:
+    """(section, what it is for placing) of the first entry of _KIND_SECTIONS the kind names, or None."""
+    phrase = f" {' '.join(re.findall(r'[a-z0-9]+', (kind or '').lower()))} "
+    return next(((section, placing) for terms, section, placing in _KIND_SECTIONS
+                 if any(f" {t} " in phrase for t in terms)), None)
+
+
+def placing_kind(kind: str | None) -> str | None:
+    """What a judged kind says a thread is, for placing it under an organization: 'class', 'work', 'personal', or None
+    (a kind that says neither, or no kind)."""
+    entry = _kind_entry(kind)
+    return entry[1] if entry else None
 
 
 def section_for_kind(kind: str | None) -> str:
@@ -132,10 +152,8 @@ def section_for_kind(kind: str | None) -> str:
     words = re.findall(r"[a-z0-9]+", (kind or "").lower())
     if not words or words == ["thread"]:
         return "Projects"
-    phrase = f" {' '.join(words)} "
-    for terms, section in _KIND_SECTIONS:
-        if any(f" {t} " in phrase for t in terms):
-            return section
+    if entry := _kind_entry(kind):
+        return entry[0]
 
     def plural(w: str) -> str:
         return w if w.endswith("s") else w + "s"
@@ -168,7 +186,8 @@ _HOW = {
     "thread-resolution": "Suggested automatically from the two threads' names and records.",
     "er": "Matched automatically by name and contacts.",
     "organizations": "Suggested from email domains and contact cards.",
-    "backbone": "Placed under your school or workplace from its emails and dates.",
+    "backbone": "Placed under your school or workplace: what it is (a class there, work there), whose email it "
+                "involves, your dates there, or what you wrote about a role there.",
     "entities": "Found from what these records share (a folder, a series, a group chat).",
     "topic-normalization": "Merged automatically from similar topic names.",
     "relationship-history": "Inferred from who wrote to whom, and when.",
@@ -675,7 +694,7 @@ def your_orgs(s: Session, me: list[int]) -> list[tuple[int, bool, object]]:
             SELECT DISTINCT ON (e.dst) e.dst AS org, (e.props->>'school') IS NOT NULL AS school, e.valid_to
             FROM edges e JOIN nodes o ON o.id = e.dst AND o.type = 'Organization' AND {visible('o')}
             WHERE e.src = ANY(:me) AND e.type = 'WORKED_AT' AND e.extractor = ANY(:yours)
-            ORDER BY e.dst, e.valid_to IS NULL DESC, e.valid_to DESC) o
+            ORDER BY e.dst, e.valid_to IS NULL DESC, e.valid_to DESC, e.id) o
         ORDER BY valid_to IS NULL DESC, valid_to DESC, org
     """), {"me": me, "yours": list(YOUR_ORGS)})]
 

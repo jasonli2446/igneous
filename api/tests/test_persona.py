@@ -176,7 +176,7 @@ def stub(system: str, user: str, schema: dict, **_options):
         shared = (re.search(r"^Shared terms: (.*)$", user, re.M) or [None, ""])[1].lower()
         shown = len(re.findall(r"^\d+\. \[", user, re.M))
         for g in THREADS:
-            if any(t.lower() in shared for t in g["terms"]) and g.get("kind") not in ("organization",):
+            if any(t.lower() in shared for t in g["terms"]) and g.get("kind") not in ("organization", "role"):
                 return {"keep": True, "kind": g["kind"], "name": g["name"], "confidence": 0.9,
                         "defining_terms": g["terms"], "members": list(range(shown))}, {}
         return {"keep": False, "kind": "", "name": "", "confidence": 0.9, "defining_terms": [], "members": []}, {}
@@ -237,13 +237,17 @@ def test_a_slice_builds_its_graph_through_the_sources_registry_and_the_pipeline(
     assert thread("Lisbon trip").props["kind"] == "trip"
     assert {"Dana Kimura", "Sofia Lindgren", "Rafael Ortiz"} <= took_part("Lisbon trip")
     assert "Theo Marsh" not in took_part("Lisbon trip")
-    # Classes, under the school on Mira's LinkedIn; the job: the hiring is Northwind's own thread. An organization
-    # can be two nodes (the company LinkedIn names, and the one found by its email domain), each with a thread.
+    # Classes, under the school on Mira's LinkedIn; the job: the hiring is Northwind's own thread. Each organization is
+    # one node (the company LinkedIn names, holding the domain its mail comes from), standing for one thread.
     def standing_for(org: str) -> dict[int, dict]:
         return dict(db.execute(text("""SELECT p.id, p.props FROM nodes p JOIN nodes o ON o.id = (p.props->>'org')::bigint
                                        WHERE p.type = 'Project' AND o.name = :o"""), {"o": org}).all())
 
+    assert db.execute(text("""SELECT key, props->'domains' FROM nodes WHERE type = 'Organization'
+                              AND name IN ('Lakeshore University', 'Northwind Robotics') ORDER BY key""")).all() == [
+        ("org:lakeshore-university", ["lakeshore.example.edu"]), ("org:northwind-robotics", ["northwind.example.com"])]
     schools = set(standing_for("Lakeshore University"))
+    assert len(schools) == len(standing_for("Northwind Robotics")) == 1
     for course in ("CS 362", "ENVS 210"):
         assert thread(course).props["kind"] == "class"
         assert schools & set(db.execute(text("SELECT dst FROM edges WHERE src = :c AND type = 'PART_OF'"),
