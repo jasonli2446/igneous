@@ -3,14 +3,18 @@
 Messages are scattered evidence; a resume says outright where you worked, what you built and when, in the names
 you use. So the biggest parts of your life come from there first, and everything else attaches to them:
 
-  1. Self-describing documents are found by content, not filename alone: a document about the owner that lists
-     roles and dates. Every version is read once (cached by content), newest first.
+  1. Self-describing documents: files in Drive, local folders or Notes titled like a resume, CV or LinkedIn export
+     (400-30,000 characters), newest first. Every version is read once (cached by content), and counts only when it
+     names you.
   2. One structured extraction per version: experience {org, title, start, end}, education {school, degree,
      start, end}, projects {name, description}. Each fact keeps the document it came from.
   3. Experience -> you WORKED_AT an Organization named as you name it ("BigCo", "Startup Studio"), with dates and the
-     domain it matches. Projects -> pinned threads named as you name them. Education -> your school.
-     All are pinned (origin 'profile'): never dropped by the verifier, and the gold-set equivalent of what you'd say.
-  4. Older versions keep roles that later versions drop (history), newer versions win on titles and dates.
+     domain it matches. Education -> your school. These are stated facts (extractor 'profile'): never judged by the
+     verifier. Projects -> pinned rows in the thread registry (origin 'profile'), named as you name them and found by
+     their full name, or a word of it that stands for the project in your records ("Atlas" for "Atlas Mobile App",
+     not "Mobile").
+  4. Each organization, school and project comes from the newest version that names it: an older version adds what
+     the newer ones left out, and a newer one wins on titles and dates.
 
 A LinkedIn export (connectors/linkedin.py) is read too, without a model: its profile item carries the same structure
 in `raw_meta.profile`. It has no date of its own, so a dated resume wins on titles and dates and LinkedIn fills in
@@ -28,6 +32,9 @@ from igneous.graph import identity
 
 EXTRACTOR = "profile"
 VERSION = "1"
+ALIAS_SHARE = 0.5  # a word of a project's name stands for it when at least this share of its records name the project
+GENERIC_WORDS = {"project", "platform", "system", "the", "app", "application", "tool", "website", "site", "service",
+                 "mobile", "web", "data", "team", "group", "new", "research", "study", "design", "development"}
 
 SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -65,7 +72,7 @@ def documents(s: Session) -> list:
         UNION ALL
         SELECT id, source, title, occurred_at, body_text, raw_meta->'profile' FROM source_items
         WHERE source = 'linkedin' AND external_id = 'profile' AND raw_meta ? 'profile'
-        ORDER BY occurred_at DESC NULLS LAST
+        ORDER BY occurred_at DESC NULLS LAST, id DESC
     """)).all()
 
 
@@ -125,13 +132,36 @@ def _date(v: str):
     return f"{m.group(1)}-{int(m.group(2) or 1):02d}-01" if m else None
 
 
+def aliases(s: Session, name: str) -> list[str]:
+    """Words of a project's name that stand for it on their own: at least ALIAS_SHARE of the life-source records
+    naming the word (as a whole word) name the whole project too. A word used for other things ("Mobile" in your
+    phone bills) isn't one, nor is a generic word."""
+    from igneous.source_catalog import LIFE
+
+    out = []
+    for word in dict.fromkeys(re.findall(r"[A-Za-z][A-Za-z0-9]{3,}", name)):
+        if word.lower() in GENERIC_WORDS or word.lower() == name.lower():
+            continue
+        named, both = s.execute(text("""
+            SELECT count(*), count(*) FILTER (WHERE hay ~* :full) FROM (
+                SELECT coalesce(title, '') || ' ' || left(coalesce(body_text, ''), 4000) AS hay FROM source_items
+                WHERE source = ANY(:src)) q WHERE hay ~* :word
+        """), {"word": r"\m" + re.escape(word) + r"\M", "full": r"\m" + re.escape(name) + r"\M",
+               "src": sorted(LIFE)}).one()
+        if named and both / named >= ALIAS_SHARE:
+            out.append(word)
+    return out
+
+
 def run(s: Session, log=print) -> dict:
-    """Build the backbone from every self-describing document, newest first (newer wins, older adds history)."""
+    """Build the backbone from every self-describing document, newest first (newer wins, older adds what it lacks).
+    Owns WORKED_AT and Organization PART_OF edges with extractor 'profile', and the registry rows of origin
+    'profile'."""
     self_id = identity.self_id(s)
     if self_id is None:
         return {"documents": 0}
-    s.execute(text("DELETE FROM edges WHERE extractor = :x"), {"x": EXTRACTOR})
-    s.execute(text("DELETE FROM thread_registry WHERE origin = 'profile'"))
+    s.execute(text("""DELETE FROM edges e USING nodes a WHERE a.id = e.src AND e.extractor = :x
+                      AND a.type <> 'Project'"""), {"x": EXTRACTOR})
     my_names = {n.lower() for n in s.execute(text("""
         SELECT n.name FROM nodes n WHERE n.id = :me OR n.id IN (SELECT node_id FROM canonical WHERE canonical_id = :me)
     """), {"me": self_id}).scalars() if n and "@" not in n}
@@ -227,18 +257,20 @@ def run(s: Session, log=print) -> dict:
                                                   f"{e.get('parent') or 'it'}"}, sid=e["doc"])
         if e.get("project"):
             named_projects.setdefault(oid, set()).add(e["project"])
-    # Projects become pinned threads named as you name them (the registry keeps them across runs).
+    # Projects become pinned rows of the thread registry, named as you name them. A row keeps its state (a project
+    # folded into a thread stays its facet); a project your documents no longer list goes.
+    keys = []
     for k, p in projects.items():
         key = "profile:" + hashlib.sha256(k.encode()).hexdigest()[:16]
-        words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9]{3,}", p["name"])
-                 if w.lower() not in ("project", "platform", "system", "the")][:2]
-        terms = [p["name"], *words]
+        keys.append(key)
+        terms = list(dict.fromkeys([p["name"], *aliases(s, p["name"])]))
         s.execute(text("""
             INSERT INTO thread_registry (key, name, kind, terms, status, pinned, origin, confidence)
             VALUES (:k, :n, 'project', :t, 'active', true, 'profile', 1.0)
-            ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, terms = EXCLUDED.terms, status = 'active',
-                pinned = true, updated_at = now()
-        """), {"k": key, "n": p["name"][:80], "t": list(dict.fromkeys(terms))})
+            ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, terms = EXCLUDED.terms, pinned = true,
+                updated_at = now()
+            WHERE (thread_registry.name, thread_registry.terms) IS DISTINCT FROM (EXCLUDED.name, EXCLUDED.terms)
+        """), {"k": key, "n": p["name"][:80], "t": terms})
         oid = org_ids.get(_slug(p.get("org") or "")) or by_name.get(_slug(p.get("org") or ""))
         if oid:
             named_projects.setdefault(oid, set()).add(p["name"])
@@ -247,7 +279,7 @@ def run(s: Session, log=print) -> dict:
     for oid, names in named_projects.items():
         s.execute(text("UPDATE nodes SET props = props || jsonb_build_object('resume_projects', CAST(:n AS jsonb)) WHERE id = :i"),
                   {"n": json.dumps(sorted(names)), "i": oid})
-    s.execute(text("DELETE FROM thread_parents WHERE origin = 'profile'"))
+    s.execute(text("DELETE FROM thread_registry WHERE origin = 'profile' AND NOT (key = ANY(:k))"), {"k": keys})
     # Organizations an older reading of your resume made that nothing points at any more.
     s.execute(text("""DELETE FROM nodes n WHERE n.type = 'Organization' AND n.props->>'named_by' = 'profile'
                       AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id OR e.dst = n.id)"""))

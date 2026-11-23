@@ -8,10 +8,11 @@ stay evidence and search results, but never appear as nodes, members or connecti
 A group conversation is a Thread that is not hidden: the thread flags (graph/item_class.py) show a thread only when it
 is a conversation among three or more people.
 
-A pair you rejected ("This is wrong", or taking something out of a project) is your 'drop' verdict on the two nodes.
-No link the explorer draws joins such a pair: neither a spoke from a centre nor a tie between two things on screen.
+A pair you rejected ("This is wrong", or taking something out of a project) is your 'drop' verdict on the two nodes,
+read as the derived stages read it (graph/derived.py): it holds for both identities, a person under any address and
+a Project under what it was folded into. No link the explorer draws joins such a pair: neither a spoke from a centre
+nor a tie between two things on screen.
 """
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 
@@ -41,14 +42,9 @@ def group_conversation(alias: str) -> str:
 
 
 def rejected(s: Session) -> set[frozenset[int]]:
-    """The pairs you rejected, as the graph is now: {a, b} for each of your 'drop' verdicts, a person by their
-    identity head. A pair whose two sides are now one identity is left out."""
-    rows = s.execute(text("""
-        SELECT DISTINCT COALESCE(ca.canonical_id, a.id), COALESCE(cb.canonical_id, b.id)
-        FROM edge_verdicts v
-        JOIN nodes a ON a.type = split_part(v.src_key, ':', 1) AND a.key = substr(v.src_key, strpos(v.src_key, ':') + 1)
-        JOIN nodes b ON b.type = split_part(v.dst_key, ':', 1) AND b.key = substr(v.dst_key, strpos(v.dst_key, ':') + 1)
-        LEFT JOIN canonical ca ON ca.node_id = a.id LEFT JOIN canonical cb ON cb.node_id = b.id
-        WHERE v.source = 'user' AND v.verdict = 'drop'
-    """)).all()
-    return {frozenset(pair) for pair in rows if pair[0] != pair[1]}
+    """The pairs you rejected, as the explorer shows the graph: the node of each identity (a person's identity head,
+    the Project a merge kept). The same reading the derived stages write by, so what they never link the explorer
+    never draws."""
+    from igneous.graph.derived import rejections
+
+    return rejections(s).heads()

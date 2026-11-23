@@ -309,6 +309,7 @@ def resolve(undo: bool = typer.Option(False, help="instead, delete the merges en
 
     with session() as s, runner.publishing(s):
         result = {"removed": er.undo(s)} if undo else er.run(s, rescore=True)
+        runner.final_step(s)  # your corrections, applied to what it publishes
     print(json.dumps(result), flush=True)
 
 

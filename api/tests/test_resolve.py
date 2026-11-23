@@ -108,8 +108,9 @@ def test_clusters_follow_trusted_links_when_no_record_changed(db):
     mail(db, "a", "ana@a.test", [ME], "Hi", day(0), names={"ana@a.test": "Ana Ames"})
     mail(db, "b", "aa@b.test", [ME], "Hey", day(1), names={"aa@b.test": "A. Ames"})
     build(db)
-    db.execute(text("""INSERT INTO edges (src, dst, type, extractor, confidence)
-                       SELECT a.id, b.id, 'SAME_AS', 'user', 1.0 FROM nodes a, nodes b
+    corrections.link(db, "Person:aa@b.test", "Person:ana@a.test", "SAME_AS", {"why": "you said so"})
+    db.execute(text("""INSERT INTO edges (src, dst, type, props, extractor, confidence)
+                       SELECT a.id, b.id, 'SAME_AS', '{"why": "you said so"}', 'user', 1.0 FROM nodes a, nodes b
                        WHERE a.key = 'ana@a.test' AND b.key = 'aa@b.test'"""))
     result = build(db, ("resolve",))
     assert result["resolve"]["result"]["rescored"] is False
@@ -143,6 +144,7 @@ def test_a_clusters_name_leaves_with_the_merge(db):
     assert head.name == "Christine Lee" and head.props["own_name"] == "Chris Lee"
     link = db.execute(text("SELECT id FROM edges WHERE type = 'SAME_AS' AND extractor = 'er'")).scalar_one()
     corrections.reject(db, link)
+    corrections.apply_all(db)
     head = db.execute(text("SELECT name, props FROM nodes WHERE key = 'chris.lee@a.test'")).one()
     assert head.name == "Chris Lee" and "own_name" not in head.props and "shown_name" not in head.props
 

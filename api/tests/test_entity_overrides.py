@@ -3,8 +3,8 @@ from igneous.graph.overrides import plan
 A, B, C = "Project:project:a", "Project:project:b", "Project:project:c"
 
 
-def row(id, op, keys, value=None):
-    return {"id": id, "op": op, "node_keys": keys, "value": value}
+def row(id, op, keys, value=None, data=None):
+    return {"id": id, "op": op, "node_keys": keys, "value": value, "data": data}
 
 
 def test_later_rename_wins():
@@ -18,9 +18,8 @@ def test_merge_chain_collapses_to_final_survivor():
 
 
 def test_overrides_on_a_folded_project_follow_it_to_the_survivor():
-    p = plan([row(1, "rename", [B], "Renamed"), row(2, "hide", [B]), row(3, "unlink", [B, "Person:x"]),
-              row(4, "merge", [A, B])])
-    assert p.renames == {A: "Renamed"} and p.hidden == {A} and p.unlinks == {(A, "Person:x")}
+    p = plan([row(1, "rename", [B], "Renamed"), row(2, "hide", [B]), row(3, "merge", [A, B])])
+    assert p.renames == {A: "Renamed"} and p.hidden == {A}
 
 
 def test_self_merges_and_cycles_never_fold_a_project_into_itself():
@@ -28,9 +27,12 @@ def test_self_merges_and_cycles_never_fold_a_project_into_itself():
     assert all(k != v for k, v in p.merges.items())
 
 
-def test_unlink_and_hide_are_idempotent():
-    p = plan([row(1, "hide", [A]), row(2, "hide", [A]), row(3, "unlink", [A, "m"]), row(4, "unlink", [A, "m"])])
-    assert p.hidden == {A} and p.unlinks == {(A, "m")}
+def test_hide_is_idempotent_and_links_keep_their_type_and_props():
+    p = plan([row(1, "hide", [A]), row(2, "hide", [A]),
+              row(3, "link", ["Person:x", A], "INVOLVED_IN", {"props": {"why": "you added this"}}),
+              row(4, "unlink", [A, "Person:x"], data={"pair_correction": True})])
+    assert p.hidden == {A}
+    assert p.links == [("Person:x", A, "INVOLVED_IN", {"why": "you added this"})]
 
 
 def test_rename_without_value_is_ignored():
@@ -45,28 +47,20 @@ def test_entity_routes_are_registered():
         assert "post" in paths[f"/graph/entity/{{node_id}}/{op}"]
     assert "get" in paths["/graph/entity/{node_id}"]
     assert "delete" in paths["/overrides/{override_id}"]
+    assert "get" in paths["/graph/suggestions"] and "post" in paths["/graph/edge/confirm"]
 
 
-def test_adding_a_connection_accepts_only_pairs_the_menu_offers():
-    """POST /graph/link used to check only the edge type's name, so it could write illegal edges (#181)."""
-    from types import SimpleNamespace
-
+def test_adding_a_connection_accepts_only_pairs_the_menu_offers(db):
+    """POST /graph/link accepts only the pairs its menu offers for the two kinds of thing (#181)."""
     from fastapi.testclient import TestClient
+    from sqlalchemy import text
 
-    from igneous.db import get_session
     from igneous.main import app
 
-    kinds = {1: "Person", 2: "Person", 3: "Project"}
-
-    class Session:
-        def execute(self, statement, params=None):
-            return SimpleNamespace(scalar=lambda: kinds.get((params or {}).get("i")))
-
-    app.dependency_overrides[get_session] = lambda: Session()
-    try:
-        client = TestClient(app)
-        assert client.post("/graph/link", json={"src": 1, "dst": 2, "type": "PART_OF"}).status_code == 400
-        assert client.post("/graph/link", json={"src": 3, "dst": 1, "type": "SAME_AS"}).status_code == 400
-        assert client.post("/graph/link", json={"src": 1, "dst": 9, "type": "RELATED_TO"}).status_code == 404
-    finally:
-        app.dependency_overrides.clear()
+    ids = [db.execute(text("INSERT INTO nodes (type, key, name) VALUES (:t, :k, :k) RETURNING id"),
+                      {"t": t, "k": k}).scalar_one() for t, k in (("Person", "a"), ("Person", "b"), ("Project", "p"))]
+    client = TestClient(app)
+    assert client.post("/graph/link", json={"src": ids[0], "dst": ids[1], "type": "PART_OF"}).status_code == 400
+    assert client.post("/graph/link", json={"src": ids[2], "dst": ids[0], "type": "SAME_AS"}).status_code == 400
+    assert client.post("/graph/link", json={"src": ids[0], "dst": 10**9, "type": "RELATED_TO"}).status_code == 404
+    assert db.execute(text("SELECT count(*) FROM overrides")).scalar() == 0

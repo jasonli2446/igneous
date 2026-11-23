@@ -13,15 +13,17 @@ Anchors that share a name are one `Project`, shown by the name's most common spe
 Every item that mentions the name (by phrase match on its chunks, across all sources) gets a PART_OF edge with the
 matched span as evidence; when one name is several projects, a mention goes to the ones whose people are on it. The
 anchors themselves link structurally (confidence 1.0), and a link keeps every reason it has. People involved in 2+
-of its items get INVOLVED_IN with a count. A group chat that mentions it on 5+ days is linked as a whole: that's how
-"Gloomhaven Night" on the calendar finds the group chat, and the chat finds who else plays.
+of its items get INVOLVED_IN with a count; someone on its own calendar series or in its own group chat is listed by
+the record itself (props.direct), which settles the link without a model. A group chat that mentions it on 5+ days is
+linked as a whole: that's how "Gloomhaven Night" on the calendar finds the group chat, and the chat finds who else
+plays.
 
-Every edge here is written with extractor 'entities', and the stage deletes and rebuilds its own edges on every run,
-so new data (a new mention, a new chat day) updates old entities. Corrections made in the Inspector live in
-graph/overrides.py and are replayed by the pipeline's last step.
+Every edge here is written with extractor 'entities' through graph/derived.py's Writer (a link you rejected is never
+written), and the stage deletes and rebuilds its own edges on every run, so new data (a new mention, a new chat day)
+updates old entities. Projects are upserted under the correction contract (a name you gave one stays); corrections
+made in the Inspector live in graph/overrides.py and are replayed by the pipeline's last step.
 """
 import hashlib
-import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -31,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from igneous.config import settings
 from igneous.graph import identity
+from igneous.graph.derived import Writer
 
 EXTRACTOR = "entities"
 VERSION = "1"
@@ -249,20 +252,13 @@ class Links(dict[tuple[int, str], Link]):
         link.reasons.append((why, sid, {"why": why, **detail}))
         link.confidence = max(link.confidence, confidence)
 
-    def write(self, s: Session, project: int) -> None:
-        for (src, type_), link in self.items():
+    def write(self, w: Writer, project: int) -> None:
+        for (src, type_), link in sorted(self.items()):
             detail = {k: v for _why, _sid, d in link.reasons for k, v in d.items() if k != "why"}
             props = {**detail, "why": "; ".join(dict.fromkeys(why for why, _sid, _d in link.reasons))}
-            edge = s.execute(text("""
-                INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence, source_item_id)
-                VALUES (:src, :dst, :t, CAST(:p AS jsonb), :x, :v, :c, :sid) RETURNING id
-            """), {"src": src, "dst": project, "t": type_, "p": json.dumps(props), "x": EXTRACTOR, "v": VERSION,
-                   "c": link.confidence,
-                   "sid": next((sid for _w, sid, _d in link.reasons if sid is not None), None)}).scalar_one()
-            s.execute(text("""
-                INSERT INTO edge_evidence (edge_id, source_item_id, kind, detail)
-                VALUES (:edge, :sid, :kind, CAST(:detail AS jsonb))
-            """), [{"edge": edge, "sid": sid, "kind": why, "detail": json.dumps(d)} for why, sid, d in link.reasons])
+            w.edge(src, project, type_, props, confidence=link.confidence,
+                   source_item_id=next((sid for _w, sid, _d in link.reasons if sid is not None), None),
+                   evidence=[(sid, why, d) for why, sid, d in link.reasons])
 
 
 def run(s: Session, log=print) -> int:
@@ -287,19 +283,20 @@ def run(s: Session, log=print) -> int:
     s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = 'true'
                       AND NOT (key = ANY(:keep))"""), {"keep": [f"project:{key}" for key in keep]})
     siblings = Counter(cands[key]["screen"] for key in keep)  # how many projects share each name
+    w = Writer(s, EXTRACTOR, VERSION)
 
     for project_key in keep:
         c = cands[project_key]
         n = c["screen"]
-        pid = s.execute(text("""
-            INSERT INTO nodes (type, key, name, props) VALUES ('Project', :k, :name, CAST(:p AS jsonb))
-            ON CONFLICT (type, key) DO UPDATE SET props = nodes.props || EXCLUDED.props RETURNING id
-        """), {"k": f"project:{project_key}", "name": c["display"],
-               "p": json.dumps({"derived": True, "original_name": c["display"],
-                                "anchors": sorted({how for _nid, how, _sp in c["anchors"]})})}).scalar_one()
+        pid = w.project(f"project:{project_key}", c["display"],
+                        {"derived": True, "anchors": sorted({how for _nid, how, _sp in c["anchors"]}),
+                         "named_from": "records"})
         links = Links()
         for nid, how, _spelling in c["anchors"]:  # structural members
             links.add(nid, "PART_OF", how, 1.0)
+        # Its own calendar series and group chats list who is in it: direct evidence.
+        listed = set().union(*(people.get(nid, set()) for nid, how, _sp in c["anchors"]
+                               if how.startswith(("event series", "repeated event")) or how == "group chat"))
 
         # Mentions anywhere: phrase match on chunk text, one edge per item (Message/File/Event node).
         hits = s.execute(text("""
@@ -344,9 +341,10 @@ def run(s: Session, log=print) -> int:
             WHERE NOT COALESCE((n.props->>'self')::bool, false) AND COALESCE(n.props->>'kind', '') <> 'service'
             GROUP BY canon.person HAVING count(DISTINCT canon.item) >= :min
         """), {"items": sorted({src for src, type_ in links if type_ == "PART_OF"}), "min": MIN_PEOPLE_ITEMS}):
+            extra = {"direct": True} if person_id in listed else {}
             links.add(person_id, "INVOLVED_IN", "observed involvement", 0.8, item_ids[0] if item_ids else None,
-                 items=count, roles=roles)
-        links.write(s, pid)
+                      items=count, roles=roles, **extra)
+        links.write(w, pid)
         if log:
             log(f"  {c['display'][:40]:40s} anchors={len(c['anchors'])} mentions={len(found)}")
     return len(keep)
