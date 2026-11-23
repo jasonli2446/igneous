@@ -40,6 +40,7 @@ import json
 import re
 from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -570,8 +571,27 @@ def _candidate_from(row, members: list) -> dict:
             "seed": row.anchor if row.origin == "name" else None}
 
 
-def _rows(s: Session):
-    return s.execute(text("SELECT * FROM thread_registry ORDER BY key")).all()
+def _rows(s: Session) -> list:
+    return list(s.execute(text("SELECT * FROM thread_registry ORDER BY key")).all())
+
+
+def _build(w: Writer, row, rows: list, found: dict[str, dict]) -> set[int]:
+    """Build one active row's thread from its records and those of its facets (the rows merged into it), and return
+    the records it holds (none when it has too few to be built: fewer than 3, or none for a pinned row)."""
+    into = {r.key: r.merged_into for r in rows if r.status == "merged" and r.merged_into}
+    facets = sorted((r for r in rows if r.status == "merged" and follow(into, r.key) == row.key), key=lambda r: r.key)
+    members = dict(found.get(row.key, {}))
+    facet_of: dict[int, str] = {}
+    for f in facets:
+        for iid, it in sorted(found.get(f.key, {}).items()):
+            if iid not in members:
+                members[iid] = it
+                if f.merged_by == "user":
+                    facet_of[iid] = f"Project:{f.key}"
+    if len(members) < 3 and not (row.pinned and members):
+        return set()
+    _write_thread(w, row, list(members.values()), facet_of, sorted({f.name for f in facets if f.name != row.name}))
+    return set(members)
 
 
 def run(s: Session, log=print, report=None) -> dict:
@@ -628,33 +648,18 @@ def run(s: Session, log=print, report=None) -> dict:
     # 1b. Every row's records; a merged row's go to the thread it ends up in.
     rows = _rows(s)
     by_key = {r.key: r for r in rows}
-    into = {r.key: r.merged_into for r in rows if r.status == "merged" and r.merged_into}
     found = registered([r for r in rows if r.status in ("active", "merged")], items)
-    facets: dict[str, list] = defaultdict(list)
-    for r in rows:
-        root = follow(into, r.key) if r.status == "merged" else None
-        if root and root in by_key and by_key[root].status == "active":
-            facets[root].append(r)
     built: list[str] = []
     claimed: set[int] = set()
     for row in sorted((r for r in rows if r.status == "active"), key=lambda r: (not r.pinned, r.key)):
-        members = dict(found.get(row.key, {}))
-        facet_of: dict[int, str] = {}
-        for f in facets.get(row.key, []):
-            for iid, it in found.get(f.key, {}).items():
-                if iid not in members:
-                    members[iid] = it
-                    if f.merged_by == "user":
-                        facet_of[iid] = f"Project:{f.key}"
-        if len(members) < 3 and not (row.pinned and members):
-            continue
-        aliases = sorted({f.name for f in facets.get(row.key, []) if f.name != row.name})
-        _write_thread(w, row, list(members.values()), facet_of, aliases)
-        built.append(row.key)
-        claimed |= set(members)
+        members = _build(w, row, rows, found)
+        if members:
+            built.append(row.key)
+            claimed |= members
     stats["threads"] = len(built)
 
-    # 2. New candidates: name seeds first (long-running), then bursts; only what known threads don't cover.
+    # 2. New candidates: name seeds first (long-running), then bursts; only what known threads don't cover. A kept
+    # one is built from its registry row, exactly as every later run builds it.
     report(note="finding new threads")
     cands = [c for c in (_seed_candidate(s, sd, items_by_id) for sd in name_seeds(s)) if c]
     cands += candidates(s)
@@ -673,27 +678,30 @@ def run(s: Session, log=print, report=None) -> dict:
             continue
         report(count=stats["calls"], total=JUDGE_BUDGET, note="judging new threads")
         terms = [t for t in (verdict.get("defining_terms") or c["terms"]) if len(t) >= 3] or c["terms"]
-        members = _belongs(c, verdict) if verdict.get("keep") else []
-        keep = len(members) >= 3
+        row = SimpleNamespace(key=key, name=(verdict.get("name") or c["terms"][0])[:80], kind=verdict.get("kind"),
+                              terms=terms, span_start=c["start"], span_end=c["end"], status="active",
+                              origin="name" if c.get("seed") else "burst", confidence=verdict.get("confidence"),
+                              anchor=c.get("seed"), anchor_name=c.get("seed_name"), judged=verdict["judged"],
+                              pinned=False, merged_into=None, merged_by=None)
+        found[key] = registered([row], items).get(key, {})
+        keep = bool(verdict.get("keep")) and len(_belongs(c, verdict)) >= 3 and len(found[key]) >= 3
         if not keep and not verdict["judged"]:
             continue  # too small without a model's say: no row, so a model judges it once it may read it
-        row = s.execute(text("""
+        row.status = "active" if keep else "rejected"
+        s.execute(text("""
             INSERT INTO thread_registry (key, name, kind, terms, span_start, span_end, status, origin, confidence,
                                          anchor, anchor_name, judged)
-            VALUES (:k, :n, :kind, :t, :a, :b, :st, :o, :c, :anc, :an, :j) ON CONFLICT (key) DO NOTHING RETURNING *
-        """), {"k": key, "n": (verdict.get("name") or c["terms"][0])[:80], "kind": verdict.get("kind"), "t": terms,
-               "a": c["start"], "b": c["end"], "st": "active" if keep else "rejected",
-               "o": "name" if c.get("seed") else "burst", "c": verdict.get("confidence"),
-               "anc": c.get("seed"), "an": c.get("seed_name"), "j": verdict["judged"]}).first()
-        if row is None:
-            continue
+            VALUES (:key, :name, :kind, :terms, :span_start, :span_end, :status, :origin, :confidence, :anchor,
+                    :anchor_name, :judged)
+        """), {k: getattr(row, k) for k in ("key", "name", "kind", "terms", "span_start", "span_end", "status",
+                                            "origin", "confidence", "anchor", "anchor_name", "judged")})
         by_key[key] = row
+        rows.append(row)
         if not keep:
             stats["rejected"] += 1
             continue
-        _write_thread(w, row, members, {}, [])
+        claimed |= _build(w, row, rows, found)
         built.append(key)
-        claimed |= {r.id for r in members}
         stats["new"] += 1
 
     # 3. Threads no row builds any more go (whatever they were); then what sits around the threads.
@@ -702,6 +710,13 @@ def run(s: Session, log=print, report=None) -> dict:
               {"keep": built})
     report(note="resolving duplicate threads")
     stats["resolution"] = resolve_threads.run(s, log=None, writer=w)
+    survivors = stats["resolution"].get("survivors") or []
+    if survivors:  # built again with their new facets, as every later run builds them
+        rows = _rows(s)
+        for row in (r for r in rows if r.key in survivors):
+            s.execute(text("""DELETE FROM edges e USING nodes t WHERE t.id = e.dst AND t.type = 'Project'
+                              AND t.key = :k AND e.extractor = :x"""), {"k": row.key, "x": EXTRACTOR})
+            _build(w, row, rows, found)
     w.refresh()  # threads folded into others: a rejection of either holds for the survivor
     w.prune()
     stats["umbrellas"] = umbrellas(s, w)

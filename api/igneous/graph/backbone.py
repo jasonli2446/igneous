@@ -4,10 +4,10 @@ Your resume (graph/profile.py) says where you were; the threads stage (graph/thr
 knows the other, which left "the Lab" as both an organization and a thread, and State University with no classes under
 it. This stage joins them, from evidence only, for every org in your backbone:
 
-  1. Same thing: a thread named exactly like the org (or a name it's also known by) IS the org. It becomes the
-     org's own thread: its sub-projects, records and people show under the org, and any other thread with that name
-     is marked props.same_as_org (the last step hides it). An org with no such thread gets one of its own
-     (`backbone:<org key>`, a Project under the correction contract: a name you give it stays).
+  1. Same thing: a thread named exactly like the org (or a shorter name of it, or a name it's also known by) IS
+     the org. It becomes the org's own thread: its sub-projects, records and people show under the org, and any
+     other thread with that name is marked props.same_as_org (the last step hides it). An org with no such thread
+     gets one of its own (`backbone:<org key>`, a Project under the correction contract: a name you give it stays).
   2. Stated: projects your resume lists under the org (`props.resume_projects`) are part of it, and a lab inside a
      university is part of the university's thread. These are stated (extractor 'profile'), never judged.
   3. Mostly theirs: a thread most of whose correspondence involves the org's email domain (a class whose mail
@@ -84,10 +84,10 @@ def _org_thread(w: Writer, org: dict, threads: list[dict]) -> tuple[int, str | N
     names = {norm(org["name"]), *(norm(a) for a in (org["props"] or {}).get("aliases", []))}
 
     def same_name(n: str) -> bool:
-        # Exactly, or one name inside the other word for word with 2+ words ("State University" is the
-        # university); a single shared word ("Case") is not enough.
-        return n in names or any(len(n.split()) >= 2 and len(m.split()) >= 2 and (f" {n} " in f" {m} " or f" {m} " in f" {n} ")
-                                 for m in names)
+        # Exactly, or a shorter name of it, word for word with 2+ words ("State University" for Western State
+        # University). A single shared word ("Case") is not enough, and a name that adds words to the org's is
+        # something there ("Acme Robotics standup", "State University Robotics Lab").
+        return n in names or any(len(n.split()) >= 2 and f" {n} " in f" {m} " for m in names)
     same = [t for t in threads if same_name(norm(t["name"]))
             or any(same_name(norm(a)) for a in (t["props"] or {}).get("aliases", []))]
     made = None
@@ -165,8 +165,10 @@ def run(s: Session, log=print) -> dict:
     w = Writer(s, EXTRACTOR, VERSION)
     orgs = _orgs(s)
     threads = _threads(s)
+    # A name on your resume is the life thread of that name before any other Project (a repo folder of the same name).
     by_name: dict[str, int] = {}
-    for t in threads:
+    for t in sorted(threads, key=lambda t: ((t["props"] or {}).get("derived") != "threads",
+                                            -((t["props"] or {}).get("records") or 0), t["id"])):
         by_name.setdefault(norm(t["name"]), t["id"])
     made = {o["id"]: _org_thread(w, o, threads) for o in orgs}
     org_thread = {o: tid for o, (tid, _key) in made.items()}

@@ -255,10 +255,12 @@ def run(s: Session, log=print, writer: Writer | None = None) -> dict:
     for t in ts:
         clusters[find(t["id"])].append(t)
     folded_into: dict[int, int] = {}
+    survivors: set[str] = set()
     for members in clusters.values():
         if len(members) < 2:
             continue
         keep = min(members, key=lambda t: (not t["pinned"], -len(t["items"]), -len(t["people"]), t["key"]))
+        survivors.add(keep["key"])
         for t in sorted(members, key=lambda t: t["key"]):
             if t["id"] == keep["id"]:
                 continue
@@ -290,6 +292,7 @@ def run(s: Session, log=print, writer: Writer | None = None) -> dict:
         w.edge(min(ia, ib), max(ia, ib), "RELATED_TO", {"why": v.get("label") or "related", "reason": v.get("reason")},
                confidence=v.get("confidence"), extractor=EXTRACTOR)
     stats["merged_away"] = len(folded_into)
+    stats["survivors"] = sorted(survivors)  # the threads that gained facets
     if log:
         log(json.dumps(stats))
     return stats
