@@ -32,6 +32,7 @@ from igneous.graph.self_identity import NAME_PARTICLES
 EXTRACTOR = "er"
 VERSION = "2"      # links in place from another version are scored again
 THRESHOLD = 0.5    # chosen on AI-reviewed labels (eval/README.md)
+NAME_SIM = 0.8     # how alike two full names must read before anything else about a pair counts
 SHARED_FULL = 3.0  # rarity-weighted shared correspondents that count as full corroboration
 SAME_BEARER = 0.5  # rarity-weighted shared correspondents that make two same-name identities one bearer
 DROP_CONFIDENCE = 0.8  # a verifier 'drop' on a SAME_AS link this sure keeps the pair apart (as verify.apply_verdicts)
@@ -69,6 +70,32 @@ def same_first(a: str, b: str) -> bool:
     """Whether two first names can be one person's, either way round: equal, one a prefix of the other (an initial),
     or nicknames of one name."""
     return a == b or a.startswith(b) or b.startswith(a) or b in NICKNAMES.get(a, ()) or a in NICKNAMES.get(b, ())
+
+
+def name_evidence(a: tuple[str, str], b: tuple[str, str]) -> tuple[bool, float]:
+    """What two (first, last) names say about being one person's, read in this order: whether the first names can
+    be (`same_first`), and how alike the full names read in [0, 1], on the surnames alone when the first names are
+    nicknames of one name (Rick ~ Richard). The similarity depends on the order, so each caller fixes one."""
+    (a_first, a_last), (b_first, b_last) = a, b
+    compatible = same_first(a_first, b_first)
+    if b_first in NICKNAMES.get(a_first, ()) or a_first in NICKNAMES.get(b_first, ()):
+        a_first = b_first
+    return compatible, SequenceMatcher(None, f"{a_first} {a_last}", f"{b_first} {b_last}").ratio()
+
+
+def block(first: str, last: str) -> str:
+    """The block a (first, last) name is compared in: its surname and first initial."""
+    return f"{last}|{first[:1]}"
+
+
+def same_name(a: tuple[str, str], b: tuple[str, str]) -> bool:
+    """Whether two (first, last) names pass the name evidence scoring requires of a pair before anything else about
+    it counts: both whole (a first name and a surname), in one block, with first names that can be one person's and
+    full names at least NAME_SIM alike. The same either way round."""
+    if not all((*a, *b)) or block(*a) != block(*b):
+        return False
+    compatible, similarity = name_evidence(*sorted((a, b)))
+    return compatible and similarity >= NAME_SIM
 
 
 @dataclass
@@ -205,7 +232,7 @@ def blocks(people: list[P]) -> dict[str, list[P]]:
     b: dict[str, list[P]] = defaultdict(list)
     for p in people:
         if not p.owner and not unresolvable(p) and p.first:
-            b[f"{p.last}|{p.first[0]}"].append(p)
+            b[block(p.first, p.last)].append(p)
     return {k: v for k, v in b.items() if 1 < len(v) <= 50}
 
 
@@ -218,11 +245,7 @@ def score(a: P, b: P) -> tuple[float, dict]:
     """Returns (score in [0,1], features), the same for (a, b) and (b, a). Name evidence is required; it can't merge
     a pair on its own."""
     a, b = sorted((a, b), key=lambda p: p.key)  # one order per pair: the comparisons below are read in it
-    first_compatible = same_first(a.first, b.first)
-    # Score name similarity on surnames when first names are nickname-equivalent (Rick ~ Richard).
-    nicknames = b.first in NICKNAMES.get(a.first, ()) or a.first in NICKNAMES.get(b.first, ())
-    a_first = b.first if nicknames else a.first
-    name_sim = SequenceMatcher(None, f"{a_first} {a.last}", f"{b.first} {b.last}").ratio()
+    first_compatible, name_sim = name_evidence((a.first, a.last), (b.first, b.last))
     shared = shared_weight(a, b)
     union = math.fsum(a.weight.get(c, 1.0) for c in a.peers | b.peers)
     jaccard = shared / union if union else 0.0
@@ -235,7 +258,7 @@ def score(a: P, b: P) -> tuple[float, dict]:
     f = {"name_sim": round(name_sim, 3), "first_compatible": first_compatible, "shared_peers": len(a.peers & b.peers),
          "shared_weight": round(shared, 3), "jaccard": round(jaccard, 3), "same_domain": same_domain,
          "exact_name": exact_name}
-    if not first_compatible or name_sim < 0.8:
+    if not first_compatible or name_sim < NAME_SIM:
         return 0.0, f
     if mention_pair:
         return (0.8 if exact_name else 0.0), f

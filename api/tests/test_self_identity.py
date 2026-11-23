@@ -4,20 +4,26 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
 
-from igneous.graph import self_identity, spine
+from igneous.graph import identity, resolve, self_identity, spine
+from igneous.graph.find import find
 from igneous.graph.self_identity import looks_like_person_name
 
 T0 = datetime(2001, 5, 14, 16, tzinfo=UTC)
 
 
-def filed(s, path, frm, to, title="Forecast", body="see attached", n=[0]):  # noqa: B006 - a counter across calls
-    """An Enron-style record: `path` is <mailbox>/<folder>/<file>, as the maildir connector names it."""
+def filed(s, path, frm, to, title="Forecast", body="see attached", cc=(), x_from=None, names=None,
+          n=[0]):  # noqa: B006 - a counter across calls
+    """An Enron-style record: `path` is <mailbox>/<folder>/<file>, as the maildir connector names it. Enron's address
+    headers carry no names: X-From (`x_from`) names the sender, and `names` gives an address a display name."""
     n[0] += 1
+    names = names or {}
+    meta = {"from": [{"email": frm, "name": names.get(frm, "")}], "fingerprint": f"fp-{path}",
+            "to": [{"email": t, "name": names.get(t, "")} for t in to],
+            "cc": [{"email": c, "name": names.get(c, "")} for c in cc], "x_from": x_from}
     s.execute(text("""
         INSERT INTO source_items (source, external_id, content_hash, title, body_text, raw_meta, occurred_at)
         VALUES ('email', :e, :e, :t, :b, CAST(:m AS jsonb), :w)
-    """), {"e": path, "t": title, "b": body, "w": T0 + timedelta(hours=n[0]), "m": json.dumps({
-        "from": [{"email": frm}], "to": [{"email": t} for t in to], "fingerprint": f"fp-{path}"})})
+    """), {"e": path, "t": title, "b": body, "w": T0 + timedelta(hours=n[0]), "m": json.dumps(meta)})
 
 
 def owner(s):
@@ -59,6 +65,68 @@ def test_a_mailbox_with_no_sent_folder_leaves_the_archive_ownerless(db):
     phil_mailbox(db)
     filed(db, "kay-k/inbox/1", "tim@x.test", ["kay@x.test"])   # whose mailbox this is, nothing says
     assert build(db)["owner"] is None
+
+
+def allen_mailbox(s):
+    """Phillip Allen's mailbox, named as Enron's headers name it: he sends from two addresses under his name, and his
+    assistant, his sister and an address named only "Phillip" send from his sent folders too."""
+    for i in range(6):
+        filed(s, f"allen-p/sent/{i}", "phillip.allen@x.test", ["tim@x.test"], x_from="Phillip K Allen")
+    for i in range(2):
+        filed(s, f"allen-p/sent_items/{i}", "k..allen@x.test", ["tim@x.test"],
+              x_from="Allen, Phillip K. </O=ENRON/OU=NA/CN=RECIPIENTS/CN=PALLEN>")
+    filed(s, "allen-p/_sent_mail/1", "ina.rangel@x.test", ["tim@x.test"], x_from="Rangel, Ina")
+    filed(s, "allen-p/_sent_mail/2", "diana.allen@x.test", ["tim@x.test"], x_from="Allen, Diana")
+    filed(s, "allen-p/_sent_mail/3", "pa@x.test", ["tim@x.test"], x_from="Phillip")
+
+
+def test_the_owners_other_address_in_their_sent_folders_is_them_and_no_one_else_there(db):
+    """k..allen@ sends under his name; an assistant and a sister have names of their own, and a first name alone says
+    nothing."""
+    allen_mailbox(db)
+    assert build(db)["self_links"] == 2
+    assert owner(db)[1] == {"phillip.allen@x.test": ["archive_sent"], "k..allen@x.test": ["archive_alias"]}
+
+
+def test_the_addresses_the_owners_mail_came_to_are_them_and_no_list_colleague_or_relative(db):
+    allen_mailbox(db)
+    names = {"phillip.sr@allen.test": "Phillip Allen", "p.allen@x.test": "Pam Allen"}
+    for path, sender, to, cc in [
+        ("inbox/1", "tim@x.test", ["pallen@x.test"], ()),             # his: nothing names it but his initial and name
+        # his name, on mail that came to none of his known addresses:
+        ("inbox/2", "tim@x.test", ["phillip.k.allen@x.test", "mike@x.test"], ()),
+        ("inbox/3", "desk@x.test", ["traders@x.test"], ()),           # a list he is on
+        ("inbox/4", "tim@x.test", ["k..allen@x.test"], ["mike.grigsby@x.test", "ina.rangel@x.test"]),  # colleagues
+        ("inbox/5", "tim@x.test", ["ina.rangel@x.test"], ()),         # his assistant's mail, filed with his
+        ("inbox/6", "tim@x.test", ["diana.allen@x.test"], ()),        # his sister
+        ("inbox/7", "tim@x.test", ["p.allen@x.test"], ()),            # P. Allen's address, a header names Pam
+        ("inbox/8", "tim@x.test", ["dallen@x.test"], ()),             # D. Allen's
+        ("inbox/9", "mom@allen.test", ["phillip.allen@x.test"], ["phillip.sr@allen.test"]),  # his father and namesake
+        ("all_documents/1", "phillip.allen@x.test", ["phillip.sr@allen.test"], ()),  # a copy of his own mail to him
+        ("deleted_items/1", "shop@store.test", ["pallen@other.test"], ()),  # pallen@ at another domain
+        ("deleted_items/2", "shop@store.test", ["pallen@ees.x.test"], ()),  # ...or another mail system of his
+    ]:
+        filed(db, f"allen-p/{path}", sender, to, cc=cc, names=names)
+    build(db)
+    assert owner(db)[1] == {"phillip.allen@x.test": ["archive_sent"], "k..allen@x.test": ["archive_alias"],
+                            "pallen@x.test": ["archive_received"], "phillip.k.allen@x.test": ["archive_received"]}
+    resolve.run(db)
+    me = identity.self_id(db)
+    yours = set(db.execute(text("SELECT key FROM nodes WHERE id = ANY(:m)"), {"m": identity.members(db, me)}).scalars())
+    assert yours == {"me", "phillip.allen@x.test", "k..allen@x.test", "pallen@x.test", "phillip.k.allen@x.test"}
+    found = find(db, "allen", types=["Person"])   # Jump to lists you once, and your father as someone else
+    assert [r["context"] for r in found if r["id"] == me] == ["You"]
+    assert sorted(r["name"] for r in found if r["name"].startswith("Phillip")) == ["Phillip Allen", "Phillip K Allen"]
+
+
+def test_an_owner_without_a_surname_has_no_other_addresses(db):
+    """Nothing but a first name to go on: no other address is theirs by name."""
+    for i in range(3):
+        filed(db, f"pk/sent/{i}", "pk@x.test", ["tim@x.test"], x_from="Phillip")
+    filed(db, "pk/sent/9", "phillip@x.test", ["tim@x.test"], x_from="Phillip")
+    filed(db, "pk/inbox/1", "tim@x.test", ["phillip.k@x.test"])
+    build(db)
+    assert owner(db)[1] == {"pk@x.test": ["archive_sent"]}
 
 
 def test_no_signal_means_no_owner_node(db):

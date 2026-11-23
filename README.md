@@ -138,8 +138,9 @@ make demo       # make migrate, igneous sync email (the allen-p demo mailbox), i
 `make demo` calls the model for up to 100 messages (`EXTRACT=100`); that needs `AWS_BEARER_TOKEN_BEDROCK` and
 `IGNEOUS_LLM_SOURCES=email`, which Ask and the evaluation need too. Run `make demo EXTRACT=0` to skip model calls. `make baseline` ingests six mailboxes
 (about 26k emails; embedding takes about 45 minutes on CPU, and search falls back to lexical for unembedded chunks
-meanwhile). The demo's Graph page opens on Phillip Allen: one mailbox's sent folders name its owner. Six mailboxes
-are six people's mail, so nobody is "you" there: search for `jeff.skilling` or `phillip.allen` to start.
+meanwhile). The demo's Graph page opens on Phillip Allen: one mailbox's sent folders name its owner, and the addresses
+he sent and received his mail at (k..allen@enron.com, pallen@enron.com) are him too. Six mailboxes are six people's
+mail, so nobody is "you" there: search for `jeff.skilling` or `phillip.allen` to start.
 
 Enron is mail only. The synthetic persona has every kind of source, so it shows what mail alone can't: life
 threads, the backbone of schools and workplaces, the profile, and evidence across sources. It is Mira Castellanos,
@@ -298,6 +299,12 @@ cd api && uv run igneous sync imessage && uv run igneous pipeline
   (`raw_meta.fingerprint`); the message stays while any copy remains.
 - In a mailbox, assistants send some of the owner's mail. The owner is whoever sent most of its sent folders, so an
   executive's mailbox that an assistant ran (lay-k, skilling-j) would name the assistant if imported alone.
+- The owner's other addresses join them only on what the mail shows (`graph/self_identity.py`): an address that sends
+  from their sent folders under their name, one their mail came to under their exact first name and surname, or one
+  nothing names but their initial and surname at the domain of an address of theirs. Enron gives recipients' names
+  only in X-To, which the connector doesn't keep, and at another domain the same local part can be someone else's
+  (Enron filed mail for Jennifer Arnold at jarnold@ees.enron.com in John Arnold's mailbox), so Phillip Allen's
+  pallen@ect.enron.com stays a person of its own.
 - Embeddings are made on this computer (`bge-small-en-v1.5`, 384-d, FastEmbed; `docs/decisions/0001-local-embeddings.md`);
   Bedrock as a second index was dropped (`docs/decisions/0002-bedrock-interop.md`). Each chunk records the model behind its vector: setting
   `IGNEOUS_EMBEDDING_MODEL` to another 384-dimensional model re-embeds every chunk on the next pipeline run, and search
