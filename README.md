@@ -208,8 +208,9 @@ The Google steps (the OAuth client file) are under [Google](#google-gmail-drive-
 invented document-style files plus two ICS calendar events that reuse the public Enron demo persona addresses, so
 they link to the Enron graph (the synthetic persona above is a separate, whole life with its own people).
 It makes no network or model calls and **does not import** the data. The Local files source reads the documents
-(`igneous sync fs --path ../data/synthetic-cross-source`); no source reads ICS calendars. Every output is labeled
-synthetic and excludes real email text, credentials, and personal data.
+(`igneous sync fs --path ../data/synthetic-cross-source`), and the Google Takeout import reads the calendar, as it reads
+any calendar file given on its own (`igneous import takeout ../data/synthetic-cross-source/calendar.ics`). Every output
+is labeled synthetic and excludes real email text, credentials, and personal data.
 Re-run it safely to restore the exact fixture, or validate an existing output with:
 
 ```bash
@@ -292,7 +293,10 @@ cd api && uv run igneous sync imessage && uv run igneous pipeline
 ## Known gaps in the baseline
 
 - Enron has no `In-Reply-To`/`References` headers. Threads are keyed on subject + participants; `REPLIES_TO` comes from
-  quoted "Original Message" headers that name exactly one message, else is inferred within the thread.
+  quoted "Original Message" headers that name exactly one message, else is inferred within the thread. Mail that has
+  them (the persona, any other mail archive) is threaded by its reply chain: a reply is in the thread of the message it
+  answers or, when that one isn't stored, of the message that began its conversation, and that first message is in
+  the thread too. Gmail threads are Gmail's conversations.
 - Enron stores one email in several folders with different Message-IDs. Messages dedupe on a content fingerprint
   (`raw_meta.fingerprint`); the message stays while any copy remains.
 - In a mailbox, assistants send some of the owner's mail. The owner is whoever sent most of its sent folders, so an

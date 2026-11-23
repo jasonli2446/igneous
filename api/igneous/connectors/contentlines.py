@@ -6,8 +6,10 @@ a tab. Components nest between `BEGIN:X` and `END:X`. Values keep their escapes 
 
 Read defensively, as exports from many programs are: bytes are UTF-8 (a byte that isn't is replaced), a line that
 isn't a content line is skipped, a component left open is closed at the end of the file, and vCard 2.1's bare
-parameters (`TEL;CELL:`) and quoted-printable values (with their `=` soft line breaks) are understood.
+parameters (`TEL;CELL:`) and quoted-printable values (`ENCODING=QUOTED-PRINTABLE` or a bare `QUOTED-PRINTABLE`, with
+their `=` soft line breaks, in the CHARSET they name, else UTF-8) are understood.
 """
+import codecs
 import quopri
 import re
 from dataclasses import dataclass, field
@@ -128,11 +130,25 @@ def parse_line(line: str) -> Prop | None:
     if not NAME.fullmatch(name):
         return None
     prop = Prop(name.upper(), _params(params) if params else {}, value, group)
-    if (prop.param("ENCODING") or "").upper() == "QUOTED-PRINTABLE":
+    # Quoted-printable: ENCODING=QUOTED-PRINTABLE, or vCard 2.1's bare QUOTED-PRINTABLE (read as a type above).
+    bare = [t for t in prop.params.get("TYPE", []) if t.strip().upper() == "QUOTED-PRINTABLE"]
+    if (prop.param("ENCODING") or "").upper() == "QUOTED-PRINTABLE" or bare:
         raw = quopri.decodestring(value.encode("ascii", errors="replace"))
-        prop.value = raw.decode(prop.param("CHARSET") or "utf-8", errors="replace")
+        prop.value = raw.decode(_codec(prop.param("CHARSET")), errors="replace")
         prop.params.pop("ENCODING", None)
+        if bare:
+            prop.params["TYPE"] = [t for t in prop.params["TYPE"] if t not in bare]
+            if not prop.params["TYPE"]:
+                del prop.params["TYPE"]
     return prop
+
+
+def _codec(charset: str | None) -> str:
+    """The codec a CHARSET parameter names, or UTF-8 when it names none Python knows."""
+    try:
+        return codecs.lookup(charset or "utf-8").name
+    except LookupError:
+        return "utf-8"
 
 
 def parse(data: bytes | str) -> list[Component]:

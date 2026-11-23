@@ -26,7 +26,10 @@ same whatever order the records came in. Each batch writes every node once and c
 in the same transaction. Replies come from the built graph: In-Reply-To names its parent by Message-ID,
 a quoted "Original Message" header names its parent by time, subject and sender (quoted.py), and mail with neither
 infers one within its thread. Each is recomputed for the messages and threads that changed, and so are the flags of
-the threads a batch touched.
+the threads a batch touched. A mail record's thread follows the messages its reply headers name, so a reply always
+shares its parent's thread, and a message that began a conversation is in one thread with its replies; mail without
+reply headers (Enron) is grouped by subject and participants ("threads" below). A record whose thread follows from
+records stored, changed or deleted later is rebuilt (`rethread`).
 """
 import json
 import re
@@ -145,23 +148,30 @@ def _rows(items: list[dict]) -> str:
 
 
 class Context:
-    """What building a batch needs from outside it: the Message nodes In-Reply-To headers name, the calendar events
-    Meet records name, and which contact-card identifiers several people's cards share."""
+    """What building a batch needs from outside it: the Message nodes In-Reply-To headers name, each mail record's
+    thread (which follows the messages it names and that name it), the calendar events Meet records name, and which
+    contact-card identifiers several people's cards share."""
 
     def __init__(self, s: Session | None = None, rows=(), cards: dict | None = None):
         self.cards = cards or {}
         self.parents: dict[str, str] = {}
+        self.threads: dict[int, str] = {}
         self.events: dict[str, str] = {}
         if s is None:
             return
         mids = sorted({r.raw_meta.get("in_reply_to") for r in rows if r.source in MAIL and r.raw_meta.get("in_reply_to")})
         self.parents = parent_keys(s, mids)
+        self.threads = thread_keys(s, [r for r in rows if r.source in MAIL])
         eids = sorted({r.raw_meta["event_id"] for r in rows if r.source == "takeout_meet" and r.raw_meta.get("event_id")})
         self.events = event_keys(s, eids)
 
     def shared(self, identifier: str) -> bool:
         """Whether cards naming two different people both carry this identifier (a family's home phone)."""
         return len({n for n in self.cards.get(identifier, {}).values() if n}) > 1
+
+    def thread(self, item) -> str:
+        """The thread a mail record is in (built without a session: from its own headers alone)."""
+        return self.threads.get(item.id) or _thread_key(item.raw_meta, item.title)
 
 
 class Builder:
@@ -507,15 +517,35 @@ def _header_name(addr: dict, x_from: str | None = None) -> tuple[str, int]:
 REPLY_PREFIX = re.compile(r"^\s*((re|fw|fwd)\s*:\s*)+", re.I)
 
 
-def _thread_key(meta: dict, title: str) -> str:
-    """Root of the reply chain if headers give one. Otherwise (all of Enron) normalized subject plus the
-    participant set, so unrelated messages that share a generic subject ("Thank You") don't merge."""
-    if meta.get("gmail_thread_id"):
-        return f"gmail:{meta['gmail_thread_id']}"
-    if meta.get("references"):
-        return meta["references"][0]
-    if meta.get("in_reply_to"):
-        return meta["in_reply_to"]
+# --- threads ---------------------------------------------------------------------------------------------------------
+#
+# Which Thread a mail record is in (its key):
+#   - a Gmail message: its Gmail conversation, `gmail:<thread id>`;
+#   - any other reply: the thread of the message it answers (In-Reply-To) when that one is stored, else of the
+#     message that began the conversation (References' first), so a reply always shares its parent's thread and a
+#     reply to a Gmail message joins that conversation; when neither is stored, keyed by the conversation's first
+#     message as its headers name it (References' first, else In-Reply-To);
+#   - a message without reply headers that another (non-Gmail) message answers or names as its conversation's first:
+#     its own Message-ID, the key its replies reach, so a conversation's first message is in one thread with them;
+#   - any other message (all of Enron, which has no reply headers): its subject without reply prefixes plus everyone
+#     on it, so unrelated messages that share a generic subject ("Thank You") stay apart; mass mail (over 12 people) by
+#     its subject alone, and a message without a subject by itself (`solo:`).
+# A thread therefore depends on other records: the messages a reply names, and whether any message names a first
+# message. `_process` re-checks the stored records a batch names or is named by, and `settle` the members of every
+# thread that lost a message (`rethread`), so the same records give the same threads in any order.
+
+
+def _ancestors(meta: dict) -> list[str]:
+    """The Message-IDs a message's reply headers name, nearest first: the message it answers (In-Reply-To), then the
+    one that began the conversation (References' first)."""
+    own, out = meta.get("message_id"), []
+    for mid in (meta.get("in_reply_to"), (meta.get("references") or [None])[0]):
+        if mid and mid != own and mid not in out:
+            out.append(mid)
+    return out
+
+
+def _subject_key(meta: dict, title: str | None) -> str:
     subj = REPLY_PREFIX.sub("", title or "").strip().lower()
     if not subj:
         return f"solo:{meta.get('fingerprint') or meta.get('message_id')}"
@@ -524,6 +554,140 @@ def _thread_key(meta: dict, title: str) -> str:
     if len(people) > 12:
         return f"subject:{subj}"
     return f"subject:{subj}|{','.join(people)}"
+
+
+def _thread_key(meta: dict, title: str | None) -> str:
+    """A mail record's thread from its own headers alone, as if nothing else were stored (`thread_keys` reads what is)."""
+    if meta.get("gmail_thread_id"):
+        return f"gmail:{meta['gmail_thread_id']}"
+    ancestors = _ancestors(meta)
+    return ancestors[-1] if ancestors else _subject_key(meta, title)
+
+
+# The mail record carrying each Message-ID, one per ID whatever the order records were stored in: a non-Gmail copy
+# first (it continues the chain its replies are on), then by source and external id.
+CARRIERS = text("""
+SELECT DISTINCT ON (raw_meta->>'message_id') raw_meta->>'message_id' AS mid, raw_meta->>'gmail_thread_id' AS gmail,
+       raw_meta->>'in_reply_to' AS in_reply_to, raw_meta->'references' AS refs
+FROM source_items WHERE source IN ('email', 'gmail') AND raw_meta->>'message_id' = ANY(:m)
+ORDER BY raw_meta->>'message_id', raw_meta->>'gmail_thread_id' IS NOT NULL, source, external_id
+""")
+
+# The Message-IDs among :m that a stored non-Gmail message answers (In-Reply-To) or names as its conversation's first
+# (References' first). Each header is read through its index: migration 0015 gives the planner statistics on both,
+# without which it takes a batch's Message-IDs to match most of the table and reads all of it.
+NAMED = text("""
+SELECT raw_meta->>'in_reply_to' FROM source_items
+WHERE source IN ('email', 'gmail') AND raw_meta->>'gmail_thread_id' IS NULL
+  AND raw_meta->>'in_reply_to' IS NOT NULL AND raw_meta->>'in_reply_to' = ANY(:m)
+UNION
+SELECT raw_meta->'references'->>0 FROM source_items
+WHERE source IN ('email', 'gmail') AND raw_meta->>'gmail_thread_id' IS NULL
+  AND raw_meta->'references'->>0 IS NOT NULL AND raw_meta->'references'->>0 = ANY(:m)
+""")
+
+
+def _chain_threads(s: Session, mids: set[str]) -> dict[str, str | None]:
+    """Each Message-ID's thread: the thread of the mail record carrying it, or None when no stored record does.
+    Loads the records each chain passes through, then follows every one to the first that names no stored message:
+    a Gmail message (its conversation), a message without reply headers (its own Message-ID: these chains name it),
+    or one whose ancestors aren't stored (the first message its headers name). Headers that name each other in a
+    circle end at the least Message-ID on it."""
+    carriers: dict[str, tuple[str | None, list[str]] | None] = {}
+    frontier = set(mids)
+    while frontier:
+        found = {r.mid: r for r in s.execute(CARRIERS, {"m": sorted(frontier)})}
+        for mid in frontier:
+            r = found.get(mid)
+            carriers[mid] = None if r is None else (r.gmail, [] if r.gmail else _ancestors(
+                {"message_id": mid, "in_reply_to": r.in_reply_to, "references": r.refs}))
+        frontier = {a for mid in frontier if carriers[mid] for a in carriers[mid][1]} - carriers.keys()
+    threads: dict[str, str | None] = {}
+    for mid in sorted(mids):
+        path, cur = [], mid
+        while cur not in threads:
+            if cur in path:
+                out = min(path[path.index(cur):])
+                break
+            carrier = carriers[cur]
+            if carrier is None:
+                out = None
+                break
+            path.append(cur)
+            gmail, ancestors = carrier
+            nearest = None if gmail else next((a for a in ancestors if carriers.get(a)), None)
+            if nearest is None:
+                out = f"gmail:{gmail}" if gmail else ancestors[-1] if ancestors else cur
+                break
+            cur = nearest
+        else:
+            out = threads[cur]
+        threads.update(dict.fromkeys(path, out))
+        threads.setdefault(mid, out)
+    return threads
+
+
+def thread_keys(s: Session, rows) -> dict[int, str]:
+    """Each mail record's thread (the rules above), from the records stored now. `rows`: (id, title, raw_meta)."""
+    out: dict[int, str] = {}
+    replies: dict[int, list[str]] = {}
+    alone = []
+    for r in rows:
+        meta = r.raw_meta or {}
+        if meta.get("gmail_thread_id"):
+            out[r.id] = f"gmail:{meta['gmail_thread_id']}"
+        elif ancestors := _ancestors(meta):
+            replies[r.id] = ancestors
+        else:
+            alone.append(r)
+    chains = _chain_threads(s, {a for ancestors in replies.values() for a in ancestors})
+    for rid, ancestors in replies.items():
+        out[rid] = next((chains[a] for a in ancestors if chains[a]), ancestors[-1])
+    mids = sorted({m for r in alone if (m := (r.raw_meta or {}).get("message_id"))})
+    named = set(s.execute(NAMED, {"m": mids}).scalars()) if mids else set()
+    for r in alone:
+        meta = r.raw_meta or {}
+        out[r.id] = meta["message_id"] if meta.get("message_id") in named else _subject_key(meta, r.title)
+    return out
+
+
+# The thread each built mail record among :ids is in now: that of the IN_THREAD edge the record supports.
+BUILT_THREADS = text("""
+SELECT si.id, si.title, si.raw_meta, t.key AS thread
+FROM source_items si
+JOIN spine_edge_support y ON y.source_item_id = si.id
+JOIN edges e ON e.id = y.edge_id AND e.type = 'IN_THREAD'
+JOIN nodes t ON t.id = e.dst
+WHERE si.id = ANY(:ids) AND si.source IN ('email', 'gmail') AND si.spined_hash = si.content_hash
+""")
+
+
+def rethread(s: Session, ids) -> int:
+    """Mark for rebuilding the built mail records among `ids` that are no longer in the thread they were built in (a
+    message they name, or a message naming them, was stored, changed or deleted since). Returns how many."""
+    rows = s.execute(BUILT_THREADS, {"ids": sorted(set(ids))}).all() if ids else []
+    if not rows:
+        return 0
+    want = thread_keys(s, rows)
+    stale = sorted({r.id for r in rows if want[r.id] != r.thread})
+    if stale:
+        s.execute(text("UPDATE source_items SET spined_hash = NULL WHERE id = ANY(:ids) AND spined_hash = content_hash"),
+                  {"ids": stale})
+    return len(stale)
+
+
+# The built mail records whose thread may follow from these Message-IDs: those carrying one that a non-Gmail message
+# names (:named) and the non-Gmail messages naming one (:mids).
+RELATED = text("""
+SELECT id FROM source_items WHERE spined_hash = content_hash AND id <> ALL(:batch) AND id IN (
+    SELECT id FROM source_items WHERE source IN ('email', 'gmail') AND raw_meta->>'message_id' = ANY(:named)
+    UNION
+    SELECT id FROM source_items WHERE source IN ('email', 'gmail') AND raw_meta->>'gmail_thread_id' IS NULL
+      AND raw_meta->>'in_reply_to' IS NOT NULL AND raw_meta->>'in_reply_to' = ANY(:mids)
+    UNION
+    SELECT id FROM source_items WHERE source IN ('email', 'gmail') AND raw_meta->>'gmail_thread_id' IS NULL
+      AND raw_meta->'references'->>0 IS NOT NULL AND raw_meta->'references'->>0 = ANY(:mids))
+""")
 
 
 def message_key(meta: dict, item_id: int) -> str:
@@ -549,14 +713,24 @@ def _event_key(source: str, external_id: str, meta: dict) -> str:
     return meta.get("event_key") or f"{source}:{meta.get('series_key') or external_id}"
 
 
+def calendar_ids(external_id: str, meta: dict) -> set[str]:
+    """The Google Calendar ids a calendar record answers to: its own event id (the end of its external id
+    "<account>/<calendar>/<event id>", an occurrence's "<event id>_<start>"), and its repeating event's (the end of its
+    series_key)."""
+    return {x.rsplit("/", 1)[-1] for x in (external_id, meta.get("series_key") or "") if x}
+
+
 def event_keys(s: Session, event_ids: list[str]) -> dict[str, str]:
-    """Calendar event id -> the Event node key of the calendar record for it (gcal external ids end in the event id)."""
+    """Calendar event id -> the Event node key of a calendar record for it (`calendar_ids`): a Meet record names the
+    event it was joined from by an occurrence's id or by its repeating event's, and finds the one Event either way."""
     if not event_ids:
         return {}
     out: dict[str, str] = {}
     for eid, external_id, meta in s.execute(text("""
-        SELECT regexp_replace(external_id, '^.*/', ''), external_id, raw_meta FROM source_items
-        WHERE source = 'gcal' AND regexp_replace(external_id, '^.*/', '') = ANY(:e) ORDER BY id
+        SELECT x.eid, si.external_id, si.raw_meta FROM source_items si
+        CROSS JOIN LATERAL (VALUES (regexp_replace(si.external_id, '^.*/', '')),
+                                   (regexp_replace(COALESCE(si.raw_meta->>'series_key', ''), '^.*/', ''))) AS x(eid)
+        WHERE si.source = 'gcal' AND x.eid = ANY(:e) ORDER BY si.id
     """), {"e": event_ids}):
         out.setdefault(eid, _event_key("gcal", external_id, meta))
     return out
@@ -575,7 +749,7 @@ def build_email(b: Builder, item) -> None:
             name, rank = _header_name(addr)
             recipient = b.node("Person", addr["email"], name, {"email": addr["email"]}, rank=rank)
             b.edge(mid, recipient, "RECEIVED", item.occurred_at, record=True)
-    tid = b.node("Thread", _thread_key(meta, item.title), REPLY_PREFIX.sub("", item.title or "").strip() or None,
+    tid = b.node("Thread", b.ctx.thread(item), REPLY_PREFIX.sub("", item.title or "").strip() or None,
                  fallback="(no subject)")
     b.edge(mid, tid, "IN_THREAD", item.occurred_at, record=True)
     parent = b.ctx.parents.get(meta.get("in_reply_to"))
@@ -828,7 +1002,7 @@ def build_takeout(b: Builder, item) -> None:
                  {"source": item.source, "kind": meta.get("kind") or meta.get("product", "activity")}, record=True,
                  fallback=item.external_id)
     if item.source == "takeout_meet" and (event := b.ctx.events.get(meta.get("event_id"))):
-        # Meet records the Calendar event id; gcal external ids end in it ("<account>/<calendar>/<event id>").
+        # Meet records the Calendar event it was joined from (`event_keys`).
         b.edge(fid, b.ref("Event", event), "RELATED_TO", item.occurred_at, until=item.occurred_at, record=True)
     if item.source != "takeout_maps":
         return
@@ -937,7 +1111,7 @@ def _link_late_parents(s: Session, rows, batch: list[int], cards: dict) -> set[i
     now, and Meet records naming an event built now. Their links become part of their own contribution. Returns
     the replies' Message nodes."""
     mids = sorted({r.raw_meta["message_id"] for r in rows if r.source in MAIL and r.raw_meta.get("message_id")})
-    eids = sorted({r.external_id.rsplit("/", 1)[-1] for r in rows if r.source == "gcal"})
+    eids = sorted({eid for r in rows if r.source == "gcal" for eid in calendar_ids(r.external_id, r.raw_meta)})
     late = []
     if mids:
         late += s.execute(text("""
@@ -1016,6 +1190,12 @@ def _process(s: Session, rows, cards: dict) -> None:
                          | quoted.quoting(s, times))
     threads = _threads_of(s, messages)
     infer_replies(s, threads | _threads_of(s, changed | answered))
+    # Stored mail whose thread follows from this batch's: the messages it names and those naming it.
+    mail = [r for r in rows if r.source in MAIL]
+    named = sorted({a for r in mail if not r.raw_meta.get("gmail_thread_id") for a in _ancestors(r.raw_meta)})
+    mids = sorted({m for r in mail if (m := r.raw_meta.get("message_id"))})
+    if named or mids:
+        rethread(s, s.execute(RELATED, {"batch": batch, "named": named, "mids": mids}).scalars().all())
 
     s.execute(text("""
         UPDATE source_items si SET item_class = v.c, spined_hash = v.h
@@ -1088,11 +1268,19 @@ def settle(s: Session, cards: dict) -> dict:
         """), {"ids": kept})
         span(s, kept)
 
-    # Threads that lost a message, or a message's sender or recipient, and the times of the messages that went.
+    # Threads that lost a message, or a message's sender or recipient, the threads a message that left one is in now
+    # (its flags counted the one it left), and the times of the messages that went.
     lost_member = {g.dst for g in gone if g.type == "IN_THREAD"} - set(doomed)
     lost_part = {g.src if g.type == "RECEIVED" else g.dst for g in gone if g.type in ("SENT", "RECEIVED")}
-    threads = lost_member | _threads_of(s, lost_part)
+    moved = {g.src for g in gone if g.type == "IN_THREAD"}
+    threads = lost_member | _threads_of(s, lost_part | moved)
     times = [g.valid_from for g in gone if g.type == "IN_THREAD" and g.valid_from is not None]
+    # A message that went may have been the one its thread's replies follow, or the last reply naming the message
+    # that began it: the records still in it are checked.
+    rethreaded = rethread(s, s.execute(text("""
+        SELECT y.source_item_id FROM edges e JOIN spine_edge_support y ON y.edge_id = e.id
+        WHERE e.type = 'IN_THREAD' AND e.dst = ANY(:t)
+    """), {"t": sorted(lost_member)}).scalars().all()) if lost_member else 0
     if doomed or gone:
         changed = quoted.run(s, orphans | quoted.quoting(s, times))
         infer_replies(s, threads | _threads_of(s, changed))
@@ -1112,7 +1300,7 @@ def settle(s: Session, cards: dict) -> dict:
               AND (NOT EXISTS (SELECT 1 FROM nodes n WHERE n.id = q.node_id)
                    OR EXISTS (SELECT 1 FROM spine_node_support x WHERE x.node_id = q.node_id))
         """), {"q": node_q})
-    return {"deleted": len(doomed) + len(gone), "pending": _recheck_cards(s, cards)}
+    return {"deleted": len(doomed) + len(gone), "pending": _recheck_cards(s, cards) + rethreaded}
 
 
 def _recheck_cards(s: Session, cards: dict) -> int:
@@ -1151,7 +1339,7 @@ def _analyze(s: Session) -> None:
     s.execute(text("ANALYZE nodes, edges, spine_node_support, spine_edge_support, spine_quotes"))
 
 
-RECHECKS = 3  # rounds of rebuilding contact cards a run settles; any left are pending for the next run
+RECHECKS = 3  # rounds of rebuilding a run settles (contact cards, threads); any left are pending for the next run
 
 
 def run(s: Session) -> int:

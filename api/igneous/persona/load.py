@@ -43,7 +43,7 @@ def connectors(s: Session, folder: Path) -> list[tuple[str, Callable]]:
     from igneous import sources
     from igneous.connectors.ai_exports import ExportConnector, preflight
     from igneous.connectors.linkedin import LinkedInConnector
-    from igneous.connectors.takeout import TakeoutConnector, synced_events
+    from igneous.connectors.takeout import TakeoutConnector, stored_calendars
     from igneous.connectors.vcard import VCardConnector
 
     ex = manifest(folder)["exports"]
@@ -54,7 +54,7 @@ def connectors(s: Session, folder: Path) -> list[tuple[str, Callable]]:
     out = [
         ("mail", mail),
         ("documents", documents),
-        ("takeout", lambda: TakeoutConnector([folder / ex["takeout"]], synced=synced_events(s))),
+        ("takeout", lambda: TakeoutConnector([folder / ex["takeout"]], stored=stored_calendars(s))),
         ("linkedin", lambda: LinkedInConnector([folder / ex["linkedin"]])),
         ("chatgpt", lambda: ExportConnector(chatgpt, preflight(chatgpt))),
     ]
