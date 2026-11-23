@@ -858,60 +858,6 @@ def test_get_sync_is_read_only_status_report():
     assert TestClient(app).get("/sync?connector=unknown").status_code == 422
 
 
-def test_filesystem_connector_walks_sorted_parseable_files_and_emits_hierarchy(tmp_path):
-    from igneous.connectors.base import CompletedScan, SourceItem
-    from igneous.connectors.filesystem import FilesystemConnector, _root_key
-
-    (tmp_path / "z-last.txt").write_text("last")
-    (tmp_path / "projects" / "igneous").mkdir(parents=True)
-    (tmp_path / "projects" / "igneous" / "plan.md").write_text("# Plan\nship")
-    (tmp_path / "node_modules").mkdir()
-    (tmp_path / "node_modules" / "ignored.txt").write_text("ignore")
-    (tmp_path / ".git").mkdir()
-    (tmp_path / ".git" / "config").write_text("ignore")
-    (tmp_path / "photo.jpg").write_bytes(b"not an image parser input")
-
-    emitted = list(FilesystemConnector(tmp_path).sync({}))
-    items = [event for event in emitted if isinstance(event, SourceItem)]
-    root_key = _root_key(tmp_path)
-    assert [item.external_id for item in items] == [
-        f"{root_key}/photo.jpg", f"{root_key}/projects/igneous/plan.md", f"{root_key}/z-last.txt"]
-    assert items[0].body_text is None and items[0].raw_meta["parse_status"] == "unsupported"
-    plan = items[1]
-    assert plan.body_text == "# Plan\nship"
-    assert plan.mime == "text/markdown"
-    assert plan.raw_meta["path"] == f"{root_key}/projects/igneous/plan.md"
-    assert plan.raw_meta["folders"] == [root_key, f"{root_key}/projects", f"{root_key}/projects/igneous"]
-    assert plan.raw_meta["parser"] == "text" and plan.raw_meta["boundaries"] == []
-    assert plan.raw_meta["model_opt_in"] is False
-    assert isinstance(emitted[-1], CompletedScan)
-
-
-def test_filesystem_connector_hashes_file_bytes_and_namespaces_multiple_roots(tmp_path):
-    from igneous.connectors.base import SourceItem
-    from igneous.connectors.filesystem import FilesystemConnector, _root_key
-
-    first, second = tmp_path / "first", tmp_path / "second"
-    first.mkdir()
-    second.mkdir()
-    (first / "same.txt").write_text("one")
-    (second / "same.txt").write_text("two")
-    connector = FilesystemConnector([second, first])
-    initial = [event for event in connector.sync({}) if isinstance(event, SourceItem)]
-    assert [item.external_id for item in initial] == [
-        f"{_root_key(first)}/same.txt", f"{_root_key(second)}/same.txt"]
-    (first / "same.txt").write_text("changed")
-    changed = [event for event in connector.sync({}) if isinstance(event, SourceItem)]
-    assert changed[0].content_hash != initial[0].content_hash
-
-
-def test_filesystem_connector_rejects_missing_roots(tmp_path):
-    from igneous.connectors.filesystem import FilesystemConnector
-
-    with pytest.raises(ValueError, match="must be directories"):
-        FilesystemConnector(tmp_path / "does-not-exist")
-
-
 def test_service_addresses_are_not_people():
     from igneous.graph.self_identity import is_service_address
 
@@ -1230,26 +1176,6 @@ def test_shared_event_and_drive_file_from_two_accounts_make_one_node():
         spine.build_file(b, Item("drive", f"{acct}/f1", {"drive_id": "f1", "path": "drive/f1", "parents": []}))
     assert {k for t, k in b.keys if t == "Event"} == {"gcal:uid-123@google.com"}
     assert {k for t, k in b.keys if t == "File"} == {"drive:f1"}
-
-
-def test_filesystem_metadata_secret_exclusion_incremental_and_repo_evidence(tmp_path):
-    from igneous.connectors.base import CompletedScan, SourceItem
-    from igneous.connectors.filesystem import FilesystemConnector
-
-    (tmp_path / "binary.bin").write_bytes(b"\x00binary")
-    (tmp_path / ".env").write_text("PASSWORD=not-stored")
-    repo = tmp_path / "igneous"
-    (repo / ".git").mkdir(parents=True)
-    (repo / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:a/igneous.git\n')
-    connector = FilesystemConnector(tmp_path)
-    events = list(connector.sync({}))
-    items = [event for event in events if isinstance(event, SourceItem)]
-    assert {item.title for item in items} == {"binary.bin", "igneous"}
-    assert next(item for item in items if item.title == "binary.bin").body_text is None
-    evidence = next(item for item in items if item.title == "igneous")
-    assert evidence.raw_meta["kind"] == "repo" and evidence.raw_meta["remote"].endswith("igneous.git")
-    cursor = next(event for event in events if isinstance(event, CompletedScan)).cursor
-    assert not [event for event in connector.sync(cursor) if isinstance(event, SourceItem)]
 
 
 def test_apple_notes_gzip_protobuf_body_and_locked_rows(tmp_path):

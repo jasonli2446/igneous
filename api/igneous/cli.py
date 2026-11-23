@@ -100,10 +100,11 @@ def sync(connector: str = typer.Argument(..., help="email | imessage | maccontac
         from igneous.connectors.filesystem import FilesystemConnector
         from igneous.sources import _fs_roots
 
-        roots = [path] if path else _fs_roots()
+        configured = _fs_roots()
+        roots = [path] if path else configured
         if not roots:
             raise typer.BadParameter("no default folders found; pass --path or set IGNEOUS_FILESYSTEM_ROOTS")
-        conn = FilesystemConnector(roots)
+        conn = FilesystemConnector(roots, anchors=configured)
     elif connector == "github":
         from igneous.connectors import secrets
         from igneous.connectors.github import GithubConnector
