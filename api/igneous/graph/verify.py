@@ -282,19 +282,27 @@ UPSERT_VERDICT = text("""
 """)
 
 
+FORGET_VERDICT = text("""DELETE FROM edge_verdicts WHERE src_key = :a AND dst_key = :b AND type = :t
+                          AND extractor = :x AND source = 'evidence'""")
+
+
 def _store(rows: list[dict], forget: list[dict] = ()) -> None:
     """Store verdicts now, in a transaction of its own (like llm.cache_store), never in the rebuild's: a paid judgment
-    outlives a rebuild that fails or is killed later. `forget`: settled verdicts whose direct evidence is gone. A
-    correction recording its intent may wait for this, never the other way round."""
+    outlives a rebuild that fails or is killed later. `forget`: settled verdicts whose direct evidence is gone. Rows
+    are written in natural-key order, the order a correction writes its verdicts in (`record_correction`), so the two
+    never deadlock."""
     from igneous.db import SessionLocal
 
+    writes = sorted([(_order(r), UPSERT_VERDICT, {"src": "model", **r}) for r in rows]
+                    + [(_order(f), FORGET_VERDICT, f) for f in forget], key=lambda w: w[0])
     with SessionLocal() as vs:
-        if rows:
-            vs.execute(UPSERT_VERDICT, [{"src": "model", **r} for r in rows])
-        if forget:
-            vs.execute(text("""DELETE FROM edge_verdicts WHERE src_key = :a AND dst_key = :b AND type = :t
-                               AND extractor = :x AND source = 'evidence'"""), list(forget))
+        for _key, statement, params in writes:
+            vs.execute(statement, params)
         vs.commit()
+
+
+def _order(row: dict) -> tuple[str, str, str, str]:
+    return (row["a"], row["b"], row["t"], row["x"])
 
 
 def _key(edge: dict) -> tuple[str, str, str, str]:

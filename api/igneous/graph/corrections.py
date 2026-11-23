@@ -4,12 +4,14 @@ A correction made through the API (rename, hide, merge, "This is wrong", a conne
 
   1. `recording`: its intent is committed at once, in rows no rebuild writes (overrides, your verdicts in
      edge_verdicts, thread_parents), keyed by natural keys (`Type:key`), never by node or edge ids. That transaction
-     locks no graph row: it holds the publish lock shared, so it waits only while a rebuild runs its final step.
+     locks no graph row: it holds the publish lock shared, so it waits only while corrections are being applied (a
+     rebuild's final step, or another correction's step 2).
   2. `apply_now`: when no rebuild is reading sources or deriving, every recorded correction is applied to the
-     published graph in place, in a transaction of its own whose lock timeout is below the deadlock timeout, so a
-     correction always loses a lock race and never aborts a rebuild. When a rebuild is running, its final step
-     applies it instead (`apply_all` under the exclusive publish lock, which waits for corrections still being
-     recorded), and the answer says so. No correction is refused because a rebuild is running.
+     published graph in place, under the exclusive publish lock (it waits for intents still being recorded, as a
+     final step does), in a transaction whose lock timeout is below the deadlock timeout, so it always loses a lock
+     race and never aborts a rebuild. When a rebuild is running, its final step applies it instead (`apply_all`
+     under the exclusive publish lock), and the answer says so. No correction is refused because a rebuild is
+     running.
 
 A pair rejection ("This is wrong" on a link, or removing something from a project) is your 'drop' verdict on the
 pair (graph/verify.py record_correction): no derived link of any type joins the two again, in either direction, under
@@ -35,7 +37,8 @@ NEXT_REBUILD = {"applied": "on_publish", "note": "Your correction is saved and a
 
 @contextmanager
 def recording(s: Session):
-    """The transaction that records a correction's intent: it waits only for a rebuild's final step, and commits."""
+    """The transaction that records a correction's intent: it waits only while corrections are being applied (the
+    publish lock, shared), and commits."""
     s.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(:k))"), {"k": pipeline.PUBLISH_LOCK})
     try:
         yield
@@ -53,31 +56,43 @@ def apply_all(s: Session) -> dict:
 
 
 def apply_now(s: Session) -> dict:
-    """Apply every recorded correction to the published graph now, unless a rebuild is running (then its final step
-    applies them). Returns what to tell the user: {applied: 'now'} or {applied: 'on_publish', note}."""
+    """Apply every recorded correction to the published graph now, unless a rebuild is reading sources or deriving
+    (then its final step applies them). Returns what to tell the user: {applied: 'now'} or {applied: 'on_publish',
+    note}.
+
+    While it applies, it holds the sources and deriving locks shared, so no rebuild starts meanwhile. It takes them
+    without waiting, as session locks on its own transaction's connection that it releases before that transaction
+    ends (a lock taken for the transaction would outlive it where the transaction is nested in another)."""
+    from igneous.graph import dirty
+
     s.rollback()  # a transaction of its own, after the intent's
-    free = s.execute(text("""
-        SELECT pg_try_advisory_xact_lock_shared(hashtext(:sources))
-           AND pg_try_advisory_xact_lock_shared(hashtext(:deriving))
-    """), {"sources": pipeline.SOURCES_LOCK, "deriving": pipeline.DERIVING_LOCK}).scalar()
-    if not free:
-        s.rollback()
-        return ON_PUBLISH
-    # One correction applies at a time; then never wait as long as the deadlock detector would.
-    s.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": pipeline.CORRECTIONS_LOCK})
-    s.execute(text("""SELECT set_config('lock_timeout', CAST(GREATEST(1, extract(epoch FROM
-                      CAST(current_setting('deadlock_timeout') AS interval)) * 500) AS int) || 'ms', true)"""))
+    held: list[str] = []
+    outcome = ON_PUBLISH
     try:
-        apply_all(s)
-        from igneous.graph import dirty
-        dirty.touch(s)
-        s.commit()
-    except OperationalError as e:
-        s.rollback()
-        if getattr(e.orig, "sqlstate", None) in ("55P03", "40P01"):  # gave up a lock wait: the next step applies it
-            return NEXT_REBUILD
-        raise
-    return APPLIED
+        for gate in (pipeline.SOURCES_LOCK, pipeline.DERIVING_LOCK):
+            if not s.execute(text("SELECT pg_try_advisory_lock_shared(hashtext(:k))"), {"k": gate}).scalar():
+                break
+            held.append(gate)
+        else:
+            try:
+                with s.begin_nested():  # whatever fails in here, the transaction can still release the locks
+                    s.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": pipeline.PUBLISH_LOCK})
+                    previous = s.execute(text("SELECT current_setting('lock_timeout')")).scalar()
+                    s.execute(text("""SELECT set_config('lock_timeout', CAST(GREATEST(1, extract(epoch FROM
+                        CAST(current_setting('deadlock_timeout') AS interval)) * 500) AS int) || 'ms', true)"""))
+                    apply_all(s)
+                    dirty.touch(s)
+                    s.execute(text("SELECT set_config('lock_timeout', :v, true)"), {"v": previous})
+                outcome = APPLIED
+            except OperationalError as e:
+                if getattr(e.orig, "sqlstate", None) not in ("55P03", "40P01"):
+                    raise
+                outcome = NEXT_REBUILD  # it gave up a lock wait: the next rebuild's final step applies it
+    finally:
+        for gate in reversed(held):
+            s.execute(text("SELECT pg_advisory_unlock_shared(hashtext(:k))"), {"k": gate})
+        s.commit() if outcome is APPLIED else s.rollback()
+    return outcome
 
 
 def _edge(s: Session, edge_id: int):
@@ -136,7 +151,7 @@ def _reject(s: Session, roots: dict[tuple, dict], reason: str, data: dict | None
     first = next(iter(roots))
     oid = overrides.add(s, "unlink", [first[1], first[0]])
     verdicts = []
-    for a, b, kind, extractor in roots:
+    for a, b, kind, extractor in sorted(roots):  # natural-key order, as the verifier writes (verify._store)
         previous = s.execute(text("""
             SELECT to_jsonb(v) FROM edge_verdicts v
             WHERE src_key=:a AND dst_key=:b AND type=:t AND extractor=:x FOR UPDATE
@@ -302,7 +317,7 @@ def restore_links(s: Session, edge_ids: list[int]) -> dict:
     for oid in groups:
         undo(s, oid)
     dropped = s.execute(text("""
-        SELECT src_key, dst_key, type, extractor FROM edges_dropped WHERE id = ANY(:i)
+        SELECT src_key, dst_key, type, extractor FROM edges_dropped WHERE id = ANY(:i) ORDER BY 1, 2, 3, 4
     """), {"i": [i for i in edge_ids if i not in grouped]}).all()
     for a, b, kind, extractor in dropped:
         verify.record_correction(s, a, b, kind, extractor, "keep", "you said this connection is right")

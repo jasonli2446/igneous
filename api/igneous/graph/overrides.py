@@ -97,13 +97,12 @@ def apply(s: Session) -> dict:
     """Complete every undo, then replay every correction. Idempotent."""
     from igneous.graph.derived import merges
 
-    rows = load(s, undone=True)
-    undone = [r for r in rows if r["undone_at"] is not None]
+    undone = [r for r in load(s, undone=True) if r["undone_at"] is not None]
     for r in undone:
         _reverse(s, r)
     if undone:
         s.execute(text("DELETE FROM overrides WHERE id = ANY(:ids)"), {"ids": [r["id"] for r in undone]})
-    p = plan([r for r in rows if r["undone_at"] is None])
+    p = plan(load(s))  # with what the undos gave back (a link you added, then took out)
     _registry(s, p)
     folded = merges(s)
     return {"undone": len(undone), "merged": _merge(s, p, folded), "projects": _projects(s, p),

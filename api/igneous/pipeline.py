@@ -195,14 +195,13 @@ def plan(names: list[str] | None = None, extract: int = 0) -> list[Stage]:
 
 
 # Advisory locks (hashtext of the name). A run holds RUN while it reads sources and publishes, and SOURCES while its
-# source stages run; the derived phase holds DERIVING; the final step holds PUBLISH exclusively until the commit, while
-# a correction records its intent under PUBLISH shared. A correction applies in place only while neither SOURCES nor
-# DERIVING is held, and CORRECTIONS keeps two corrections from applying at once (graph/corrections.py).
+# source stages run, until it holds DERIVING for its derived phase; the final step holds PUBLISH exclusively until the
+# commit, while a correction records its intent under PUBLISH shared. A correction applies in place only while
+# neither SOURCES nor DERIVING is held, and then under PUBLISH exclusively, like a final step (graph/corrections.py).
 RUN_LOCK = "igneous:run"
 SOURCES_LOCK = "igneous:sources"
 DERIVING_LOCK = "igneous:deriving"
 PUBLISH_LOCK = "igneous:publish"
-CORRECTIONS_LOCK = "igneous:corrections"
 
 
 def _lock(s: Session, name: str) -> None:
@@ -293,8 +292,8 @@ def run(s: Session, names: list[str] | None = None, *, extract: int = 0, progres
         for st in stages:
             if not st.derived:
                 execute(st)
-        done_reading()
         with publishing(s):
+            done_reading()  # only now: a correction never applies in place between the two phases
             for st in stages:
                 if st.derived:
                     execute(st)

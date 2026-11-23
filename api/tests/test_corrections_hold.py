@@ -132,7 +132,7 @@ def test_a_rejected_link_never_comes_back_mid_rebuild_through_another_address_or
     for i in range(16):
         life_threads._mail(db, f"ana-more{i}", "ana@pals.test", [life_threads.ME], f"lunch {i}",
                            life_threads.at(300 + i), "lunch at noon?")
-    db.commit()
+    life_threads.arrived_later(db)
     seen = []
     real = backbone.run
 

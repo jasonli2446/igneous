@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from pipeline_data import put
+from sqlalchemy import text
 
 ME = "mo@self.test"
 NAMES = {ME: "Mo Self", "ana@pals.test": "Ana Ames", "bo@pals.test": "Bo Berg", "cy@pals.test": "Cy Cole",
@@ -227,13 +228,39 @@ def model(system: str, user: str, schema: dict, **_options):
             for k, v in props.items()}, {}
 
 
+def arrived_later(s) -> None:
+    """Records a test added after a run, as a later sync's would be: newer than what that run read. (A test's
+    database is one transaction, where now() stands still, and the spine reads only what was updated after it last
+    ran.)"""
+    s.execute(text("""UPDATE source_items SET updated_at = clock_timestamp()
+                      WHERE updated_at >= (SELECT max(watermark) FROM pipeline_state)"""))
+    s.commit()
+
+
+SOURCES = "gmail,gcal,imessage,drive,fs,github"  # every source the life is in, opted in
+
+
 @pytest.fixture
 def life(db, local_models, monkeypatch):
     """The synthetic life in the test database, every source opted in, `model` answering hosted calls."""
     from igneous import llm
 
     monkeypatch.setattr(llm, "structured", model)
-    monkeypatch.setattr(llm.settings, "llm_sources", "gmail,gcal,imessage,drive,fs,github")
+    monkeypatch.setattr(llm.settings, "llm_sources", SOURCES)
     monkeypatch.setattr(llm.settings, "local_sources_model_enabled", True)
     build(db)
+    return db
+
+
+@pytest.fixture
+def trips(db, local_models, monkeypatch):
+    """A smaller life: a year of everyday mail and the two trips, every source opted in, `model` answering."""
+    from igneous import llm
+
+    monkeypatch.setattr(llm, "structured", model)
+    monkeypatch.setattr(llm.settings, "llm_sources", SOURCES)
+    _everyday(db)
+    _trip(db, "Portland", 60, ["ana@pals.test", "bo@pals.test"], "chat-road", "Road crew", "portland")
+    _trip(db, "Lisbon", 185, ["cy@pals.test", "fay@pals.test"], "chat-wander", "Wanderers", "lisbon")
+    db.commit()
     return db
