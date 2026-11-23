@@ -33,12 +33,13 @@ What is in them, so you know what to click:
    IGNEOUS_LLM_SOURCES=email,fs,takeout,linkedin,ai_chats   # the sources the persona came through
    IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true                 # its documents (resumes, notes) too
    ```
-3. **Let the model read it** (needs `AWS_BEARER_TOKEN_BEDROCK` in the API's shell): start the API and press
-   **Rebuild** on the Sources page once (or run `cd api && uv run igneous pipeline`). The model names the threads
-   ("Lisbon trip", "CS 452") and says what kind each is, reads the resumes for where Mira studied and worked, and
-   checks every derived link. Without a key the graph still builds and every section below works, but threads keep
-   their fallback names ("Lisbon · Jan-Mar 2025", kind "thread", all under Projects) and classes are not yet placed
-   under the school.
+3. **Rebuild once**: start the API and press **Rebuild** on the Sources page (or run `cd api && uv run igneous
+   pipeline`). The first build finds Lakeshore University and Northwind Robotics by their email domains only after
+   it has placed threads, so nothing sits under them until the second. With `AWS_BEARER_TOKEN_BEDROCK` in the API's
+   shell, the model also names the threads ("Lisbon trip", "CS 452") and says what kind each is, reads the resumes
+   for where Mira studied and worked, and checks every derived link. Without a key the graph still builds and every
+   section below works, but threads keep their fallback names ("Lisbon · Jan-Mar 2025", kind "thread", all under
+   Projects) and nothing checks where they were placed (see the last table).
 4. **Freeze the graph.** Don't press Rebuild or run the pipeline during the demo: the explorer keeps the previous
    graph while a rebuild runs, then switches to the new one when it publishes, and trips and their members can change
    under you. Finish any rebuild first.
@@ -135,7 +136,7 @@ Pick 3–4. Each needs no setup beyond registration. Speak as Mira: the server's
    > Using igneous: who went on my Lisbon trip, and how do you know? Show the evidence.
 
    Expect: `find` → `open_node` (travellers + the trip's group chat) → `why_connected` or `sources` → `read_item`.
-   Dana, Sofia and Rafael, cited via the "Lisbon spring break" chat and the bookings.
+   Dana, Sofia and Rafael, cited via the trip's emails ("Spring break: Lisbon?", the bookings) and its group chat.
 
 3. **Structure** (shows the backbone):
    > Using igneous: what's under Northwind Robotics, and who did I work with on the Heron field trials?
@@ -145,8 +146,8 @@ Pick 3–4. Each needs no setup beyond registration. Speak as Mira: the server's
 4. **Explain a link** (shows trust):
    > Using igneous: why is Dana Kimura connected to the Lisbon trip? Cite the records. Two records is enough.
 
-   Expect: `find` ×2 → `why_connected` (the link, its kind, the checker's verdict and reason, the records) →
-   `read_item`.
+   Expect: `find` ×2 → `why_connected` (the link, its kind, the records, and with the model the checker's verdict
+   and reason) → `read_item`.
 
 5. **Brief me** (shows synthesis):
    > Using igneous: brief me on CS 452: what it is, who's in it, and the latest activity.
@@ -161,9 +162,10 @@ Pick 3–4. Each needs no setup beyond registration. Speak as Mira: the server's
    citations.
 
 7. **Ask at scale** (the Enron corpus, `igneous-enron`):
-   > Using igneous-enron, ask: what did Phillip Allen say about the gas price forecast?
+   > Using igneous-enron, ask: what is the deadline for Phillip, Tim and Yevgeny to respond with approval on the revised high level design?
 
-   Expect: `ask` with citations from the Enron mailboxes, or "can't answer" when the records don't say.
+   Expect: `ask` answers "COB 10/23" and cites the email it comes from: question q002 of the Enron gold set
+   (`api/eval/questions.jsonl`), answered in the demo mailbox `make demo` reads.
 
 Adding "two records is enough" to prompt 4 keeps it short; without it the agent may keep reading. Time each prompt
 in a fresh session before recording: times depend on the model and on the warm cache (step 8).
@@ -194,6 +196,12 @@ in a fresh session before recording: times depend on the model and on the warm c
 | `make persona` says the database exists | Use it as it is, or rebuild from scratch: `make persona CLEAN=1`. |
 | Sync now on the persona says it never mixes with other records | The API points at another database. Set `IGNEOUS_DATABASE_URL` to `igneous_persona` and restart the API. |
 | Threads are named like "Lisbon · Jan-Mar 2025" and all sit under Projects | The model hasn't read the persona: set `AWS_BEARER_TOKEN_BEDROCK` and the opt-ins (step 2), then Rebuild once. |
+| Lakeshore University and Northwind Robotics open to nothing | Only one build has run: Rebuild once more (step 3). |
+| Lakeshore University also opens to a trip or Tidepool | They were placed by email domain (most of their people write from the school's address). The model's checker judges each placement; without it nothing does. Either way it's the moment for **This is wrong**. |
+| Search shows two Lisbons (or two Icelands, two Tidepools, a class twice) | The other one is a documents folder made a project ("Lisbon 2025"): it takes in every record that mentions Lisbon, fare newsletters and her mother's mail included. Open the trip thread ("Lisbon · Jan-Mar 2025" without the model). |
+| Search shows Lakeshore University or Northwind Robotics twice | One is the company her LinkedIn connections list, the other the organization found by its email domain. The one on Mira's first ring holds the threads: open it from there. |
+| Group chats show as "Google Chat Space AAAA…" | The Takeout reader doesn't read a chat's name yet, only its folder's. Open one: its members and messages are right. |
+| `me` lists Northwind only from July 2026 | The profile keeps one position per organization; the internship from January 2025 is in her LinkedIn export and resume. |
 | First tool call says "waiting for MCP servers" | Another configured server is slow; igneous still connects. Remove the slow one before recording. |
 | A trip or org opens with almost nothing | Its records arrived after the last build. Press Rebuild (or run `igneous pipeline`); the graph switches over when it publishes. |
 | `ask` returns "ask is unavailable" | The MCP env is missing the Bedrock token; re-run the `claude mcp add` with `-e AWS_BEARER_TOKEN_BEDROCK=...`. |

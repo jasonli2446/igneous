@@ -20,6 +20,7 @@
    "name": "Lisbon trip",
    "kind": "trip",
    "terms": ["Lisbon", "Sintra"],
+   "parent": null,
    "participants": ["Dana Kimura", "Sofia Lindgren", "Rafael Ortiz"],
    "not_participants": ["Theo Marsh"],
    "must_include": [
@@ -37,6 +38,7 @@
    "name": "Iceland trip",
    "kind": "trip",
    "terms": ["Iceland", "Ring Road"],
+   "parent": null,
    "participants": ["Dana Kimura", "Theo Marsh"],
    "not_participants": ["Sofia Lindgren", "Rafael Ortiz"],
    "must_include": [
@@ -140,6 +142,7 @@
    "name": "Tidepool",
    "kind": "project",
    "terms": ["Tidepool"],
+   "parent": null,
    "participants": ["Rafael Ortiz"],
    "must_include": [
     {"source": "email", "external_id": "mira/Sent/cur/1739032200.M12025608P34721.mira-laptop,S=776:2,S", "fingerprint": "4b7b92c011336d736857282b948dd851d1c67608"},

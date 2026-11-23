@@ -6,11 +6,13 @@
 A personal gold file names a person's projects and people, so it stays local, in git-ignored data/; the synthetic
 persona's (igneous/persona/gold) is in the repo. A file holds {"threads": [...]}, each entry {name, terms: [words its
 name may use], parent: the name of the gold thread it sits under, must_include: [records], must_exclude: [...],
-participants: [names], not_participants: [names]}; every field but name and terms is optional. A record is a stable
-key (gold.py: {source, external_id} or {source, path}), which holds on any build, or a source_items id of the database
-the file was written on. A gold thread is "found" by the derived Project named exactly like it, or else by a Project
-whose name contains one of its terms (three letters or more), the one covering most of must_include. Reported per
-thread and in total, so a change that fixes one case and breaks another shows.
+participants: [names], not_participants: [names]}; every field but name and terms is optional, and a parent of null
+says it sits under nothing (a trip with school friends is not part of their school), neither as found nor as any
+duplicate of it. A record is a stable key (gold.py: {source, external_id} or {source, path}), which holds on any
+build, or a source_items id of the database the file was written on. A gold thread is "found" by the derived Project
+named exactly like it, or else by a Project whose name contains one of its terms (three letters or more), the one
+covering most of must_include. Its records are its own and those of every Project under it (a school holds its
+classes'). Reported per thread and in total, so a change that fixes one case and breaks another shows.
 """
 import json
 import re
@@ -43,6 +45,21 @@ def _records(s, given: list) -> set[int]:
     return ids.union(*found)
 
 
+def _held(projects: dict[int, dict], parents: set[tuple[int, int]], top: int) -> set[int]:
+    """A project's records with those of every project under it, however deep."""
+    children: dict[int, set[int]] = {}
+    for child, parent in parents:
+        children.setdefault(parent, set()).add(child)
+    held, seen, todo = set(), set(), [top]
+    while todo:
+        pid = todo.pop()
+        if pid not in seen:
+            seen.add(pid)
+            held |= projects[pid]["items"] if pid in projects else set()
+            todo.extend(children.get(pid, ()))
+    return held
+
+
 def score(gold: dict) -> dict:
     with SessionLocal() as s:
         projects = _projects(s)
@@ -51,7 +68,7 @@ def score(gold: dict) -> dict:
             "AND dst IN (SELECT id FROM nodes WHERE type='Project')"))}
         records = [(_records(s, g.get("must_include") or []), _records(s, g.get("must_exclude") or []))
                    for g in gold["threads"]]
-    report, found_ids = [], {}
+    report, found_ids, same_ids = [], {}, {}
     for g, (inc, exc) in zip(gold["threads"], records, strict=True):
         terms = [t.lower() for t in g["terms"]]
         # A gold thread is found by name first (the thing exists under the name the person uses); records only
@@ -65,11 +82,13 @@ def score(gold: dict) -> dict:
         best = max(matches, key=lambda p: (p in by_name, len(p["items"] & inc), len(p["items"])), default=None)
         dups = [p for p in named if p is not best and not p["umbrella"]]
         found_ids[g["name"]] = best["id"] if best else None
+        same_ids[g["name"]] = {best["id"], *(p["id"] for p in dups)} if best else set()
+        held = _held(projects, parents, best["id"]) if best else set()
         report.append({
             "name": g["name"], "found": best["name"] if best else None, "duplicates": len(dups),
-            "dup_names": [p["name"] for p in dups][:4], "records": len(best["items"]) if best else 0,
-            "include_recall": round(len(best["items"] & inc) / len(inc), 2) if best and inc else None,
-            "exclude_leaks": len(best["items"] & exc) if best else 0,
+            "dup_names": [p["name"] for p in dups][:4], "records": len(held),
+            "include_recall": round(len(held & inc) / len(inc), 2) if best and inc else None,
+            "exclude_leaks": len(held & exc),
             "kind": best["kind"] if best else None})
     # Who took part: names the person gave (match by first name, so "Tara" finds her contact under any name).
     with SessionLocal() as s:
@@ -83,16 +102,19 @@ def score(gold: dict) -> dict:
             r["participants_missing"] = [p for p in g.get("participants", []) if not any(first(p) in w for w in went)]
             r["wrongly_went"] = [p for p in g.get("not_participants", []) if any(first(p) in w for w in went)]
     for g, r in zip(gold["threads"], report, strict=True):
+        child = found_ids.get(g["name"])
         if g.get("parent"):
-            child, parent = found_ids.get(g["name"]), found_ids.get(g["parent"])
+            parent = found_ids.get(g["parent"])
             r["parent_ok"] = bool(child and parent and (child, parent) in parents)
+        elif "parent" in g:  # null: it sits under nothing (a trip is no part of the school its friends attend)
+            r["parent_ok"] = bool(child) and not any(c in same_ids[g["name"]] for c, _p in parents)
     total = len(report)
     summary = {
         "found": sum(1 for r in report if r["found"]), "of": total,
         "duplicated": sum(1 for r in report if r["duplicates"]),
         "leaks": sum(r["exclude_leaks"] for r in report),
         "hierarchy_ok": sum(1 for r in report if r.get("parent_ok")),
-        "hierarchy_of": sum(1 for g in gold["threads"] if g.get("parent")),
+        "hierarchy_of": sum(1 for g in gold["threads"] if "parent" in g),
         "participant_errors": sum(len(r.get("participants_missing", [])) + len(r.get("wrongly_went", [])) for r in report)}
     return {"summary": summary, "threads": report}
 

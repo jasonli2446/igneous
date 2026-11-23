@@ -161,7 +161,33 @@ IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous
   uv run python eval/persona_eval.py
 ```
 
-PERSONA_RESULTS
+On the default seed with the model off (2026-11-23), after `make persona` (one pipeline run) and after a second run:
+
+| | One run | Two runs |
+|---|---|---|
+| Gold threads found | 12 of 12 | 12 of 12 |
+| Found twice or more (another Project for the same thing) | 10 | 10 |
+| Records that must not be in their thread, but are | 1 | 1 |
+| Placed right (under its school or job, or under nothing) | 3 of 10 | 7 of 10 |
+| Who took part: missing or wrongly there | 0 | 0 |
+| Identities: clusters P / R | 1.00 / 0.94 | 1.00 / 0.94 |
+| Identities: pairs ≥ 0.5, P / R | 1.00 / 0.83 | 1.00 / 0.83 |
+| Ask retrieval, recall@10 over 13 answerable questions: hybrid / dense / lexical | 0.85 / 0.69 / 0.85 | the same |
+
+- Every duplicate is a Project the entities stage named from a folder or chat ("Lisbon 2025", "CS 341 Operating
+  Systems", "tidepool") beside the thread the threads stage found for the same thing; CS 481 is also split in two
+  threads ("Harborline", "Demo Day").
+- The leak is a "remember Lisbon?" chat six months after the trip: the folder-named "Lisbon 2025" takes in every
+  record that mentions Lisbon.
+- One run places nothing. The profile stage, which runs first, ties LinkedIn's employers to LinkedIn's company nodes;
+  the organizations stage then finds the same organizations by email domain, and on the next run the profile stage
+  ties the employers to those. With a domain to go on, the backbone puts the classes, the Heron field trials and the
+  hiring thread under the right organization, and also the Lisbon and Iceland trips and Tidepool under Lakeshore
+  University, since most of their people write from the school's domain.
+- The only identity left apart is classmate Alex Chen's LinkedIn profile: two people share the name, so the name
+  alone joins neither.
+- With the model off, threads keep their fallback names ("Lisbon · Jan-Mar 2025", kind "thread"). `--qa` needs the
+  model.
 
 ## LightRAG on Igneous's graph (criterion 5)
 

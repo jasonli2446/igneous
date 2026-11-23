@@ -114,3 +114,41 @@ def test_a_gold_thread_with_only_short_terms_matches_no_project(db, tools):
     found = tools.threads.score({"threads": [{"name": "AI club", "terms": ["ai", "ml"]},
                                              {"name": "Robots", "terms": ["robotics"]}]})
     assert [t["found"] for t in found["threads"]] == [None, "Robotics Lab"]
+
+
+def test_a_local_file_is_keyed_by_its_path_in_whatever_folder_was_read(db, tools):
+    """A documents folder's ids start with a hash of where it sits on disk, so gold names the file by its path."""
+    ids = [db.execute(text("INSERT INTO source_items (source, external_id, content_hash) VALUES ('fs', :e, :e) "
+                           "RETURNING id"), {"e": e}).scalar_one()
+           for e in ("a1b2c3/Travel/plan.md", "d4e5f6/Mira/Travel/plan.md", "a1b2c3/Travel/other-plan.md")]
+    key = {"source": "fs", "path": "Travel/plan.md"}
+    assert tools.gold.resolve(db, [key]) == [{ids[0], ids[1]}]
+    cited = tools.gold.keys_of(db, [ids[1]])[ids[1]]
+    assert cited["path"] == "Mira/Travel/plan.md" and tools.gold.same(cited, key)
+    assert not tools.gold.same(tools.gold.keys_of(db, [ids[2]])[ids[2]], key)
+
+
+def test_thread_gold_names_records_by_key_and_says_what_sits_under_nothing(db, tools):
+    def node(type_, key, name, item=None):
+        return db.execute(text("INSERT INTO nodes (type, key, name, source_item_id) VALUES (:t, :k, :n, :i) "
+                               "RETURNING id"), {"t": type_, "k": key, "n": name, "i": item}).scalar_one()
+    sent, inbox = _item(db, "mira/Sent/cur/1.", "fp-trip"), _item(db, "mira/INBOX/cur/2.", "fp-hostel")
+    first, second = node("Message", "fp-trip", "Lisbon?", sent), node("Message", "fp-hostel", "Hostel booked", inbox)
+    school = node("Project", "backbone:u", "Lakeshore University")
+    trip = node("Project", "thread:lisbon", "Lisbon · Jan-Mar 2025")
+    folder = node("Project", "project:lisbon", "Lisbon 2025")  # the same trip again, named by its folder
+    db.execute(text("INSERT INTO edges (src, dst, type) VALUES (:a, :t, 'PART_OF'), (:a, :f, 'PART_OF'), "
+                    "(:b, :f, 'PART_OF'), (:t, :s, 'PART_OF')"),
+               {"a": first, "b": second, "t": trip, "f": folder, "s": school})
+    gold = {"threads": [{"name": "Lakeshore University", "terms": ["Lakeshore University"]},
+                        {"name": "Lisbon trip", "terms": ["Lisbon"], "parent": None,
+                         "must_include": [_key("mira/Sent/cur/1.", "fp-trip"), _key("mira/INBOX/cur/2.", "fp-hostel")]}]}
+    report = tools.threads.score(gold)
+    school_row, lisbon = report["threads"]
+    assert school_row["records"] == 1  # a school holds what the threads under it hold
+    assert (lisbon["found"], lisbon["duplicates"], lisbon["include_recall"]) == ("Lisbon 2025", 1, 1.0)
+    assert lisbon["parent_ok"] is False  # its duplicate sits under the school, and a trip isn't part of it
+    assert (report["summary"]["hierarchy_ok"], report["summary"]["hierarchy_of"]) == (0, 1)
+    db.execute(text("DELETE FROM edges WHERE src = :t AND dst = :s"), {"t": trip, "s": school})
+    report = tools.threads.score(gold)
+    assert report["threads"][1]["parent_ok"] is True and report["threads"][0]["records"] == 0
