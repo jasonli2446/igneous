@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
