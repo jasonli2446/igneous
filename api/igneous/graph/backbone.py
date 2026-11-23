@@ -17,13 +17,20 @@ backbone:
   4. Classes: a thread judged a class or course, inside your dates at exactly one school, was taken there (a class
      run in group chats has no school email to go on). Its records from those dates are the evidence.
 
-Inferred links (3, 4) are PART_OF thread -> org's thread with extractor 'backbone' and their evidence; the verifier
-checks them like any other. A thread you hid takes no part. Rebuilt every run: the stage owns its links (both
+Roles: an org where your resume or LinkedIn lists several roles (an internship, then the full-time job; a degree and
+a TA job; graph/profile.py props.roles) shows once, with a thread for each role under its own thread
+(`backbone:<org key>/<title>`, kind 'role', named by its title, stated: extractor 'profile'). A thread placed under
+such an org goes under the one role whose dates hold it (a month's slack either side; a class only under a degree,
+anything else only under a job), else under the org: two roles at once leave it to you.
+
+Inferred links (3, 4) are PART_OF thread -> org's (or role's) thread with extractor 'backbone' and their evidence; the
+verifier checks them like any other. A thread you hid takes no part. Rebuilt every run: the stage owns its links (both
 extractors, between Projects), its flags (props.org, org_why, same_as_org on threads; props.thread on organizations)
-and the org threads it made, which go when their org leaves your backbone.
+and the org and role threads it made, which go when their org leaves your backbone or the role leaves your resume.
 """
 import json
 import re
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -35,6 +42,7 @@ VERSION = "1"
 DOMAIN_SHARE = 0.5     # of a thread's people-bearing records, involving the org's domain
 MIN_DOMAIN_RECORDS = 3
 EVIDENCE = 6
+SLACK = timedelta(days=31)  # around your dates at an org or in a role: planning before, wrap-up after
 
 
 def _orgs(s: Session) -> list[dict]:
@@ -42,11 +50,14 @@ def _orgs(s: Session) -> list[dict]:
     your own mail shows), most specific first."""
     from igneous.graph.organizations import YOUR_ORGS
 
-    # Your dates there as you stated them (your resume, then what you said) before the ones your mail shows.
+    # Your dates there as you stated them (your resume, then what you said) before the ones your mail shows, and the
+    # roles your resume or LinkedIn lists there.
     rows = s.execute(text("""
         SELECT DISTINCT ON (o.id) o.id, o.name, o.key, o.props, (e.props->>'school') IS NOT NULL AS school,
                e.valid_from, e.valid_to,
-               (SELECT p.dst FROM edges p WHERE p.src = o.id AND p.type = 'PART_OF' ORDER BY p.id LIMIT 1) AS parent
+               (SELECT p.dst FROM edges p WHERE p.src = o.id AND p.type = 'PART_OF' ORDER BY p.id LIMIT 1) AS parent,
+               (SELECT r.props->'roles' FROM edges r WHERE r.src = e.src AND r.dst = o.id AND r.type = 'WORKED_AT'
+                  AND r.extractor = 'profile') AS roles
         FROM edges e JOIN nodes o ON o.id = e.dst
         JOIN nodes me ON me.id = e.src AND COALESCE((me.props->>'self')::bool, false)
         WHERE e.type = 'WORKED_AT' AND e.extractor = ANY(:yours) AND o.type = 'Organization'
@@ -58,23 +69,65 @@ def _orgs(s: Session) -> list[dict]:
     return sorted(orgs, key=lambda o: (o["id"] in parents, o["id"]))
 
 
-def _within(props: dict, org: dict) -> bool:
-    """The thread happened while you were there (a month's slack either side)."""
-    from datetime import datetime, timedelta
+def _inside(props: dict, start: datetime | None, end: datetime | None) -> bool:
+    """The thread (its props.start and props.end) happened between `start` and `end` (open ends hold anything), a
+    month's slack either side."""
     try:
-        start, end = (datetime.fromisoformat(props[k]) for k in ("start", "end"))
+        first, last = (datetime.fromisoformat(props[k]) for k in ("start", "end"))
     except (KeyError, TypeError, ValueError):
         return False
-    lo = org["valid_from"] - timedelta(days=31) if org["valid_from"] else None
-    hi = org["valid_to"] + timedelta(days=31) if org["valid_to"] else None
-    return (lo is None or start >= lo) and (hi is None or end <= hi)
+    return (start is None or first >= start - SLACK) and (end is None or last <= end + SLACK)
 
 
-def _threads(s: Session) -> list[dict]:
-    """Every Project except the ones you hid, and the org threads this stage makes."""
-    from igneous.graph import overrides
+def _within(props: dict, org: dict) -> bool:
+    """The thread happened while you were there."""
+    return _inside(props, org["valid_from"], org["valid_to"])
 
-    hidden = overrides.plan(overrides.load(s)).hidden
+
+def _day(d: str | None) -> datetime | None:
+    return datetime.fromisoformat(d).replace(tzinfo=UTC) if d else None
+
+
+def _span(role: dict) -> str:
+    """When you held a role, as people write it: 'Jan 2025 - May 2026', 'since Jul 2026'."""
+    start, end = _day(role.get("start")), _day(role.get("end"))
+    if start and end:
+        return f"{start:%b %Y} - {end:%b %Y}"
+    return f"since {start:%b %Y}" if start else (f"until {end:%b %Y}" if end else "")
+
+
+def _roles(w: Writer, org: dict, parent: int, hidden: set[str]) -> tuple[list[dict], list[str]]:
+    """An org where you had several roles (an internship, then the full-time job; a degree and a TA job): a thread for
+    each, under the org's own thread, named by its title. Stated (your resume or LinkedIn lists it): extractor
+    'profile'. Returns the roles that may hold threads ({id, title, start, end, span, school}: not one you hid) and
+    every role thread's key."""
+    from igneous.graph.organizations import slug
+
+    listed = org["roles"] or []
+    if len(listed) < 2:
+        return [], []
+    titles = [slug(r["title"]) or "role" for r in listed]
+    out, keys = [], []
+    for r, title in zip(listed, titles, strict=True):
+        # Its key is its title at the org; a title held twice (two stints) is told apart by when each began.
+        key = f"backbone:{org['key']}/{title}" + (f"/{(r.get('start') or '')[:7]}" if titles.count(title) > 1 else "")
+        span = _span(r)
+        tid = w.project(key, r["title"] or "Role", {
+            "derived": EXTRACTOR, "kind": "role", "named_from": "profile", "role_of": org["id"], "title": r["title"],
+            "start": r.get("start"), "end": r.get("end"), **({"school": True} if r.get("school") else {})})
+        w.edge(tid, parent, "PART_OF", {"why": f"{r.get('via') or 'your resume'}: {r['title']} at {org['name']}"
+                                               + (f", {span}" if span else "")},
+               confidence=1.0, source_item_id=r.get("source_item_id"), extractor="profile")
+        keys.append(key)
+        if f"Project:{key}" not in hidden:
+            out.append({"id": tid, "title": r["title"], "start": _day(r.get("start")), "end": _day(r.get("end")),
+                        "span": span, "school": bool(r.get("school"))})
+    return out, keys
+
+
+def _threads(s: Session, hidden: set[str]) -> list[dict]:
+    """Every Project except the ones you hid (`hidden`: their natural keys), and the org and role threads this stage
+    makes."""
     return [dict(r) for r in s.execute(text("""
         SELECT n.id, n.key, n.name, n.props FROM nodes n
         WHERE n.type = 'Project' AND n.props->>'derived' IS DISTINCT FROM :x AND NOT (n.type || ':' || n.key = ANY(:h))
@@ -175,9 +228,12 @@ def run(s: Session, log=print) -> dict:
     s.execute(text("UPDATE nodes SET props = props - 'org' - 'org_why' WHERE type = 'Project' AND props ? 'org'"))
     s.execute(text("UPDATE nodes SET props = props - 'thread' WHERE type = 'Organization' AND props ? 'thread'"))
     s.execute(text("UPDATE nodes SET props = props - 'same_as_org' WHERE type = 'Project' AND props ? 'same_as_org'"))
+    from igneous.graph import overrides
+
     w = Writer(s, EXTRACTOR, VERSION)
     orgs = _orgs(s)
-    threads = _threads(s)
+    hidden = overrides.plan(overrides.load(s)).hidden
+    threads = _threads(s, hidden)
     # A name on your resume is the life thread of that name before any other Project (a repo folder of the same name).
     by_name: dict[str, int] = {}
     for t in sorted(threads, key=lambda t: ((t["props"] or {}).get("derived") != "threads",
@@ -185,15 +241,34 @@ def run(s: Session, log=print) -> dict:
         by_name.setdefault(norm(t["name"]), t["id"])
     made = {o["id"]: _org_thread(w, o, threads) for o in orgs}
     org_thread = {o: tid for o, (tid, _key) in made.items()}
-    # Org threads of orgs no longer on your backbone (or now with a thread of their own name) go.
+    roles: dict[int, list[dict]] = {}
+    keys = [key for _tid, key in made.values() if key]
+    for o in orgs:
+        roles[o["id"]], role_keys = _roles(w, o, org_thread[o["id"]], hidden)
+        keys += role_keys
+    # Org threads of orgs no longer on your backbone (or now with a thread of their own name) go, and so do the
+    # threads of roles no longer listed.
     s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = :x AND NOT (key = ANY(:k))"""),
-              {"x": EXTRACTOR, "k": sorted(key for _tid, key in made.values() if key)})
+              {"x": EXTRACTOR, "k": sorted(keys)})
+    by_id = {t["id"]: t for t in threads}
+
+    def place(t: int, o: dict, why: str, **edge) -> int | None:
+        """Put thread `t` under org `o`: under the one role there whose dates hold it (a class only under a degree,
+        anything else only under a job), else under the org's own thread."""
+        p = (by_id.get(t) or {}).get("props") or {}
+        cls = bool(re.search(r"\b(class|course)\b", p.get("kind") or ""))
+        fits = [r for r in roles[o["id"]] if r["school"] == cls and _inside(p, r["start"], r["end"])]
+        if len(fits) == 1:
+            why += f", while you were {fits[0]['title']} there" + (f" ({fits[0]['span']})" if fits[0]["span"] else "")
+        return w.edge(t, fits[0]["id"] if len(fits) == 1 else org_thread[o["id"]], "PART_OF", {"why": why}, **edge)
+
     # Threads that already have a parent you stated keep it; the backbone fills in the rest.
     has_parent = set(s.execute(text("""
         SELECT e.src FROM edges e JOIN nodes p ON p.id = e.dst AND p.type = 'Project'
         WHERE e.type = 'PART_OF' AND e.extractor = 'user'""")).scalars())
     placed: set[int] = set(org_thread.values())
-    stats = {"orgs": len(orgs), "stated": 0, "by_domain": 0, "nested": 0, "classes": 0}
+    stats = {"orgs": len(orgs), "roles": sum(len(r) for r in roles.values()), "stated": 0, "by_domain": 0,
+             "nested": 0, "classes": 0}
     for o in orgs:
         ot = org_thread[o["id"]]
         # An org inside an org (the Lab in State University): its thread is under the parent's.
@@ -204,8 +279,7 @@ def run(s: Session, log=print) -> dict:
         for name in sorted((o["props"] or {}).get("resume_projects", [])):
             t = by_name.get(norm(name))
             if t and t != ot and t not in placed:
-                w.edge(t, ot, "PART_OF", {"why": f"your resume lists it under {o['name']}"}, confidence=1.0,
-                       extractor="profile")
+                place(t, o, f"your resume lists it under {o['name']}", confidence=1.0, extractor="profile")
                 placed.add(t)
                 stats["stated"] += 1
         ds = domains(o)
@@ -214,8 +288,8 @@ def run(s: Session, log=print) -> dict:
         for t, (share, n, ev) in _domain_share(s, ds).items():
             if t in placed or t in has_parent or t == ot or n < MIN_DOMAIN_RECORDS or share < DOMAIN_SHARE:
                 continue
-            if w.edge(t, ot, "PART_OF", {"why": f"{round(share * 100)}% of its conversations involve {' or '.join(ds)}"},
-                      confidence=round(share, 3), evidence=[(sid, "backbone", {}) for sid in ev[:EVIDENCE]]):
+            if place(t, o, f"{round(share * 100)}% of its conversations involve {' or '.join(ds)}",
+                     confidence=round(share, 3), evidence=[(sid, "backbone", {}) for sid in ev[:EVIDENCE]]):
                 placed.add(t)
                 stats["by_domain"] += 1
     schools = [o for o in orgs if o.get("school")]
@@ -226,9 +300,8 @@ def run(s: Session, log=print) -> dict:
         inside = [o for o in schools if _within(p, o)]
         if len(inside) == 1:
             school = inside[0]
-            if w.edge(t["id"], org_thread[school["id"]], "PART_OF",
-                      {"why": f"a class you took while at {school['name']}"}, confidence=0.9,
-                      evidence=[(sid, "backbone", {}) for sid in _class_evidence(s, t["id"], school)]):
+            if place(t["id"], school, f"a class you took while at {school['name']}", confidence=0.9,
+                     evidence=[(sid, "backbone", {}) for sid in _class_evidence(s, t["id"], school)]):
                 placed.add(t["id"])
                 stats["classes"] += 1
     stats["skipped_rejected"] = w.skipped

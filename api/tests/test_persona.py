@@ -176,7 +176,7 @@ def stub(system: str, user: str, schema: dict, **_options):
         shared = (re.search(r"^Shared terms: (.*)$", user, re.M) or [None, ""])[1].lower()
         shown = len(re.findall(r"^\d+\. \[", user, re.M))
         for g in THREADS:
-            if any(t.lower() in shared for t in g["terms"]) and g.get("kind") not in ("organization",):
+            if any(t.lower() in shared for t in g["terms"]) and g.get("kind") not in ("organization", "role"):
                 return {"keep": True, "kind": g["kind"], "name": g["name"], "confidence": 0.9,
                         "defining_terms": g["terms"], "members": list(range(shown))}, {}
         return {"keep": False, "kind": "", "name": "", "confidence": 0.9, "defining_terms": [], "members": []}, {}

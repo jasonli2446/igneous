@@ -58,6 +58,9 @@ CLAIMS = {
                                             "talked before",
     ("PART_OF", "hierarchy"): "this project / thread is part of (or run under) this larger program or organization",
     ("PART_OF", "backbone"): "this thread (a class, project or job) was done at or for this organization or school",
+    ("PART_OF", "backbone", "role"): "this thread (a class, project or piece of work) was done in this role (B: a "
+                                     "position or degree the person held at an organization, as their resume or "
+                                     "LinkedIn lists it), not merely at the same time as it",
     ("RELATED_TO", "thread-resolution"): "these two threads are related as stated (e.g. interviews for, same client as)",
 }
 MAX_EVIDENCE = 6
@@ -68,9 +71,12 @@ EXAMPLES = 4        # your past corrections shown as examples per call
 
 
 def claim_of(edge: dict) -> tuple:
-    """The claim an edge makes: (type, extractor), or its variant for the kind of node at A."""
+    """The claim an edge makes: (type, extractor), or its variant for the kind of node at A (a group chat or series
+    about a thread) or at B (a role, for a thread the backbone placed under one)."""
     if (edge["type"], edge["extractor"]) == ("PART_OF", "threads") and edge["src_type"] in ("Thread", "Event"):
         return ("PART_OF", "threads", "group")
+    if (edge["type"], edge["extractor"]) == ("PART_OF", "backbone") and edge.get("dst_kind") == "role":
+        return ("PART_OF", "backbone", "role")
     return (edge["type"], edge["extractor"])
 
 

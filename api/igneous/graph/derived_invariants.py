@@ -6,6 +6,7 @@
   duplicate_aliases       a Project lists one alias twice
   dropped_edge_live       a link the verifier dropped is in the graph as well as in edges_dropped
   orphan_org_thread       an org thread the backbone made for an organization that no longer stands for it
+  orphan_role             a role's thread (graph/backbone.py) not under the thread of the organization it is at
   empty_umbrella          an umbrella no thread sits under
   domain_held_twice       an email domain two organizations hold (graph/organizations.py: one organization, one node)
 """
@@ -73,9 +74,19 @@ def orphan_project_violations(s: Session) -> list[Violation]:
                          message="an org thread no organization stands for")
                for r in s.execute(text("""
                    SELECT p.id, p.key FROM nodes p WHERE p.type = 'Project' AND p.props->>'derived' = 'backbone'
+                     AND p.props->>'kind' IS DISTINCT FROM 'role'
                      AND NOT EXISTS (SELECT 1 FROM nodes o WHERE o.type = 'Organization'
                                      AND (o.props->>'thread')::bigint = p.id)
                    ORDER BY p.id"""))]
+    orphans += [Violation(code="orphan_role", node_id=r.id, details={"key": r.key},
+                          message="a role's thread not under the thread of the organization it is a role at")
+                for r in s.execute(text("""
+                    SELECT p.id, p.key FROM nodes p WHERE p.type = 'Project' AND p.props->>'derived' = 'backbone'
+                      AND p.props->>'kind' = 'role'
+                      AND NOT EXISTS (SELECT 1 FROM edges e JOIN nodes o ON o.type = 'Organization'
+                                      AND (o.props->>'thread')::bigint = e.dst AND o.id = (p.props->>'role_of')::bigint
+                                      WHERE e.src = p.id AND e.type = 'PART_OF')
+                    ORDER BY p.id"""))]
     return orphans + [Violation(code="empty_umbrella", node_id=r.id, details={"key": r.key},
                                 message="an umbrella no thread sits under")
                       for r in s.execute(text("""

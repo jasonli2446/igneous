@@ -17,6 +17,18 @@
    ]
   },
   {
+   "name": "Software Engineering Intern",
+   "kind": "role",
+   "terms": ["Software Engineering Intern"],
+   "parent": "Northwind Robotics"
+  },
+  {
+   "name": "Software Engineer",
+   "kind": "role",
+   "terms": ["Software Engineer"],
+   "parent": "Northwind Robotics"
+  },
+  {
    "name": "Lisbon trip",
    "kind": "trip",
    "terms": ["Lisbon", "Sintra"],
@@ -128,7 +140,7 @@
    "name": "Heron field trials",
    "kind": "project",
    "terms": ["Heron", "Kalman"],
-   "parent": "Northwind Robotics",
+   "parent": "Software Engineering Intern",
    "participants": ["Jonah Feld", "Priya Raman"],
    "must_include": [
     {"source": "email", "external_id": "mira/Archive/cur/1748460000.M11016839P64514.mira-laptop,S=752:2,S", "fingerprint": "07697a7b3e3188dacc6fa438585eb79dd354e3f9"},

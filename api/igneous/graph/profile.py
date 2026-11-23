@@ -8,19 +8,25 @@ you use. So the biggest parts of your life come from there first, and everything
      names you.
   2. One structured extraction per version: experience {org, title, start, end}, education {school, degree,
      start, end}, projects {name, description}. Each fact keeps the document it came from.
-  3. Experience -> you WORKED_AT an Organization named as you name it ("BigCo", "Startup Studio") and keyed by that
-     name (`org:<slug>`, as LinkedIn and contact cards key a company, so whichever stage meets it first, it is one
-     node), with dates and the domain the document gives it (props.domain on the link: graph/organizations.py gives
-     that domain to this organization). Education -> your school. These are stated facts (extractor 'profile'): never
-     judged by the verifier. Projects -> pinned rows in the thread registry (origin 'profile'), named as you name them and found by
-     their full name, or a word of it that stands for the project in your records ("Atlas" for "Atlas Mobile App",
-     not "Mobile").
-  4. Each organization, school and project comes from the newest version that names it: an older version adds what
-     the newer ones left out, and a newer one wins on titles and dates.
+  3. Experience and education -> you WORKED_AT an Organization named as you name it ("BigCo", "Startup Studio",
+     your school) and keyed as a company is (`org:<slug>`, as LinkedIn and contact cards key it, so whichever stage
+     meets it first, it is one node; graph/organizations.py company_for), with the domain the document gives it
+     (props.domain on the link: the organizations stage gives that domain to this organization). One link per
+     organization holds every role you had there (props.roles: an internship, then the full-time job; a degree),
+     each its own title and dates, newest first; the link spans them all (valid_from, valid_to), and the backbone
+     gives an organization with several roles a thread for each (graph/backbone.py). These are stated facts
+     (extractor 'profile'): never judged by the verifier. Projects -> pinned rows in the thread registry (origin
+     'profile'), named as you name them and found by their full name, or a word of it that stands for the project in
+     your records ("Atlas" for "Atlas Mobile App", not "Mobile").
+  4. A role is one title at one organization over one stretch of time: the same title in two documents, at dates
+     that overlap, is one role, while a second stint is another. Every version adds to it: an older version adds what
+     the newer ones left out, and a newer one wins on dates, except that an end it leaves open ("present") gives way
+     to an end another document states for after the newer one was written. Each organization and project comes
+     from the newest version that names it the same way.
 
 A LinkedIn export (connectors/linkedin.py) is read too, without a model: its profile item carries the same structure
-in `raw_meta.profile`. It has no date of its own, so a dated resume wins on titles and dates and LinkedIn fills in
-what the resumes leave out.
+in `raw_meta.profile`. It has no date of its own, so a dated resume wins on dates and LinkedIn fills in what the
+resumes leave out, an end included.
 """
 import hashlib
 import json
@@ -31,6 +37,7 @@ from sqlalchemy.orm import Session
 
 from igneous.config import settings
 from igneous.graph import identity
+from igneous.graph.derived import norm
 from igneous.graph.organizations import company_for, domain_of
 
 EXTRACTOR = "profile"
@@ -140,6 +147,25 @@ def _date(v: str):
     return f"{m.group(1)}-{int(m.group(2) or 1):02d}-01" if m else None
 
 
+def _same_role(a: dict, b: dict) -> bool:
+    """Two documents' entries for one role: the same title, at dates that overlap (or one of them gives none). Two
+    stints with one title are two roles."""
+    if norm(a["title"]) != norm(b["title"]):
+        return False
+    if not a["start"] or not b["start"]:
+        return True
+    return a["start"] <= (b["end"] or "9999") and b["start"] <= (a["end"] or "9999")
+
+
+def _merge_role(kept: dict, older: dict) -> None:
+    """An older document's entry for a role adds what the newer ones left out. The newer one wins on dates, except
+    that an end it leaves open ("present") gives way to an end the other states for after the newer one was written
+    (a LinkedIn export has no date of its own, so its end always counts)."""
+    kept["start"] = kept["start"] or older["start"]
+    if kept["end"] is None and older["end"] and (kept["at"] is None or older["end"] > kept["at"]):
+        kept["end"] = older["end"]
+
+
 def aliases(s: Session, name: str) -> list[str]:
     """Words of a project's name that stand for it on their own: at least ALIAS_SHARE of the life-source records
     naming the word (as a whole word) name the whole project too. A word used for other things ("Mobile" in your
@@ -173,9 +199,11 @@ def run(s: Session, log=print) -> dict:
     my_names = {n.lower() for n in s.execute(text("""
         SELECT n.name FROM nodes n WHERE n.id = :me OR n.id IN (SELECT node_id FROM canonical WHERE canonical_id = :me)
     """), {"me": self_id}).scalars() if n and "@" not in n}
-    orgs: dict[str, dict] = {}
+    # Every role, per organization: a position (or a degree, at a school) is (organization, title, dates), and each
+    # document's entry for it adds to the one role (`_same_role`, `_merge_role`). The organization's name, domain and
+    # parent come from the newest entry that gives them.
+    orgs: dict[str, dict] = {}     # org slug -> {name, domain_hint, parent, project, roles}
     projects: dict[str, dict] = {}
-    schools: dict[str, dict] = {}
     used = 0
     for doc in documents(s):
         out = extract(s, doc)
@@ -187,18 +215,27 @@ def run(s: Session, log=print) -> dict:
             continue
         used += 1
         via = "your LinkedIn" if doc.source == "linkedin" else "your resume"
-        for e in out.get("experience", []):
-            k = _slug(e["org"])
-            if k and k not in orgs:  # newest version wins
-                orgs[k] = {**e, "doc": doc.id, "via": via}
+        at = doc.occurred_at.date().isoformat() if doc.occurred_at else None
+        entries = [(ed.get("school") or "", ed, True) for ed in out.get("education", [])] + \
+                  [(e.get("org") or "", e, False) for e in out.get("experience", [])]
+        for name, e, school in entries:
+            k = _slug(name)
+            if not k:
+                continue
+            org = orgs.setdefault(k, {"name": name, "domain_hint": "", "parent": "", "project": "", "roles": []})
+            for field in ("domain_hint", "parent", "project"):
+                org[field] = org[field] or (e.get(field) or "").strip()
+            role = {"title": ((e.get("degree") if school else e.get("title")) or "").strip(), "school": school,
+                    "start": _date(e.get("start")), "end": _date(e.get("end")), "via": via, "doc": doc.id, "at": at}
+            same = next((r for r in org["roles"] if r["school"] == school and _same_role(r, role)), None)
+            if same:
+                _merge_role(same, role)
+            else:
+                org["roles"].append(role)
         for p in out.get("projects", []):
             k = _slug(p["name"])
             if k and k not in projects:
                 projects[k] = {**p, "doc": doc.id}
-        for ed in out.get("education", []):
-            k = _slug(ed["school"])
-            if k and k not in schools:
-                schools[k] = {**ed, "doc": doc.id, "via": via}
 
     # An organization is keyed as a company is (`org:<slug>`, the key LinkedIn and contact cards give it), whatever
     # stage or record meets it first: by the name its domain's own people give it, else by yours, and named as you
@@ -246,28 +283,31 @@ def run(s: Session, log=print) -> dict:
 
     org_ids: dict[str, int] = {}
     named_projects: dict[int, set[str]] = {}  # org -> project names your resume puts under it
-    for k, ed in schools.items():
-        oid, _ = org_node(ed["school"], ed.get("domain_hint") or "")
+    # Schools first: they claim their domains before a lab at the same domain does.
+    for k, e in sorted(orgs.items(), key=lambda kv: not any(r["school"] for r in kv[1]["roles"])):
+        oid, part_of = org_node(e["name"], e["domain_hint"])
         if oid is None:
             continue
         org_ids[k] = oid
-        edge(self_id, oid, "WORKED_AT", {"why": f"{ed['via']}: {ed['degree']}", "title": ed["degree"], "school": True,
-                                         **claim(oid)},
-             _date(ed["start"]), _date(ed["end"]), ed["doc"])
-    for k, e in orgs.items():
-        oid, part_of = org_node(e["org"], e.get("domain_hint") or "")
-        if oid is None:
-            continue
-        org_ids[k] = oid
-        edge(self_id, oid, "WORKED_AT", {"why": f"{e['via']}: {e['title']}", "title": e["title"], **claim(oid)},
-             _date(e["start"]), _date(e["end"]), e["doc"])
+        # One link per organization (edges are one per pair, type and stage), with every role you had there, newest
+        # first, each with its own dates; the link spans them all.
+        roles = sorted(e["roles"], key=lambda r: (r["start"] or "", r["end"] or "9999", r["title"]), reverse=True)
+        vias = {via: [r["title"] for r in roles if r["via"] == via] for via in dict.fromkeys(r["via"] for r in roles)}
+        props = {"why": "; ".join(f"{via}: {', '.join(titles)}" for via, titles in vias.items()),
+                 "title": roles[0]["title"],
+                 "roles": [{"title": r["title"], "start": r["start"], "end": r["end"], "via": r["via"],
+                            "source_item_id": r["doc"], **({"school": True} if r["school"] else {})} for r in roles],
+                 **({"school": True} if any(r["school"] for r in roles) else {}), **claim(oid)}
+        starts = [r["start"] for r in roles if r["start"]]
+        edge(self_id, oid, "WORKED_AT", props, min(starts, default=None),
+             None if any(r["end"] is None for r in roles) else max(r["end"] for r in roles), roles[0]["doc"])
         parent = part_of
-        if e.get("parent"):
+        if e["parent"]:
             parent = by_name.get(_slug(e["parent"])) or org_node(e["parent"], "")[0]
         if parent and parent != oid:
-            edge(oid, parent, "PART_OF", {"why": f"{e['via']}: {e['org']} is part of "
-                                                  f"{e.get('parent') or 'it'}"}, sid=e["doc"])
-        if e.get("project"):
+            edge(oid, parent, "PART_OF", {"why": f"{roles[0]['via']}: {e['name']} is part of {e['parent'] or 'it'}"},
+                 sid=roles[0]["doc"])
+        if e["project"]:
             named_projects.setdefault(oid, set()).add(e["project"])
     # Projects become pinned rows of the thread registry, named as you name them. A row keeps its state (a project
     # folded into a thread stays its facet); a project your documents no longer list goes.
@@ -296,7 +336,9 @@ def run(s: Session, log=print) -> dict:
     s.execute(text("""DELETE FROM nodes n WHERE n.type = 'Organization' AND n.props->>'named_by' = 'profile'
                       AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id OR e.dst = n.id)
                       AND NOT EXISTS (SELECT 1 FROM spine_node_support x WHERE x.node_id = n.id)"""))
-    stats = {"documents": used, "orgs": len(orgs), "schools": len(schools), "projects": len(projects)}
+    stats = {"documents": used, "orgs": sum(1 for o in orgs.values() if not any(r["school"] for r in o["roles"])),
+             "schools": sum(1 for o in orgs.values() if any(r["school"] for r in o["roles"])),
+             "roles": sum(len(o["roles"]) for o in orgs.values()), "projects": len(projects)}
     if log:
         log(json.dumps(stats))
     return stats
