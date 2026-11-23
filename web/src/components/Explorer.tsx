@@ -35,6 +35,8 @@ type Step = "push" | "back";
 
 const EMPTY: Subgraph = { nodes: [], edges: [] };
 const NONE: ReadonlySet<string> = new Set();
+// The key of the person who is you (identity.OWNER_KEY in the API): your graph lives at "/", every other at /?seed=.
+const OWNER_KEY = "me";
 const edgeKey = (e: GEdge) => `${e.src}-${e.dst}-${e.type}`;
 /** A node the inspector read, as the graph draws it when it opens off another. */
 const asNode = ({ id, type, name, key, category }: NodeDetail): GNode =>
@@ -149,7 +151,9 @@ export default function Explorer() {
         return;
       }
       const next: Shown = { seed: g.seed, base: { nodes: g.nodes, edges: g.edges }, layers: [], cut: NONE };
-      if (id === null) self.current = g.seed;
+      // The API centres on you when asked for no one; you are also the person keyed OWNER_KEY, found by name.
+      const centre = g.nodes.find((n) => n.id === g.seed);
+      if (id === null || centre?.key === OWNER_KEY) self.current = g.seed;
       builtAt.current = { seed: g.seed, version };
       setShown(next);
       setSelected(open ? g.seed : null);
@@ -157,7 +161,6 @@ export default function Explorer() {
       setChecking(false);
       setQuery("");
       // The API may centre on another identity of the same person (merged addresses): the trail names what it chose.
-      const centre = g.nodes.find((n) => n.id === g.seed);
       if (centre) {
         setTrail((t) => (step === "push" ? [...t.filter((x) => x.id !== centre.id), centre].slice(-6) : [...t.slice(0, -2), centre]));
       }
@@ -347,10 +350,11 @@ export default function Explorer() {
   }
 
   // A connection you added: shown at once, the other end joining the graph if it wasn't on it (once it applies: one
-  // that waits for a rebuild shows when it publishes).
+  // that waits for a rebuild shows when it publishes). Undo forgets it; a Project put under a Project, which has no
+  // correction of its own, is taken out instead.
   async function linked(from: number, other: Thing, answer: LinkAdded) {
     const { id, override_id: overrideId } = answer;
-    const undo = id !== null ? () => api.removeLink(id) : overrideId !== null ? () => api.undoCorrection(overrideId) : undefined;
+    const undo = overrideId !== null ? () => api.undoCorrection(overrideId) : id !== null ? () => api.removeLink(id) : undefined;
     corrected({ text: `Connected to ${other.name}.`, answer, undo });
     if (id === null) return;
     try {

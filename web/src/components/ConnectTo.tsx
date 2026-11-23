@@ -54,7 +54,7 @@ export default function ConnectTo({ id, name, type, onLinkedAction }: {
             <button type="button" onClick={reset} className="text-muted hover:text-ink">Cancel</button>
           </div>
           {hits.active && (
-            <ul className="space-y-0.5">
+            <ul className="space-y-0.5" aria-label="Things to connect to">
               {hits.results?.map((n) => (
                 <li key={n.id}>
                   <button type="button" onClick={() => setOther(n)} className="btn-option">

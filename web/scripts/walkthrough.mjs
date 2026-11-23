@@ -1,6 +1,7 @@
 // The explorer walkthrough: drives the Graph page in Chromium the way a person would (search, expand, collapse,
-// Back, a correction and its undo, the Reader, another tab and back, twenty changes of centre) and checks what the
-// page shows after each step. It fails on any console error or warning, a WebGL context warning among them.
+// Back, a correction and its undo, the Reader, another tab and back, finding you by name, twenty changes of centre) and
+// checks what the page shows after each step. It fails on any console error or warning, a WebGL context warning among
+// them.
 //
 // Needs the API and the web app running against the Enron demo database (make demo). Usage, from web/:
 //   npm run walkthrough                              # the app at http://localhost:3000
@@ -12,8 +13,8 @@
 import { chromium } from "playwright";
 
 const WEB = (process.env.WEB_URL ?? "http://localhost:3000").replace(/\/$/, "");
-// Two people to centre on, then Back between them: never the mailbox's owner (Phillip K Allen), whom the graph opens
-// on and whom Jump to lists as "You".
+// Two people to centre on, then Back between them. The mailbox's owner (Phillip K Allen), whom the graph opens on, is
+// found by name in a step of its own: Jump to lists them under their name, marked "You".
 const [FIRST, SECOND] = (process.env.WALK_PEOPLE ?? "Ina Rangel|John Lavorato").split("|");
 // A person and a top connection of theirs joined by an inferred link, which "This is wrong" can remove.
 const [PERSON, OTHER] = (process.env.WALK_PAIR ?? "Mery L Brown|Pallen").split("|");
@@ -89,10 +90,10 @@ async function walk(browser) {
     }
   }
 
-  /** Search for a name and open the best match that carries exactly that name. */
+  /** Search for a name and open the best match that carries exactly that name (you are marked "You"). */
   async function centreOn(name) {
     await search.fill(name);
-    await page.getByRole("option", { name: new RegExp(`^${escape(name)} \\d`) }).first().click({ timeout: TIMEOUT });
+    await page.getByRole("option", { name: new RegExp(`^${escape(name)} (\\d|You$)`) }).first().click({ timeout: TIMEOUT });
     await until(`the graph centred on ${name}`, async () => (await shown()).name === name);
     return shown();
   }
@@ -105,6 +106,7 @@ async function walk(browser) {
   const empty = page.getByText("Nobody to start from yet", { exact: true });
   const opened = await until("your graph or the empty state", async () =>
     (await status.count()) ? `centred on ${(await shown()).name}` : (await empty.count()) ? "nobody to start from" : false);
+  const you = opened.startsWith("centred on ") ? (await shown()).name : null;
   pass(opened);
 
   step = `search for ${FIRST}`;
@@ -195,6 +197,13 @@ async function walk(browser) {
   check(after.count === before.count, `the graph changed from ${before.count} to ${after.count} things`);
   await until("the URL to name the centre again", async () => page.url() === url);
   pass(`still centred on ${after.name}`);
+
+  if (you) {
+    step = `find you (${you}) by name`;
+    await centreOn(you);
+    await until("your own graph at /", async () => new URL(page.url()).pathname === "/" && !new URL(page.url()).search);
+    pass();
+  }
 
   step = `${CHANGES} changes of centre`;
   for (let i = 0; i < CHANGES; i++) await centreOn(SEEDS[(i + 1) % SEEDS.length]);

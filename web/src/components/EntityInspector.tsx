@@ -61,7 +61,7 @@ function MergePicker({ self, onPick, onCancel }: { self: number; onPick: (n: Thi
         <button type="button" onClick={onCancel} className="text-xs text-muted hover:text-ink">Cancel</button>
       </div>
       {projects.active && (
-        <ul className="mt-2 space-y-0.5">
+        <ul className="mt-2 space-y-0.5" aria-label="Projects to merge">
           {projects.results?.map((n) => (
             <li key={n.id}>
               <button type="button" onClick={() => onPick(n)} className="btn-option">

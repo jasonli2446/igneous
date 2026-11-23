@@ -229,7 +229,7 @@ function SamePerson({ id, name, onMergedAction }: { id: number; name: string; on
             <button type="button" onClick={close} className="text-muted hover:text-ink">Cancel</button>
           </div>
           {people.active && (
-            <ul className="mt-2 space-y-0.5">
+            <ul className="mt-2 space-y-0.5" aria-label="People to merge with">
               {people.results?.map((n) => (
                 <li key={n.id}>
                   <button type="button" className="btn-option" onClick={() => setPicked(n)}>
