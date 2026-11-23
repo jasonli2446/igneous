@@ -1,32 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useId } from "react";
 import { InlineError, Skeleton } from "@/components/ui";
-import { api, NodeSummary as Summary } from "@/lib/api";
-import { categoryColor, TYPE_CATEGORY } from "@/lib/graph-style";
+import { api, type NodeSummary as Summary } from "@/lib/api";
+import { nodeColor, sectionOf } from "@/lib/graph-style";
+import { useRequest } from "@/lib/hooks";
 
-const colorOf = (h: { type: string; category: string | null }) =>
-  categoryColor(h.category ?? TYPE_CATEGORY[h.type]);
-
-/** How a node connects to the rest of the graph, in a few plain sentences, then its top connections by category. */
-export default function NodeSummary({ id, onSelectAction, onWhyAction, showConnections = true }: {
-  id: number; onSelectAction: (id: number) => void; onWhyAction?: (a: number, b: number) => void; showConnections?: boolean;
+/** How a node connects to the rest of the graph, in a few plain sentences, then its top connections by section. */
+export default function NodeSummary({ id, revision = 0, onSelectAction, onWhyAction, showConnections = true }: {
+  id: number; revision?: number; onSelectAction: (id: number) => void; onWhyAction?: (a: number, b: number) => void;
+  showConnections?: boolean;
 }) {
-  const [data, setData] = useState<Summary | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [attempt, setAttempt] = useState(0);
+  const { data, error, retry } = useRequest(id, (signal) => api.nodeSummary(id, signal), revision);
+  const headingId = useId();
 
-  useEffect(() => {
-    const request = new AbortController();
-    setData(null);
-    setError(null);
-    api.nodeSummary(id, request.signal)
-      .then(setData)
-      .catch((e) => { if (!request.signal.aborted) setError(`Couldn't summarize this. (${String(e)})`); });
-    return () => request.abort();
-  }, [id, attempt]);
-
-  if (error) return <InlineError message={error} onRetry={() => setAttempt((a) => a + 1)} />;
+  if (error && !data) return <InlineError message={`Couldn't summarize this. (${String(error)})`} onRetry={retry} />;
   if (!data) {
     return (
       <div className="space-y-2" role="status" aria-label="Summarizing connections">
@@ -37,7 +25,7 @@ export default function NodeSummary({ id, onSelectAction, onWhyAction, showConne
 
   const groups = new Map<string, Summary["highlights"]>();
   for (const h of data.highlights) {
-    const key = h.category ?? TYPE_CATEGORY[h.type] ?? "Other";
+    const key = sectionOf(h) ?? "Other";
     groups.set(key, [...(groups.get(key) ?? []), h]);
   }
 
@@ -48,26 +36,25 @@ export default function NodeSummary({ id, onSelectAction, onWhyAction, showConne
         {data.generated_by === "model" && <p className="mt-1 text-[11px] text-muted">Summarized by AI from this item&apos;s connections.</p>}
       </section>
       {showConnections && groups.size > 0 && (
-        <section aria-label="Top connections" className="border-t border-line pt-4">
-          <h3 className="mb-2 text-xs font-medium text-muted">Top connections</h3>
+        <section aria-labelledby={headingId} className="border-t border-line pt-4">
+          <h3 id={headingId} className="mb-2 text-xs font-medium text-muted">Top connections</h3>
           <div className="space-y-3">
-            {[...groups].map(([cat, items]) => (
-              <div key={cat}>
+            {[...groups].map(([section, items]) => (
+              <div key={section}>
                 <div className="mb-0.5 flex items-center gap-1.5 text-[11px] text-muted">
-                  <span className="h-1.5 w-1.5 rounded-full" style={{ background: colorOf(items[0]) }} />{cat}
+                  <span aria-hidden className="h-1.5 w-1.5 rounded-full" style={{ background: nodeColor(items[0]) }} />{section}
                 </div>
                 <ul>
                   {items.map((h) => (
                     <li key={h.id} className="flex items-center gap-1">
-                      <button onClick={() => onSelectAction(h.id)}
+                      <button type="button" onClick={() => onSelectAction(h.id)}
                         className="flex min-w-0 flex-1 flex-col rounded px-1.5 py-1 text-left hover:bg-hover">
                         <span className="truncate text-sm">{h.name}</span>
                         <span className="truncate text-xs text-muted">{h.why}</span>
                       </button>
                       {onWhyAction && (
-                        <button onClick={() => onWhyAction(id, h.id)} aria-label={`Why is ${h.name} connected?`}
-                          title={`Why is ${h.name} connected?`}
-                          className="shrink-0 rounded border border-line px-1.5 py-0.5 text-[11px] text-soft hover:bg-hover hover:text-ink">Why</button>
+                        <button type="button" onClick={() => onWhyAction(id, h.id)} aria-label={`Why is ${h.name} connected?`}
+                          title={`Why is ${h.name} connected?`} className="btn-chip shrink-0">Why</button>
                       )}
                     </li>
                   ))}

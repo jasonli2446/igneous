@@ -1,8 +1,6 @@
-"""Google Drive connector: full backfill plus incremental Changes API sync."""
+"""Google Drive connector: a resumable backfill, then incremental Changes API sync."""
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
 
@@ -10,18 +8,19 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from igneous.config import settings
-from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem, Tombstone
-from igneous.connectors.gmail import _retry
-from igneous.parsers import parse_document
+from igneous.connectors import google_api
+from igneous.connectors.base import Checkpoint, CompletedScan, Every, SourceItem, Tombstone
+from igneous.parsers import MAX_DOCUMENT_BYTES, parse_document, supported
 
-CHECKPOINT_EVERY = 100
 FOLDER_MIME = "application/vnd.google-apps.folder"
 WORKSPACE_EXPORTS = {
     "application/vnd.google-apps.document": ("text/plain", ".txt"),
-    "application/vnd.google-apps.spreadsheet": ("text/csv", ".csv"),
+    # .xlsx, not CSV: a CSV export holds only the first sheet.
+    "application/vnd.google-apps.spreadsheet": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                                ".xlsx"),
     "application/vnd.google-apps.presentation": ("text/plain", ".txt"),
 }
-FILE_FIELDS = "id,name,mimeType,modifiedTime,createdTime,parents,webViewLink,trashed"
+FILE_FIELDS = "id,name,mimeType,size,modifiedTime,createdTime,parents,webViewLink,trashed"
 
 
 def _when(value: str | None) -> datetime | None:
@@ -53,47 +52,53 @@ def _is_expired_change_token(exc: HttpError) -> bool:
 class DriveConnector:
     """Synchronize Drive files by immutable Drive ID, never by a synthesized path.
 
-    The first sync obtains a Changes API token before a complete ``files.list`` snapshot.
-    Subsequent syncs consume the Changes API. Explicit removed/trashed changes become
-    ``Tombstone`` events; they never misuse ``CompletedScan``, which is only for a full
-    listing whose observed IDs are known complete.
+    A file is stored when it is in Drive, not trashed, and readable: a format the parsers read, no larger than
+    MAX_DOCUMENT_BYTES, and downloadable. Whether a file qualifies is decided from its listing before anything is
+    downloaded. The first sync obtains a Changes API token before a complete `files.list` snapshot, whose
+    CompletedScan observes only the files it stored, so a stored file that no longer qualifies is removed; the
+    snapshot checkpoints its page and what it has observed, so an interrupted one continues where it stopped. Later
+    syncs consume the Changes API: a file removed, trashed or no longer readable becomes a Tombstone.
     """
 
     name = "drive"
 
-    def __init__(self, creds, account: str):
-        self.svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+    def __init__(self, creds, account: str, service=None):
+        self.svc = service or build("drive", "v3", credentials=creds, cache_discovery=False)
         self.account = account
+        self._folder_names: dict[str, str | None] = {}
 
     def _folder_name(self, folder_id: str) -> str | None:
         """A parent folder's human name (one read-only lookup per folder per sync), so the graph shows
         "Gloomhaven Night" rather than a Drive id. None when the folder isn't visible to this account."""
-        cache = self.__dict__.setdefault("_folder_names", {})
-        if folder_id not in cache:
+        if folder_id not in self._folder_names:
             try:
-                cache[folder_id] = self.svc.files().get(
-                    fileId=folder_id, fields="name", supportsAllDrives=True).execute().get("name")
-            except (HttpError, AttributeError, TypeError):  # not visible to this account, or a test double
-                cache[folder_id] = None
-        return cache[folder_id]
+                found = google_api.call("drive", self.svc.files().get(fileId=folder_id, fields="name",
+                                                                      supportsAllDrives=True))
+                self._folder_names[folder_id] = found.get("name")
+            except HttpError as exc:
+                if exc.resp.status not in (403, 404):
+                    raise
+                self._folder_names[folder_id] = None
+        return self._folder_names[folder_id]
 
     def _source_item(self, file: dict) -> SourceItem | None:
         mime_type = file.get("mimeType")
         if mime_type == FOLDER_MIME or file.get("trashed"):
             return None
         export = WORKSPACE_EXPORTS.get(mime_type)
-        # Workspace types without an export format (Forms, Sites, shortcuts, etc.) cannot
-        # be downloaded. They remain observed during a full scan but have no SourceItem.
-        if mime_type and mime_type.startswith("application/vnd.google-apps.") and not export:
-            return None
+        if export:
+            export_mime, suffix = export
+            filename, parser_mime = f"{file.get('name', file['id'])}{suffix}", export_mime
+            request = self.svc.files().export(fileId=file["id"], mimeType=export_mime)
+        elif mime_type and mime_type.startswith("application/vnd.google-apps."):
+            return None  # Forms, Sites, shortcuts and the like have no export to read
+        else:
+            filename, parser_mime = file.get("name", file["id"]), mime_type
+            if not supported(filename, parser_mime) or int(file.get("size") or 0) > MAX_DOCUMENT_BYTES:
+                return None  # decided from the listing: nothing is downloaded
+            request = self.svc.files().get_media(fileId=file["id"], supportsAllDrives=True)
         try:
-            if export:
-                export_mime, suffix = export
-                data = _retry(self.svc.files().export(fileId=file["id"], mimeType=export_mime))
-                filename, parser_mime = f"{file.get('name', file['id'])}{suffix}", export_mime
-            else:
-                data = _retry(self.svc.files().get_media(fileId=file["id"], supportsAllDrives=True))
-                filename, parser_mime = file.get("name", file["id"]), file.get("mimeType")
+            data = google_api.call("drive", request)
         except HttpError as exc:
             if _is_skippable_download_error(exc):
                 return None
@@ -117,7 +122,6 @@ class DriveConnector:
             "parser": parsed.parser,
             "boundaries": parsed.boundaries,
         }
-        digest = hashlib.sha256(data + b"\0" + json.dumps(raw_meta, sort_keys=True).encode()).hexdigest()
         return SourceItem(
             source=self.name,
             external_id=_external_id(self.account, file["id"]),
@@ -126,37 +130,47 @@ class DriveConnector:
             occurred_at=_when(file.get("modifiedTime") or file.get("createdTime")),
             mime=parsed.mime,
             raw_meta=raw_meta,
-            content_hash=digest,
         )
 
-    def _backfill(self) -> Iterator[SourceItem | Checkpoint | CompletedScan]:
+    def _backfill(self, resume: dict | None = None) -> Iterator[SourceItem | Checkpoint | CompletedScan]:
+        """A complete listing. `resume` (the cursor's "backfill") continues one: its change token, the next page
+        and the ids observed so far."""
+        resume = resume or {}
         # Capture the change position before the snapshot so mutations during it are not missed.
-        start_token = _retry(self.svc.changes().getStartPageToken(supportsAllDrives=True))["startPageToken"]
-        page, observed = None, set()
+        start_token = resume.get("start_page_token") or google_api.call(
+            "drive", self.svc.changes().getStartPageToken(supportsAllDrives=True))["startPageToken"]
+        page, observed, due = resume.get("page_token"), set(resume.get("observed", [])), Every()
         while True:
-            response = _retry(self.svc.files().list(
-                q="trashed = false", spaces="drive", pageSize=settings.drive_page_size, pageToken=page,
-                fields=f"nextPageToken,files({FILE_FIELDS})", orderBy="name", supportsAllDrives=True,
-                includeItemsFromAllDrives=True))
+            try:
+                response = google_api.call("drive", self.svc.files().list(
+                    q="trashed = false", spaces="drive", pageSize=settings.drive_page_size, pageToken=page,
+                    fields=f"nextPageToken,files({FILE_FIELDS})", orderBy="name", supportsAllDrives=True,
+                    includeItemsFromAllDrives=True))
+            except HttpError as exc:
+                if resume and exc.resp.status == 400:  # a page token that outlived its listing: list again
+                    yield from self._backfill()
+                    return
+                raise
             for file in response.get("files", []):
-                observed.add(_external_id(self.account, file["id"]))
                 item = self._source_item(file)
                 if item:
+                    observed.add(item.external_id)
                     yield item
             page = response.get("nextPageToken")
             if not page:
                 break
-            # A limited run deliberately restarts a fresh snapshot later, preventing a partial
-            # listing from ever authorizing deletion reconciliation.
-            yield Checkpoint({})
-        yield CompletedScan({"start_page_token": start_token}, self.name, frozenset(observed))
+            if due():
+                yield Checkpoint({"backfill": {"start_page_token": start_token, "page_token": page,
+                                               "observed": sorted(observed)}})
+        # The listing covers this account only: another account's files are not its to delete.
+        yield CompletedScan({"start_page_token": start_token}, self.name, frozenset(observed), scopes=(self.account,))
 
     def _changes(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | Tombstone]:
         start = cursor["start_page_token"]
         page = cursor.get("changes_page_token")
         while True:
             try:
-                response = _retry(self.svc.changes().list(
+                response = google_api.call("drive", self.svc.changes().list(
                     pageToken=page or start, spaces="drive", pageSize=settings.drive_page_size,
                     fields=f"nextPageToken,newStartPageToken,changes(changeType,fileId,removed,file({FILE_FIELDS}))",
                     includeRemoved=True, supportsAllDrives=True, includeItemsFromAllDrives=True))
@@ -174,12 +188,8 @@ class DriveConnector:
                     continue
                 external_id = _external_id(self.account, file_id)
                 file = change.get("file")
-                if change.get("removed") or not file or file.get("trashed"):
-                    yield Tombstone(self.name, external_id)
-                    continue
-                item = self._source_item(file)
-                if item:
-                    yield item
+                item = None if change.get("removed") or not file else self._source_item(file)
+                yield item or Tombstone(self.name, external_id)  # removed, trashed or no longer readable
             page = response.get("nextPageToken")
             if not page:
                 new_token = response.get("newStartPageToken", start)
@@ -188,7 +198,9 @@ class DriveConnector:
             yield Checkpoint({"start_page_token": start, "changes_page_token": page})
 
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | CompletedScan | Tombstone]:
-        if "start_page_token" not in cursor:
+        if "backfill" in cursor:
+            yield from self._backfill(cursor["backfill"])
+        elif "start_page_token" not in cursor:
             yield from self._backfill()
         else:
             yield from self._changes(cursor)

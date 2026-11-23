@@ -15,21 +15,6 @@ export type NodeSummary = {
 export type Subgraph = { nodes: GNode[]; edges: GEdge[]; categories?: GNode[] };
 export type GraphFilters = { source?: string; edgeTypes?: string[]; from?: string; to?: string };
 
-export type SyncStatus = {
-  connector: string;
-  account: string;
-  status: "known" | "never_synced";
-  last_synced_at: string | null;
-  cursor_age_seconds: number | null;
-  item_count: number;
-  item_count_scope: "connector";
-  cursor: {
-    present: boolean;
-    keys: string[];
-    gmail_backfill_in_progress: boolean;
-  };
-};
-
 function graphParams(filters: GraphFilters = {}) {
   return { source: filters.source, types: filters.edgeTypes, from: filters.from, to: filters.to };
 }
@@ -196,44 +181,18 @@ function searchUrl(path: string, q: string, { sources, person, from, to, mode }:
   return url;
 }
 
-export type AiImportResult = {
-  provider: "chatgpt" | "claude_ai" | "gemini";
-  conversations: number;
-  items_inserted: number;
-  items_updated: number;
-  redactions: number;
-};
+/** What an import route takes: files to upload, or a path the API reads in place (it runs on your computer). */
+export type ImportInput = { files?: File[]; path?: string; scanDownloads?: boolean };
 
-// XHR rather than fetch: fetch cannot report upload progress.
-function importAiExport(file: File, provider?: string, onProgress?: (fraction: number) => void) {
-  return new Promise<AiImportResult>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", new URL("/import/ai-export", API).toString());
-    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
-    xhr.onerror = () => reject(new Error("Could not reach the API."));
-    xhr.onload = () => {
-      let body: { detail?: unknown } = {};
-      try { body = JSON.parse(xhr.responseText); } catch {}
-      if (xhr.status >= 200 && xhr.status < 300) return resolve(body as unknown as AiImportResult);
-      reject(new Error(typeof body.detail === "string" ? body.detail : `Import failed (${xhr.status}).`));
-    };
-    const form = new FormData();
-    form.append("file", file);
-    if (provider) form.append("provider", provider);
-    xhr.send(form);
-  });
-}
-
-export type TakeoutResult = {
-  inserted: number; updated: number; unchanged: number; places: number; redactions: number;
-  parts: Record<string, number>; counts: Record<string, number>; notes: string[];
-};
-
-// A Takeout zip can be several GB: prefer { path } or { scan_downloads } (this API runs on your computer) over upload.
-function importTakeout(input: { files?: File[]; path?: string; scanDownloads?: boolean }, onProgress?: (fraction: number) => void) {
+/** Start an import job. XHR rather than fetch: fetch cannot report upload progress. */
+function startImport(route: string, input: ImportInput, onProgress?: (fraction: number) => void) {
+  const form = new FormData();
+  for (const f of input.files ?? []) form.append("file", f);
+  if (input.path?.trim()) form.append("path", input.path.trim());
+  if (input.scanDownloads) form.append("scan_downloads", "true");
   return new Promise<Job>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", new URL("/import/takeout", API).toString());
+    xhr.open("POST", new URL(route, API).toString());
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
     xhr.onerror = () => reject(new Error("Could not reach the API."));
     xhr.onload = () => {
@@ -242,42 +201,21 @@ function importTakeout(input: { files?: File[]; path?: string; scanDownloads?: b
       if (xhr.status >= 200 && xhr.status < 300) return resolve(body as unknown as Job);
       reject(new Error(typeof body.detail === "string" ? body.detail : `Import failed (${xhr.status}).`));
     };
-    const form = new FormData();
-    for (const f of input.files ?? []) form.append("file", f);
-    if (input.path?.trim()) form.append("path", input.path.trim());
-    if (input.scanDownloads) form.append("scan_downloads", "true");
     xhr.send(form);
   });
 }
 
-export type LinkedInResult = {
-  inserted: number; updated: number; unchanged: number; connections: number; positions: number; education: number;
-  profile: number; redactions: number;
+/** The stats every import's job result carries. */
+type ImportStats = { inserted: number; updated: number; unchanged: number; redactions: number };
+export type AiImportResult = ImportStats & { provider: "chatgpt" | "claude_ai" | "gemini"; conversations: number };
+export type TakeoutResult = ImportStats & {
+  places: number; parts: Record<string, number>; counts: Record<string, number>; notes: string[];
 };
-
-// A LinkedIn export is small: upload the zip, or give a path (this API runs on your computer).
-function importLinkedin(input: { file?: File; path?: string }, onProgress?: (fraction: number) => void) {
-  return new Promise<Job>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", new URL("/import/linkedin", API).toString());
-    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
-    xhr.onerror = () => reject(new Error("Could not reach the API."));
-    xhr.onload = () => {
-      let body: { detail?: unknown } = {};
-      try { body = JSON.parse(xhr.responseText); } catch {}
-      if (xhr.status >= 200 && xhr.status < 300) return resolve(body as unknown as Job);
-      reject(new Error(typeof body.detail === "string" ? body.detail : `Import failed (${xhr.status}).`));
-    };
-    const form = new FormData();
-    if (input.file) form.append("file", input.file);
-    if (input.path?.trim()) form.append("path", input.path.trim());
-    xhr.send(form);
-  });
-}
+export type LinkedInResult = ImportStats & { connections: number; positions: number; education: number; profile: number };
 
 export type Job = {
   id: string;
-  kind: "sync" | "pipeline" | "connect" | "import";
+  kind: "sync" | "pipeline" | "import";
   source: string;
   account: string | null;
   status: "running" | "succeeded" | "failed";
@@ -289,14 +227,15 @@ export type Job = {
     stage?: string | null; label?: string | null; step?: number; steps?: number;
     count?: number | null; total?: number | null; note?: string | null;
     file?: string; files_done?: number; files_total?: number;
+    conversations?: number; account?: string;
   };
-  result: Record<string, number> | null;
+  result: Record<string, unknown> | null;
   error: string | null;
 };
 
 export type SourceInfo = {
   id: string;
-  kind: "google" | "local" | "remote" | "import" | "planned";
+  kind: "google" | "local" | "remote" | "import";
   name: string;
   group: string;
   reads: string;
@@ -309,9 +248,8 @@ export type SourceInfo = {
   accounts: { account: string; last_sync: string | null }[];
   requirements_ok: boolean;
   can_sync: boolean;
-  coming_soon: boolean;
   job: Job | null;
-  // Whether a hosted model may read this source, and how to change that (#179).
+  // Whether a hosted model may read this source, and how to change that.
   model: { id: string; allowed: "yes" | "partly" | "no"; note: string };
 };
 
@@ -333,18 +271,23 @@ async function send<T>(method: string, path: string, body?: unknown, params: Rec
 }
 
 export const api = {
-  importAiExport,
-  importTakeout,
-  importLinkedin,
+  // A Takeout export can be several GB: prefer a path or scanDownloads (read in place) to an upload.
+  importTakeout: (input: ImportInput, onProgress?: (fraction: number) => void) =>
+    startImport("/import/takeout", input, onProgress),
+  importLinkedin: (input: ImportInput, onProgress?: (fraction: number) => void) =>
+    startImport("/import/linkedin", input, onProgress),
+  importAiExport: (input: ImportInput, onProgress?: (fraction: number) => void) =>
+    startImport("/import/ai-export", input, onProgress),
   job: (id: string, signal?: AbortSignal) => get<Job>(`/jobs/${id}`, {}, signal),
   sources: (signal?: AbortSignal) => get<{ sources: SourceInfo[]; model: ModelStatus }>("/sources", {}, signal),
   jobs: (signal?: AbortSignal) => get<{ jobs: Job[] }>("/jobs", {}, signal),
   syncSource: (id: string, account?: string) => send<Job>("POST", `/sources/${id}/sync`, undefined, account ? { account } : {}),
   runPipeline: () => send<Job>("POST", "/pipeline/run"),
-  saveGithubToken: (token: string) => send<{ stored: boolean }>("POST", "/sources/github/token", { token }),
+  saveGithubToken: (token: string) => send<{ stored: boolean; account: string }>("POST", "/sources/github/token", { token }),
+  disconnect: (provider: "google" | "github", account: string) =>
+    send<{ removed: string }>("DELETE", `/sources/${provider}/accounts/${encodeURIComponent(account)}`),
   googleConnectUrl: () => new URL("/sources/google/connect", API).toString(),
   stats: () => get<{ source_items: Record<string, number>; nodes: Record<string, number>; edges: Record<string, number> }>("/stats", {}),
-  sync: (signal?: AbortSignal) => get<{ syncs: SyncStatus[] }>("/sync", {}, signal),
   search: (q: string, opts: SearchOptions = {}, signal?: AbortSignal) =>
     requestJson<{ hits: Hit[]; filters: AppliedFilters }>(searchUrl("/search", q, opts), { signal }),
   experts: (q: string, opts: SearchOptions = {}, signal?: AbortSignal) =>

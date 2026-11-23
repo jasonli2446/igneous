@@ -1,7 +1,7 @@
-"""Encrypted connector secrets shared by OAuth and token-based connectors.
+"""Connector credentials (Google OAuth tokens, GitHub tokens), encrypted at rest in the `oauth_tokens` table.
 
-The encryption key stays in the git-ignored data/google/token.key location used by the
-existing Google connector so stored credentials remain readable after this refactor.
+The Fernet key is data/google/token.key (git-ignored, mode 600), created on first use: tokens saved under one key
+can't be read with another, so the data folder must stay the same (IGNEOUS_DATA_DIR).
 """
 import os
 from pathlib import Path
@@ -49,3 +49,11 @@ def load(s: Session, provider: str, account: str | None = None) -> tuple[str, st
 
 def accounts(s: Session, provider: str) -> list[str]:
     return list(s.execute(text("SELECT account FROM oauth_tokens WHERE provider = :p ORDER BY 1"), {"p": provider}).scalars())
+
+
+def delete(s: Session, provider: str, account: str) -> bool:
+    """Forget an account's secret. Its synced items and cursor stay: connecting it again resumes where it stopped."""
+    gone = s.execute(text("DELETE FROM oauth_tokens WHERE provider = :p AND account = :a"),
+                     {"p": provider, "a": account}).rowcount
+    s.commit()
+    return bool(gone)

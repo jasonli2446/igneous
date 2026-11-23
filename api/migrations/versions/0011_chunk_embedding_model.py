@@ -5,13 +5,13 @@ compares only vectors from that model, so changing the model never mixes two vec
 this column existed came from BAAI/bge-small-en-v1.5, the model Igneous ships with; a database embedded with another
 model is re-embedded once.
 
-Revision ID: 0010
-Revises: 0009
+Revision ID: 0011
+Revises: 0010
 """
 from alembic import op
 
-revision = "0010"
-down_revision = "0009"
+revision = "0011"
+down_revision = "0010"
 
 
 def upgrade():

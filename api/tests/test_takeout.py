@@ -1,4 +1,4 @@
-"""Google Takeout importer (#109). Synthetic data only; DB tests run in the throwaway test database."""
+"""Google Takeout importer. Synthetic data only; DB tests run in the throwaway test database."""
 import io
 import json
 import zipfile
@@ -180,6 +180,19 @@ def test_places_keys_and_timeline_without_names(zpath):
     assert takeout.place_key(None, "  Board  Game Cafe", 41.5004, -81.6004) == saved["key"]
 
 
+def test_a_days_visits_count_the_secrets_redacted_from_them(tmp_path):
+    visit = {"placeVisit": {"location": {"placeId": "ChIJkey", "name": f"Locker {TOKEN}", "address": "2 Side St"},
+                            "duration": {"startTimestamp": "2025-06-04T09:00:00.000Z",
+                                         "endTimestamp": "2025-06-04T10:00:00.000Z"}}}
+    # The same visit twice (a history exported in both formats is one visit): counted once.
+    z = build_zip(tmp_path / "t.zip", {
+        "Location History (Timeline)/Semantic Location History/2025/2025_JUNE.json": {"timelineObjects": [visit, visit]}})
+    items, report = takeout.parse([z])
+    day = by_id(items)["maps/visits/2025-06-04"]
+    assert TOKEN not in day.body_text and "[REDACTED:github_token]" in day.body_text
+    assert day.raw_meta["redactions"] == 1 and report["redactions"] >= 1
+
+
 def test_html_activity_is_reported_not_parsed(tmp_path):
     z = build_zip(tmp_path / "t.zip", full_files(html_activity=True))
     _, report = takeout.parse([z])
@@ -225,20 +238,10 @@ def test_scan_downloads(tmp_path):
     assert [p.name for p in takeout.downloads_zips(tmp_path)] == ["takeout-1-001.zip"]
 
 
-def clean():
-    with SessionLocal() as s:
-        s.execute(text("DELETE FROM nodes WHERE type = 'Place' OR (type IN ('File', 'Message') AND key LIKE 'takeout\\_%')"))
-        s.execute(text("DELETE FROM source_items WHERE source LIKE 'takeout\\_%' OR "
-                       "(source = 'ai_chats' AND external_id LIKE 'gemini/gemini-2025-05-01/%')"))
-        s.execute(text("DELETE FROM sync_state WHERE connector = 'takeout'"))
-        s.commit()
-
-
 @pytest.fixture
-def db(test_db):
-    clean()
-    yield
-    clean()
+def db(committed_db):
+    """These tests commit through their own sessions (as an import does): start from an empty graph."""
+    yield committed_db
 
 
 def test_import_is_idempotent_and_builds_graph(db, zpath):

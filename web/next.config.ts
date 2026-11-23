@@ -1,9 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
   cacheComponents: true,
   partialPrefetching: true,
+  // Imports live on the Sources page; an old /import link lands there.
+  redirects() {
+    return [{ source: "/import", destination: "/settings", permanent: false }];
+  },
   turbopack: {
     rules: {
       "*.css": {

@@ -290,14 +290,15 @@ def build_contact(b: Builder, item) -> None:
     identity on the card: ground truth for entity resolution (extractor 'contacts', which `resolve --undo`
     leaves alone)."""
     meta = item.raw_meta
-    name = item.title
+    name = item.title  # None for a card without a name: it still ties its identities together, but names no one
     keys = [e for e in meta.get("emails", [])] + [norm_phone(p) or p for p in meta.get("phones", []) if p]
     ids = []
     for k in keys:
-        pid = b.node("Person", k, name, {"handle": k} if "@" not in k else {"email": k})
-        # A contact card is the authority on a person's name: overwrite handle- or address-derived names.
-        b.s.execute(text("UPDATE nodes SET name = :n, props = props || '{\"named_by\": \"contacts\"}' WHERE id = :id"),
-                    {"n": name, "id": pid})
+        pid = b.node("Person", k, name or k, {"handle": k} if "@" not in k else {"email": k})
+        if name:
+            # A contact card is the authority on a person's name: overwrite handle- or address-derived names.
+            b.s.execute(text("UPDATE nodes SET name = :n, props = props || '{\"named_by\": \"contacts\"}' "
+                             "WHERE id = :id"), {"n": name, "id": pid})
         ids.append(pid)
     for a, c in pairwise(ids):
         s0, s1 = sorted((a, c))

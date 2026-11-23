@@ -16,7 +16,8 @@ class Settings(BaseSettings):
     data_dir: str = "../data"
     # Where the browser UI lives; the Google sign-in callback sends you back here.
     web_url: str = "http://localhost:3000"
-    # Comma-separated filesystem roots used by ``igneous sync fs`` when --path is omitted.
+    # The Local files folders, comma-separated. Empty: the Documents, Desktop, Downloads and iCloud Drive folders
+    # that exist (sources.fs_roots).
     filesystem_roots: str = ""
     # Local files and Apple Notes reach a hosted model only with this on as well as listed in llm_sources. Search
     # embeds and reranks every source on this computer either way.
