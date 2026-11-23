@@ -9,8 +9,9 @@ backbone:
      the org. It becomes the org's own thread: its sub-projects, records and people show under the org, and any
      other thread with that name is marked props.same_as_org (the last step hides it). An org with no such thread
      gets one of its own (`backbone:<org key>`, a Project under the correction contract: a name you give it stays).
-  2. Stated: projects your resume lists under the org (`props.resume_projects`) are part of it, and a lab inside a
-     university is part of the university's thread. These are stated (extractor 'profile'), never judged.
+  2. Stated: projects your resume lists under the org (`props.resume_projects`, each with the document that lists it)
+     are part of it, and a lab inside a university is part of the university's thread. These are stated (extractor
+     'profile'), never judged, and their record is the document that states them.
   3. Described: a thread your own description of a role there names as written (your LinkedIn says the internship
      was "Heron depth filtering"), inside that role's dates, was work you did there, under that role. A trip or a
      hobby never is.
@@ -79,6 +80,8 @@ def _orgs(s: Session) -> list[dict]:
         SELECT DISTINCT ON (o.id) o.id, o.name, o.key, o.props, (e.props->>'school') IS NOT NULL AS school,
                e.valid_from, e.valid_to,
                (SELECT p.dst FROM edges p WHERE p.src = o.id AND p.type = 'PART_OF' ORDER BY p.id LIMIT 1) AS parent,
+               (SELECT p.source_item_id FROM edges p WHERE p.src = o.id AND p.type = 'PART_OF' ORDER BY p.id LIMIT 1)
+                   AS parent_record,
                (SELECT r.props->'roles' FROM edges r WHERE r.src = e.src AND r.dst = o.id AND r.type = 'WORKED_AT'
                   AND r.extractor = 'profile') AS roles,
                EXISTS (SELECT 1 FROM edges x WHERE x.src = e.src AND x.dst = o.id AND x.type = 'WORKED_AT'
@@ -403,12 +406,13 @@ def run(s: Session, log=print) -> dict:
         # An org inside an org (the Lab in State University): its thread is under the parent's.
         if o["parent"] in org_thread:
             w.edge(ot, org_thread[o["parent"]], "PART_OF", {"why": "part of it, per your resume"}, confidence=1.0,
-                   extractor="profile")
+                   extractor="profile", source_item_id=o["parent_record"])
             stats["nested"] += 1
-        for name in sorted((o["props"] or {}).get("resume_projects", [])):
-            t = by_name.get(norm(name))
+        for listed in sorted((o["props"] or {}).get("resume_projects", []), key=lambda p: p["name"]):
+            t = by_name.get(norm(listed["name"]))
             if t and t != ot and t not in placed:
-                place(t, o, f"your resume lists it under {o['name']}", confidence=1.0, extractor="profile")
+                place(t, o, f"your resume lists it under {o['name']}", confidence=1.0, extractor="profile",
+                      source_item_id=listed.get("source_item_id"))
                 placed.add(t)
                 stats["stated"] += 1
     for o in orgs:

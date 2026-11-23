@@ -240,6 +240,8 @@ def run(s: Session, log=print) -> dict:
             if not k:
                 continue
             org = orgs.setdefault(k, {"name": name, "domain_hint": "", "parent": "", "project": "", "school": False})
+            if not org["project"] and (e.get("project") or "").strip():
+                org["project_doc"] = doc.id  # the document that lists the project under the organization
             for field in ("domain_hint", "parent", "project"):
                 org[field] = org[field] or (e.get(field) or "").strip()
             org["school"] |= school
@@ -301,7 +303,7 @@ def run(s: Session, log=print) -> dict:
 
     org_ids: dict[str, int] = {}
     part_of: dict[str, int] = {}  # org slug -> the org that claimed its domain first
-    named_projects: dict[int, set[str]] = {}  # org -> project names your resume puts under it
+    named_projects: dict[int, dict[str, int]] = {}  # org -> {project your resume puts under it: the document}
     # Each name's organization, schools first: they claim their domains before a lab at the same domain does.
     for k, e in sorted(orgs.items(), key=lambda kv: not kv[1]["school"]):
         oid, by_domain = org_node(e["name"], e["domain_hint"])
@@ -345,7 +347,7 @@ def run(s: Session, log=print) -> dict:
             edge(oid, parent, "PART_OF", {"why": f"{first['via']}: {e['name']} is part of {e['parent'] or 'it'}"},
                  sid=first["doc"])
         if e["project"]:
-            named_projects.setdefault(oid, set()).add(e["project"])
+            named_projects.setdefault(oid, {}).setdefault(e["project"], e["project_doc"])
     # Projects become pinned rows of the thread registry, named as you name them. A row keeps its state (a project
     # folded into a thread stays its facet); a project your documents no longer list goes.
     keys = []
@@ -362,12 +364,13 @@ def run(s: Session, log=print) -> dict:
         """), {"k": key, "n": p["name"][:80], "t": terms})
         oid = org_ids.get(_slug(p.get("org") or "")) or by_name.get(_slug(p.get("org") or ""))
         if oid:
-            named_projects.setdefault(oid, set()).add(p["name"])
-    # Which projects sit under which org: read by the backbone stage once threads exist (graph/backbone.py).
+            named_projects.setdefault(oid, {}).setdefault(p["name"], p["doc"])
+    # Which projects sit under which org, each with the document that says so: read by the backbone stage once threads
+    # exist (graph/backbone.py).
     s.execute(text("UPDATE nodes SET props = props - 'resume_projects' WHERE type = 'Organization' AND props ? 'resume_projects'"))
-    for oid, names in named_projects.items():
+    for oid, listed in named_projects.items():
         s.execute(text("UPDATE nodes SET props = props || jsonb_build_object('resume_projects', CAST(:n AS jsonb)) WHERE id = :i"),
-                  {"n": json.dumps(sorted(names)), "i": oid})
+                  {"n": json.dumps([{"name": n, "source_item_id": listed[n]} for n in sorted(listed)]), "i": oid})
     s.execute(text("DELETE FROM thread_registry WHERE origin = 'profile' AND NOT (key = ANY(:k))"), {"k": keys})
     # Organizations an older reading of your resume made that nothing points at any more.
     s.execute(text("""DELETE FROM nodes n WHERE n.type = 'Organization' AND n.props->>'named_by' = 'profile'

@@ -95,6 +95,11 @@ def test_an_internship_then_a_full_time_job_at_one_company(db):
                                                   "Jun 2024 - Aug 2024",
                    "Atlas": "your resume lists it under Acme Robotics, while you were Software Engineering Intern "
                             "there (Jun 2024 - Aug 2024)"}
+    # What the Why panel opens for a placement your resume states: the resume.
+    assert rows(db, """SELECT DISTINCT si.title FROM edges e JOIN nodes c ON c.id = e.src
+                       JOIN source_items si ON si.id = e.source_item_id
+                       WHERE e.type = 'PART_OF' AND c.name IN ('Atlas', 'Kiosk', 'Hiring Day')""") == [
+        ("Mo_Self_Resume_2024.pdf",)]
     # The explorer: the company once among your orgs, opening to its roles, each with when you held it.
     assert [o for o, _school, _until in traversal.your_orgs(db, [me_id])] == [link.id]
     opened = rows(db, "SELECT name FROM nodes WHERE id = ANY(:i)", i=traversal.children(db, link.id, "Organization"))
