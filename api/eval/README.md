@@ -200,7 +200,7 @@ On the default seed with the model off (2026-11-23), after `make persona` (one p
 | Who took part: missing or wrongly there | 0 | 0 |
 | Identities: clusters P / R | 1.00 / 0.94 | 1.00 / 0.94 |
 | Identities: pairs ≥ 0.5, P / R | 1.00 / 0.83 | 1.00 / 0.83 |
-| Ask retrieval, recall@10 over 13 answerable questions: hybrid / dense / lexical | 0.92 / 0.92 / 0.85 | the same |
+| Ask retrieval, recall@10 over 13 answerable questions: hybrid / dense / lexical | 0.77-0.92 / 0.46-0.92 / 0.85 | the same |
 
 - A folder, series or group chat a thread is about joins that thread (graph/entities.py) when most of its records are
   the thread's, so the documents folder's "Lisbon 2025", "CS 341 Operating Systems" and "tidepool" are part of their
@@ -224,9 +224,10 @@ On the default seed with the model off (2026-11-23), after `make persona` (one p
   bookings, the check-in notice, the searches and the Maps days, and none of the 26 fare newsletters.
 - The only identity left apart is classmate Alex Chen's LinkedIn profile: two people share the name, so the name
   alone joins neither.
-- Retrieval moves by a question or two between builds of the same seed (hybrid recall@10 from 0.77 to 0.92 over
-  four builds): lexical search orders equal scores by however the rows were stored, and the vector index (HNSW) is
-  approximate.
+- Retrieval moves between builds of the same seed (hybrid recall@10 from 0.77 to 0.92 over four builds), and between
+  restores of one database (dense from 0.46 to 0.92 over eight restores of one build, lexical 0.85 on each): lexical
+  search orders equal scores by however the rows were stored, and the vector index (HNSW) is approximate, its graph
+  built anew on each restore. The exact nearest passages are the same on every restore.
 - With the model off, threads keep their fallback names ("Lisbon · Jan-Mar 2025", kind "thread"). `--qa` needs the
   model.
 
