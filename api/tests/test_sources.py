@@ -1,10 +1,12 @@
 """The Sources registry, the one path every sync takes (CLI, API, scheduler), and the background job runner.
 No network: Google and GitHub are faked, and jobs run fake connectors against the test database."""
 import json
+import threading
 import time
 
 import click
 import pytest
+from conftest import finished_job
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from typer.testing import CliRunner
@@ -208,33 +210,37 @@ class FakeConnector:
         yield Checkpoint({"n": self.n})
 
 
-def wait_done(job_id: str) -> dict:
-    for _ in range(100):
-        with SessionLocal() as s:
-            job = jobs.get(s, job_id)
-        if job["status"] != "running":
-            return job
-        time.sleep(0.05)
-    raise AssertionError("job never finished")
-
-
 def test_job_runs_in_background_and_records_counts(committed_db):
     job = jobs.start("sync", "jobtest-ok", lambda s, p: jobs.run_connector(s, FakeConnector(3), "default", p))
     assert job["status"] == "running"
-    done = wait_done(job["id"])
+    done = finished_job(job["id"])
     assert done["status"] == "succeeded" and done["error"] is None
     assert done["result"]["inserted"] == 3 and done["progress"] == {"items": 3}
     assert done["finished_at"] is not None
 
 
+def test_a_started_job_is_answered_as_it_started_whatever_its_thread_did(committed_db, monkeypatch):
+    """The thread can finish before `start` returns (a loaded machine schedules it first): the answer is still the
+    job as it started, so the API's reply never depends on how threads are scheduled."""
+    class FinishesFirst(threading.Thread):
+        def start(self):
+            super().start()
+            self.join()
+
+    monkeypatch.setattr(jobs.threading, "Thread", FinishesFirst)
+    job = jobs.start("sync", "jobtest-fast", lambda s, p: {"inserted": 1, "updated": 0, "unchanged": 0})
+    assert (job["status"], job["finished_at"], job["result"]) == ("running", None, None)
+    assert finished_job(job["id"])["status"] == "succeeded"
+
+
 def test_failed_job_keeps_error_text_and_what_did_sync(committed_db):
     job = jobs.start("sync", "jobtest-bad", lambda s, p: jobs.run_connector(s, FakeConnector(1, fail=True), "x", p))
-    done = wait_done(job["id"])
+    done = finished_job(job["id"])
     assert done["status"] == "failed" and done["error"] == "boom" and done["result"] is None
 
     def partly(s, p):
         raise sources.SyncFailed("b@y.com: token expired", {"inserted": 2, "accounts": {"a@x.com": {}}})
-    done = wait_done(jobs.start("sync", "jobtest-partly", partly)["id"])
+    done = finished_job(jobs.start("sync", "jobtest-partly", partly)["id"])
     assert done["error"] == "b@y.com: token expired" and done["result"]["inserted"] == 2
 
 
@@ -249,9 +255,9 @@ def test_one_running_job_per_source(committed_db):
     with pytest.raises(jobs.JobBusy):
         jobs.start("sync", "jobtest-busy", slow)
     release.append(1)
-    wait_done(first["id"])
+    finished_job(first["id"])
     again = jobs.start("sync", "jobtest-busy", lambda s, p: {})  # free again once finished
-    wait_done(again["id"])
+    finished_job(again["id"])
 
 
 def test_interrupted_jobs_are_marked_failed_on_startup(committed_db):

@@ -11,6 +11,7 @@
   results cached per graph version (graph/dirty.py) start empty too.
 - `committed_db` is for code that commits from another thread or process (jobs, subprocesses): it empties every
   table, and what the test writes is really committed.
+- Uploads are staged in this run's own folder, so another run's imports never show up in this one's checks.
 
 Off CI, tests that need Postgres skip when it is not running.
 """
@@ -23,6 +24,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
+from igneous import uploads
 from igneous.config import Settings, settings
 
 API = Path(__file__).resolve().parents[1]
@@ -37,6 +39,7 @@ settings.database_url = _server.set(database=TEST_DB).render_as_string(hide_pass
 settings.data_dir = DATA_DIR
 # The web app is where FastAPI's test client calls from, so the API's local-only guard (igneous/access.py) lets it in.
 settings.web_url = "http://testserver"
+uploads.ROOT = Path(DATA_DIR) / "uploads"
 
 # Subprocesses (the CLI, the MCP server) build their own Settings: give them every value explicitly, which takes
 # precedence over api/.env, and nothing else from the shell.
@@ -139,6 +142,25 @@ def committed_db(test_db):
         _empty(s)
         s.commit()
         yield s
+
+
+def finished_job(job_id: str, timeout: float = 120.0) -> dict:
+    """A background job (`jobs.start`) once its thread has finished it, read from the jobs table. It waits up to a
+    deadline, not a number of polls, so a loaded machine makes the test slower, never wrong."""
+    import time
+
+    from igneous import jobs
+    from igneous.db import SessionLocal
+
+    deadline = time.monotonic() + timeout
+    while True:
+        with SessionLocal() as s:
+            job = jobs.get(s, job_id)
+        assert job is not None, f"job {job_id} is not in the jobs table"
+        if job["status"] != "running":
+            return job
+        assert time.monotonic() < deadline, f"job {job_id} still running after {timeout:.0f}s"
+        time.sleep(0.05)
 
 
 def pytest_sessionfinish(session, exitstatus):
