@@ -5,13 +5,19 @@ import { InlineError, Skeleton } from "@/components/ui";
 import { api, type SourceCard } from "@/lib/api";
 import { formatDay } from "@/lib/dates";
 import { useRequest } from "@/lib/hooks";
+import { useSourceLabel } from "@/lib/sources";
 
-const SOURCE_LABEL: Record<string, string> = {
-  gmail: "Gmail", email: "Email", gcal: "Calendar", gcontacts: "Contacts", maccontacts: "Contacts", drive: "Drive",
-  github: "GitHub", fs: "Files", notes: "Notes", imessage: "Messages", ai_chats: "AI chat", takeout: "Takeout", linkedin: "LinkedIn",
-};
-export const sourceLabel = (s: string) =>
-  SOURCE_LABEL[s] ?? (s.startsWith("takeout_") ? `Takeout ${s.slice(8)}` : s);
+/** The people a record's metadata names under `key` (from, to, cc): each by name, or by address when it has none. */
+export function participants(meta: Record<string, unknown>, key: string): string {
+  const named = meta[key];
+  if (!Array.isArray(named)) return "";
+  return named.map((x: unknown) => {
+    if (typeof x !== "object" || x === null) return String(x);
+    const name = "name" in x && typeof x.name === "string" ? x.name : "";
+    const email = "email" in x && typeof x.email === "string" ? x.email : "";
+    return name || email;
+  }).filter(Boolean).join(", ");
+}
 
 /** Open the original: an external link, or (for a local file) ask the API to open it in the default app. */
 export function OpenButton({ item }: { item: Pick<SourceCard, "id" | "open_url" | "open_label" | "local_file"> }) {
@@ -34,6 +40,7 @@ export function SourceRows({ items, highlight = [], note }: {
   items: SourceCard[]; highlight?: string[]; note?: (i: SourceCard) => string | null;
 }) {
   const [viewing, setViewing] = useState<number | null>(null);
+  const sourceLabel = useSourceLabel();
   return (
     <>
       <ul className="space-y-1.5">
@@ -117,6 +124,7 @@ export function Reader({ id, highlight, onCloseAction }: { id: number; highlight
   const titleId = useId();
   const { data: item, error, retry } = useRequest(id, (signal) => api.item(id, signal));
   const closed = useEffectEvent(onCloseAction);
+  const sourceLabel = useSourceLabel();
 
   // Opens on mount. The cleanup (unmount, or Next hiding this page) closes it without reporting a close: when the
   // page is shown again, it opens again. A close event that arrives while the dialog is open again is stale.
@@ -139,9 +147,6 @@ export function Reader({ id, highlight, onCloseAction }: { id: number; highlight
     ? item.text.split(new RegExp(`(${terms.map(esc).join("|")})`, "gi")) : null;
   const lower = new Set(terms.map((t) => t.toLowerCase()));
   const firstIdx = parts ? parts.findIndex((p) => lower.has(p.toLowerCase())) : -1;
-  const people = (v: unknown) => Array.isArray(v)
-    ? v.map((x) => (typeof x === "object" && x ? ((x as { name?: string; email?: string }).name || (x as { email?: string }).email) : String(x))).filter(Boolean).join(", ")
-    : "";
 
   // Keys pressed in the Reader are its own: Escape closes it, not the panel behind it.
   return (
@@ -156,8 +161,8 @@ export function Reader({ id, highlight, onCloseAction }: { id: number; highlight
           <h2 id={titleId} className="mt-0.5 break-words text-base font-semibold leading-snug">
             {item ? item.title || "(untitled)" : "Source item"}
           </h2>
-          {item && ["from", "to", "cc"].map((k) => people(item.meta[k]) && (
-            <div key={k} className="mt-0.5 break-words text-xs text-soft"><span className="capitalize">{k}</span> {people(item.meta[k])}</div>
+          {item && ["from", "to", "cc"].map((k) => participants(item.meta, k) && (
+            <div key={k} className="mt-0.5 break-words text-xs text-soft"><span className="capitalize">{k}</span> {participants(item.meta, k)}</div>
           ))}
         </div>
         {item && <OpenButton item={{ id: item.id, open_url: item.open_url, open_label: item.open_label, local_file: !!item.local_path }} />}

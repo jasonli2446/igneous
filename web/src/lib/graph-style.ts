@@ -55,7 +55,20 @@ const TYPE_LABEL: Record<string, string> = {
   Topic: "Topic", Commitment: "Commitment", Decision: "Decision",
 };
 
-export function typeLabel(type: string, props?: { group?: boolean } | null) {
-  if (type === "Thread") return props?.group ? "Group chat" : "Conversation";
+/** A node's type in words; a conversation the thread flags mark as a group (`props.group`) is a group chat. */
+export function typeLabel(type: string, props?: Record<string, unknown>) {
+  if (type === "Thread") return props?.group === true ? "Group chat" : "Conversation";
   return TYPE_LABEL[type] ?? type;
+}
+
+/** What a link of each type says, read from its source to its destination ("Ana is part of Atlas"). */
+const RELATION: Record<string, string> = {
+  CORRESPONDS: "corresponds with", PART_OF: "is part of", INVOLVED_IN: "is involved in", RELATED_TO: "is related to",
+  ATTENDED: "attended", MENTIONS: "mentions", ABOUT: "is about", INTRODUCED: "introduced", MEMBER_OF: "is a member of",
+  WORKED_AT: "worked at", SENT: "sent", RECEIVED: "received", IN_THREAD: "is in", REPLIES_TO: "replied to",
+  AUTHORED: "authored", SAME_AS: "is the same as",
+};
+
+export function relationLabel(type: string) {
+  return RELATION[type] ?? type.toLowerCase().replaceAll("_", " ");
 }

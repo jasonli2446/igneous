@@ -2,14 +2,15 @@
 
 import { useState } from "react";
 import ConnectTo from "@/components/ConnectTo";
-import type { Corrected } from "@/components/Inspector";
 import NodeSummary from "@/components/NodeSummary";
 import Sources from "@/components/SourceList";
 import { InlineError, Section, Skeleton } from "@/components/ui";
-import { api, type Correction, type GEdge, type GNode, type Thing } from "@/lib/api";
+import { api, type EntityCorrected, type EntityDetail, type LinkAdded, type Rejected, type Thing } from "@/lib/api";
+import type { Corrected } from "@/lib/corrections";
 import { formatDay } from "@/lib/dates";
 import { nodeColor } from "@/lib/graph-style";
 import { useLiveSearch, useRequest } from "@/lib/hooks";
+import { useSourceLabel } from "@/lib/sources";
 
 type Props = {
   id: number;
@@ -17,10 +18,10 @@ type Props = {
   revision: number;
   onSelectAction: (id: number) => void;
   onCloseAction: () => void;
-  /** A correction went through: the page says what changed, offers Undo and shows the result. */
+  /** A correction went through: the page says what changed and when it applies, offers Undo and shows the result. */
   onCorrectedAction: (c: Corrected) => void;
   /** A connection you added: shown on the graph in place. */
-  onLinkedAction: (node: GNode, edge: GEdge) => void;
+  onLinkedAction: (from: number, other: Thing, answer: LinkAdded) => void;
 };
 
 const ANCHOR_SENTENCES: [RegExp, (m: RegExpMatchArray) => string][] = [
@@ -78,23 +79,77 @@ function MergePicker({ self, onPick, onCancel }: { self: number; onPick: (n: Thi
   );
 }
 
+/** Your corrections that shape this project, each with its undo, for as long as it stands: not only in the notice
+ *  that follows it. */
+function YourCorrections({ e, locked, onUndo }: {
+  e: EntityDetail; locked: boolean; onUndo: (text: string, overrideIds: number[]) => void;
+}) {
+  const renames = e.corrections.filter((c) => c.op === "rename");
+  const hides = e.corrections.filter((c) => c.op === "hide");
+  const merges = e.corrections.filter((c) => c.op === "merge");
+  const rename = renames[renames.length - 1]; // the latest rename is the name it has; undoing it shows the one before
+  if (!rename && !hides.length && !merges.length) return null;
+  return (
+    <ul aria-label="Your corrections" className="mt-2 space-y-1 text-xs">
+      {rename && (
+        <li className="flex items-center gap-2 text-muted">
+          <span className="min-w-0 flex-1">You named it “{rename.value}” on {formatDay(rename.created_at)}.</span>
+          <button type="button" disabled={locked} className="btn-link shrink-0"
+            onClick={() => onUndo("Name restored.", [rename.override_id])}>Undo rename</button>
+        </li>
+      )}
+      {hides.length > 0 && (
+        <li className="flex items-center gap-2 text-danger">
+          <span className="min-w-0 flex-1">Hidden from the graph.</span>
+          <button type="button" disabled={locked} className="btn-link shrink-0"
+            onClick={() => onUndo(`"${e.name}" is on the graph again.`, hides.map((c) => c.override_id))}>Unhide</button>
+        </li>
+      )}
+      {merges.map((m) => (
+        <li key={m.override_id} className="flex items-center gap-2 text-muted">
+          <span className="min-w-0 flex-1">You merged “{m.value ?? "a project"}” into it.</span>
+          <button type="button" disabled={locked} className="btn-link shrink-0"
+            onClick={() => onUndo(`"${m.value ?? "The project"}" is its own project again.`, [m.override_id])}>Separate</button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export default function EntityInspector({ id, revision, onSelectAction, onCloseAction, onCorrectedAction, onLinkedAction }: Props) {
   const { data: e, error: loadError, loading, retry } = useRequest(id, (signal) => api.entity(id, signal), revision);
+  const sourceLabel = useSourceLabel();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [merging, setMerging] = useState(false);
 
-  /** Run one correction; the page announces it with Undo and refreshes this panel and the graph. */
-  const act = async (text: string, run: () => Promise<Correction>, keep: number = id) => {
+  /** Run one correction; the page says what changed and when it applies, offers Undo and refreshes this panel and
+   *  the graph. */
+  const act = async (text: string, run: () => Promise<EntityCorrected | Rejected>, keep: number = id) => {
     setBusy(true);
     setError(null);
     try {
-      const c = await run();
-      onCorrectedAction({ text, undo: () => api.undoCorrection(c.override_id), keep });
+      const answer = await run();
+      onCorrectedAction({ text, answer, undo: () => api.undoCorrection(answer.override_id), keep });
     } catch (x) {
       setError(`That didn't work. (${String(x)})`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Undo corrections listed in the panel (every hide, to unhide). */
+  const undo = async (text: string, overrideIds: number[]) => {
+    setBusy(true);
+    setError(null);
+    try {
+      let answer = null;
+      for (const o of overrideIds) answer = await api.undoCorrection(o);
+      if (answer) onCorrectedAction({ text, answer, keep: id });
+    } catch (x) {
+      setError(`Couldn't undo that. (${String(x)})`);
     } finally {
       setBusy(false);
     }
@@ -113,7 +168,7 @@ export default function EntityInspector({ id, revision, onSelectAction, onCloseA
   const saveName = () => {
     const name = draft.trim();
     setEditing(false);
-    if (name && name !== e.name) void act(`Renamed to "${name}"`, () => api.renameEntity(id, name));
+    if (name && name !== e.name) void act(`Renamed to "${name}".`, () => api.renameEntity(id, name));
   };
 
   return (
@@ -140,13 +195,16 @@ export default function EntityInspector({ id, revision, onSelectAction, onCloseA
           </h2>
         )}
         {e.aliases.length > 0 && <div className="mt-0.5 text-xs text-muted">Also known as {e.aliases.join(", ")}</div>}
-        {e.hidden && <div className="mt-1 text-xs text-danger">Hidden from the graph.</div>}
+        <YourCorrections e={e} locked={locked} onUndo={(text, ids) => void undo(text, ids)} />
+        {e.hidden && !e.corrections.some((c) => c.op === "hide") && (
+          <div className="mt-1 text-xs text-muted">Not on the graph: it repeats one of your organizations.</div>
+        )}
         {error && <div className="mt-2"><InlineError message={error} /></div>}
       </header>
 
       <NodeSummary id={id} revision={revision} onSelectAction={onSelectAction} showConnections={false} />
 
-      <ConnectTo id={id} name={e.name} onLinkedAction={onLinkedAction} />
+      <ConnectTo id={id} name={e.name} type="Project" onLinkedAction={(other, answer) => onLinkedAction(id, other, answer)} />
 
       {e.anchors.length > 0 && (
         <Section title="Known from">
@@ -163,7 +221,7 @@ export default function EntityInspector({ id, revision, onSelectAction, onCloseA
                   <span className="truncate">{p.name}</span><span className="shrink-0 text-muted tabular-nums">{p.items} items</span>
                 </button>
                 <RemoveButton label={`Remove ${p.name} from this project`} disabled={locked}
-                  onClick={() => void act(`Removed ${p.name}`, () => api.unlinkFromEntity(id, p.id))} />
+                  onClick={() => void act(`Removed ${p.name} from "${e.name}".`, () => api.unlinkFromEntity(id, p.id))} />
               </li>
             ))}
           </ul>
@@ -179,7 +237,7 @@ export default function EntityInspector({ id, revision, onSelectAction, onCloseA
                   <span className="truncate">{g.name}</span>
                 </button>
                 <RemoveButton label={`Remove ${g.name} from this project`} disabled={locked}
-                  onClick={() => void act(`Removed ${g.name}`, () => api.unlinkFromEntity(id, g.id))} />
+                  onClick={() => void act(`Removed ${g.name} from "${e.name}".`, () => api.unlinkFromEntity(id, g.id))} />
               </li>
             ))}
           </ul>
@@ -196,7 +254,7 @@ export default function EntityInspector({ id, revision, onSelectAction, onCloseA
                   {v.date && <span className="shrink-0 text-muted">{formatDay(v.date)}</span>}
                 </button>
                 <RemoveButton label={`Remove ${v.name} from this project`} disabled={locked}
-                  onClick={() => void act(`Removed ${v.name}`, () => api.unlinkFromEntity(id, v.id))} />
+                  onClick={() => void act(`Removed ${v.name} from "${e.name}".`, () => api.unlinkFromEntity(id, v.id))} />
               </li>
             ))}
           </ul>
@@ -212,10 +270,10 @@ export default function EntityInspector({ id, revision, onSelectAction, onCloseA
                   <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: nodeColor(i) }} />
                   <button type="button" onClick={() => onSelectAction(i.id)} className="min-w-0 flex-1 truncate text-left font-medium hover:underline">{i.name}</button>
                   <RemoveButton label={`Remove ${i.name} from this project`} disabled={locked}
-                    onClick={() => void act("Removed 1 item", () => api.unlinkFromEntity(id, i.id))} />
+                    onClick={() => void act(`Removed 1 item from "${e.name}".`, () => api.unlinkFromEntity(id, i.id))} />
                 </div>
                 <div className="mt-0.5 text-muted">
-                  {[i.why ? WHY[i.why] ?? i.why : null, i.source, formatDay(i.date)].filter(Boolean).join(" · ")}
+                  {[i.why ? WHY[i.why] ?? i.why : null, i.source && sourceLabel(i.source), formatDay(i.date)].filter(Boolean).join(" · ")}
                 </div>
                 {i.quote && <blockquote className="mt-1 border-l-2 border-line pl-2 leading-relaxed break-words text-soft">{i.quote.trim()}</blockquote>}
               </li>
@@ -231,14 +289,14 @@ export default function EntityInspector({ id, revision, onSelectAction, onCloseA
 
       <Section title="Fix this project">
         <div className="flex flex-wrap gap-2">
-          <button type="button" disabled={locked || e.hidden} onClick={() => void act(`Hid "${e.name}"`, () => api.hideEntity(id))}
+          <button type="button" disabled={locked || e.hidden} onClick={() => void act(`Hid "${e.name}".`, () => api.hideEntity(id))}
             className="btn">Hide</button>
           <button type="button" disabled={locked} onClick={() => setMerging((v) => !v)} className="btn">Merge with…</button>
         </div>
         {merging && (
           <MergePicker self={id} onCancel={() => setMerging(false)} onPick={(n) => {
             setMerging(false);
-            void act(`Merged "${n.name}" into "${e.name}"`, () => api.mergeEntity(id, n.id));
+            void act(`Merged "${n.name}" into "${e.name}".`, () => api.mergeEntity(id, n.id));
           }} />
         )}
       </Section>

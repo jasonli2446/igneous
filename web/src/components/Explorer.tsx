@@ -4,12 +4,17 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useEffectEvent, useId, useMemo, useRef, useState } from "react";
-import Inspector, { type Corrected } from "@/components/Inspector";
+import Inspector from "@/components/Inspector";
+import Suggestions from "@/components/Suggestions";
 import { InlineError, TopProgress } from "@/components/ui";
 import WhyConnected from "@/components/WhyConnected";
-import { API, ApiError, api, type GEdge, type GNode, type NodeDetail, type Subgraph, type Thing } from "@/lib/api";
+import {
+  API, ApiError, api, type GEdge, type GNode, type LinkAdded, type NodeDetail, type Pair, type Settled, type Subgraph,
+  type Thing,
+} from "@/lib/api";
+import { type Corrected, pairKey } from "@/lib/corrections";
 import { nodeColor, sectionOf } from "@/lib/graph-style";
-import { useLiveSearch } from "@/lib/hooks";
+import { useLiveSearch, useRequest } from "@/lib/hooks";
 
 // WebGL libraries touch window at import time, so they can't render on the server.
 const Graph3D = dynamic(() => import("@/components/Graph3D"), { ssr: false });
@@ -17,40 +22,48 @@ const Graph3D = dynamic(() => import("@/components/Graph3D"), { ssr: false });
 /** Something added on top of the centre's view, hanging off the node `by`: an expansion (`by`'s connections), a node
  *  opened from the panel, or a link you made. Layers apply in the order they were added. */
 type Layer = { key: string; kind: "expand" | "open" | "link"; by: number; nodes: GNode[]; edges: GEdge[] };
-/** The centre (the API's seed), its view, and the layers on top. */
-type Shown = { seed: number; base: Subgraph; layers: Layer[] };
-type Toast = { text: string; undo?: () => Promise<unknown> };
+/** The centre (the API's seed), its view, the layers on top, and the node pairs corrections took apart (`cut`: no link
+ *  joins them on screen). */
+type Shown = { seed: number; base: Subgraph; layers: Layer[]; cut: ReadonlySet<string> };
+/** What a correction just did. `note`: it applies when the rebuild that is running publishes, so the notice stays
+ *  until then. */
+type Toast = { text: string; note?: string; undo?: () => Promise<Settled> };
 /** What went wrong, and what Retry does again. */
 type Failure = { text: string; retry?: () => void };
 /** How a new centre changes the trail: added to it, or back to the previous one. */
 type Step = "push" | "back";
 
 const EMPTY: Subgraph = { nodes: [], edges: [] };
+const NONE: ReadonlySet<string> = new Set();
 const edgeKey = (e: GEdge) => `${e.src}-${e.dst}-${e.type}`;
-/** A node the inspector read, as the graph draws it. */
-const asNode = ({ id, type, name, key, category }: NodeDetail): GNode => ({ id, type, name, key, category });
+/** A node the inspector read, as the graph draws it when it opens off another. */
+const asNode = ({ id, type, name, key, category }: NodeDetail): GNode =>
+  ({ id, type, name, key, category, kind: "entity", strength: 0.5, expandable: true });
 
-/** What is on screen: the centre's view plus every layer whose node is still shown, each node and link once. */
-function compose(base: Subgraph, layers: Layer[]) {
+/** What is on screen: the centre's view plus every layer whose node is still shown, each node and link once, and no
+ *  link between a pair a correction took apart. A node opened from the panel or linked by you hangs off one node
+ *  only: when that pair is taken apart, it leaves with the link. */
+function compose(base: Subgraph, layers: Layer[], cut: ReadonlySet<string>) {
   const nodes = new Map(base.nodes.map((n) => [n.id, n]));
   const edges = new Map(base.edges.map((e) => [edgeKey(e), e]));
   const live: Layer[] = [];
   for (const layer of layers) {
     if (!nodes.has(layer.by)) continue;
+    if (layer.kind !== "expand" && cut.has(pairKey(layer.by, layer.nodes[0].id))) continue;
     live.push(layer);
     for (const n of layer.nodes) if (!nodes.has(n.id)) nodes.set(n.id, n);
     for (const e of layer.edges) if (!edges.has(edgeKey(e))) edges.set(edgeKey(e), e);
   }
-  const data = { nodes: [...nodes.values()], edges: [...edges.values()].filter((e) => nodes.has(e.src) && nodes.has(e.dst)) };
-  return { data, live };
+  const shown = [...edges.values()].filter((e) => nodes.has(e.src) && nodes.has(e.dst) && !cut.has(pairKey(e.src, e.dst)));
+  return { data: { nodes: [...nodes.values()], edges: shown }, live };
 }
 
 /** Hide what `id` revealed (its expansion and the nodes opened from its panel), then whatever hung off those. Links
  *  you made stay while both ends are shown. */
-function fold(base: Subgraph, layers: Layer[], id: number) {
-  let rest = layers.filter((l) => l.by !== id || l.kind === "link");
+function fold(shown: Shown, id: number) {
+  let rest = shown.layers.filter((l) => l.by !== id || l.kind === "link");
   for (;;) {
-    const { live } = compose(base, rest);
+    const { live } = compose(shown.base, rest, shown.cut);
     if (live.length === rest.length) return rest;
     rest = live;
   }
@@ -64,6 +77,17 @@ function merge(current: Layer[], replayed: Layer[], before: Layer[]) {
   return current.flatMap((l) => fresh.get(l.key) ?? (had.has(l.key) ? [] : [l]));
 }
 
+/** The pairs taken apart once a correction's answer is in: a pair no link joins any more is cut, one joined again is
+ *  not (a link the API draws comes back with the refresh that follows). */
+function recut(cut: ReadonlySet<string>, pairs: Pair[] = []) {
+  const next = new Set(cut);
+  for (const p of pairs) {
+    if (p.still_linked) next.delete(pairKey(p.a, p.b));
+    else next.add(pairKey(p.a, p.b));
+  }
+  return next;
+}
+
 export default function Explorer() {
   const router = useRouter();
   const inputId = useId();
@@ -75,13 +99,16 @@ export default function Explorer() {
   const [trail, setTrail] = useState<GNode[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [why, setWhy] = useState<{ a: number; b: number } | null>(null);
+  const [checking, setChecking] = useState(false); // the panel lists the links to check
   const [loading, setLoading] = useState(true); // the first view starts loading on mount
   const [error, setError] = useState<Failure | null>(null);
   // Why there is no one to open on, when the API's opening view is empty: nothing is built yet, or no source says
   // which person is you.
   const [empty, setEmpty] = useState<"nothing_built" | "no_owner" | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
-  // Bumped by every correction and undo, so the open panel shows the result.
+  // A correction waits for the running rebuild to publish: the graph version is checked more often until it does.
+  const [awaiting, setAwaiting] = useState(false);
+  // Bumped by every correction and undo, and when the graph changes, so the open panel shows the result.
   const [revision, setRevision] = useState(0);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
@@ -96,11 +123,14 @@ export default function Explorer() {
   const enterFor = useRef<string | null>(null); // Enter was pressed while this query's matches were on their way
   const started = useRef(false);
 
-  const { data, live } = useMemo(() => (shown ? compose(shown.base, shown.layers) : { data: EMPTY, live: [] }), [shown]);
+  const { data, live } = useMemo(() => (shown ? compose(shown.base, shown.layers, shown.cut) : { data: EMPTY, live: [] }), [shown]);
   const expanded = useMemo(() => new Set(live.filter((l) => l.kind === "expand").map((l) => l.by)), [live]);
   const seed = shown?.seed;
   const current = trail[trail.length - 1];
   const previous = trail[trail.length - 2];
+  // The links the verifier was unsure about, for you to answer; fetched again after every correction.
+  const toCheck = useRequest("suggestions", (signal) => api.suggestions(signal).then((r) => r.suggestions), revision);
+  const checkCount = toCheck.data?.length ?? 0;
 
   /** Centre the graph on `id` (null: you). Every caller sets the loading state first: see go(). */
   async function load(id: number | null, step: Step, open = false) {
@@ -118,12 +148,13 @@ export default function Explorer() {
         setEmpty(g.reason);
         return;
       }
-      const next: Shown = { seed: g.seed, base: { nodes: g.nodes, edges: g.edges }, layers: [] };
+      const next: Shown = { seed: g.seed, base: { nodes: g.nodes, edges: g.edges }, layers: [], cut: NONE };
       if (id === null) self.current = g.seed;
       builtAt.current = { seed: g.seed, version };
       setShown(next);
       setSelected(open ? g.seed : null);
       setWhy(null);
+      setChecking(false);
       setQuery("");
       // The API may centre on another identity of the same person (merged addresses): the trail names what it chose.
       const centre = g.nodes.find((n) => n.id === g.seed);
@@ -180,7 +211,7 @@ export default function Explorer() {
     inFlight.current.expand = request;
     setError(null);
     try {
-      const visible = compose(from.base, from.layers).data.nodes.map((n) => n.id);
+      const visible = compose(from.base, from.layers, from.cut).data.nodes.map((n) => n.id);
       const got = await api.expandNode(from.seed, id, visible, request.signal);
       // A group whose members are all on screen returns only links (no new nodes): keep them, they're the point.
       if (mine !== generation.current || (!got.nodes.length && !got.edges.length)) return;
@@ -197,12 +228,12 @@ export default function Explorer() {
   // Click a node: reveal its top connections; click it again to fold them back.
   async function toggle(id: number, mode: "open" | "toggle" = "toggle") {
     if (!expanded.has(id)) return expand(id);
-    if (mode === "toggle") setShown((s) => (s ? { ...s, layers: fold(s.base, s.layers, id) } : s));
+    if (mode === "toggle") setShown((s) => (s ? { ...s, layers: fold(s, id) } : s));
   }
 
   /** Bring what's on screen up to date in place: the centre's view again, then each layer in order (an expansion
    *  asks the API again; an opened node or a link you made stays while its node exists). The selection, the panel
-   *  and every position stay. */
+   *  and every position stay. A pair a correction took apart is joined again once the API draws a link between it. */
   async function refresh() {
     const from = shown;
     if (!from) return;
@@ -216,7 +247,7 @@ export default function Explorer() {
       const base = { nodes: view.nodes, edges: view.edges };
       const layers: Layer[] = [];
       for (const layer of from.layers) {
-        const on = compose(base, layers).data.nodes;
+        const on = compose(base, layers, from.cut).data.nodes;
         if (!on.some((n) => n.id === layer.by)) continue;
         if (layer.kind === "expand") {
           const got = await api.expandNode(from.seed, layer.by, on.map((n) => n.id), request.signal);
@@ -232,7 +263,11 @@ export default function Explorer() {
       }
       if (mine !== generation.current) return;
       builtAt.current = { seed: from.seed, version };
-      setShown((s) => (s && s.seed === from.seed ? { ...s, base, layers: merge(s.layers, layers, from.layers) } : s));
+      const drawn = new Set([...base.edges, ...layers.flatMap((l) => (l.kind === "expand" ? l.edges : []))]
+        .map((e) => pairKey(e.src, e.dst)));
+      setShown((s) => (s && s.seed === from.seed ? {
+        ...s, base, layers: merge(s.layers, layers, from.layers), cut: new Set([...s.cut].filter((k) => !drawn.has(k))),
+      } : s));
     } catch (e) {
       if (!request.signal.aborted) setError({ text: `Couldn't refresh the graph. (${String(e)})`, retry: () => void refresh() });
     } finally {
@@ -240,13 +275,18 @@ export default function Explorer() {
     }
   }
 
-  // The graph is long-lived: check the API's change token now and every 30 s (only while this page is shown), and
-  // refresh the graph and the open panel in place when it moved, e.g. after a rebuild on the Sources page.
+  // The graph is long-lived: check the API's change token now and every 30 s (every 3 s while a correction waits for
+  // a rebuild to publish; only while this page is shown), and refresh the graph and the open panel in place when it
+  // moved, e.g. after a rebuild on the Sources page.
   const checkVersion = useEffectEvent(async (signal: AbortSignal) => {
     const built = builtAt.current;
     if (!built || built.seed !== seed) return;
     const { version } = await api.graphVersion(signal);
     if (signal.aborted || builtAt.current !== built || version === built.version) return;
+    if (awaiting) {
+      setAwaiting(false);
+      setToast({ text: "The rebuild published: your corrections are on the graph." });
+    }
     setRevision((n) => n + 1);
     await refresh();
   });
@@ -256,14 +296,15 @@ export default function Explorer() {
     // A transient API outage must not disturb an open graph: the next check tries again.
     const check = () => { checkVersion(request.signal).catch(() => {}); };
     check();
-    const timer = window.setInterval(check, 30_000);
+    const timer = window.setInterval(check, awaiting ? 3_000 : 30_000);
     return () => { window.clearInterval(timer); request.abort(); };
-  }, [seed]);
+  }, [seed, awaiting]);
 
   // A connection picked in the panel joins the graph you're on, linked to what you were looking at: only a search
   // or Back changes the centre.
   async function openFromPanel(id: number, from: number | null = selected) {
     setWhy(null);
+    setChecking(false);
     if (data.nodes.some((n) => n.id === id)) return setSelected(id);
     const at = shown;
     if (!at) return;
@@ -276,7 +317,7 @@ export default function Explorer() {
       const node = asNode(await api.node(id, request.signal));
       if (mine !== generation.current) return;
       const layer: Layer = {
-        key: `o${node.id}`, kind: "open", by: anchor, nodes: [{ ...node, expandable: true, strength: 0.5 }],
+        key: `o${node.id}`, kind: "open", by: anchor, nodes: [node],
         edges: [{ id: -(700000 + node.id), src: anchor, dst: node.id, type: "RELATED", weight: 1, origin: "derived", stated: false }],
       };
       setShown((s) => (s && s.seed === at.seed ? { ...s, layers: [...s.layers.filter((l) => l.key !== layer.key), layer] } : s));
@@ -288,20 +329,38 @@ export default function Explorer() {
     }
   }
 
-  // A connection you added shows up now: the other end joins the graph if it wasn't already there.
-  function linked(node: GNode, edge: GEdge) {
-    const by = edge.src === node.id ? edge.dst : edge.src;
-    const layer: Layer = { key: `l${edge.id}`, kind: "link", by, nodes: [node], edges: [edge] };
-    setShown((s) => (s ? { ...s, layers: [...s.layers.filter((l) => l.key !== layer.key), layer] } : s));
+  /** Show what a correction's answer means now: the pairs it took apart or joined again and, once it applies, the
+   *  graph and the open panel brought up to date. One that applies when a rebuild publishes waits for it. */
+  function settle(answer: Settled) {
+    setShown((s) => (s ? { ...s, cut: recut(s.cut, answer.pairs) } : s));
+    setRevision((n) => n + 1);
+    if (answer.applied === "now") void refresh();
+    else setAwaiting(true);
   }
 
-  /** After a correction: say what changed (with Undo when it can be undone), show the result in the open panel, and
-   *  bring the graph up to date in place. `keep` is the node to stay on when the correction moved it (a merge). */
-  function corrected({ text, undo, keep }: Corrected) {
-    setToast({ text, undo });
+  /** After a correction: say what changed and when it applies (with Undo when it can be undone), show the result in
+   *  the open panel, and bring the graph up to date. `keep` is the node to stay on when the correction moved it. */
+  function corrected({ text, answer, undo, keep }: Corrected) {
+    setToast({ text, undo, note: answer.applied === "on_publish" ? answer.note : undefined });
     if (keep !== undefined) setSelected(keep);
-    setRevision((n) => n + 1);
-    void refresh();
+    settle(answer);
+  }
+
+  // A connection you added: shown at once, the other end joining the graph if it wasn't on it (once it applies: one
+  // that waits for a rebuild shows when it publishes).
+  async function linked(from: number, other: Thing, answer: LinkAdded) {
+    const { id, override_id: overrideId } = answer;
+    const undo = id !== null ? () => api.removeLink(id) : overrideId !== null ? () => api.undoCorrection(overrideId) : undefined;
+    corrected({ text: `Connected to ${other.name}.`, answer, undo });
+    if (id === null) return;
+    try {
+      const node = data.nodes.find((n) => n.id === other.id) ?? asNode(await api.node(other.id));
+      const layer: Layer = { key: `l${id}`, kind: "link", by: from, nodes: [node],
+        edges: [{ id, src: answer.src, dst: answer.dst, type: answer.type, weight: 1, origin: "user", stated: true }] };
+      setShown((s) => (s ? { ...s, layers: [...s.layers.filter((l) => l.key !== layer.key), layer] } : s));
+    } catch (e) {
+      setError({ text: `Connected, but couldn't show it on the graph. (${String(e)})` });
+    }
   }
 
   async function undoLast() {
@@ -309,16 +368,17 @@ export default function Explorer() {
     if (!t?.undo) return;
     setToast(null);
     try {
-      await t.undo();
-      setRevision((n) => n + 1);
-      await refresh();
+      const answer = await t.undo();
+      setToast({ text: "Undone.", note: answer.applied === "on_publish" ? answer.note : undefined });
+      settle(answer);
     } catch (e) {
       setError({ text: `Couldn't undo that. (${String(e)})` });
     }
   }
 
+  // A notice goes after 8 s, unless its correction waits for a rebuild to publish.
   useEffect(() => {
-    if (!toast) return;
+    if (!toast || toast.note) return;
     const timer = window.setTimeout(() => setToast(null), 8000);
     return () => window.clearTimeout(timer);
   }, [toast]);
@@ -367,6 +427,10 @@ export default function Explorer() {
     }
   };
 
+  const back = () => { if (previous) go(previous.id, "back"); };
+  const panelOpen = why !== null || checking || selected !== null;
+  const closePanel = () => { setWhy(null); setChecking(false); setSelected(null); };
+
   // "/" jumps to search and Escape closes the panel, unless a field or the Reader already took the key.
   const pageKey = useEffectEvent((e: KeyboardEvent) => {
     if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -375,8 +439,7 @@ export default function Explorer() {
       e.preventDefault();
       searchRef.current?.focus();
     } else if (e.key === "Escape") {
-      setWhy(null);
-      setSelected(null);
+      closePanel();
     }
   });
   useEffect(() => {
@@ -385,9 +448,6 @@ export default function Explorer() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const back = () => { if (previous) go(previous.id, "back"); };
-  const panelOpen = why !== null || selected !== null;
-  const closePanel = () => { setWhy(null); setSelected(null); };
   // While the panel is open on a wide screen, the overlays keep clear of it.
   const besidePanel = panelOpen ? "md:right-[24.75rem]" : "";
 
@@ -401,9 +461,9 @@ export default function Explorer() {
 
       {seed !== undefined && data.nodes.length > 0 && (
         <Graph3D data={data} seed={seed} selected={selected}
-          onSelectAction={(id) => { setSelected(id); setWhy(null); }}
+          onSelectAction={(id) => { setSelected(id); setWhy(null); setChecking(false); }}
           onExpandAction={toggle}
-          onLinkAction={(a, b) => setWhy({ a: a.id, b: b.id })} />
+          onLinkAction={(a, b) => { setChecking(false); setWhy({ a: a.id, b: b.id }); }} />
       )}
 
       {data.nodes.length === 0 && !loading && !error && empty === "nothing_built" && (
@@ -429,7 +489,7 @@ export default function Explorer() {
         </div>
       )}
 
-      {/* Top row: where you are, and search. */}
+      {/* Top row: where you are, search, and the links waiting for your answer. */}
       <div className={`pointer-events-none absolute left-3 right-3 top-3 z-20 flex items-start gap-2 transition-[right] duration-200 ${besidePanel}`}>
         {current && (
           // Whose graph this is. Only searching changes it; when you're centred on someone else, one click goes
@@ -499,6 +559,14 @@ export default function Explorer() {
             </div>
           )}
         </div>
+
+        {checkCount > 0 && (
+          <button type="button" aria-pressed={checking}
+            onClick={() => { setWhy(null); setChecking((v) => !v); }}
+            className="pointer-events-auto shrink-0 rounded-md border border-line bg-panel/95 px-2.5 py-1.5 text-xs text-soft hover:bg-hover hover:text-ink">
+            Links to check <span className="ml-1 rounded-full bg-accent/15 px-1.5 text-accent tabular-nums">{checkCount}</span>
+          </button>
+        )}
       </div>
 
       {error && (
@@ -516,12 +584,19 @@ export default function Explorer() {
         </p>
       )}
 
-      {/* What a correction just changed, with Undo. Outside the panel, so it stays put while the panel scrolls. */}
+      {/* What a correction just did, when it applies, and Undo. Outside the panel, so it stays put while the panel
+          scrolls. */}
       <div role="status" className={`pointer-events-none absolute bottom-12 left-3 right-3 z-30 flex justify-center ${besidePanel}`}>
         {toast && (
-          <div className="pointer-events-auto flex items-center gap-3 rounded-md border border-line bg-panel px-3 py-2 text-xs shadow-lg">
-            <span className="text-soft">{toast.text}</span>
-            {toast.undo && <button type="button" onClick={undoLast} className="btn-link font-medium">Undo</button>}
+          <div className="pointer-events-auto flex max-w-lg items-start gap-3 rounded-md border border-line bg-panel px-3 py-2 text-xs shadow-lg">
+            <span className="min-w-0">
+              <span className="text-soft">{toast.text}</span>
+              {toast.note && <span className="mt-0.5 block text-muted">{toast.note}</span>}
+            </span>
+            {toast.undo && <button type="button" onClick={undoLast} className="btn-link shrink-0 font-medium">Undo</button>}
+            {toast.note && (
+              <button type="button" onClick={() => setToast(null)} aria-label="Dismiss" className="btn-close shrink-0">×</button>
+            )}
           </div>
         )}
       </div>
@@ -530,16 +605,19 @@ export default function Explorer() {
       <aside aria-label="Details" inert={!panelOpen}
         className={`absolute inset-y-0 right-0 z-20 w-full overflow-y-auto border-l border-line bg-panel transition-transform duration-200 md:max-w-96 ${panelOpen ? "translate-x-0" : "translate-x-full"}`}>
         {why ? (
-          <WhyConnected key={`${why.a}-${why.b}`} a={why.a} b={why.b} revision={revision} onCloseAction={closePanel}
+          <WhyConnected key={`${why.a}-${why.b}`} a={why.a} b={why.b} revision={revision}
+            onCloseAction={() => (checking ? setWhy(null) : closePanel())}
             onOpenAction={(id) => openFromPanel(id)}
-            onCorrectedAction={corrected}
-            onRestoredAction={() => { setRevision((n) => n + 1); void refresh(); }} />
+            onCorrectedAction={corrected} />
+        ) : checking ? (
+          <Suggestions items={toCheck.data} error={toCheck.error} onRetryAction={toCheck.retry} onCloseAction={closePanel}
+            onWhyAction={(a, b) => setWhy({ a, b })} onCorrectedAction={corrected} />
         ) : selected !== null ? (
           <Inspector key={selected} id={selected} revision={revision} expanded={expanded.has(selected)}
             onExpandAction={toggle} onCloseAction={closePanel}
             onSelectAction={(id) => openFromPanel(id)}
             onWhyAction={(a, b) => setWhy({ a, b })}
-            onLinkedAction={linked}
+            onLinkedAction={(from, other, answer) => void linked(from, other, answer)}
             onCorrectedAction={corrected} />
         ) : null}
       </aside>

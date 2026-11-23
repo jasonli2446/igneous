@@ -2,50 +2,43 @@
 
 import { useState } from "react";
 import { InlineError } from "@/components/ui";
-import { api, type GEdge, type GNode, type Thing } from "@/lib/api";
+import { api, type LinkAdded, type LinkOption, type Thing } from "@/lib/api";
 import { useLiveSearch, useRequest } from "@/lib/hooks";
 
-type Option = { label: string; type: string; src: number; dst: number };
-
-/** "+ Connect to…": tell the graph about a link it missed. Pick the other thing, say how they're connected in
- *  plain words, optionally why. Stored as yours, so the AI never second-guesses or drops it. */
-export default function ConnectTo({ id, name, onLinkedAction }: {
-  id: number; name: string; onLinkedAction: (node: GNode, edge: GEdge) => void;
+/** "+ Connect to…": tell the graph about a link it missed. Pick the other thing, say how they're connected in plain
+ *  words (the API offers the ways two such things connect; never "same person", which is its own action), optionally
+ *  why. Stored as yours, so the AI never second-guesses or drops it. */
+export default function ConnectTo({ id, name, type, onLinkedAction }: {
+  id: number; name: string; type: string;
+  /** The link went through: the page shows it and says when it applies, with Undo. */
+  onLinkedAction: (other: Thing, answer: LinkAdded) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const [other, setOther] = useState<Thing | null>(null);
-  const [choice, setChoice] = useState<Option | null>(null);
+  const [choice, setChoice] = useState<LinkOption | null>(null);
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
-  const [done, setDone] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const hits = useLiveSearch(open && !other ? q : "",
     (text, signal) => api.findThings(text, {}, signal).then((r) => r.results.filter((n) => n.id !== id).slice(0, 8)));
   // The kinds of link the API allows between these two; the first is picked until you pick another.
   const options = useRequest(other ? `${id}-${other.id}` : null, (signal) => api.linkOptions(id, other!.id, signal));
-  const offered: Option[] = options.data?.options ?? [];
+  const offered: LinkOption[] = options.data?.options ?? [];
   const chosen = choice && offered.includes(choice) ? choice : offered[0] ?? null;
 
   const reset = () => { setOpen(false); setQ(""); setOther(null); setChoice(null); setNote(""); };
 
   if (!open) {
-    return (
-      <div>
-        <button type="button" onClick={() => { setOpen(true); setDone(null); setError(null); }} className="btn">+ Connect to…</button>
-        {done && <p role="status" className="mt-1 text-xs text-muted">{done}</p>}
-      </div>
-    );
+    return <button type="button" onClick={() => { setOpen(true); setError(null); }} className="btn">+ Connect to…</button>;
   }
 
   const save = () => {
     if (!other || !chosen || saving) return;
     setSaving(true);
     setError(null);
-    api.addLink(chosen.src, chosen.dst, chosen.type, note.trim() || undefined).then((e) => {
-      onLinkedAction({ id: other.id, type: other.type, name: other.name, key: "", category: other.category },
-        { id: e.id, src: e.src, dst: e.dst, type: e.type, origin: "user", stated: true });
-      setDone(`Connected "${name}" to "${other.name}".`);
+    api.addLink(chosen.src, chosen.dst, chosen.type, note.trim() || undefined).then((answer) => {
+      onLinkedAction(other, answer);
       reset();
     }).catch((err) => setError(`Couldn't connect them. (${String(err)})`)).finally(() => setSaving(false));
   };
@@ -65,7 +58,7 @@ export default function ConnectTo({ id, name, onLinkedAction }: {
               {hits.results?.map((n) => (
                 <li key={n.id}>
                   <button type="button" onClick={() => setOther(n)} className="btn-option">
-                    <span className="truncate">{n.name}</span><span className="shrink-0 text-muted">{n.type}</span>
+                    <span className="truncate">{n.name}</span><span className="shrink-0 text-muted">{n.context}</span>
                   </button>
                 </li>
               ))}
@@ -87,6 +80,9 @@ export default function ConnectTo({ id, name, onLinkedAction }: {
               </button>
             ))}
           </div>
+          {type === "Person" && other.type === "Person" && (
+            <p className="text-muted">The same person under another name or address? Use Same person as… instead.</p>
+          )}
           <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Why (optional, shown as the reason)"
             aria-label="Why they are connected" onKeyDown={(e) => { if (e.key === "Enter") save(); }}
             className="field w-full" />

@@ -53,14 +53,14 @@ export default function Graph3D({ data, seed, selected, onSelectAction, onExpand
   const snapshot = useRef<Snapshot | null>(null);
   // Bumped when the newest halos have faded, so the labels redraw without them.
   const [haloTick, setHaloTick] = useState(0);
-  const { weight, strongest, labeled } = useMemo(() => rank(data, seed), [data, seed]);
+  const labeled = useMemo(() => labelled(data, seed), [data, seed]);
 
   const nodeClicked = useEffectEvent((n: N) => {
     // Clicking opens a node: select it and reveal its connections. Coming back to it later (after clicking
     // elsewhere) keeps them; only clicking it again while it's the selected one hides them.
     const again = selected === n.id;
     onSelectAction(n.id);
-    if (n.expandable !== false) onExpandAction(n.id, again ? "toggle" : "open");
+    if (n.expandable) onExpandAction(n.id, again ? "toggle" : "open");
   });
   const linkClicked = useEffectEvent((l: L) => {
     if (typeof l.source === "object" && typeof l.target === "object") onLinkAction(l.source, l.target);
@@ -189,9 +189,7 @@ export default function Graph3D({ data, seed, selected, onSelectAction, onExpand
       const node: N = {
         ...n, seed: n.id === seed,
         // Biggest = strongest relationship to the centre.
-        val: n.id === seed ? 14
-          : n.strength !== undefined ? 1.2 + 10 * n.strength ** 1.6
-          : HUB.has(n.type) ? 1.2 : 1.5 + 9 * Math.sqrt((weight.get(n.id) ?? 1) / strongest),
+        val: n.id === seed ? 14 : 1.2 + 10 * n.strength ** 1.6,
       };
       const prev = old.get(n.id);
       if (prev) return Object.assign(prev, node);
@@ -204,7 +202,7 @@ export default function Graph3D({ data, seed, selected, onSelectAction, onExpand
 
     const ids = new Set(nodes.map((n) => n.id));
     const links: L[] = data.edges.filter((e) => ids.has(e.src) && ids.has(e.dst)).map((e: GEdge) => ({
-      source: e.src, target: e.dst, type: e.type, weight: e.weight ?? 1, spoke: e.src === seed || e.dst === seed,
+      source: e.src, target: e.dst, type: e.type, weight: e.weight, spoke: e.src === seed || e.dst === seed,
     }));
     // Shown again with nothing new: every node goes back where it was and the layout stays still.
     const still = restore !== null && nodes.every((n) => restore.nodes.has(n.id));
@@ -222,7 +220,7 @@ export default function Graph3D({ data, seed, selected, onSelectAction, onExpand
       // Frame early (the layout is mostly in place within a second), then again when it fully settles.
       s.later(1200, () => { if (!s.framed) frameAll(g, 500, true); });
     }
-  }, [data, seed, weight, strongest]);
+  }, [data, seed]);
 
   // The one place labels and highlights are drawn. Selection lights up what the click is about: the node (ringed,
   // full name), everything it connects to (full color, every one named), the lines between them (accent, thicker,
@@ -285,19 +283,18 @@ export default function Graph3D({ data, seed, selected, onSelectAction, onExpand
   return <div ref={host} className="absolute inset-0 cursor-grab active:cursor-grabbing" />;
 }
 
-/** How strongly each node is tied to the centre, and which nodes get a name label: the strongest people and the
- *  strongest few groups, events and projects (unnamed dots read as noise). */
-function rank(data: Subgraph, seed: number) {
+/** Which nodes get a name label: the people and the groups, events and projects most tied to the centre (by the
+ *  weight of their links to it, and of what is part of them), the strongest few of each (unnamed dots read as noise). */
+function labelled(data: Subgraph, seed: number) {
   const weight = new Map<number, number>();
   for (const e of data.edges) {
-    if (e.src === seed) weight.set(e.dst, (weight.get(e.dst) ?? 0) + (e.weight ?? 1));
-    if (e.dst === seed) weight.set(e.src, (weight.get(e.src) ?? 0) + (e.weight ?? 1));
-    if (e.type === "PART_OF") weight.set(e.dst, (weight.get(e.dst) ?? 0) + (e.weight ?? 1));
+    if (e.src === seed) weight.set(e.dst, (weight.get(e.dst) ?? 0) + e.weight);
+    if (e.dst === seed) weight.set(e.src, (weight.get(e.src) ?? 0) + e.weight);
+    if (e.type === "PART_OF") weight.set(e.dst, (weight.get(e.dst) ?? 0) + e.weight);
   }
   const ranked = [...data.nodes].sort((a, b) => (weight.get(b.id) ?? 0) - (weight.get(a.id) ?? 0));
-  const labeled = new Set([...ranked.filter((n) => !HUB.has(n.type)).slice(0, 8),
-                           ...ranked.filter((n) => HUB.has(n.type) || n.type === "Project").slice(0, 5)].map((n) => n.id));
-  return { weight, strongest: Math.max(1, ...weight.values()), labeled };
+  return new Set([...ranked.filter((n) => !HUB.has(n.type)).slice(0, 8),
+                  ...ranked.filter((n) => HUB.has(n.type) || n.type === "Project").slice(0, 5)].map((n) => n.id));
 }
 
 /** Names float beside the centre, the strongest few nodes, and (while something is selected) the selected node, its
@@ -411,9 +408,8 @@ function describe(n: N) {
   const swatch = section
     ? `<i style="display:inline-block;width:7px;height:7px;border-radius:9px;margin-right:5px;background:${sectionHue(section)}"></i>${escapeHtml(section)}`
     : "";
-  const detail = n.seed ? "the centre of this graph"
-    : n.type === "Thread" ? (n.members ? `conversation with ${n.members} of your contacts` : "conversation")
-    : n.type === "Event" ? (n.members ? `event with ${n.members} of your contacts` : "event") : "";
+  const detail = n.seed ? "the centre of this graph" : n.type === "Thread" ? "group conversation"
+    : n.type === "Event" ? "event" : "";
   return [swatch, detail].filter(Boolean).join(" · ") || escapeHtml(n.type);
 }
 
