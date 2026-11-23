@@ -1,8 +1,9 @@
 """Strip credentials from text before it is stored or sent to a model.
 
 Mail, chats and AI transcripts are full of pasted secrets (tokens, keys, connection strings). The sync runner
-(`base.run_sync`) passes every item's title and text through here before storing it, so a match is replaced with
-`[REDACTED:<kind>]` and never reaches source_items, chunks, embeddings or a prompt. Items stored under an earlier
+(`base.run_sync`) passes every item's title, text and metadata text (not its ids, paths or addresses) through here
+before storing it, so a match is replaced with `[REDACTED:<kind>]` and never reaches source_items, chunks,
+embeddings or a prompt. Items stored under an earlier
 VERSION of these rules are brought up to date by the pipeline's first step (`base.redact_stored`). A connector that
 shortens text redacts it first, so a secret cut in half can't slip through. Patterns are deliberately broad: a false
 positive costs a few characters of context; a false negative leaks a credential.

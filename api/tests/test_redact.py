@@ -92,6 +92,29 @@ def test_every_item_is_stored_redacted_whatever_its_connector(db):
     assert run_sync(db, Items("gmail", [item]))["unchanged"] == 1
 
 
+def test_metadata_text_is_redacted_at_any_depth_but_ids_and_paths_never_are():
+    lookalike = "sk-proj-" + "a" * 24  # a folder, a message id or an address can look like a key
+    meta = {
+        "path": f"k1/{lookalike}/notes.md", "folders": ["k1", f"k1/{lookalike}"], "message_id": f"<{lookalike}@x>",
+        "labels": [lookalike], "fingerprint": "f" * 40, "account": f"{lookalike}@x.com", "repo": lookalike,
+        "from": [{"name": f"API_KEY={lookalike}", "email": f"{lookalike}@x.com"}],
+        "attendees": [{"name": "Sam", "email": "sam@x.com", "response": f"see {GH}"}],
+        "parent_names": {lookalike: f"Keys {GH}"},
+        "boundaries": [{"kind": "heading", "title": f"Setup {GH}", "start": 0, "end": 4}],
+        "description": {"nested": [[f"token: {GH}"]]},
+    }
+    item = stored(SourceItem("drive", f"me/{lookalike}", "t", "body", raw_meta=meta))
+    out = item.raw_meta
+    for key in ("path", "folders", "message_id", "labels", "fingerprint", "account", "repo"):
+        assert out[key] == meta[key], key
+    assert out["from"] == [{"name": "API_KEY=[REDACTED:openai_key]", "email": f"{lookalike}@x.com"}]
+    assert out["attendees"][0]["response"] == "see [REDACTED:github_token]"
+    assert out["parent_names"] == {lookalike: "Keys [REDACTED:github_token]"}  # a key is an id: kept
+    assert out["boundaries"] == [{"kind": "heading", "title": "Setup [REDACTED:github_token]", "start": 0, "end": 4}]
+    assert out["description"] == {"nested": [["token: [REDACTED:github_token]"]]}
+    assert out["redactions"] == 5
+
+
 def test_an_item_without_secrets_keeps_its_hash_and_metadata(db):
     item = SourceItem("email", "a/1", "Forecast", "Here is our forecast.", raw_meta={"from": []})
     run_sync(db, Items("email", [item]))
@@ -190,6 +213,20 @@ def test_items_stored_before_the_rules_are_redacted_and_chunked_again(committed_
         assert chunks and all(GH not in c.text and c.fresh for c in chunks)  # embed redoes them
 
         assert redact_stored(s) == {"checked": 0, "redacted": 0}  # nothing is out of date
+
+
+def test_stored_metadata_is_redacted_in_place_too(db):
+    from igneous.connectors.base import redact_stored
+
+    event = old_row(db, "gcal", "me/team/e1", "Standup", "", {
+        "calendar": "Team", "calendar_id": "team", "event_key": "gcal:e1@google.com",
+        "attendees": [{"name": f"bot {GH}", "email": "bot@x.com"}]})
+    before = item_row(db, event)
+    assert redact_stored(db) == {"checked": 1, "redacted": 1}
+    after = item_row(db, event)
+    assert after["raw_meta"]["attendees"] == [{"name": "bot [REDACTED:github_token]", "email": "bot@x.com"}]
+    assert after["raw_meta"]["event_key"] == "gcal:e1@google.com" and after["raw_meta"]["redactions"] == 1
+    assert after["redaction_version"] == 1 and after["content_hash"] != before["content_hash"]
 
 
 def test_a_new_version_of_the_rules_checks_every_item_again(db, monkeypatch):

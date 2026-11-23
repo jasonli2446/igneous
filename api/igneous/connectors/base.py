@@ -2,7 +2,8 @@
 
 A connector yields SourceItems with Checkpoints between them, and Tombstones or a final CompletedScan for what was
 deleted. `run_sync` is the storage boundary: it stores each item without NUL characters and with every credential
-in its title and text redacted (`redact.py`), then upserts it, skipping it when its content hash is unchanged.
+in its title, its text and the text in its metadata redacted (`redact.py`), then upserts it, skipping it when its
+content hash is unchanged.
 """
 import hashlib
 import json
@@ -57,6 +58,37 @@ def _without_nul(value, positions: list[int] | None = None):
     return value if positions is None else (value, positions)
 
 
+# raw_meta keys whose values identify or locate something (ids and keys, paths, addresses and handles, hashes,
+# labels, dates, offsets): the graph joins on them and the reader opens them, so redaction never rewrites them, at
+# any depth. Everything else in raw_meta is text, and redacted like the title and body.
+STRUCTURAL = frozenset({
+    "account", "path", "folders", "drive_id", "parents", "url", "web_view_link", "repo_url",
+    "gmail_thread_id", "message_id", "in_reply_to", "references", "fingerprint", "labels",
+    "series_key", "event_key", "event_id", "calendar_id", "start", "end", "modified_time",
+    "chat", "participants", "senders", "session", "session_id", "tool", "day", "kind", "product", "group",
+    "repo", "repo_path", "cwd", "branches", "number", "sha", "author", "login",
+    "email", "emails", "phones", "key", "place_id",
+    "parser", "original_mime", "parse_status", "size", "redactions", "boundaries_redacted",
+})
+
+
+def _redact_meta(value, key: str | None = None) -> tuple[object, int]:
+    """`value` with every credential in its text redacted, except under STRUCTURAL keys (a list's items count as
+    under its key), and how many were removed."""
+    if key in STRUCTURAL:
+        return value, 0
+    if isinstance(value, str):
+        out, found = redact(value)
+        return out, sum(found.values())
+    if isinstance(value, dict):
+        pairs = [(k, *_redact_meta(v, k)) for k, v in value.items()]
+        return {k: v for k, v, _ in pairs}, sum(n for _, _, n in pairs)
+    if isinstance(value, list):
+        pairs = [_redact_meta(v, key) for v in value]
+        return [v for v, _ in pairs], sum(n for _, n in pairs)
+    return value, 0
+
+
 def _count(redactions) -> int:
     """A redaction count as stored: a number, or (on items stored before counts were totals) one per kind."""
     if isinstance(redactions, dict):
@@ -66,13 +98,13 @@ def _count(redactions) -> int:
 
 def _store(item: SourceItem, offsets: list[int]) -> tuple[SourceItem, list[int]]:
     """`stored(item)`, and where each of `offsets` (positions in its text) lands in the stored text."""
-    meta = _without_nul(item.raw_meta)
+    meta, meta_found = _redact_meta(_without_nul(item.raw_meta))
     bounds = meta.get("boundaries") if isinstance(meta.get("boundaries"), list) else []
     marks = [b[k] for b in bounds for k in ("start", "end")] + list(offsets)
     body, marks = _without_nul(item.body_text, marks)
     body, body_found, marks = redact_moving(body, marks)
     title, title_found = redact(_without_nul(item.title))
-    found = sum(body_found.values()) + sum(title_found.values())
+    found = sum(body_found.values()) + sum(title_found.values()) + meta_found
     if bounds:
         meta["boundaries"] = [{**b, "start": marks[2 * i], "end": marks[2 * i + 1]} for i, b in enumerate(bounds)]
     if found:
@@ -83,8 +115,9 @@ def _store(item: SourceItem, offsets: list[int]) -> tuple[SourceItem, list[int]]
 
 
 def stored(item: SourceItem) -> SourceItem:
-    """The item as it is stored: no NUL characters, no credentials in its title or text (`redact.VERSION` of the
-    rules), and its boundaries moved with the text. Removals are added to `raw_meta["redactions"]`."""
+    """The item as it is stored: no NUL characters, and no credentials (`redact.VERSION` of the rules) in its title,
+    its text or the text in its metadata; its boundaries move with the text. Removals are added to
+    `raw_meta["redactions"]`."""
     return _store(item, [])[0]
 
 
