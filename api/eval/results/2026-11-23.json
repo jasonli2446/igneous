@@ -1,0 +1,44 @@
+{
+  "date": "2026-11-23",
+  "provenance": {
+    "commit": "63994a954981bbb67f53255e3a394ffe811bcdfa",
+    "uncommitted_changes": false,
+    "database": "igneous_baseline205",
+    "corpus": {
+      "source_items": {
+        "email": 26259
+      },
+      "chunks": 18516,
+      "embedded": 18516
+    },
+    "models": {
+      "answer": "us.anthropic.claude-sonnet-5-5",
+      "question_filters": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "embedding": "BAAI/bge-small-en-v1.5",
+      "reranker": "Xenova/ms-marco-MiniLM-L-6-v2"
+    },
+    "settings": {
+      "recall_k": 10,
+      "context_chunks": 8,
+      "graph_slots": 3,
+      "expand_per_hit": 2,
+      "reranker_pool_size": 32,
+      "llm_sources": []
+    },
+    "configs": {}
+  },
+  "questions": {
+    "answerable": 70,
+    "unanswerable": 12,
+    "gold_not_in_database": []
+  },
+  "recall@10": {
+    "hybrid": 0.829,
+    "dense": 0.8,
+    "lexical": 0.386
+  },
+  "recall@10_multihop": {
+    "hybrid": 0.65,
+    "dense": 0.7
+  }
+}

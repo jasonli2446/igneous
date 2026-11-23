@@ -1,4 +1,5 @@
-"""Documents are chunked along the pages, sections, slides and sheets the parser recorded (#186)."""
+"""Chunking and embedding: documents along the pages, sections, slides and sheets the parser recorded, every chunk
+under its record's title, every source embedded locally, and each vector tied to the model that made it."""
 from io import BytesIO
 from types import SimpleNamespace
 
@@ -68,11 +69,25 @@ def test_sheets_are_named():
 
 def test_untrusted_boundaries_fall_back_to_plain_splitting():
     body, bounds = pages("one", "two")
-    # A local file imported before boundaries followed redaction: its offsets point into the unredacted text.
-    old_local = item(body, bounds, source="fs", redactions={"anthropic_key": 1})
-    assert chunking.chunks_for(old_local) == [body]
-    assert chunking.chunks_for(item(body, [{"kind": "page", "index": 1, "start": 0, "end": 999}])) == [body]
-    assert chunking.chunks_for(item(body, [])) == [body]
+    # A redacted local file whose recorded offsets point into the unredacted text.
+    unredacted_offsets = item(body, bounds, source="fs", redactions={"anthropic_key": 1})
+    assert chunking.chunks_for(unredacted_offsets) == [f"plan.pdf\n{body}"]
+    assert chunking.chunks_for(item(body, [{"kind": "page", "index": 1, "start": 0, "end": 999}])) == [f"plan.pdf\n{body}"]
+    assert chunking.chunks_for(item(body, [])) == [f"plan.pdf\n{body}"]
+
+
+def test_every_kind_of_record_puts_its_title_in_every_chunk():
+    long = "word " * 900  # three chunks
+    for source, title in (("fs", "notes.md"), ("ai_chats", "Claude Code: igneous, 2025-03-01"),
+                          ("github", "Fix the build"), ("imessage", "Chat with Sam Lee"), ("linkedin", "Profile"),
+                          ("drive", "Budget 2025"), ("takeout_chrome", "Chrome history, 2025-01-02")):
+        chunks = chunking.chunks_for(item(long.strip(), [], source=source, title=title))
+        assert len(chunks) == 3 and all(c.startswith(f"{title}\n") for c in chunks), source
+    # A note whose first line is its title doesn't repeat it; untitled records have nothing to add.
+    assert chunking.chunks_for(item("Groceries\n- eggs", [], source="notes", title="Groceries")) == ["Groceries\n- eggs"]
+    assert chunking.chunks_for(item("just text", [], source="fs", title=None)) == ["just text"]
+    # Mail and calendar keep their own headers.
+    assert chunking.chunks_for(item("Hello", [], source="gmail", title="Lunch")) == ["Subject: Lunch\nHello"]
 
 
 def test_redaction_moves_a_local_files_page_boundaries(tmp_path):
@@ -94,34 +109,97 @@ def test_redaction_moves_a_local_files_page_boundaries(tmp_path):
         "deck.pptx, slide 1 to slide 3\nSetup uses [REDACTED:anthropic_key] for now\n\nSecond slide\n\nThird slide"]
 
 
-def test_documents_chunked_the_old_way_are_rechunked_once(db):
+def _record(s, source, ext, title, body, raw=None, chunk=None) -> tuple[int, int]:
+    """A source item with its node, built and chunked at its current content, and optionally one chunk made under
+    no layout (an older one), with a vector."""
     import json
 
     from sqlalchemy import text
 
+    sid = s.execute(text("""
+        INSERT INTO source_items (source, external_id, content_hash, title, body_text, raw_meta, spined_hash,
+                                  chunked_hash)
+        VALUES (:s, :e, :e, :t, :b, CAST(:m AS jsonb), :e, :e) RETURNING id"""),
+        {"s": source, "e": ext, "t": title, "b": body, "m": json.dumps(raw or {})}).scalar_one()
+    nid = s.execute(text("INSERT INTO nodes (type, key, name, source_item_id) VALUES (:t, :k, :k, :i) RETURNING id"),
+                    {"t": "Message" if source in ("gmail", "email") else "File", "k": ext, "i": sid}).scalar_one()
+    if chunk is not None:
+        s.execute(text("""INSERT INTO chunks (source_item_id, node_id, ord, text, meta, embedding, embedding_model)
+                          VALUES (:i, :n, 0, :c, '{}', CAST(:v AS vector), :m)"""),
+                  {"i": sid, "n": nid, "c": chunk, "v": str([0.5] * 384), "m": "BAAI/bge-small-en-v1.5"})
+    return sid, nid
+
+
+def test_items_chunked_under_an_older_layout_are_chunked_again_once_and_keep_unchanged_vectors(db):
+    from sqlalchemy import text
+
     body, bounds = pages("First page", "Second page")
-    ids = {}
-    for source, ext, raw, chunk in (("drive", "doc", {"boundaries": bounds}, body),
-                                    ("gmail", "mail", {}, "Subject: Hi\nhello")):
-        # Both already built and chunked at their current content.
-        ids[source] = sid = db.execute(text("""
-            INSERT INTO source_items (source, external_id, content_hash, title, body_text, raw_meta, spined_hash,
-                                      chunked_hash)
-            VALUES (:s, :e, :e, :t, :b, CAST(:m AS jsonb), :e, :e) RETURNING id"""),
-            {"s": source, "e": ext, "t": "plan.pdf" if source == "drive" else "Hi",
-             "b": body if source == "drive" else "hello", "m": json.dumps(raw)}).scalar_one()
-        nid = db.execute(text("INSERT INTO nodes (type, key, name, source_item_id) VALUES "
-                              "(:t, :k, :k, :i) RETURNING id"),
-                         {"t": "File" if source == "drive" else "Message", "k": ext, "i": sid}).scalar_one()
-        db.execute(text("INSERT INTO chunks (source_item_id, node_id, ord, text, meta) VALUES (:i, :n, 0, :c, '{}')"),
-                   {"i": sid, "n": nid, "c": chunk})  # chunked before layouts existed
-    assert chunking.run(db) == 1   # only the document
-    doc = db.execute(text("SELECT text, meta->>'layout' FROM chunks WHERE source_item_id = :i"),
-                     {"i": ids["drive"]}).all()
-    assert doc == [("plan.pdf, page 1 to page 2\nFirst page\n\nSecond page", str(chunking.LAYOUT))]
-    assert db.execute(text("SELECT text FROM chunks WHERE source_item_id = :i"),
-                      {"i": ids["gmail"]}).scalar() == "Subject: Hi\nhello"  # untouched, embedding kept
-    assert chunking.run(db) == 0   # once
+    doc, _ = _record(db, "drive", "doc", "plan.pdf", body, {"boundaries": bounds}, chunk=body)
+    note, _ = _record(db, "fs", "notes.md", "notes.md", "Remember the milk", chunk="Remember the milk")
+    mail, _ = _record(db, "gmail", "mail", "Hi", "hello", chunk="Subject: Hi\nhello")
+    before = db.execute(text("SELECT id FROM chunks WHERE source_item_id = :i"), {"i": mail}).scalar_one()
+    assert chunking.run(db) == 3  # none changed: all three only for the layout
+    rows = {r.source_item_id: r for r in db.execute(text(
+        "SELECT id, source_item_id, text, meta->>'layout' AS layout, embedding IS NOT NULL AS has_vector FROM chunks"))}
+    assert (rows[doc].text, rows[doc].has_vector) == ("plan.pdf, page 1 to page 2\nFirst page\n\nSecond page", False)
+    assert (rows[note].text, rows[note].has_vector) == ("notes.md\nRemember the milk", False)
+    # The email's chunk comes out the same: kept, vector and all, under the new layout.
+    assert (rows[mail].id, rows[mail].text, rows[mail].has_vector) == (before, "Subject: Hi\nhello", True)
+    assert {r.layout for r in rows.values()} == {str(chunking.LAYOUT)}
+    assert chunking.run(db) == 0  # once
+
+
+def test_every_source_is_embedded_locally_and_each_vector_names_its_model(db, monkeypatch):
+    from sqlalchemy import text
+
+    from igneous.rag import embed
+
+    monkeypatch.setattr(embed.settings, "local_sources_model_enabled", False)  # hosted models only
+    calls: list[list[str]] = []
+    monkeypatch.setattr(embed, "embed_texts", lambda texts: calls.append(texts) or [[0.1] * embed.DIM for _ in texts])
+    for source, ext in (("fs", "a.md"), ("notes", "n1"), ("gmail", "m1")):
+        sid, nid = _record(db, source, ext, ext, "text")
+        db.execute(text("INSERT INTO chunks (source_item_id, node_id, ord, text) VALUES (:i, :n, 0, :t)"),
+                   {"i": sid, "n": nid, "t": f"{ext} text"})
+    assert embed.run(db) == 3
+    assert db.execute(text("SELECT DISTINCT embedding_model FROM chunks")).scalars().all() == [
+        embed.settings.embedding_model]
+    # Vectors from another model are made again; current ones are left alone.
+    db.execute(text("UPDATE chunks SET embedding_model = 'another/model' WHERE text = 'a.md text'"))
+    calls.clear()
+    reported: list[tuple[int, int]] = []
+    assert embed.run(db, progress=lambda done, total: reported.append((done, total))) == 1
+    assert calls == [["a.md text"]] and reported == [(1, 1)]
+    assert embed.run(db) == 0
+
+
+def test_a_model_of_another_dimension_is_refused_before_anything_is_written(db, monkeypatch):
+    import pytest
+    from sqlalchemy import text
+
+    from igneous.rag import embed
+
+    sid, nid = _record(db, "fs", "a.md", "a.md", "text")
+    db.execute(text("INSERT INTO chunks (source_item_id, node_id, ord, text) VALUES (:i, :n, 0, 'x')"),
+               {"i": sid, "n": nid})
+    monkeypatch.setattr(embed, "embed_texts", lambda texts: [[0.1] * 768 for _ in texts])
+    with pytest.raises(RuntimeError, match="768-dimensional"):
+        embed.run(db)
+    assert db.execute(text("SELECT count(embedding) FROM chunks")).scalar() == 0
+
+
+def test_fastembed_keeps_its_models_in_the_data_folder(monkeypatch, tmp_path):
+    from igneous import providers
+    from igneous.config import settings
+
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "model_cache_dir", "")
+    for provider in (providers._embedder, providers._reranker):
+        provider.cache_clear()
+        assert provider().cache_dir == str(tmp_path / "models")  # built lazily: nothing is downloaded here
+        provider.cache_clear()
+    monkeypatch.setattr(settings, "model_cache_dir", "/srv/models")
+    assert settings.models_dir == "/srv/models"
 
 
 def test_chunk_reads_what_changed_once_the_spine_built_it(db):

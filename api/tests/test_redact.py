@@ -6,6 +6,7 @@ import json
 from conftest import API
 from sqlalchemy import text
 
+from igneous.config import settings
 from igneous.connectors import ai_chats
 from igneous.connectors.base import SourceItem, run_sync, stored
 from igneous.connectors.redact import PATTERNS, redact, url_without_credentials
@@ -183,7 +184,8 @@ def test_items_stored_before_the_rules_are_redacted_and_chunked_again(committed_
         spine.run(s)
         chunking.run(s)
         assert GH in s.execute(text("SELECT string_agg(text, ' ') FROM chunks")).scalar_one()
-        s.execute(text("UPDATE chunks SET embedding = CAST(:v AS vector)"), {"v": json.dumps([0.0] * 384)})
+        s.execute(text("UPDATE chunks SET embedding = CAST(:v AS vector), embedding_model = :m"),
+                  {"v": json.dumps([0.0] * 384), "m": settings.embedding_model})
         topic = s.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Topic', 't', 't') RETURNING id")).scalar_one()
         file_node = s.execute(text("SELECT id FROM nodes WHERE source_item_id = :i"), {"i": item}).scalar_one()
         start = body.index(page2)

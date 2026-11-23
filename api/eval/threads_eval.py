@@ -1,11 +1,13 @@
-"""Score derived threads/projects against a gold set: found, duplicated, hierarchy, must-include/exclude.
+"""Score derived threads/projects against a gold set: found, duplicated, hierarchy, must-include/exclude, who took part.
 
     IGNEOUS_DATABASE_URL=...igneous_personal uv run python eval/threads_eval.py [data/eval/threads_gold.json]
 
-The gold file is local (it names a person's projects and people) and lives in git-ignored data/. Each entry:
-{name, kind, terms, parent, children, must_include: [source_item ids], must_exclude: [...], members: [names]}.
-A gold thread is "found" by the derived Project whose records best cover must_include (and whose name matches
-any of its terms). Reported per thread and in total, so a change that fixes one case and breaks another shows.
+The gold file is local (it names a person's projects and people) and lives in git-ignored data/. It holds
+{"threads": [...]}, each entry {name, terms: [words its name may use], parent: the name of the gold thread it sits
+under, must_include: [source_item ids], must_exclude: [...], participants: [names], not_participants: [names]};
+every field but name and terms is optional. A gold thread is "found" by the derived Project named exactly like it,
+or else by a Project whose name contains one of its terms (three letters or more), the one covering most of
+must_include. Reported per thread and in total, so a change that fixes one case and breaks another shows.
 """
 import json
 import re
@@ -41,11 +43,12 @@ def score(gold: dict) -> dict:
         terms = [t.lower() for t in g["terms"]]
         inc, exc = set(g.get("must_include") or []), set(g.get("must_exclude") or [])
         # A gold thread is found by name first (the thing exists under the name the person uses); records only
-        # break ties. Matching by overlapping records first let one big thread "match" several gold threads.
+        # break ties, since matching by overlapping records would let one big thread match several gold threads.
         gname = g["name"].lower()
         by_name = [p for p in projects.values() if (p["name"] or "").lower() == gname]
-        word = re.compile(r"\b(" + "|".join(re.escape(t.strip()) for t in terms if len(t.strip()) >= 3) + r")\b")
-        named = [p for p in projects.values() if word.search((p["name"] or "").lower())] if terms else []
+        usable = [re.escape(t.strip()) for t in terms if len(t.strip()) >= 3]
+        word = re.compile(r"\b(" + "|".join(usable) + r")\b") if usable else None  # no terms: no name matches
+        named = [p for p in projects.values() if word.search((p["name"] or "").lower())] if word else []
         matches = by_name or named
         best = max(matches, key=lambda p: (p in by_name, len(p["items"] & inc), len(p["items"])), default=None)
         dups = [p for p in named if p is not best and not p["umbrella"]]

@@ -1,7 +1,47 @@
 {
   "date": "2026-10-18",
-  "n_answerable": 70,
-  "n_unanswerable": 12,
+  "provenance": {
+    "commit": "3478204f7b22e7adf47ffd74fdf6ebfbafbaaf6d",
+    "database": "six-mailbox Enron baseline: lay-k, skilling-j, allen-p, arnold-j, delainey-d, lavorato-j",
+    "corpus": {
+      "source_items": {
+        "email": 26259
+      },
+      "messages": 13902
+    },
+    "models": {
+      "answer": "us.anthropic.claude-sonnet-5-5",
+      "question_filters": null,
+      "embedding": "BAAI/bge-small-en-v1.5",
+      "reranker": null
+    },
+    "settings": {
+      "recall_k": 10,
+      "hits": 8,
+      "expand_per_hit": 2,
+      "effort": "low"
+    },
+    "configs": {
+      "full": {
+        "mode": "hybrid",
+        "use_graph": true,
+        "reranker": false,
+        "evidence": "the 8 hits plus up to 4 graph neighbours, ranked by embedding similarity to the question (12 passages)"
+      },
+      "baseline": {
+        "mode": "dense",
+        "use_graph": false,
+        "reranker": false,
+        "evidence": "the 8 dense hits"
+      }
+    }
+  },
+  "metric": "cited_gold: answerable questions answered with answerable=true and a citation of a gold record. Scored with `run_eval.py --score eval/results/2026-10-18-answers.jsonl` on 2026-11-23; recall and latency are from the run itself.",
+  "questions": {
+    "answerable": 70,
+    "unanswerable": 12,
+    "gold_not_in_database": []
+  },
   "recall@10": {
     "hybrid": 0.814,
     "dense": 0.786,
@@ -12,21 +52,27 @@
     "dense": 0.7
   },
   "full": {
-    "cited_gold": 0.9,
-    "abstention": 1.0,
-    "p50_s": 2.2,
-    "p95_s": 3.06,
+    "cited_gold": 0.871,
     "cited_gold_multihop": 1.0,
     "cited_gold_multihop-hard": 1.0,
-    "cited_gold_single": 0.86
+    "cited_gold_single": 0.82,
+    "abstention": 1.0,
+    "answerable_questions": 70,
+    "unanswerable_questions": 12,
+    "errors": 0,
+    "p50_s": 2.2,
+    "p95_s": 3.06
   },
   "baseline": {
-    "cited_gold": 0.771,
-    "abstention": 1.0,
-    "p50_s": 1.83,
-    "p95_s": 2.51,
+    "cited_gold": 0.743,
     "cited_gold_multihop": 0.933,
     "cited_gold_multihop-hard": 0.0,
-    "cited_gold_single": 0.8
+    "cited_gold_single": 0.76,
+    "abstention": 1.0,
+    "answerable_questions": 70,
+    "unanswerable_questions": 12,
+    "errors": 0,
+    "p50_s": 1.83,
+    "p95_s": 2.51
   }
 }

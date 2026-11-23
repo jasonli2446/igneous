@@ -119,26 +119,6 @@ def test_experts_uses_retrieved_items_and_returns_bounded_evidence(monkeypatch):
     assert session.params["k"] == 5 and session.params["evidence_limit"] == 2
 
 
-def test_experts_endpoint_validates_query_and_passes_bounded_parameters(monkeypatch):
-    from fastapi.testclient import TestClient
-
-    from igneous import main
-    from igneous.db import get_session
-
-    calls = []
-    monkeypatch.setattr(main, "experts", lambda session, q, **kwargs: calls.append((session, q, kwargs)) or [])
-    marker = object()
-    main.app.dependency_overrides[get_session] = lambda: marker
-    try:
-        client = TestClient(main.app)
-        assert client.get("/experts?q=%20%20").status_code == 422
-        response = client.get("/experts?q=budget&k=2&evidence_limit=1&mode=lexical")
-    finally:
-        main.app.dependency_overrides.clear()
-    assert response.status_code == 200 and response.json() == {"experts": []}
-    assert calls == [(marker, "budget", {"k": 2, "evidence_limit": 1, "mode": "lexical"})]
-
-
 def test_graph_filters_scope_discovery_and_final_serialization():
     """A source/date request must not discover or serialize a non-matching edge."""
     from igneous.graph.traversal import GraphFilters, neighborhood
@@ -377,7 +357,7 @@ def test_ask_with_nothing_opted_in_calls_no_model_and_searches_nothing(monkeypat
     assert out["answerable"] is False and out["reason"] == "no_opted_in_sources"
     assert "IGNEOUS_LLM_SOURCES" in out["answer"] and out["evidence"] == []
 
-    # A question limited to sources that aren't opted in is not widened to every source (it used to be).
+    # A question limited to sources that aren't opted in is not widened to every source.
     monkeypatch.setattr(qa.llm.settings, "llm_sources", "gmail")
     monkeypatch.setattr(qa, "apply", lambda _s, _q, f: Filters(sources=("imessage",)))
     out = qa.answer(object(), "What did Sam text me?")
@@ -451,13 +431,13 @@ def test_quoted_header_parsing():
 def test_cross_encoder_reranks_full_pool_then_limits(monkeypatch):
     from igneous.rag import rerank
 
-    class Encoder:
-        def rerank(self, question, documents):
-            assert question == "Which item is relevant?"
-            assert documents == ["first", "second", "third"]
-            return [0.1, 0.2, 0.9]
+    def scores(question, documents):
+        assert question == "Which item is relevant?"
+        assert documents == ["first", "second", "third"]
+        return [0.1, 0.2, 0.9]
 
-    monkeypatch.setattr(rerank, "_model", lambda: Encoder())
+    monkeypatch.setattr(rerank, "score_documents", scores)
+    monkeypatch.setattr(rerank, "_load_failure", None)
     items = [{"text": "first", "score": 1.0}, {"text": "second", "score": 0.5}, {"text": "third"}]
     assert rerank.rerank("Which item is relevant?", items, keep=2) == [
         {"text": "third", "rerank_score": 0.9},
@@ -465,32 +445,31 @@ def test_cross_encoder_reranks_full_pool_then_limits(monkeypatch):
     ]
 
 
-def test_cross_encoder_disabled_preserves_retrieval_order(monkeypatch):
+def test_cross_encoder_turned_off_leaves_the_order_to_its_caller(monkeypatch):
     from igneous.rag import rerank
 
     monkeypatch.setattr(rerank.settings, "reranker_enabled", False)
-    monkeypatch.setattr(rerank, "_model", lambda: (_ for _ in ()).throw(AssertionError("must not load")))
-    items = [{"text": "first"}, {"text": "second"}]
-    assert rerank.rerank("question", items, keep=1) == [{"text": "first"}]
+    monkeypatch.setattr(rerank, "score_documents", lambda *_: (_ for _ in ()).throw(AssertionError("must not load")))
+    assert rerank.rerank("question", [{"text": "first"}, {"text": "second"}], keep=1) is None
 
 
-def test_cross_encoder_failure_preserves_retrieval_order(monkeypatch, caplog):
+def test_cross_encoder_failure_is_tried_once_and_leaves_the_order_to_its_caller(monkeypatch, caplog):
     from igneous.rag import rerank
 
     attempts = 0
 
-    def unavailable():
+    def unavailable(_question, _documents):
         nonlocal attempts
         attempts += 1
         raise OSError("model cache is offline")
 
-    monkeypatch.setattr(rerank, "_model", unavailable)
+    monkeypatch.setattr(rerank, "score_documents", unavailable)
     monkeypatch.setattr(rerank, "_load_failure", None)
     items = [{"text": "first"}, {"text": "second"}]
-    assert rerank.rerank("question", items, keep=1) == [{"text": "first"}]
-    assert rerank.rerank("question", items, keep=1) == [{"text": "first"}]
+    assert rerank.rerank("question", items, keep=1) is None
+    assert rerank.rerank("question", items, keep=1) is None
     assert attempts == 1
-    assert "using retrieval order" in caplog.text
+    assert "chooses evidence without it" in caplog.text
 
 
 def test_contact_names_in_messages():

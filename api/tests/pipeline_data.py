@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import text
 
 from igneous import providers
-from igneous.config import settings
+from igneous.rag.embed import DIM
 
 T0 = datetime(2025, 3, 3, 12, tzinfo=UTC)
 
@@ -61,7 +61,7 @@ def linkedin_profile(s, name: str, positions: list[dict]) -> None:
 
 def vector(value: str) -> list[float]:
     rnd = random.Random(hashlib.sha256(value.encode()).digest())
-    v = [rnd.gauss(0, 1) for _ in range(settings.embedding_dim)]
+    v = [rnd.gauss(0, 1) for _ in range(DIM)]
     norm = sum(x * x for x in v) ** 0.5
     return [x / norm for x in v]
 
@@ -81,7 +81,9 @@ class LocalModels:
 
 @pytest.fixture
 def local_models(monkeypatch):
-    monkeypatch.setattr(providers, "get_provider", LocalModels)
+    models = LocalModels()
+    for factory in ("_embedder", "_reranker", "_chat_model"):
+        monkeypatch.setattr(providers, factory, lambda: models)
 
 
 def rows(s, sql: str, **params) -> list[tuple]:

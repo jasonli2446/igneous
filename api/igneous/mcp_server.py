@@ -141,7 +141,7 @@ def evidence(node_id: int, limit: int = 10) -> list[dict]:
 def ask(question: str) -> dict:
     """Answer a question from the archive with citations, or say it can't be answered. Runs hybrid search,
     graph expansion, and a cite-or-abstain answer step server-side."""
-    from igneous.llm import LLMDisabled
+    from igneous.llm import LLMDisabled, ProviderError
     from igneous.rag import qa
 
     try:
@@ -152,9 +152,12 @@ def ask(question: str) -> dict:
         # don't need the model, so say so instead of failing opaquely.
         return {"error": f"ask is unavailable: {e}. Use search/evidence instead, or pass the model "
                          "credentials in the MCP server's env."}
+    except ProviderError as e:
+        return {"error": f"the hosted model failed to answer: {e}. Use search/evidence instead."}
     return {"answerable": r["answerable"], "answer": r["answer"],
-            "citations": [{"chunk_id": c["chunk_id"], "title": c["title"],
-                           "date": c["occurred_at"].isoformat() if c["occurred_at"] else None} for c in r["citations"]]}
+            "citations": [{"item_id": c["source_item_id"], "node_id": c["node_id"], "chunk_id": c["chunk_id"],
+                           "title": c["title"], "date": c["occurred_at"].isoformat() if c["occurred_at"] else None}
+                          for c in r["citations"]]}
 
 
 _VIEW: dict = {}  # the big picture per (owner, graph version): it only changes when the graph does

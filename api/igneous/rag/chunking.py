@@ -1,7 +1,11 @@
-"""Structure-aware chunking. Email: one chunk per message with quoted tails stripped. Parsed documents (PDF, DOCX,
-PPTX, XLSX): chunks follow the pages, sections, slides and sheets the parser recorded, and each chunk says where in
-the document it is. `run` chunks the records whose content changed since it last read them (`chunked_hash`), once the
-spine has built them."""
+"""Structure-aware chunking, every chunk under its record's title so that a search for a subject, a file name or a
+conversation finds each part of it. Email: one chunk per message with quoted tails stripped, under "Subject:".
+Calendar events: title, time and attendees. Parsed documents (PDF, DOCX, PPTX, XLSX): chunks follow the pages,
+sections, slides and sheets the parser recorded, and each says where in the document it is. Everything else (local
+files, notes, AI chats, GitHub, Takeout days, messages) is split by length, the title first in every chunk.
+
+`run` chunks the records whose content changed since it last read them (`chunked_hash`), once the spine has built
+them, and every record chunked under an older LAYOUT, once."""
 import json
 import re
 
@@ -10,7 +14,9 @@ from sqlalchemy.orm import Session
 
 MAX_CHARS = 2000  # ~500 tokens
 OVERLAP = 200
-LAYOUT = 2  # chunk meta 'layout': documents chunked by an older layout are re-chunked once
+# Recorded in each chunk's meta. An item chunked under an older layout is chunked again once; an item whose chunks
+# come out the same keeps them and their vectors, so only changed chunks are embedded again.
+LAYOUT = 3
 
 # Lines that start a quoted reply or forwarded block in Enron/Outlook mail.
 QUOTE_START = re.compile(
@@ -90,6 +96,14 @@ def packed(title: str, units: list[tuple[str, str]]) -> list[str]:
     return out
 
 
+def titled(title: str | None, parts: list[str]) -> list[str]:
+    """Each part with the record's title on its first line, unless the part already opens with it (a note whose
+    first line is its title)."""
+    if not title:
+        return parts
+    return [part if part.startswith(title) else f"{title}\n{part}" for part in parts]
+
+
 def chunks_for(item) -> list[str]:
     body = item.body_text or ""
     if item.source == "gcal":  # title + time + people so "meeting with Sam last week" finds it
@@ -100,19 +114,16 @@ def chunks_for(item) -> list[str]:
         body = strip_quoted(body)
         header = f"Subject: {item.title}\n" if item.title else ""
         return [header + c for c in split(body)] or ([header.strip()] if header else [])
-    if item.source.startswith("takeout_"):  # a day of searches or visits: the title says which product and day
-        head = f"{item.title}\n" if item.title else ""
-        return [head + c for c in split(body)]
     units = sections(item)
     if units:
         return packed(item.title or "", units)
-    return split(body)
+    return titled(item.title, split(body))
 
 
 BATCH = 500
 
 # Records whose content changed since chunk last read them, once the spine has built that version (a record is chunked
-# under the node it is), and documents chunked by an older layout. `chunked_hash` is written back as the hash read: a
+# under the node it is), and records chunked under an older layout. `chunked_hash` is written back as the hash read: a
 # record that changes meanwhile stays pending.
 PENDING = text("""
     SELECT si.id, si.source, si.title, si.body_text, si.occurred_at, si.raw_meta, si.content_hash, n.id AS node_id
@@ -129,6 +140,9 @@ PENDING = text("""
 
 
 def run(s: Session) -> int:
+    """Chunk every pending record (PENDING) and every record chunked under an older LAYOUT, one batch per
+    transaction; returns how many records it read. A record whose chunks come out the same keeps them, vectors
+    included; the others' chunks are replaced and wait for the embed stage."""
     again, after, done = _older_layout(s), 0, 0
     named = None
     while rows := s.execute(PENDING, {"again": again, "after": after, "n": BATCH}).all():
@@ -136,17 +150,29 @@ def run(s: Session) -> int:
         from igneous.graph.traversal import handle_names, name_handles
         if named is None and any(r.source == "imessage" for r in rows):
             named = handle_names(s)
-        s.execute(text("DELETE FROM chunks WHERE source_item_id = ANY(:ids)"), {"ids": [r.id for r in rows]})
+        existing = dict(s.execute(text("""
+            SELECT source_item_id, array_agg(text ORDER BY ord) FROM chunks
+            WHERE source_item_id = ANY(CAST(:ids AS bigint[])) GROUP BY 1
+        """), {"ids": [r.id for r in rows]}).all())
         for item in rows:
             # Contact cards carry no text worth searching; a duplicate copy (the same email in two Enron folders) is
             # searched through the record its node points at.
             if item.node_id is None or item.source in ("gcontacts", "maccontacts"):
+                if item.id in existing:
+                    s.execute(text("DELETE FROM chunks WHERE source_item_id = :id"), {"id": item.id})
                 continue
+            texts = chunks_for(item)
+            if item.source == "imessage":
+                texts = [name_handles(c, named or {}) for c in texts]
             meta = json.dumps({"source": item.source, "title": item.title, "layout": LAYOUT,
                                "occurred_at": item.occurred_at.isoformat() if item.occurred_at else None})
-            for ord_, c in enumerate(chunks_for(item)):
-                if item.source == "imessage":
-                    c = name_handles(c, named or {})
+            if existing.get(item.id) == texts:
+                s.execute(text("UPDATE chunks SET node_id = :nid, meta = CAST(:meta AS jsonb) "
+                               "WHERE source_item_id = :sid"), {"sid": item.id, "nid": item.node_id, "meta": meta})
+                continue
+            if item.id in existing:
+                s.execute(text("DELETE FROM chunks WHERE source_item_id = :id"), {"id": item.id})
+            for ord_, c in enumerate(texts):
                 s.execute(text("""
                     INSERT INTO chunks (source_item_id, node_id, ord, text, meta)
                     VALUES (:sid, :nid, :ord, :text, CAST(:meta AS jsonb))
@@ -162,10 +188,7 @@ def run(s: Session) -> int:
 
 
 def _older_layout(s: Session) -> list[int]:
-    """Parsed documents whose chunks predate LAYOUT: re-chunked once along their boundaries. Nothing else is,
-    so nothing else is re-embedded."""
+    """Items whose chunks were made under an older LAYOUT: chunked again once (run keeps those that don't change)."""
     return list(s.execute(text("""
-        SELECT DISTINCT c.source_item_id FROM chunks c JOIN source_items si ON si.id = c.source_item_id
-        WHERE jsonb_array_length(COALESCE(si.raw_meta->'boundaries', '[]')) > 0
-          AND COALESCE((c.meta->>'layout')::int, 1) < :layout
+        SELECT DISTINCT source_item_id FROM chunks WHERE COALESCE((meta->>'layout')::int, 1) < :layout
     """), {"layout": LAYOUT}).scalars())
