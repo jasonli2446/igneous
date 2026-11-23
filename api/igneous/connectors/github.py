@@ -3,10 +3,14 @@
 The first sync reads every repository you own or collaborate on that the token can see; later syncs read what
 changed since the last complete one: issues and pull requests through `/issues?since` (one listing covers both),
 their comments when they have any, READMEs of repositories pushed since, and the commit days touched since. A
-repository the last sync didn't list is read in full. The cursor: `synced_at` (when the last complete scan began),
-`repos` (the names it listed) and `repos_etag`, saved when a scan completes; while a first scan runs, `scan` (when
-it began, the repositories it finished and the ids it observed), so an interrupted one (a rate limit runs out)
-continues where it stopped.
+repository the last sync didn't list is read in full.
+
+The cursor: `synced_at` (when the last complete sync began), `repos` (the names it listed) and `repos_etag`, saved
+when a sync completes. A sync that stops before then (the token's hourly rate limit runs out, the process ends)
+leaves `scan`: when it began, the repositories it finished, the one it was reading (`at`: its issues and pull
+requests, listed oldest change first, are read through `through`) and, for a first sync, every id it observed. The
+next sync continues from there: that repository first, from `through`, then the ones not finished. So a repository
+too big for one hour of requests is read over several, and the others still get their turn.
 """
 from __future__ import annotations
 
@@ -50,7 +54,8 @@ def _error(e: HTTPError, path: str) -> GithubError:
     if e.code in (403, 429) and headers.get("X-RateLimit-Remaining") == "0":
         reset = headers.get("X-RateLimit-Reset")
         until = f" until {datetime.fromtimestamp(int(reset), UTC):%H:%M} UTC" if reset and reset.isdigit() else ""
-        return GithubError(f"GitHub's rate limit for this token is used up{until}. Sync again after that.")
+        return GithubError(f"GitHub's rate limit for this token is used up{until}. The next sync after that "
+                           "continues where this one stopped.")
     if e.code == 429 or headers.get("Retry-After") or "rate limit" in message.lower():
         return GithubError("GitHub asked Igneous to slow down (secondary rate limit). Sync again in a few minutes.")
     if e.code == 403:
@@ -159,7 +164,8 @@ class GithubConnector:
                           "text/markdown", {"kind": "readme", "account": self.account, "repo": name, "url": readme.get("html_url")})
 
     def _discussions(self, repo: dict, since: str | None) -> Iterator[SourceItem]:
-        """Issues and pull requests updated since `since` (all of them without it), each with its comments."""
+        """Issues and pull requests updated since `since` (all of them without it), each with its comments, oldest
+        change first."""
         name = repo["full_name"]
         records = None
         if repo.get("has_issues") is not False:
@@ -170,7 +176,8 @@ class GithubConnector:
             # Issues are turned off for the repository (410), and /issues lists no pull requests then. /pulls
             # has no `since`: list them all and keep the recent ones.
             cutoff = _when(since)
-            pulls, _ = self.client.pages(f"/repos/{name}/pulls", {"state": "all", "per_page": PER_PAGE})
+            pulls, _ = self.client.pages(f"/repos/{name}/pulls", {"state": "all", "sort": "updated",
+                                                                  "direction": "asc", "per_page": PER_PAGE})
             records = [{**p, "pull_request": {}} for p in pulls or []
                        if cutoff is None or (_when(p.get("updated_at")) or cutoff) >= cutoff]
         for record in records:
@@ -210,11 +217,11 @@ class GithubConnector:
                                           for c in group]})
 
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | CompletedScan | Tombstone]:
-        scan = cursor.get("scan")  # an interrupted first scan's progress
-        full = scan is not None or not cursor.get("synced_at")
-        # Advance only to the instant the scan began. An endpoint listed later cannot miss a mutation that
-        # happened during a long scan on the next invocation.
-        watermark = scan["started"] if scan else _iso(datetime.now(UTC))
+        scan = cursor.get("scan") or {}  # how far a sync that stopped got
+        full = not cursor.get("synced_at")
+        # Advance only to the instant the sync began. An endpoint listed later cannot miss a mutation that
+        # happened during a long sync on the next invocation.
+        watermark = scan.get("started") or _iso(datetime.now(UTC))
         since = None if full else _iso(_when(cursor["synced_at"]) - OVERLAP)
         # The ETag covers the first page only: use it when the whole list fit on one.
         etag = cursor.get("repos_etag") if not full and len(cursor.get("repos", [])) < PER_PAGE else None
@@ -224,19 +231,23 @@ class GithubConnector:
         if not listed:  # 304: the same repositories as last time, and none pushed since
             repos, new_etag = [{"full_name": n} for n in cursor.get("repos", [])], etag
         names = {repo["full_name"] for repo in repos}
-        known = set(cursor.get("repos", []))
-        if listed:
-            for missing in sorted(known - names):
+        known, done = set(cursor.get("repos", [])), set(scan.get("done", []))
+        observed, at = set(scan.get("observed", [])), scan.get("at") or {}
+        if listed:  # a repository that went (since the last sync, or while this one was stopped) takes its items
+            for missing in sorted((known | done | {at.get("repo")}) - names - {None}):
                 yield Tombstone(self.name, f"{self.account}/{missing}", prefix=True)
-        done, observed = set((scan or {}).get("done", [])), set((scan or {}).get("observed", []))
+        # The repository the sync stopped in comes first, so at most one is ever partly read.
+        repos = sorted(repos, key=lambda repo: repo["full_name"] != at.get("repo"))
         emitted, due = 0, Every()
 
-        def progress() -> Checkpoint:
-            """Commits the items so far. A first scan's cursor records how far it got (its cursor names every id it
-            observed, so it is written by time); a later sync's moves only when it completes."""
-            if not full:
-                return Checkpoint(cursor)
-            return Checkpoint({"scan": {"started": watermark, "done": sorted(done), "observed": sorted(observed)}})
+        def progress(position: dict | None = None) -> Checkpoint:
+            """Commits the items so far and records how far the sync got. A first sync's progress names every id it
+            observed, so it is written by time; a later sync's keeps the last complete sync's cursor beside it."""
+            state = {"started": watermark, "done": sorted(done), **({"at": position} if position else {})}
+            if full:
+                return Checkpoint({"scan": {**state, "observed": sorted(observed)}})
+            return Checkpoint({key: cursor[key] for key in ("synced_at", "repos", "repos_etag") if key in cursor}
+                              | {"scan": state})
 
         for repo in repos:
             name = repo["full_name"]
@@ -244,22 +255,28 @@ class GithubConnector:
                 continue
             # A repository this account didn't list before (new, renamed, or newly shared) is read in full.
             repo_since = since if name in known else None
+            position = {"repo": name, "through": at["through"]} if at.get("repo") == name else None
             found = [self._item("repo", name, repo)] if listed else []
             pushed = _when(repo.get("pushed_at"))
             if listed and (repo_since is None or pushed is None or pushed >= _when(repo_since)):
                 found += [r for r in [self._readme(repo)] if r]  # a README changes only with a push
-            for item in chain(found, self._discussions(repo, repo_since), self._commit_days(name, repo_since)):
+            for item in chain(found, self._discussions(repo, position["through"] if position else repo_since),
+                              self._commit_days(name, repo_since)):
                 observed.add(item.external_id)
-                emitted += 1
                 yield item
+                if item.raw_meta["kind"] in ("issue", "pr") and item.occurred_at:  # in order of their last change
+                    position = {"repo": name, "through": _iso(item.occurred_at)}
+                elif item.raw_meta["kind"] == "commits":  # every issue and pull request is read
+                    position = {"repo": name, "through": watermark}
+                emitted += 1
                 if (due() if full else emitted % CHECKPOINT_EVERY == 0):
-                    yield progress()
+                    yield progress(position)
             done.add(name)
-            if full and due():
+            if due():
                 yield progress()
         next_cursor = {"repos_etag": new_etag, "repos": sorted(names), "synced_at": watermark}
         if full:
-            # A repository that went while the scan was interrupted takes the items it observed.
+            # A repository that went while the sync was stopped takes the items it observed.
             kept = frozenset(i for i in observed if "/".join(i.split("/")[1:3]) in names)
             yield CompletedScan(next_cursor, self.name, kept, scopes=(self.account,))
         else:

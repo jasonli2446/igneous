@@ -6,7 +6,7 @@ import pytest
 from fakes import FakeGitHub
 from sqlalchemy import text
 
-from igneous.connectors.base import CompletedScan, SourceItem, load_cursor, run_sync
+from igneous.connectors.base import CompletedScan, SourceItem, load_cursor, run_sync, save_cursor
 from igneous.connectors.github import GithubClient, GithubConnector, GithubError, account_for
 
 REPO = {"full_name": "me/repo", "name": "repo", "updated_at": "2024-01-02T00:00:00Z",
@@ -111,6 +111,83 @@ def test_an_interrupted_first_scan_continues_where_it_stopped(db, monkeypatch):
     assert stats["deleted"] == 0 and len(stored(db)) == 6  # me/repo's five items and me/two's own
     cursor = load_cursor(db, "github", "me")
     assert "scan" not in cursor and cursor["repos"] == ["me/repo", "me/two"] and cursor["synced_at"]
+
+
+BIG = {**REPO, "full_name": "me/big", "name": "big", "updated_at": "2024-03-09T00:00:00Z"}
+BIG_ISSUES = [{"number": n, "title": f"Issue {n}", "body": "", "updated_at": f"2024-03-0{n}T00:00:00Z",
+               "user": {"login": "me"}, "comments": 1} for n in range(1, 7)]
+
+
+def big(**routes) -> FakeGitHub:
+    """me/big: six issues with a comment each, listed oldest change first from `since`, as GitHub lists them."""
+    return api(**{"/repos/me/big/issues": lambda q: [i for i in BIG_ISSUES if i["updated_at"] >= q.get("since", "")],
+                  **{f"/repos/me/big/issues/{n}/comments": [] for n in range(1, 7)},
+                  "/repos/me/big/commits": [], "/repos/me/two/issues": [], "/repos/me/two/commits": [], **routes})
+
+
+class RateLimited:
+    """`fake` for `budget` requests, then GitHub's answer once the token's requests for the hour are used up."""
+
+    def __init__(self, fake: FakeGitHub, budget: int):
+        self.fake, self.budget = fake, budget
+
+    def __call__(self, request, timeout=30):
+        if self.budget == 0:
+            raise HTTPError(request.full_url, 403, "Forbidden", {"X-RateLimit-Remaining": "0",
+                            "X-RateLimit-Reset": "1700000000"}, io.BytesIO(b'{"message": "API rate limit exceeded"}'))
+        self.budget -= 1
+        return self.fake(request, timeout)
+
+
+def comments_read(fake: FakeGitHub) -> list[int]:
+    return [int(path.split("/")[-2]) for path in fake.paths() if path.startswith("/repos/me/big/issues/")]
+
+
+def test_a_first_sync_stopped_inside_a_repository_continues_inside_it(db, monkeypatch):
+    """A repository can need more requests than the token has in an hour (one per issue with comments): the next
+    sync continues from the last issue read, not from the repository's start, so it is read over several hours."""
+    from igneous.connectors import base
+
+    monkeypatch.setattr(base, "CHECKPOINT_SECONDS", 0)
+    fake = big(**{"/user/repos": [BIG]})
+    with pytest.raises(GithubError, match="continues where this one stopped"):  # after the third issue's comments
+        run_sync(db, GithubConnector("token", "me", GithubClient("token", opener=RateLimited(fake, 6))), account="me")
+    db.rollback()  # what the last checkpoint committed stays
+    assert load_cursor(db, "github", "me")["scan"]["at"] == {"repo": "me/big", "through": "2024-03-03T00:00:00Z"}
+    fake.calls.clear()
+    stats = run_sync(db, connector(fake), account="me")
+    assert comments_read(fake) == [3, 4, 5, 6]  # the third again: it changed at the instant the sync resumes from
+    assert stats["deleted"] == 0 and len(stored(db)) == 7  # the repository and its six issues
+    assert "scan" not in load_cursor(db, "github", "me")
+
+
+def test_a_later_sync_stopped_in_a_new_repository_keeps_what_it_finished(db, monkeypatch):
+    """A later sync that meets a big new repository (read in full) and runs out of requests keeps its progress: the
+    next one skips the repositories it finished and reads the stopped one first, from where it stopped. Without
+    that, each sync would start over with the newest repository and never reach the others."""
+    from igneous.connectors import github
+
+    monkeypatch.setattr(github, "CHECKPOINT_EVERY", 1)
+    two = {**REPO, "full_name": "me/two", "name": "two", "pushed_at": "2020-01-01T00:00:00Z"}
+    fake = big(**{"/user/repos": [REPO, BIG, two]})
+    cursor = {"synced_at": "2024-06-01T00:00:00Z", "repos": ["me/repo", "me/two"], "repos_etag": '"before"'}
+    save_cursor(db, "github", "me", cursor)
+    with pytest.raises(GithubError):
+        run_sync(db, GithubConnector("token", "me", GithubClient("token", opener=RateLimited(fake, 11))), account="me")
+    db.rollback()
+    stopped = load_cursor(db, "github", "me")
+    assert stopped["synced_at"] == cursor["synced_at"] and stopped["scan"]["done"] == ["me/repo"]
+    assert stopped["scan"]["at"] == {"repo": "me/big", "through": "2024-03-04T00:00:00Z"}
+    assert comments_read(fake) == [1, 2, 3, 4]
+    fake.routes["/user/repos"] = [two, REPO, BIG]  # the listing's order changes as repositories change
+    fake.calls.clear()
+    run_sync(db, connector(fake), account="me")
+    paths = [path for path in fake.paths() if path.startswith("/repos/")]
+    assert paths[0].startswith("/repos/me/big/") and not [path for path in paths if path.startswith("/repos/me/repo/")]
+    assert comments_read(fake) == [4, 5, 6] and "/repos/me/two/issues" in paths
+    done = load_cursor(db, "github", "me")
+    assert "scan" not in done and done["synced_at"] == stopped["scan"]["started"]
+    assert done["repos"] == ["me/big", "me/repo", "me/two"]
 
 
 def test_an_error_response_is_closed():
