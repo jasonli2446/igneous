@@ -113,7 +113,7 @@ def claude_turns(path: str) -> tuple[dict, list[dict]]:
     meta: dict = {"title": None, "cwd": None, "branches": set(), "session_id": None}
     turns: list[dict] = []
     paths: list[str] = []
-    with open(path, errors="replace") as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             try:
                 r = json.loads(line)
@@ -156,7 +156,7 @@ def codex_turns(path: str) -> tuple[dict, list[dict]]:
     meta: dict = {"title": None, "cwd": None, "branches": [], "session_id": None}
     turns: list[dict] = []
     paths: list[str] = []
-    with open(path, errors="replace") as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             try:
                 r = json.loads(line)

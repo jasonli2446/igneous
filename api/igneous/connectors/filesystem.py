@@ -73,15 +73,18 @@ def _git_remote(directory: Path) -> str | None:
     """The checkout's remote URL (origin's, else the first remote's) from its git config, without the user name and
     token an HTTPS remote may embed. A worktree's `.git` file points at its gitdir, whose `commondir` holds the
     shared config."""
+    def read(path: Path) -> str:
+        return path.read_text(encoding="utf-8", errors="replace")
+
     git = directory / ".git"
     remotes: dict[str, str] = {}
     try:
         if git.is_file():
-            git = (directory / git.read_text(errors="replace").strip().removeprefix("gitdir:").strip()).resolve()
+            git = (directory / read(git).strip().removeprefix("gitdir:").strip()).resolve()
             if (git / "commondir").is_file():
-                git = (git / (git / "commondir").read_text(errors="replace").strip()).resolve()
+                git = (git / read(git / "commondir").strip()).resolve()
         remote = None  # the remote whose section the line is in
-        for line in (git / "config").read_text(errors="replace").splitlines():
+        for line in read(git / "config").splitlines():
             if section := _SECTION.match(line):
                 remote = section[2] if section[1].lower() == "remote" else None
             elif remote is not None and (url := _URL.match(line)) and url[1]:
