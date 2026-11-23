@@ -1,4 +1,7 @@
 """The sync runner (connectors/base.py): what a sync stores, what it deletes, and when it commits."""
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta, timezone
+
 import pytest
 from fakes import FakeDrive
 from sqlalchemy import text
@@ -86,3 +89,29 @@ def test_backfilling_a_second_drive_account_keeps_the_first_accounts_files(db):
     db.execute(text("DELETE FROM sync_state WHERE account = 'a@x.com'"))
     run_sync(db, DriveConnector(None, "a@x.com", first), account="a@x.com")
     assert stored(db, "drive") == {"a@x.com/f1", "b@y.com/g1"}
+
+
+@pytest.mark.parametrize("before,after", [
+    ({"occurred_at": datetime(2025, 1, 6, 9, tzinfo=UTC)},
+     {"occurred_at": datetime(2025, 1, 6, 17, tzinfo=UTC)}),
+    ({"occurred_at": None}, {"occurred_at": datetime(2025, 1, 6, 9, tzinfo=UTC)}),
+    ({"occurred_at": datetime(2025, 1, 6, 9, tzinfo=UTC)}, {"occurred_at": None}),
+    ({"mime": "text/plain"}, {"mime": "text/markdown"}),
+    ({"mime": None}, {"mime": "text/plain"}),
+    ({"mime": "text/plain"}, {"mime": None}),
+])
+def test_a_sync_stores_date_and_mime_changes_and_skips_an_identical_reread(db, before, after):
+    item = SourceItem("fs", "root/note.txt", "Note", "Same text", **before)
+    assert run_sync(db, Events("fs", [item]))["inserted"] == 1
+    changed = replace(item, **after)
+    assert run_sync(db, Events("fs", [changed]))["updated"] == 1
+    row = db.execute(text("SELECT occurred_at, mime FROM source_items")).one()
+    assert (row.occurred_at, row.mime) == (changed.occurred_at, changed.mime)
+    assert run_sync(db, Events("fs", [changed]))["unchanged"] == 1
+
+
+def test_the_same_instant_in_another_zone_is_unchanged(db):
+    item = SourceItem("notes", "note", "Note", "Same text", datetime(2025, 1, 6, 9, tzinfo=UTC))
+    run_sync(db, Events("notes", [item]))
+    other_zone = replace(item, occurred_at=item.occurred_at.astimezone(timezone(timedelta(hours=-8))))
+    assert run_sync(db, Events("notes", [other_zone]))["unchanged"] == 1

@@ -276,6 +276,8 @@ cd api && uv run igneous sync imessage && uv run igneous pipeline
   is new and commits as it goes: it finds its own work and marks it done at the version it read, in the transaction
   that writes the result, never by a timestamp (a sync can commit records stamped before the last run). See
   `rag/chunking.py`: it reads records whose `chunked_hash` differs from `content_hash` and writes back the hash it read.
+  That hash covers the title, text, metadata, date and MIME type, so a date-only sync reaches the graph and search
+  on the next Rebuild. Unchanged chunk text keeps its embedding.
   A derived stage runs inside the publishing transaction: it never commits, rolls back or bumps the graph version,
   rebuilds only the rows it owns (its extractor) and writes them through the Writer in `api/igneous/graph/derived.py`
   (which never links a pair you said is wrong and keeps a name you gave a Project), stores paid model results with

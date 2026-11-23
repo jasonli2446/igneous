@@ -11,7 +11,7 @@ import time
 from bisect import bisect_left
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Protocol
 
 from sqlalchemy import text
@@ -35,11 +35,18 @@ class SourceItem:
 
     @property
     def content_hash(self) -> str:
-        """What the upsert compares to skip an unchanged item: a hash of the title, text and metadata."""
+        """What the upsert and rebuild markers compare: title, text, metadata, date and MIME type.
+
+        A zoned date is hashed in UTC, so two representations of the same instant compare equal.
+        """
         h = hashlib.sha256()
         h.update((self.title or "").encode())
         h.update((self.body_text or "").encode())
         h.update(json.dumps(self.raw_meta, sort_keys=True, default=str).encode())
+        when = self.occurred_at
+        if when is not None and when.tzinfo is not None:
+            when = when.astimezone(UTC)
+        h.update(json.dumps([when.isoformat() if when is not None else None, self.mime]).encode())
         return h.hexdigest()
 
 
