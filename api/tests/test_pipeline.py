@@ -117,7 +117,7 @@ def test_thread_flags_count_people_merged_in_the_same_build(db):
     """Alice's two addresses are one person (her contact card), so the thread is a two-person exchange."""
     card(db, "acct/people/1", "Alice Ames", emails=["alice@a.test", "alice@b.test"])
     mail(db, "p1", "bob@c.test", ["alice@a.test"], "Plans", day(0), thread="plans")
-    mail(db, "p2", ME, ["alice@b.test", "bob@c.test"], "Re: Plans", day(1), sent=True, thread="plans")
+    mail(db, "p2", "alice@b.test", ["bob@c.test"], "Re: Plans", day(1), thread="plans")
     db.commit()
     pipeline.run(db)
     flags = db.execute(text("SELECT props FROM nodes WHERE type = 'Thread' AND key = 'gmail:plans'")).scalar_one()

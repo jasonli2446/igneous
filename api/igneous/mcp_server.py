@@ -197,7 +197,8 @@ def me() -> dict:
     with SessionLocal() as s:
         seed = identity.self_id(s)
         if seed is None:
-            return {"error": "no owner identified yet: run the pipeline"}
+            return {"error": "no owner: no source says which person is the user (several people's mailboxes, or "
+                             "none of the user's own accounts connected); use find to start from a person"}
         from igneous.graph import dirty
         key = (seed, dirty.version(s))
         g = _VIEW.get(key) or _VIEW.setdefault(key, view(s, seed))

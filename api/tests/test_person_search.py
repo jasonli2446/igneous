@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from igneous.graph.find import find
-from igneous.graph.spine import Builder, build_github
+from igneous.graph.spine import Builder
 from igneous.main import app
 
 
@@ -37,12 +37,15 @@ def test_github_fixture_never_builds_repo_logins_as_people(graph):
     s = graph
     sid = s.execute(text("""INSERT INTO source_items (source,external_id,content_hash)
                             VALUES ('github','sam/project/issue/1','fixture') RETURNING id""")).scalar_one()
-    item = SimpleNamespace(id=sid, external_id="sam/project/issue/1", title="Fix the build", occurred_at=None,
+    item = SimpleNamespace(id=sid, source="github", external_id="sam/project/issue/1", title="Fix the build",
+                           occurred_at=None,
                            raw_meta={"repo": "sam/project", "kind": "issue", "number": 1,
                                      "author": {"login": "sam/project"},
                                      "comments": [{"login": "sam/project"}, {"login": "samlee"}],
                                      "commits": [{"login": "sam/other"}]})
-    build_github(Builder(s), item)
+    builder = Builder(s)
+    builder.build(item)
+    builder.flush()
     assert list(s.execute(text("SELECT key FROM nodes WHERE type='Person'")).scalars()) == ["github:samlee"]
     assert s.execute(text("SELECT type FROM nodes WHERE key='repo:sam/project'")).scalar_one() == "Folder"
 
