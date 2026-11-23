@@ -20,8 +20,10 @@ A judged thread is a persistent identity in `thread_registry`, keyed by its firs
 runs attach new records to it by its defining terms, with no model call, and judge only what is new. Its lifecycle:
 
   active    built every run from its terms; an unjudged one (named without the model) is judged once its records may
-            be read, within the run's budget, unless you renamed it
-  rejected  judged not a thread; never built, never judged again
+            be read, within the run's budget, unless you renamed it (one you merged others into stays, whatever
+            the judge says)
+  rejected  judged not a thread; never built, never judged again. What had been merged into it (found to be the same
+            thing) stands on its own again.
   merged    a facet of the thread it was folded into (merged_into): two found to be one (graph/resolve_threads.py), or
             a merge you made (merged_by 'user'). Its own terms and span keep finding its records, for that thread.
 
@@ -611,7 +613,9 @@ def run(s: Session, log=print, report=None) -> dict:
     s.execute(text("DELETE FROM edges WHERE extractor IN (:x, 'hierarchy', 'thread-resolution')"), {"x": EXTRACTOR})
     w = Writer(s, EXTRACTOR, VERSION)
     stats = {"threads": 0, "new": 0, "rejected": 0, "rejudged": 0, "calls": 0, "waiting": 0}
-    renamed = {k.removeprefix("Project:") for k in overrides.plan(overrides.load(s)).renames}
+    yours = overrides.plan(overrides.load(s))
+    renamed = {k.removeprefix("Project:") for k in yours.renames}
+    kept = {k.removeprefix("Project:") for k in yours.merges.values()}  # threads you merged others into
 
     # A name thread's window follows its anchor (a series' occurrences, a repo's activity) as the data grows.
     for row in s.execute(text("""SELECT key, anchor, anchor_name FROM thread_registry
@@ -636,12 +640,15 @@ def run(s: Session, log=print, report=None) -> dict:
             if verdict is None or not verdict["judged"]:
                 continue  # still nothing a model may read, the call failed, or the budget is spent
             terms = [t for t in (verdict.get("defining_terms") or row.terms) if len(t) >= 3] or list(row.terms)
-            keep = verdict.get("keep") and len(_belongs(c, verdict)) >= 3
+            keep = (bool(verdict.get("keep")) and len(_belongs(c, verdict)) >= 3) or row.key in kept
             s.execute(text("""
                 UPDATE thread_registry SET name = :n, kind = :kind, terms = :t, confidence = :c, judged = true,
                     status = :st, updated_at = now() WHERE key = :k
             """), {"k": row.key, "n": (verdict.get("name") or row.name)[:80], "kind": verdict.get("kind"), "t": terms,
                    "c": verdict.get("confidence"), "st": "active" if keep else "rejected"})
+            if not keep:  # what was merged into it stands on its own again
+                s.execute(text("""UPDATE thread_registry SET status = 'active', merged_into = NULL, updated_at = now()
+                                  WHERE status = 'merged' AND merged_into = :k"""), {"k": row.key})
             stats["rejudged"] += 1
             report(count=stats["calls"], total=JUDGE_BUDGET, note="judging threads named without the model")
 

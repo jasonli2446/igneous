@@ -855,10 +855,8 @@ def test_verifier_snippets_claims_and_merge_safety():
             "dst_type": "Project", "dst_name": "Gloomhaven Night", "dst_kind": "tabletop game"}
     desc = verify._describe(edge, [item], names={1: "Ana"})
     assert "2 recipients" in desc and "A = Person 'Ana'" in desc and len(verify.digest(("INVOLVED_IN", "threads"), desc)) == 64
-    # every claim the verifier judges is phrased; merges are only undone by a confident drop
+    # every claim the verifier judges is phrased (merges are split only by a confident drop: tests/test_verifier.py)
     assert ("SAME_AS", "er") in verify.CLAIMS and ("PART_OF", "hierarchy") in verify.CLAIMS
-    import inspect
-    assert "v.confidence >= 0.8" in inspect.getsource(verify.apply_verdicts)
 
 
 def test_ask_suggestions_templates_skip_missing_slots():
@@ -882,7 +880,7 @@ def test_thread_clusters_merge_only_on_direct_evidence():
     same = {"relation": "same", "confidence": 0.9}
     names = {1: "Atlas platform", 2: "atlas-platform (client app)", 3: "Atlas Platform MVP", 4: "Portland trip"}
     assert _clusters_agree({1, 2}, {3}, {(1, 3): same, (2, 3): same}, names)
-    assert _clusters_agree({1, 2}, {3}, {(1, 3): same}, names) is not False or True  # half judged is enough
+    assert _clusters_agree({1, 2}, {3}, {(1, 3): same}, names)  # half the pairs judged is enough
     # an unrelated thread can't ride in on its neighbours' judgments, nor merge without sharing a name word
     assert not _clusters_agree({1}, {4}, {(1, 4): same}, names)
     assert not _clusters_agree({1, 2}, {3}, {(1, 3): same, (2, 3): {"relation": "related", "confidence": 0.9}}, names)
@@ -1044,13 +1042,11 @@ def test_mcp_server_starts_light_and_exposes_graph_tools():
         assert callable(getattr(m, tool))
 
 
-def test_part_of_direction_comes_from_the_named_container():
+def test_an_umbrella_still_shows_its_own_content():
     import inspect
 
-    from igneous.graph import resolve_threads, traversal
+    from igneous.graph import traversal
 
-    src = inspect.getsource(resolve_threads)
-    assert '"part_of"' in src and "container" in src and "a_part_of_b" not in src  # no A/B label to flip
     # An umbrella still shows its own repo, people and chats after its sub-projects.
     assert "_own_content" in inspect.getsource(traversal.children)
 

@@ -226,9 +226,10 @@ cd api && uv run igneous sync imessage && uv run igneous pipeline
 - **Pipeline stage:** add it to `STAGES` in `api/igneous/pipeline.py`, after every stage whose output it reads, with
   the label the Sources page shows while it runs. A source stage (redact, spine, chunk, embed, extract) reads only what
   is new and commits as it goes. A derived stage runs inside the publishing transaction: it never commits, rolls back
-  or bumps the graph version, rebuilds only the rows it owns (its extractor), stores paid model results with
-  `llm.cache_store` as they arrive, and leaves corrections to the last step. `igneous pipeline --stage NAME` runs it
-  alone, then publishes.
+  or bumps the graph version, rebuilds only the rows it owns (its extractor) and writes them through the Writer in
+  `api/igneous/graph/derived.py` (which never links a pair you said is wrong and keeps a name you gave a Project),
+  stores paid model results with `llm.cache_store` as they arrive, and leaves corrections to the last step.
+  `igneous pipeline --stage NAME` runs it alone, then publishes.
 
 ## Known gaps in the baseline
 

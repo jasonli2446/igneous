@@ -4,6 +4,7 @@ A synthetic graph mixes an opted-in source (gmail) with one that never is (imess
 Every model-calling stage runs against it with a recording provider in place of Bedrock.
 """
 import json
+import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -137,6 +138,7 @@ def graph(test_db):
 
 def _run_model_stages(monkeypatch, sources: str) -> Recorder:
     from igneous.graph import profile, resolve_threads, threads, verify
+    from igneous.graph.derived import Writer
 
     rec = Recorder()
     monkeypatch.setattr(llm, "chat", rec)
@@ -146,7 +148,7 @@ def _run_model_stages(monkeypatch, sources: str) -> Recorder:
     with SessionLocal() as s:
         verify.run(s, log=None)
         resolve_threads.run(s, log=None)
-        threads.umbrellas(s, ["thread:atlas", "thread:atlas-platform", "thread:pat-only"])
+        threads.umbrellas(s, Writer(s, threads.EXTRACTOR))
         profile.run(s, log=None)
         s.commit()
     return rec
@@ -161,6 +163,40 @@ def test_visible_nodes_are_those_grounded_in_opted_in_records(graph):
             g["me"], g["sam"], g["sam2"], g["atlas"], g["platform"], g["items"]["g0"]}
         assert llm.visible_nodes(s, ids, frozenset()) == set()
         assert g["pat"] in llm.visible_nodes(s, ids, frozenset({"imessage"}))
+
+
+def test_a_name_from_outside_opted_in_records_never_reaches_a_prompt(db, monkeypatch):
+    """A project named by your LinkedIn (never opted in) whose opted-in records don't name it, and a person named by a
+    contact card whose opted-in mail shows only an address: the verifier may read their records but never names them.
+    A name the records hold (Sam's, on his own mail; a thread named from its records) is named."""
+    from igneous.graph import verify
+
+    me = _node(db, "Person", "me", "Me Myself", {"self": True})
+    quinn = _node(db, "Person", "quinn@x.test", "Quinn Hidden", {"named_by": "contacts"})
+    sam = _node(db, "Person", "sam@x.test", "Sam Shared")
+    zephyr = _node(db, "Project", "profile:zephyr", "Zephyr Mobile Suite",
+                   {"derived": "threads", "kind": "project", "pinned": True, "named_from": "profile"})
+    atlas = _node(db, "Project", "thread:atlas", "Atlas", {"derived": "threads", "kind": "project",
+                                                           "named_from": "model"})
+    for i in range(3):
+        for who, project, ref, title in ((quinn, zephyr, f"q{i}", f"Your mobile bill {i}"),
+                                         (sam, atlas, f"s{i}", f"Atlas update {i}")):
+            sid = _item(db, "gmail", ref, title, f"{title}: as attached.", T0 + timedelta(days=i))
+            m = _node(db, "Message", f"gmail:{ref}", title, item=sid)
+            _edge(db, who, m, "SENT", item=sid)
+            _edge(db, m, me, "RECEIVED", item=sid)
+            _edge(db, m, project, "PART_OF", "threads", item=sid)
+    _edge(db, quinn, zephyr, "INVOLVED_IN", "threads")
+    _edge(db, sam, atlas, "INVOLVED_IN", "threads")
+    rec = Recorder()
+    monkeypatch.setattr(llm, "chat", rec)
+    monkeypatch.setattr(llm.settings, "llm_enabled", True)
+    monkeypatch.setattr(llm.settings, "llm_sources", "gmail")
+    stats = verify.run(db, log=None)
+    joined = "\n".join(rec.prompts)
+    assert "Person 'Sam Shared'" in joined and "Project 'Atlas'" in joined
+    assert "Zephyr" not in joined and "Quinn" not in joined and stats["not_shared"] == 4
+    assert llm.nameable(db, [sam, quinn, zephyr, atlas]) == {sam: "Sam Shared", atlas: "Atlas"}
 
 
 def test_nothing_opted_in_means_no_hosted_call(graph, monkeypatch):
@@ -178,6 +214,44 @@ def test_prompts_carry_only_opted_in_records(graph, monkeypatch):
     # ...and nothing from the texts: no snippet, no name, no number, no correction about Pat, no local resume.
     assert rec.leaked() == []
     assert "resume.pdf" not in joined and "Resume 2026" not in joined  # drive isn't opted in either
+
+
+class Unsure(Recorder):
+    """A verifier that is unsure of every edge, so each one is asked again of the strong model."""
+
+    def __init__(self):
+        super().__init__()
+        self.models: list[str | None] = []
+
+    def __call__(self, messages, schema=None, **options):
+        super().__call__(messages, schema, **options)
+        self.models.append(options.get("model"))
+        n = len(re.findall(r"^### Edge \d+$", messages[-1]["content"], re.M))
+        return ChatResult(json.dumps({"edges": [{"edge": i, "verdict": "unsure", "confidence": 0.5, "reason": "?"}
+                                                for i in range(n)]}), {"input_tokens": 0, "output_tokens": 0})
+
+
+def test_the_verifiers_second_opinion_and_an_introducers_name_follow_the_rule(graph, monkeypatch):
+    """The strong model's second look reads the same opted-in prompt as the first, and an introduction names its
+    introducer only when opted-in records show them (Pat is only in texts)."""
+    from igneous.graph import verify
+
+    g = graph
+    with SessionLocal() as s:
+        sid = s.execute(text("SELECT id FROM source_items WHERE external_id = 'g0'")).scalar_one()
+        s.execute(text("""INSERT INTO edges (src, dst, type, props, extractor, source_item_id)
+                          VALUES (:a, :b, 'INTRODUCED', CAST(:p AS jsonb), 'relationship-history', :i)"""),
+                  {"a": g["sam"], "b": g["sam2"], "p": json.dumps({"introducer": g["pat"]}), "i": sid})
+        s.commit()
+    rec = Unsure()
+    monkeypatch.setattr(llm, "chat", rec)
+    monkeypatch.setattr(llm.settings, "llm_enabled", True)
+    monkeypatch.setattr(llm.settings, "llm_sources", "gmail")
+    with SessionLocal() as s:
+        verify.run(s, log=None)
+        s.commit()
+    assert None in rec.models and llm.settings.llm_cheap_model in rec.models  # asked again of the strong model
+    assert rec.leaked() == [] and "introducer = '(not shared)'" in "\n".join(rec.prompts)
 
 
 def test_opting_in_a_document_source_lets_its_resume_be_read(graph, monkeypatch):

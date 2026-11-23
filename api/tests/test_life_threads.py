@@ -1,11 +1,12 @@
 """The threads pipeline on a synthetic life (tests/life_threads.py): every gold thread found, once, under the right
-parent; two rebuilds with no new data change nothing; and candidates come out the same whatever the hash seed or the
-order of the records."""
+parent; two rebuilds with no new data change nothing, whatever the hash seed of the process that runs each; and
+candidates come out the same whatever the hash seed or the order of the records."""
 import json
 import os
 import random
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import life_threads
@@ -18,9 +19,8 @@ from sqlalchemy import text
 from igneous import pipeline
 from igneous.graph import threads
 
-pytestmark = pytest.mark.usefixtures("life")
 
-
+@pytest.mark.usefixtures("life")
 def test_every_gold_thread_is_found_once_under_its_parent(db):
     from eval.threads_eval import score
 
@@ -37,7 +37,7 @@ def snapshot(s) -> dict:
     def rows(sql: str) -> list:
         return [tuple(json.dumps(v, sort_keys=True, default=str) if isinstance(v, (dict, list)) else v for v in r)
                 for r in s.execute(text(sql)).all()]
-    return {
+    out = {
         "nodes": rows("SELECT id, type, key, name, props FROM nodes ORDER BY type, key"),
         "edges": rows("""
             SELECT a.type || ':' || a.key, b.type || ':' || b.key, e.type, e.extractor, e.props, e.confidence,
@@ -53,14 +53,39 @@ def snapshot(s) -> dict:
                             FROM edge_verdicts ORDER BY 1, 2, 3, 4"""),
         "dropped": rows("SELECT src_key, dst_key, type, extractor FROM edges_dropped ORDER BY 1, 2, 3, 4"),
     }
+    s.rollback()
+    return out
 
 
-def test_two_rebuilds_with_no_new_data_change_nothing(db):
-    pipeline.run(db)
-    first = snapshot(db)
+REBUILD = """
+import sys
+sys.path.insert(0, sys.argv[1])
+import life_threads, pipeline_data
+from igneous import llm, pipeline, providers
+from igneous.db import SessionLocal
+
+models = pipeline_data.LocalModels()
+for factory in ("_embedder", "_reranker", "_chat_model"):
+    setattr(providers, factory, lambda: models)
+llm.structured = life_threads.model
+llm.settings.llm_sources = life_threads.SOURCES
+llm.settings.local_sources_model_enabled = True
+with SessionLocal() as s:
+    pipeline.run(s)
+"""
+
+
+def test_two_rebuilds_with_no_new_data_change_nothing_whatever_the_hash_seed(committed_db):
+    """Each rebuild runs in a process of its own, under another PYTHONHASHSEED: nothing it derives (nodes, links,
+    keys, names, identities, the registry, verdicts) may depend on the order a set or dict happens to iterate in."""
+    life_threads.build(committed_db)
+    snapshots = []
+    for seed in ("1", "2"):
+        subprocess.run([sys.executable, "-c", REBUILD, str(Path(__file__).parent)], check=True, cwd=API,
+                       env={**os.environ, "PYTHONHASHSEED": seed})
+        snapshots.append(snapshot(committed_db))
+    first, second = snapshots
     assert first["registry"] and first["verdicts"]
-    pipeline.run(db)
-    second = snapshot(db)
     for part in first:
         assert second[part] == first[part], part
 
@@ -80,6 +105,7 @@ def _candidates(items) -> list:
     return [[threads.thread_key(c), c["terms"], sorted(c["items"])] for c in threads.burst_candidates(items, set())]
 
 
+@pytest.mark.usefixtures("life")
 def test_candidates_are_the_same_whatever_the_hash_seed_or_record_order(db, tmp_path):
     rows = [dict(r._mapping) for r in threads._items(db)]
     items = [SimpleNamespace(**r) for r in rows]
