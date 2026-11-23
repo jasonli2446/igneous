@@ -131,8 +131,9 @@ Pick 3–4. Each needs no setup beyond registration. Speak as Mira: the server's
 1. **Overview** (start here):
    > Using igneous, give me a quick overview of my life right now: where I work and study, what I'm working on, and who I'm closest to.
 
-   Expect: `me` → `open_node` → `correspondents`. Lakeshore University and Northwind Robotics with dates, Tidepool and
-   the recent trips, and Dana, Rafael and Priya among the closest people.
+   Expect: `me` → `open_node` → `correspondents`. Lakeshore University and Northwind Robotics with dates (both of her
+   Northwind roles: the internship from January 2025 to May 2026 and the job since July 2026), Tidepool and the recent
+   trips, and Dana, Rafael and Priya among the closest people.
 
 2. **Who went, and how do you know** (shows evidence):
    > Using igneous: who went on my Lisbon trip, and how do you know? Show the evidence.
