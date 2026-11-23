@@ -81,7 +81,7 @@ def test_preflight_rejects_empty(tmp_path):
 def clean():
     with SessionLocal() as s:
         s.execute(text("DELETE FROM nodes WHERE key LIKE 'linkedin:%' OR key LIKE '%@linkedin-test.example' "
-                       "OR key IN ('org:globex', 'linkedin-test.example')"))
+                       "OR key IN ('org:globex')"))
         s.execute(text("DELETE FROM source_items WHERE source = 'linkedin'"))
         s.execute(text("DELETE FROM sync_state WHERE connector = 'linkedin'"))
         s.commit()
@@ -122,8 +122,8 @@ def test_reimport_is_noop_and_graph(db, zpath):
                                     JOIN nodes o ON o.id = e.dst
                                     WHERE e.type='MEMBER_OF' AND e.extractor='linkedin' AND o.name = 'Globex'
                                     ORDER BY p.name""")).all()
-        # no email domain -> org:<slug>; a known work-email domain keys the org by that domain
-        assert [(m[0], m[1]) for m in members] == [("Kim Wu", "org:globex"), ("Sam Lee", "linkedin-test.example")]
+        # The company is keyed by its own name, never by a connection's email domain.
+        assert [(m[0], m[1]) for m in members] == [("Kim Wu", "org:globex"), ("Sam Lee", "org:globex")]
         assert [v for v in check_graph(s) if v.details and v.details.get("edge_type") in ("MEMBER_OF", "SAME_AS")
                 and v.edge_id in set(s.execute(text("SELECT id FROM edges WHERE extractor='linkedin'")).scalars())] == []
         n_edges = s.execute(text("SELECT count(*) FROM edges WHERE extractor='linkedin'")).scalar()

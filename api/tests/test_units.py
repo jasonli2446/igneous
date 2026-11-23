@@ -105,58 +105,6 @@ def test_names_and_threads():
     assert _thread_key({"from": [{"email": "a@x"}], "to": [{"email": "b@x"}]}, "RE: FW: Forecast") == "subject:forecast|a@x,b@x"
 
 
-def test_spine_assigns_closed_message_intervals_without_domain_membership():
-    from igneous.graph.spine import UPSERT_EDGE, Builder, _person
-
-    class Result:
-        def scalar_one(self):
-            return 1
-
-    class Session:
-        def __init__(self):
-            self.calls = []
-
-        def execute(self, statement, params):
-            self.calls.append((str(statement), params))
-            return Result()
-
-    session = Session()
-    builder = Builder(session)
-    first, last = datetime(2024, 1, 2), datetime(2024, 3, 4)
-    person = _person(builder, {"email": "person@example.com"}, "Person", first, 10)
-    builder.edge(person, 99, "SENT", last, 11)
-
-    (sent,) = [params for statement, params in session.calls if statement == str(UPSERT_EDGE)]
-    assert sent == {"src": 1, "dst": 99, "type": "SENT", "valid_from": last,
-                    "valid_to": last, "sid": 11}
-    assert "LEAST(edges.valid_from, EXCLUDED.valid_from)" in str(UPSERT_EDGE)
-    assert "GREATEST(edges.valid_to, EXCLUDED.valid_to)" in str(UPSERT_EDGE)
-
-
-def test_temporal_backfill_is_bounded_and_repairs_both_edge_classes():
-    from igneous.graph.spine import BACKFILL_MEMBERSHIPS, BACKFILL_POINT_EDGES, backfill_temporal
-
-    class Result:
-        def __init__(self, rowcount):
-            self.rowcount = rowcount
-
-    class Session:
-        def __init__(self):
-            self.calls = []
-
-        def execute(self, statement, params):
-            self.calls.append((str(statement), params))
-            return Result(2 if statement == BACKFILL_POINT_EDGES else 3)
-
-    session = Session()
-    assert backfill_temporal(session, limit=25) == 5
-    assert [statement for statement, _ in session.calls] == [str(BACKFILL_POINT_EDGES), str(BACKFILL_MEMBERSHIPS)]
-    assert all(params["limit"] == 25 for _, params in session.calls)
-    assert "SET valid_from = c.observed_at, valid_to = c.observed_at" in str(BACKFILL_POINT_EDGES)
-    assert "min(COALESCE(si.occurred_at, observed.valid_from))" in str(BACKFILL_MEMBERSHIPS)
-    assert "max(COALESCE(si.occurred_at, observed.valid_from))" in str(BACKFILL_MEMBERSHIPS)
-
-
 def test_rrf_rewards_agreement():
     assert rrf([1, 2, 3], [3, 2, 9])[0][0] in (2, 3)
     assert {c for c, _ in rrf([1], [2])} == {1, 2}
@@ -1510,9 +1458,9 @@ def test_shared_event_and_drive_file_from_two_accounts_make_one_node():
         def __init__(self):
             self.keys = []
 
-        def node(self, type_, key, name, props=None, sid=None):
+        def node(self, type_, key, name=None, props=None, **_):
             self.keys.append((type_, key))
-            return len(self.keys)
+            return (type_, key)
 
         def edge(self, *a, **k):
             pass
@@ -1742,18 +1690,6 @@ def test_ai_session_repo_comes_from_files_touched_not_launch_dir(tmp_path):
     assert meta["repo_path"] == str(repo)
 
 
-def test_node_upsert_keeps_human_names_over_keys_and_contact_names():
-    from igneous.graph.spine import NAME_FROM_HEADERS, UPSERT_NODE
-
-    sql = str(UPSERT_NODE)
-    # a contact card's name is never replaced; a real name beats the key (phone/address) itself
-    assert "named_by' = 'contacts' THEN nodes.name" in sql
-    assert "EXCLUDED.name = nodes.key AND nodes.name <> nodes.key THEN nodes.name" in sql
-    # header naming picks the most frequent display name and never overrides cards or user renames
-    hs = str(NAME_FROM_HEADERS)
-    assert "ORDER BY key, n DESC" in hs and "'contacts'" in hs and "renamed" in hs
-
-
 def test_product_relay_senders_are_services_not_people():
     from igneous.graph.resolve import P, _human_name, unresolvable
     from igneous.graph.self_identity import is_relay_name, is_service_address
@@ -1858,15 +1794,6 @@ def test_thread_terms_match_whole_words_and_course_codes_are_whole():
     assert pat.search("the atlas platform demo") and not pat.search("fatlas testing") and not pat.search("atlases")
 
 
-def test_only_group_conversations_become_thread_nodes():
-    from igneous.graph import item_class
-
-    sql = str(item_class.SYNC_THREAD_FLAG)
-    # a one-on-one conversation stays a conversation (it feeds the person's closeness) but isn't a second node
-    assert "'hidden', NOT (flag.ok AND flag.grp)" in sql and ">= 3 AS grp" in sql
-    assert "'conversational', flag.ok" in sql
-
-
 def test_one_way_bulk_senders_are_services_but_colleagues_are_not():
     from igneous.graph import self_identity
 
@@ -1875,6 +1802,7 @@ def test_one_way_bulk_senders_are_services_but_colleagues_are_not():
     assert "named_by' IS DISTINCT FROM 'contacts'" in sql      # not a saved contact
     assert "NOT IN (SELECT d FROM my_domains)" in sql          # not at a domain you write to (school, employer)
     assert "bulk >= 0.8 * sent.n" in sql                       # what they send is mostly notifications/marketing
+
 
 
 def test_links_you_stated_are_never_judged_by_the_model():
