@@ -529,6 +529,20 @@ def test_only_the_calendar_folder_or_a_calendar_file_given_on_its_own_is_your_ca
     assert [i.external_id for i in items] == ["takeout/Team/retro"]  # no account in a file alone: keyed by the export
 
 
+def test_a_calendar_that_cannot_be_read_in_part_never_stops_the_import(tmp_path):
+    """An event out of Python's range, and a property in a CHARSET nobody knows: the rest of the export is read."""
+    odd = ics("20250801T000000Z", "DTSTART:99991231T230000Z\nDURATION:P2D\nRRULE:FREQ=DAILY\nUID:far@google.com",
+              "DTSTART:20250605T180000Z\nUID:caf@google.com\nSUMMARY;ENCODING=QUOTED-PRINTABLE;CHARSET=X-NOPE:caf=C3=A9",
+              name="Odd")
+    export = build_zip(tmp_path / "takeout-20250801T000000Z-001.zip", {
+        "Calendar/me@example.com.ics": ics("20250801T000000Z", STANDUP), "Calendar/Odd.ics": odd,
+        "Tasks/Tasks.json": TASKS})
+    items, report = takeout.parse([export])
+    titles = sorted(i.title for i in items if i.source == "gcal")
+    assert titles == ["Standup", "café"] and any(i.source == "takeout_tasks" for i in items)
+    assert any("couldn't be read were left out (1)" in n for n in report["notes"])
+
+
 def test_without_user_info_you_are_the_one_person_in_every_conversation(tmp_path):
     space = {"name": "Gloomhaven Night", "members": [CHAT_GROUP["members"][1], LEE, ELLA]}  # Sam isn't in it
     files = {"Google Chat/Groups/Space AAAAgloom/group_info.json": space,
