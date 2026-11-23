@@ -249,7 +249,7 @@ after a second run:
 - The only identity left apart is classmate Alex Chen's LinkedIn profile: two people share the name, so the name
   alone joins neither.
 - Retrieval is the same on every build of the seed, because equal scores go in chunk id order and dense search is
-  exact ("Dense retrieval is exact" above). Two builds from scratch, measured at `8f5317c`, gave the same recall@10
+  exact ("Dense retrieval is exact" above). Two builds from scratch, measured at `7740826`, gave the same recall@10
   and the same result lists for every gold question. That includes both legs' 50-passage pools and Ask's evidence,
   with the cross-encoder on and off.
 - With the model off, threads keep their fallback names ("Lisbon · Jan-Mar 2025", kind "thread"). `--qa` needs the
