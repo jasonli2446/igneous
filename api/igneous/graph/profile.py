@@ -20,10 +20,13 @@ you use. So the biggest parts of your life come from there first, and everything
      'profile'), named as you name them and found by their full name, or a word of it that stands for the project in
      your records ("Atlas" for "Atlas Mobile App", not "Mobile").
   4. A role is one title at one organization over one stretch of time: the same title in two documents, at dates
-     that overlap, is one role, while a second stint is another. Every version adds to it: an older version adds what
-     the newer ones left out, and a newer one wins on dates, except that an end it leaves open ("present") gives way
-     to an end another document states for after the newer one was written. Each organization and project comes
-     from the newest version that names it the same way.
+     that overlap, is one role, while a second stint is another; a degree at one school is one whatever each document
+     calls it ("B.S. Computer Science", "Bachelor of Science - BS, Computer Science") at dates that overlap. Every
+     version adds to it: an older version adds what the newer ones left out, and a newer one wins on title and dates,
+     except that an end it leaves open ("present") gives way to an end another document states for after the newer
+     one was written. Two names of one organization (your resume's "Northwind" and LinkedIn's "Northwind Robotics",
+     the company its people name) are one organization with every role from both, named as the newest document
+     names it. Each project comes from the newest version that names it the same way.
 
 A LinkedIn export (connectors/linkedin.py) is read too, without a model: its profile item carries the same structure
 in `raw_meta.profile`. It has no date of its own, so a dated resume wins on dates and LinkedIn fills in what the
