@@ -7,6 +7,7 @@
   dropped_edge_live       a link the verifier dropped is in the graph as well as in edges_dropped
   orphan_org_thread       an org thread the backbone made for an organization that no longer stands for it
   empty_umbrella          an umbrella no thread sits under
+  domain_held_twice       an email domain two organizations hold (graph/organizations.py: one organization, one node)
 """
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -84,7 +85,19 @@ def orphan_project_violations(s: Session) -> list[Violation]:
                           ORDER BY p.id"""))]
 
 
+def domain_violations(s: Session) -> list[Violation]:
+    """An organization holds its domains (props.domains; one keyed by its domain holds that one): no domain is held by
+    two."""
+    return [Violation(code="domain_held_twice", details={"domain": r.domain, "organizations": r.keys},
+                      message=f"two organizations hold the domain {r.domain}")
+            for r in s.execute(text("""
+                SELECT d AS domain, array_agg(DISTINCT n.key ORDER BY n.key) AS keys FROM nodes n
+                CROSS JOIN LATERAL (SELECT jsonb_array_elements_text(COALESCE(n.props->'domains', '[]')) AS d
+                                    UNION SELECT n.key WHERE n.key !~ ':' AND n.key ~ '\\.') ds
+                WHERE n.type = 'Organization' GROUP BY d HAVING count(DISTINCT n.id) > 1 ORDER BY d"""))]
+
+
 def check(s: Session) -> list[Violation]:
     """Every check above, in order."""
     return [*rejected_pair_violations(s), *registry_violations(s), *alias_violations(s), *dropped_violations(s),
-            *orphan_project_violations(s)]
+            *orphan_project_violations(s), *domain_violations(s)]

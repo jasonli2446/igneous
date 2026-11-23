@@ -9,7 +9,9 @@ made someone "part of" a game, two different people merged by name, or a project
 Verdicts are stored in `edge_verdicts`, keyed by the edge's natural identity ('Type:key' of both ends, edge type,
 extractor) so they survive stages that rebuild their edges every run, and by a digest of exactly what the judge read
 (its instructions with the claim, the edge's description and its evidence), so an edge is judged again when its
-evidence or the prompt changes and never otherwise. Each batch is stored the moment the model answers, in a
+evidence or the prompt changes and never otherwise. They are read as the graph is keyed now (`_verdicts`): a verdict
+on a link to an organization by a key another organization has now is that organization's link's (graph/derived.py
+`rekeyed`), and of two verdicts on one link, yours wins. Each batch is stored the moment the model answers, in a
 transaction of its own, so a rebuild that fails later loses its graph write but never a paid judgment. Only the
 verdicts the model returned are stored; an edge it left out is asked again next run. An 'unsure' from the cheap model
 is asked once more of the strong model, once per evidence change.
@@ -207,13 +209,15 @@ def _snippet(item: dict, terms: list[str]) -> str:
 def _examples(s: Session, claim: tuple, batch: list[dict], sources: frozenset[str], k: int = EXAMPLES) -> list[str]:
     """Your own corrections of this claim, the most similar to the batch first (about the same thing or person, then
     the most recent), as lines a prompt may show: both ends named (llm.nameable), with the reason you gave."""
+    from igneous.graph.derived import rekeyed
     from igneous.llm import nameable
 
-    rows = [dict(r) for r in s.execute(text("""
-        SELECT v.src_key, v.dst_key, v.verdict, v.reason, a.id AS a, b.id AS b FROM edge_verdicts v
+    verdicts, keyed = _verdicts(rekeyed(s))
+    rows = [dict(r) for r in s.execute(text(f"""
+        SELECT v.src_key, v.dst_key, v.verdict, v.reason, a.id AS a, b.id AS b FROM {verdicts} v
         JOIN nodes a ON a.type || ':' || a.key = v.src_key JOIN nodes b ON b.type || ':' || b.key = v.dst_key
         WHERE v.source = 'user' AND v.type = :t AND v.extractor = :x ORDER BY v.updated_at DESC, v.src_key LIMIT :n
-    """), {"t": claim[0], "x": claim[1], "n": k * 10}).mappings()]
+    """), {"t": claim[0], "x": claim[1], "n": k * 10, **keyed}).mappings()]
     near = {e["dst_key"] for e in batch} | {e["src_key"] for e in batch}
     rows.sort(key=lambda r: (r["dst_key"] not in near and r["src_key"] not in near))
     names = nameable(s, [r["a"] for r in rows] + [r["b"] for r in rows], sources)
@@ -301,6 +305,24 @@ def _store(rows: list[dict], forget: list[dict] = ()) -> None:
         vs.commit()
 
 
+def _verdicts(moved: dict[str, str]) -> tuple[str, dict]:
+    """`edge_verdicts` as the graph is keyed now, for a FROM clause, with its parameters: a verdict recorded under a
+    key that stands for another now (`moved`, graph/derived.py rekeyed) is that key's, and of two verdicts on one link
+    yours wins, then the latest."""
+    if not moved:
+        return "edge_verdicts", {}
+    return """(SELECT DISTINCT ON (src_key, dst_key, type, extractor) * FROM (
+                   SELECT COALESCE(ma.new, v.src_key) AS src_key, COALESCE(mb.new, v.dst_key) AS dst_key, v.type,
+                          v.extractor, v.evidence, v.verdict, v.confidence, v.reason, v.source, v.updated_at
+                   FROM edge_verdicts v
+                   LEFT JOIN unnest(CAST(:moved_old AS text[]), CAST(:moved_new AS text[])) AS ma(old, new)
+                     ON ma.old = v.src_key
+                   LEFT JOIN unnest(CAST(:moved_old AS text[]), CAST(:moved_new AS text[])) AS mb(old, new)
+                     ON mb.old = v.dst_key) keyed
+               ORDER BY src_key, dst_key, type, extractor, source = 'user' DESC, updated_at DESC)""", {
+        "moved_old": sorted(moved), "moved_new": [moved[k] for k in sorted(moved)]}
+
+
 def _order(row: dict) -> tuple[str, str, str, str]:
     return (row["a"], row["b"], row["t"], row["x"])
 
@@ -318,12 +340,14 @@ def run(s: Session, log=print, budget: int = BUDGET, progress=None) -> dict:
     """Settle the links with direct evidence, judge every other derived edge that has no verdict for what it would
     be judged on now (storing each batch as it arrives), then apply every verdict in the caller's transaction.
     `progress(count, total)` follows the model calls."""
+    from igneous.graph.derived import rekeyed
     from igneous.llm import allowed_sources, nameable
 
     stats = {"judged": 0, "keep": 0, "drop": 0, "unsure": 0, "cached": 0, "calls": 0, "strong": 0, "not_shared": 0,
              "settled": 0}
+    verdicts, keyed = _verdicts(rekeyed(s))
     known = {(r[0], r[1], r[2], r[3]): (r[4], r[5], r[6]) for r in s.execute(text(
-        "SELECT src_key, dst_key, type, extractor, evidence, source, verdict FROM edge_verdicts"))}
+        f"SELECT src_key, dst_key, type, extractor, evidence, source, verdict FROM {verdicts} v"), keyed)}
     edges = _edges(s)
     # 1. Direct evidence: the record itself lists them (a thread's group chat members, its events' attendees).
     settled, forget, rest = [], [], []
@@ -431,17 +455,18 @@ def apply_verdicts(s: Session) -> int:
       - the verifier's drops: the link moves to `edges_dropped` (kept for the why-view and undo, one row per natural
         key), and a 'keep' of yours on a dropped link brings it back; a row whose verdict no longer drops it goes;
       - every other verdict rides on its link (props.verdict, reason, confidence, verified_by)."""
-    from igneous.graph.derived import blocked_sql, rejections
+    from igneous.graph.derived import blocked_sql, rejections, rekeyed
 
     blocked = rejections(s).id_pairs()
+    verdicts, keyed = _verdicts(rekeyed(s))
     removed = s.execute(text(f"""
         DELETE FROM edges e WHERE e.extractor <> ALL(:stated) AND {blocked_sql('e.src', 'e.dst')} RETURNING e.type
     """), {"stated": list(STATED), "blocked": blocked}).scalars().all() if blocked else []
-    moved = s.execute(text("""
+    moved = s.execute(text(f"""
         WITH doomed AS (
             SELECT e.id, a.type || ':' || a.key AS src_key, b.type || ':' || b.key AS dst_key, v.reason
             FROM edges e JOIN nodes a ON a.id = e.src JOIN nodes b ON b.id = e.dst
-            JOIN edge_verdicts v ON v.src_key = a.type || ':' || a.key AND v.dst_key = b.type || ':' || b.key
+            JOIN {verdicts} v ON v.src_key = a.type || ':' || a.key AND v.dst_key = b.type || ':' || b.key
                 AND v.type = e.type AND v.extractor = e.extractor
             WHERE v.verdict = 'drop' AND v.source = 'model' AND e.extractor <> ALL(:stated)
                 AND (e.type <> 'SAME_AS' OR v.confidence >= 0.8)
@@ -459,26 +484,27 @@ def apply_verdicts(s: Session) -> int:
             confidence = EXCLUDED.confidence, source_item_id = EXCLUDED.source_item_id,
             span_start = EXCLUDED.span_start, span_end = EXCLUDED.span_end
         RETURNING type
-    """), {"stated": list(STATED)}).scalars().all()
+    """), {"stated": list(STATED), **keyed}).scalars().all()
     back = s.execute(text(f"""
         INSERT INTO edges (id, src, dst, type, props, valid_from, valid_to, extractor, extractor_version, model,
                            confidence, source_item_id, span_start, span_end)
         SELECT d.id, a.id, b.id, d.type, d.props - 'verdict' - 'reason', d.valid_from, d.valid_to, d.extractor,
                d.extractor_version, d.model, d.confidence, d.source_item_id, d.span_start, d.span_end
         FROM edges_dropped d
-        JOIN edge_verdicts v ON (v.src_key, v.dst_key, v.type, v.extractor) = (d.src_key, d.dst_key, d.type, d.extractor)
+        JOIN {verdicts} v ON (v.src_key, v.dst_key, v.type, v.extractor) = (d.src_key, d.dst_key, d.type, d.extractor)
         JOIN nodes a ON a.type || ':' || a.key = d.src_key JOIN nodes b ON b.type || ':' || b.key = d.dst_key
         WHERE v.source = 'user' AND v.verdict = 'keep'
           AND (d.source_item_id IS NULL OR EXISTS (SELECT 1 FROM source_items si WHERE si.id = d.source_item_id))
           {f"AND NOT {blocked_sql('a.id', 'b.id')}" if blocked else ""}
         ON CONFLICT DO NOTHING RETURNING type
-    """), {"blocked": blocked}).scalars().all()
-    s.execute(text("""
+    """), {"blocked": blocked, **keyed}).scalars().all()
+    # An archived link goes when its verdict, read as the graph is keyed now, doesn't drop it.
+    s.execute(text(f"""
         DELETE FROM edges_dropped d WHERE NOT EXISTS (
-            SELECT 1 FROM edge_verdicts v
+            SELECT 1 FROM {verdicts} v
             WHERE (v.src_key, v.dst_key, v.type, v.extractor) = (d.src_key, d.dst_key, d.type, d.extractor)
               AND v.verdict = 'drop' AND v.source = 'model' AND (d.type <> 'SAME_AS' OR v.confidence >= 0.8))
-    """))
+    """), keyed)
     # Identities you said are not one person, still in one cluster (a trusted link joins them): split them now.
     together = s.execute(text("""
         SELECT EXISTS (SELECT 1 FROM edge_verdicts v
@@ -490,15 +516,15 @@ def apply_verdicts(s: Session) -> int:
     if together or "SAME_AS" in [*removed, *moved, *back]:
         from igneous.graph.resolve import refresh_canonical
         refresh_canonical(s)
-    return len(removed) + len(moved) + len(back) + s.execute(text("""
+    return len(removed) + len(moved) + len(back) + s.execute(text(f"""
         UPDATE edges e SET props = e.props || jsonb_build_object('verdict', v.verdict, 'reason', v.reason,
                                                                   'confidence', v.confidence, 'verified_by', v.source)
-        FROM nodes a, nodes b, edge_verdicts v
+        FROM nodes a, nodes b, {verdicts} v
         WHERE a.id = e.src AND b.id = e.dst AND v.src_key = a.type || ':' || a.key
           AND v.dst_key = b.type || ':' || b.key AND v.type = e.type AND v.extractor = e.extractor
           AND e.extractor <> ALL(:stated)
           AND (e.props->>'verdict' IS DISTINCT FROM v.verdict OR e.props->>'reason' IS DISTINCT FROM v.reason)
-    """), {"stated": list(STATED)}).rowcount
+    """), {"stated": list(STATED), **keyed}).rowcount
 
 
 def record_correction(s: Session, src_key: str, dst_key: str, type_: str, extractor: str, verdict: str,

@@ -42,6 +42,7 @@ def _orgs(s: Session) -> list[dict]:
     your own mail shows), most specific first."""
     from igneous.graph.organizations import YOUR_ORGS
 
+    # Your dates there as you stated them (your resume, then what you said) before the ones your mail shows.
     rows = s.execute(text("""
         SELECT DISTINCT ON (o.id) o.id, o.name, o.key, o.props, (e.props->>'school') IS NOT NULL AS school,
                e.valid_from, e.valid_to,
@@ -49,7 +50,7 @@ def _orgs(s: Session) -> list[dict]:
         FROM edges e JOIN nodes o ON o.id = e.dst
         JOIN nodes me ON me.id = e.src AND COALESCE((me.props->>'self')::bool, false)
         WHERE e.type = 'WORKED_AT' AND e.extractor = ANY(:yours) AND o.type = 'Organization'
-        ORDER BY o.id, (e.props->>'school') IS NULL
+        ORDER BY o.id, (e.props->>'school') IS NULL, array_position(CAST(:yours AS text[]), e.extractor), e.id
     """), {"yours": list(YOUR_ORGS)}).mappings().all()
     orgs = [dict(r) for r in rows]
     parents = {o["parent"] for o in orgs if o["parent"]}
@@ -72,8 +73,9 @@ def _within(props: dict, org: dict) -> bool:
 def _threads(s: Session) -> list[dict]:
     """Every Project except the ones you hid, and the org threads this stage makes."""
     from igneous.graph import overrides
+    from igneous.graph.derived import rekeyed
 
-    hidden = overrides.plan(overrides.load(s)).hidden
+    hidden = overrides.plan(overrides.load(s), rekeyed(s)).hidden
     return [dict(r) for r in s.execute(text("""
         SELECT n.id, n.key, n.name, n.props FROM nodes n
         WHERE n.type = 'Project' AND n.props->>'derived' IS DISTINCT FROM :x AND NOT (n.type || ':' || n.key = ANY(:h))
@@ -120,13 +122,21 @@ def _org_thread(w: Writer, org: dict, threads: list[dict]) -> tuple[int, str | N
     return tid, made
 
 
-def _domain_share(s: Session, domain: str) -> dict[int, tuple[float, int, list[int]]]:
+def domains(org: dict) -> list[str]:
+    """The org's email domains (graph/organizations.py): its props.domains, or its key when it is a domain of its
+    own."""
+    return list((org["props"] or {}).get("domains") or ([org["key"]] if "." in org["key"] and ":" not in org["key"]
+                                                        else []))
+
+
+def _domain_share(s: Session, ds: list[str]) -> dict[int, tuple[float, int, list[int]]]:
     """{thread: (share, records, evidence items)}: how much of each thread's people-bearing records involve the
-    domain (sent from or to an address there, or an event someone there attends)."""
+    domains `ds` (sent from or to an address there, or an event someone there attends)."""
     rows = s.execute(text("""
         WITH rec AS (
             SELECT pe.dst AS t, n.source_item_id AS sid,
-                   bool_or(p.key LIKE '%@' || :d OR p.key LIKE '%.' || :d) AS hit
+                   bool_or(EXISTS (SELECT 1 FROM unnest(CAST(:d AS text[])) d
+                                   WHERE p.key LIKE '%@' || d OR p.key LIKE '%.' || d)) AS hit
             FROM edges pe JOIN nodes n ON n.id = pe.src AND n.type IN ('Message', 'Event')
             JOIN edges x ON (x.src = n.id AND x.type = 'RECEIVED') OR (x.dst = n.id AND x.type IN ('SENT', 'ATTENDED'))
             JOIN nodes p ON p.id = CASE WHEN x.src = n.id THEN x.dst ELSE x.src END AND p.type = 'Person'
@@ -138,24 +148,24 @@ def _domain_share(s: Session, domain: str) -> dict[int, tuple[float, int, list[i
         SELECT t AS thread, avg(hit::int) AS share, count(*) FILTER (WHERE hit) AS n,
                (array_agg(sid ORDER BY sid DESC) FILTER (WHERE hit))[1:6] AS ev
         FROM rec GROUP BY t ORDER BY t
-    """), {"d": domain}).mappings().all()
+    """), {"d": ds}).mappings().all()
     return {r["thread"]: (float(r["share"]), int(r["n"]), list(r["ev"] or [])) for r in rows}
 
 
 def _class_evidence(s: Session, thread: int, org: dict) -> list[int]:
-    """A class's records from your dates at the school, those naming the school or involving its domain first."""
-    domain = org["key"] if "." in org["key"] and ":" not in org["key"] else ""
+    """A class's records from your dates at the school, those naming the school or involving its domains first."""
     return list(s.execute(text("""
         SELECT si.id FROM edges pe JOIN nodes n ON n.id = pe.src JOIN source_items si ON si.id = n.source_item_id
         WHERE pe.dst = :t AND pe.type = 'PART_OF' AND pe.extractor = 'threads'
           AND (CAST(:a AS timestamptz) IS NULL OR si.occurred_at >= CAST(:a AS timestamptz) - interval '31 days')
           AND (CAST(:b AS timestamptz) IS NULL OR si.occurred_at <= CAST(:b AS timestamptz) + interval '31 days')
         ORDER BY (si.title || ' ' || coalesce(si.body_text, '')) ILIKE :name
-                 OR (:d <> '' AND CAST(si.raw_meta AS text) ILIKE :domain) DESC,
+                 OR EXISTS (SELECT 1 FROM unnest(CAST(:d AS text[])) d
+                            WHERE CAST(si.raw_meta AS text) ILIKE '%@' || d || '%') DESC,
                  si.occurred_at DESC, si.id DESC
         LIMIT :n
-    """), {"t": thread, "a": org["valid_from"], "b": org["valid_to"], "name": f"%{org['name']}%", "d": domain,
-           "domain": f"%@{domain}%", "n": EVIDENCE}).scalars())
+    """), {"t": thread, "a": org["valid_from"], "b": org["valid_to"], "name": f"%{org['name']}%", "d": domains(org),
+           "n": EVIDENCE}).scalars())
 
 
 def run(s: Session, log=print) -> dict:
@@ -179,6 +189,9 @@ def run(s: Session, log=print) -> dict:
     # Org threads of orgs no longer on your backbone (or now with a thread of their own name) go.
     s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = :x AND NOT (key = ANY(:k))"""),
               {"x": EXTRACTOR, "k": sorted(key for _tid, key in made.values() if key)})
+    # A thread you put under an org's thread is under the one made now, which is keyed by the org's key now.
+    from igneous.graph.threads import stated_hierarchy
+    stated_hierarchy(s)
     # Threads that already have a parent you stated keep it; the backbone fills in the rest.
     has_parent = set(s.execute(text("""
         SELECT e.src FROM edges e JOIN nodes p ON p.id = e.dst AND p.type = 'Project'
@@ -199,13 +212,13 @@ def run(s: Session, log=print) -> dict:
                        extractor="profile")
                 placed.add(t)
                 stats["stated"] += 1
-        domain = o["key"] if "." in o["key"] and ":" not in o["key"] else None
-        if not domain:
+        ds = domains(o)
+        if not ds:
             continue
-        for t, (share, n, ev) in _domain_share(s, domain).items():
+        for t, (share, n, ev) in _domain_share(s, ds).items():
             if t in placed or t in has_parent or t == ot or n < MIN_DOMAIN_RECORDS or share < DOMAIN_SHARE:
                 continue
-            if w.edge(t, ot, "PART_OF", {"why": f"{round(share * 100)}% of its conversations involve {domain}"},
+            if w.edge(t, ot, "PART_OF", {"why": f"{round(share * 100)}% of its conversations involve {' or '.join(ds)}"},
                       confidence=round(share, 3), evidence=[(sid, "backbone", {}) for sid in ev[:EVIDENCE]]):
                 placed.add(t)
                 stats["by_domain"] += 1

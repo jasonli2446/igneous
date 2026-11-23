@@ -17,7 +17,7 @@ verdicts (graph/verify.py) are stored the moment they arrive.
   introductions       who introduced whom (merged people, never a service)
   topics, entities    topic merges, and the projects you return to with the people in them (never you)
   profile             your resume and LinkedIn (needs you)
-  organizations       where people work, you included (merged people, and the names your resume gives orgs)
+  organizations       where people work, you included (merged people, and the orgs and domains your resume names)
   threads, backbone   life threads, then threads under your orgs (needs profile, organizations and threads)
   verify              checks the derived links every stage above wrote
   corrections         re-applies every correction committed before it, so a correction always wins

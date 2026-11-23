@@ -144,7 +144,6 @@ Pick 3–4. Each needs no setup beyond registration. Speak as Mira: the server's
    > Using igneous: what's under Northwind Robotics, and who did I work with on the Heron field trials?
 
    Expect: `find` → `open_node` on the org (its projects) → `open_node` on the project (Jonah, Priya, Alex Chen).
-   `find` lists Northwind Robotics twice; the projects are under one of them (see the last table).
 
 4. **Explain a link** (shows trust):
    > Using igneous: why is Dana Kimura connected to the Lisbon trip? Cite the records. Two records is enough.
@@ -201,7 +200,6 @@ in a fresh session before recording: times depend on the model and on the warm c
 | Threads are named like "Lisbon · Jan-Mar 2025" and all sit under Projects | The model hasn't read the persona: set `AWS_BEARER_TOKEN_BEDROCK` and the opt-ins (step 2), then Rebuild once. |
 | Lakeshore University also opens to a trip or Tidepool | They were placed by email domain (most of their people write from the school's address). The model's checker judges each placement; without it nothing does. Either way it's the moment for **This is wrong**. |
 | Search shows two Lisbons (or two Icelands, two Tidepools, a class twice) | The other one is a documents folder made a project ("Lisbon 2025"): it takes in every record that mentions Lisbon, fare newsletters and her mother's mail included. Open the trip thread ("Lisbon · Jan-Mar 2025" without the model). |
-| Lakeshore University or Northwind Robotics shows twice, on her first ring or in search | One is the company her LinkedIn connections name, the other the organization found by its email domain, which holds the threads (in MCP, `find` lists both). Open the one with classes or projects under it. |
 | Group chats show as "Google Chat Space AAAA…" | The Takeout reader doesn't read a chat's name yet, only its folder's. Open one: its members and messages are right. |
 | `me` lists Northwind only from July 2026 | The profile keeps one position per organization; the internship from January 2025 is in her LinkedIn export and resume. |
 | First tool call says "waiting for MCP servers" | Another configured server is slow; igneous still connects. Remove the slow one before recording. |

@@ -8,9 +8,11 @@ you use. So the biggest parts of your life come from there first, and everything
      names you.
   2. One structured extraction per version: experience {org, title, start, end}, education {school, degree,
      start, end}, projects {name, description}. Each fact keeps the document it came from.
-  3. Experience -> you WORKED_AT an Organization named as you name it ("BigCo", "Startup Studio"), with dates and the
-     domain it matches. Education -> your school. These are stated facts (extractor 'profile'): never judged by the
-     verifier. Projects -> pinned rows in the thread registry (origin 'profile'), named as you name them and found by
+  3. Experience -> you WORKED_AT an Organization named as you name it ("BigCo", "Startup Studio") and keyed by that
+     name (`org:<slug>`, as LinkedIn and contact cards key a company, so whichever stage meets it first, it is one
+     node), with dates and the domain the document gives it (props.domain on the link: graph/organizations.py gives
+     that domain to this organization). Education -> your school. These are stated facts (extractor 'profile'): never
+     judged by the verifier. Projects -> pinned rows in the thread registry (origin 'profile'), named as you name them and found by
      their full name, or a word of it that stands for the project in your records ("Atlas" for "Atlas Mobile App",
      not "Mobile").
   4. Each organization, school and project comes from the newest version that names it: an older version adds what
@@ -29,6 +31,7 @@ from sqlalchemy.orm import Session
 
 from igneous.config import settings
 from igneous.graph import identity
+from igneous.graph.organizations import company_for, domain_of
 
 EXTRACTOR = "profile"
 VERSION = "1"
@@ -76,6 +79,11 @@ def documents(s: Session) -> list:
     """)).all()
 
 
+def cache_key(body: str) -> str:
+    """Where the reading of a document with this text is cached (llm_cache)."""
+    return "profile-extract:v3:" + hashlib.sha256(body.encode()).hexdigest()
+
+
 def extract(s: Session, doc) -> dict | None:
     """One cached structured read of a document. Uses the stronger model: this is the backbone, once per version.
     A version already read keeps counting with the model off; a new one is read only if its source is opted in
@@ -84,7 +92,7 @@ def extract(s: Session, doc) -> dict | None:
 
     if doc.given:  # the LinkedIn export states it outright: no model call
         return doc.given
-    key = "profile-extract:v3:" + hashlib.sha256(doc.body_text.encode()).hexdigest()
+    key = cache_key(doc.body_text)
     cached = cache_lookup(key)
     if cached is not None:
         return cached
@@ -192,40 +200,39 @@ def run(s: Session, log=print) -> dict:
             if k and k not in schools:
                 schools[k] = {**ed, "doc": doc.id, "via": via}
 
-    # A domain names one organization. Schools claim theirs first; a later entry with the same domain (a lab at
-    # the university) is part of the one that claimed it, never a rename of it.
-    claimed: dict[str, int] = {}
-    by_name: dict[str, int] = {}
+    # An organization is keyed as a company is (`org:<slug>`, the key LinkedIn and contact cards give it), whatever
+    # stage or record meets it first: by the name its domain's own people give it, else by yours, and named as you
+    # name it (graph/organizations.py company_for). The domain your resume gives it is its claim, which the
+    # organizations stage reads off the WORKED_AT link (props.domain). A domain names one organization: schools claim
+    # theirs first, and a later entry with the same domain (a lab at the university) is part of the one that claimed
+    # it, never a rename of it.
+    claimed: dict[str, int] = {}   # domain -> the org that claimed it
+    by_name: dict[str, int] = {}   # the names your documents give -> org
 
-    def org_node(name: str, domain: str) -> tuple[int, int | None]:
-        """(org id, the org it's part of when its domain was already claimed)."""
+    def org_node(name: str, domain: str) -> tuple[int | None, int | None]:
+        """(org id, the org it's part of when another one claimed its domain first); no id for a name that can't be
+        an organization's."""
         d = (domain or "").lower().strip()
-        if d in claimed:
-            nid = s.execute(text("""
-                INSERT INTO nodes (type, key, name, props) VALUES ('Organization', :k, :n, '{"named_by": "profile"}')
-                ON CONFLICT (type, key) DO UPDATE SET name = EXCLUDED.name RETURNING id
-            """), {"k": "org:" + _slug(name), "n": name}).scalar_one()
-            by_name.setdefault(_slug(name), nid)
-            return nid, claimed[d]
-        nid = None
-        if d:  # reuse the domain's node (people already MEMBER_OF it count), named as you name it
-            nid = s.execute(text("SELECT id FROM nodes WHERE type = 'Organization' AND key = :d"), {"d": d}).scalar()
-            if nid:
-                s.execute(text("UPDATE nodes SET name = :n, props = props || '{\"named_by\": \"profile\"}' WHERE id = :i"),
-                          {"n": name, "i": nid})
-        if nid is None:  # no domain given: the org already in your graph under this name, if one is
-            nid = by_name.get(_slug(name)) or s.execute(text("""
-                SELECT id FROM nodes WHERE type = 'Organization' AND lower(name) = lower(:n)
-                ORDER BY (SELECT count(*) FROM edges e WHERE e.dst = nodes.id) DESC LIMIT 1"""), {"n": name}).scalar()
+        d = d if domain_of(f"x@{d}") == d else ""
+        nid = by_name.get(_slug(name))
         if nid is None:
+            company = company_for(s, name, "" if d in claimed else d)
+            if company is None:
+                return None, None
             nid = s.execute(text("""
                 INSERT INTO nodes (type, key, name, props) VALUES ('Organization', :k, :n, '{"named_by": "profile"}')
-                ON CONFLICT (type, key) DO UPDATE SET name = EXCLUDED.name RETURNING id
-            """), {"k": d or "org:" + _slug(name), "n": name}).scalar_one()
+                ON CONFLICT (type, key) DO UPDATE SET name = EXCLUDED.name,
+                    props = nodes.props || '{"named_by": "profile"}'
+                RETURNING id
+            """), {"k": company[0], "n": company[1]}).scalar_one()
+            by_name[_slug(name)] = nid
         if d:
-            claimed[d] = nid
-        by_name.setdefault(_slug(name), nid)
-        return nid, None
+            claimed.setdefault(d, nid)
+        return nid, (claimed[d] if d and claimed[d] != nid else None)
+
+    def claim(oid: int) -> dict:
+        """The domain `oid` claims, for its WORKED_AT link (graph/organizations.py reads it)."""
+        return next(({"domain": d} for d, n in sorted(claimed.items()) if n == oid), {})
 
     def edge(src: int, dst: int, type_: str, props: dict, frm=None, to=None, sid=None):
         s.execute(text("""
@@ -241,13 +248,18 @@ def run(s: Session, log=print) -> dict:
     named_projects: dict[int, set[str]] = {}  # org -> project names your resume puts under it
     for k, ed in schools.items():
         oid, _ = org_node(ed["school"], ed.get("domain_hint") or "")
+        if oid is None:
+            continue
         org_ids[k] = oid
-        edge(self_id, oid, "WORKED_AT", {"why": f"{ed['via']}: {ed['degree']}", "title": ed["degree"], "school": True},
+        edge(self_id, oid, "WORKED_AT", {"why": f"{ed['via']}: {ed['degree']}", "title": ed["degree"], "school": True,
+                                         **claim(oid)},
              _date(ed["start"]), _date(ed["end"]), ed["doc"])
     for k, e in orgs.items():
         oid, part_of = org_node(e["org"], e.get("domain_hint") or "")
+        if oid is None:
+            continue
         org_ids[k] = oid
-        edge(self_id, oid, "WORKED_AT", {"why": f"{e['via']}: {e['title']}", "title": e["title"]},
+        edge(self_id, oid, "WORKED_AT", {"why": f"{e['via']}: {e['title']}", "title": e["title"], **claim(oid)},
              _date(e["start"]), _date(e["end"]), e["doc"])
         parent = part_of
         if e.get("parent"):
@@ -282,7 +294,8 @@ def run(s: Session, log=print) -> dict:
     s.execute(text("DELETE FROM thread_registry WHERE origin = 'profile' AND NOT (key = ANY(:k))"), {"k": keys})
     # Organizations an older reading of your resume made that nothing points at any more.
     s.execute(text("""DELETE FROM nodes n WHERE n.type = 'Organization' AND n.props->>'named_by' = 'profile'
-                      AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id OR e.dst = n.id)"""))
+                      AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id OR e.dst = n.id)
+                      AND NOT EXISTS (SELECT 1 FROM spine_node_support x WHERE x.node_id = n.id)"""))
     stats = {"documents": used, "orgs": len(orgs), "schools": len(schools), "projects": len(projects)}
     if log:
         log(json.dumps(stats))

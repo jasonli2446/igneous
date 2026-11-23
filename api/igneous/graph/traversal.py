@@ -675,7 +675,7 @@ def your_orgs(s: Session, me: list[int]) -> list[tuple[int, bool, object]]:
             SELECT DISTINCT ON (e.dst) e.dst AS org, (e.props->>'school') IS NOT NULL AS school, e.valid_to
             FROM edges e JOIN nodes o ON o.id = e.dst AND o.type = 'Organization' AND {visible('o')}
             WHERE e.src = ANY(:me) AND e.type = 'WORKED_AT' AND e.extractor = ANY(:yours)
-            ORDER BY e.dst, e.valid_to IS NULL DESC, e.valid_to DESC) o
+            ORDER BY e.dst, e.valid_to IS NULL DESC, e.valid_to DESC, e.id) o
         ORDER BY valid_to IS NULL DESC, valid_to DESC, org
     """), {"me": me, "yours": list(YOUR_ORGS)})]
 
