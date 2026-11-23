@@ -333,8 +333,9 @@ def test_a_new_version_of_the_rules_checks_every_item_again(db, monkeypatch):
 def test_an_item_redacted_in_place_reads_as_unchanged_when_synced_again(db):
     from igneous.connectors.base import redact_stored
 
-    leaky = SourceItem("gmail", "m1", "Hello", f"key {GH}", raw_meta={"labels": ["INBOX"]})
-    clean = SourceItem("fs", "k/a.txt", "a.txt", "plain words", raw_meta={"path": "k/a.txt", "size": 11})
+    leaky = SourceItem("gmail", "m1", "Hello", f"key {GH}", mime="text/plain", raw_meta={"labels": ["INBOX"]})
+    clean = SourceItem("fs", "k/a.txt", "a.txt", "plain words", mime="text/plain",
+                       raw_meta={"path": "k/a.txt", "size": 11})
     old_row(db, "gmail", "m1", leaky.title, leaky.body_text, leaky.raw_meta, leaky.content_hash)
     clean_id = old_row(db, "fs", "k/a.txt", clean.title, clean.body_text, clean.raw_meta, "a-hash-of-the-file-bytes")
     unchanged_since = item_row(db, clean_id)["updated_at"]

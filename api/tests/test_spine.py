@@ -2,6 +2,7 @@
 replies and threads it derives, and an incremental build equal to a build at once."""
 import json
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -1009,3 +1010,59 @@ def test_an_existing_database_threads_each_conversation_once_after_one_run(test_
         with admin.connect() as c:
             c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
         admin.dispose()
+
+
+@pytest.mark.parametrize("source,meta", [
+    ("email", {"fingerprint": "fp-date", "from": [{"email": "ann@x.test"}],
+               "to": [{"email": "bo@x.test"}]}),
+    ("gcal", {"event_key": "gcal:date", "attendees": [{"email": "ann@x.test"}]}),
+])
+def test_a_date_only_sync_reaches_the_graph_and_search_on_rebuild(db, source, meta):
+    from igneous import pipeline
+
+    item = SourceItem(source, "date", "Plans", "Unchanged body", T0, raw_meta=meta)
+    assert store(db, item)[0] == "inserted"
+    pipeline.run(db, ["spine", "chunk"])
+    # The unchanged mail text keeps its vector; calendar text contains the date and must be embedded again.
+    db.execute(text("UPDATE chunks SET embedding = CAST(:v AS vector), embedding_model = :m"),
+               {"v": str([0.5] * 384), "m": "BAAI/bge-small-en-v1.5"})
+    old_chunk = db.execute(text("SELECT id, text FROM chunks")).one()
+    changed = replace(item, occurred_at=T0 + timedelta(hours=8))
+    assert store(db, changed)[0] == "updated"
+    pending = db.execute(text("SELECT spined_hash, chunked_hash FROM source_items")).one()
+    assert pending == (None, None)
+    result = pipeline.run(db, ["spine", "chunk"])
+    assert result["spine"]["result"] == result["chunk"]["result"] == 1
+    assert set(db.execute(text("SELECT at FROM spine_node_support")).scalars()) == {changed.occurred_at}
+    assert set(db.execute(text("SELECT valid_from FROM edges WHERE source_item_id IS NOT NULL")).scalars()) == {
+        changed.occurred_at}
+    chunk = db.execute(text("SELECT id, text, meta, embedding IS NOT NULL AS embedded FROM chunks")).one()
+    assert chunk.meta["occurred_at"] == changed.occurred_at.isoformat()
+    if source == "email":
+        assert (chunk.id, chunk.text, chunk.embedded) == (old_chunk.id, old_chunk.text, True)
+    else:
+        assert str(changed.occurred_at) in chunk.text and str(T0) not in chunk.text
+        assert not chunk.embedded
+    assert spine.run(db) == chunking.run(db) == 0
+    legal(db)
+
+
+def test_a_date_changed_while_the_spine_reads_it_stays_pending(committed_db, monkeypatch):
+    item = SourceItem("email", "date", "Plans", "Unchanged body", T0,
+                      raw_meta={"fingerprint": "fp-date", "from": [{"email": "ann@x.test"}]})
+    store(committed_db, item)
+    committed_db.commit()
+    changed = replace(item, occurred_at=T0 + timedelta(hours=8))
+    build = spine.BUILDERS["email"]
+
+    def rescheduled_meanwhile(b, record):
+        if record.occurred_at == T0:
+            with SessionLocal() as sync:
+                store(sync, changed)
+                sync.commit()
+        build(b, record)
+
+    monkeypatch.setitem(spine.BUILDERS, "email", rescheduled_meanwhile)
+    assert spine.run(committed_db) == 2
+    assert set(committed_db.execute(text("SELECT valid_from FROM edges WHERE source_item_id IS NOT NULL"))
+               .scalars()) == {changed.occurred_at}
