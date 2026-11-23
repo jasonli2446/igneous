@@ -39,7 +39,6 @@ class Plan:
     hidden: set[str] = field(default_factory=set)
     merges: dict[str, str] = field(default_factory=dict)          # folded key -> surviving key
     links: list[tuple[str, str, str, dict]] = field(default_factory=list)  # (src key, dst key, edge type, props)
-    removed: list[tuple[str, str, str]] = field(default_factory=list)       # links you added, taken out
 
 
 def plan(rows: list[dict]) -> Plan:
@@ -66,8 +65,6 @@ def plan(rows: list[dict]) -> Plan:
                 p.merges = {f: (keep if k == fold else k) for f, k in p.merges.items()}  # keep chains one deep
         elif r["op"] == "link" and len(keys) == 2 and r.get("value"):
             p.links.append((keys[0], keys[1], r["value"], (r.get("data") or {}).get("props") or {}))
-        elif r["op"] == "unlink" and (r.get("data") or {}).get("user_link"):
-            p.removed.append((r["data"]["src_key"], r["data"]["dst_key"], r["value"]))
 
     p.renames = {survivor(k): v for k, v in p.renames.items()}
     p.hidden = {survivor(k) for k in p.hidden}
@@ -202,7 +199,8 @@ def _unmerge(s: Session, r: dict) -> None:
 
 
 def _reverse(s: Session, r: dict) -> None:
-    """Undo one correction on the graph as it is now."""
+    """Undo one correction on the graph as it is now. (A link you added needs nothing here: with its row gone, the
+    link goes too, `_links`.)"""
     from igneous.graph import corrections
 
     data = r.get("data") or {}
@@ -216,26 +214,6 @@ def _reverse(s: Session, r: dict) -> None:
         corrections.restore(s, r)
     elif r["op"] == "merge" and len(r["node_keys"]) == 2:
         _unmerge(s, r)
-    elif r["op"] == "link" and len(r["node_keys"]) == 2 and r.get("value"):
-        others = s.execute(text("""
-            SELECT 1 FROM overrides WHERE op = 'link' AND id <> :i AND undone_at IS NULL AND node_keys = :k AND value = :v
-        """), {"i": r["id"], "k": r["node_keys"], "v": r["value"]}).first()
-        if others:
-            return  # the same connection, added again later, still stands
-        from igneous.graph.derived import merges
-
-        folded = merges(s)
-        ids = _ids(s, [follow(folded, k) for k in r["node_keys"]])
-        a, b = (ids.get(follow(folded, k)) for k in r["node_keys"])
-        if a is None or b is None:
-            return
-        if r["value"] == "SAME_AS":
-            a, b = sorted((a, b))
-        gone = s.execute(text("""DELETE FROM edges WHERE src = :a AND dst = :b AND type = :t AND extractor = 'user'
-                                 RETURNING id"""), {"a": a, "b": b, "t": r["value"]}).first()
-        if gone and r["value"] == "SAME_AS":
-            from igneous.graph.resolve import refresh_canonical
-            refresh_canonical(s)
 
 
 def _projects(s: Session, p: Plan) -> int:
@@ -266,29 +244,23 @@ def stated_parents(s: Session) -> list[tuple[str, str]]:
 
 
 def _links(s: Session, p: Plan, folded: dict[str, str]) -> int:
-    """The connections you added, as edges with extractor 'user', on whatever each end is now (a Project you folded
-    away: the one it went into); a link you took out is gone unless you added it again. Identity clusters are rebuilt
-    when a 'same person' link comes or goes."""
+    """The connections you added, exactly: an edge with extractor 'user' for each intent (an override 'link', or a
+    Project under a Project in thread_parents) on whatever each end is now (a Project you folded away: the one it went
+    into), and none that no intent backs (one you took out, a 'same person' you took back). Identity clusters are
+    rebuilt when a 'same person' link comes or goes."""
     links = [*p.links, *((c, q, "PART_OF", {"why": "you said so"}) for c, q in stated_parents(s))]
-    ids = _ids(s, [follow(folded, k) for a, b, _t, _p in links for k in (a, b)]
-               + [follow(folded, k) for a, b, _t in p.removed for k in (a, b)])
-    written, same_as = 0, False
-    wanted = {(follow(folded, a), follow(folded, b), t) for a, b, t, _p in links}
-    for a_key, b_key, type_ in p.removed:
-        a, b = follow(folded, a_key), follow(folded, b_key)
-        if (a, b, type_) in wanted or (type_ == "SAME_AS" and (b, a, type_) in wanted) or a not in ids or b not in ids:
-            continue
-        x, y = sorted((ids[a], ids[b])) if type_ == "SAME_AS" else (ids[a], ids[b])
-        if s.execute(text("""DELETE FROM edges WHERE src = :a AND dst = :b AND type = :t AND extractor = 'user'
-                             RETURNING id"""), {"a": x, "b": y, "t": type_}).first():
-            written += 1
-            same_as |= type_ == "SAME_AS"
+    ids = _ids(s, [follow(folded, k) for a, b, _t, _p in links for k in (a, b)])
+    wanted: dict[tuple[int, int, str], dict] = {}
     for a_key, b_key, type_, props in links:
         a, b = ids.get(follow(folded, a_key)), ids.get(follow(folded, b_key))
-        if a is None or b is None or a == b:
-            continue
-        if type_ == "SAME_AS":
-            a, b = sorted((a, b))
+        if a is not None and b is not None and a != b:
+            wanted[(*sorted((a, b)), type_) if type_ == "SAME_AS" else (a, b, type_)] = props
+    stale = [r for r in s.execute(text("SELECT id, src, dst, type FROM edges WHERE extractor = 'user' ORDER BY id"))
+             if (r.src, r.dst, r.type) not in wanted]
+    if stale:
+        s.execute(text("DELETE FROM edges WHERE id = ANY(:i)"), {"i": [r.id for r in stale]})
+    written, same_as = len(stale), any(r.type == "SAME_AS" for r in stale)
+    for (a, b, type_), props in sorted(wanted.items()):
         new = s.execute(text("""
             INSERT INTO edges (src, dst, type, props, extractor, extractor_version, confidence)
             VALUES (:a, :b, :t, CAST(:p AS jsonb), 'user', '1', 1.0)

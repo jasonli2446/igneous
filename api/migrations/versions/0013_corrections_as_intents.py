@@ -13,14 +13,41 @@
 - Connections you added (edges with extractor 'user') become intents, so a rebuild that deletes and recreates a
   node never loses them: a Project under a Project goes to `thread_parents` (origin 'user'), anything else to an
   override 'link'.
+- `node_held`: a connection you added no longer keeps a node that is its records (a message, thread, event, file,
+  folder or place) once they are gone. Its intent stays, and the last step of a rebuild links it again if the record
+  comes back.
 
-Revision ID: 0012
-Revises: 0011
+Revision ID: 0013
+Revises: 0012
 """
 from alembic import op
 
-revision = "0012"
-down_revision = "0011"
+revision = "0013"
+down_revision = "0012"
+
+RECORDS = "'Message', 'Thread', 'Event', 'File', 'Folder', 'Place'"  # node types that are their records
+
+
+def _node_held(yours_hold_records: bool) -> str:
+    """node_held (migration 0012): with `yours_hold_records`, as that migration made it (a connection you added holds
+    any node); without, as this one makes it (it holds a node that isn't its records)."""
+    yours = """EXISTS (SELECT 1 FROM edges u WHERE u.src = n.id AND u.extractor = 'user')
+                OR EXISTS (SELECT 1 FROM edges u WHERE u.dst = n.id AND u.extractor = 'user')"""
+    return f"""
+        CREATE OR REPLACE FUNCTION node_held(node bigint, leaving bigint) RETURNS boolean LANGUAGE sql STABLE AS $$
+            SELECT (n.type = 'Person' AND n.key = 'me')
+                OR EXISTS (SELECT 1 FROM spine_node_support x WHERE x.node_id = n.id
+                           AND x.source_item_id IS DISTINCT FROM leaving)
+                {f"OR {yours}" if yours_hold_records else ""}
+                OR (n.type <> ALL (ARRAY[{RECORDS}]) AND (
+                    {"" if yours_hold_records else f"{yours} OR"}
+                    EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id
+                            AND edge_backed(e.id, e.source_item_id, leaving))
+                    OR EXISTS (SELECT 1 FROM edges e WHERE e.dst = n.id
+                               AND edge_backed(e.id, e.source_item_id, leaving))))
+            FROM nodes n WHERE n.id = node
+        $$;
+    """
 
 
 def upgrade():
@@ -85,11 +112,13 @@ def upgrade():
             WHERE e.extractor = 'user' AND NOT (e.type = 'PART_OF' AND a.type = 'Project' AND b.type = 'Project')
             ORDER BY e.id;
     """)
+    op.execute(_node_held(yours_hold_records=False))
 
 
 def downgrade():
     # Connections you added stay as edges (the code before this reads those). Undos still waiting for a rebuild
     # are dropped as they are; converted unlinks stay pair rejections, which that code also applies.
+    op.execute(_node_held(yours_hold_records=True))
     op.execute("""
         DELETE FROM overrides WHERE op = 'link' OR undone_at IS NOT NULL;
         ALTER TABLE overrides DROP COLUMN undone_at;

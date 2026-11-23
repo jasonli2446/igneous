@@ -172,7 +172,7 @@ def test_a_thread_whose_resume_entry_or_org_is_gone_leaves_the_graph(db):
                                "end": "2025-08", "domain_hint": "", "parent": "", "project": ""}]}
     put(db, "linkedin", "profile", "LinkedIn profile: Mo Self", {"kind": "profile", "person_name": "Mo Self",
                                                                  "profile": profile}, None, "LinkedIn profile of Mo Self")
-    life_threads.arrived_later(db)
+    db.commit()
     pipeline.run(db)
     gone = db.execute(text("SELECT key FROM nodes WHERE key = ANY(:k)"), {"k": atlas + school}).scalars().all()
     assert gone == [] and db.execute(text("SELECT count(*) FROM thread_registry WHERE origin = 'profile'")).scalar() == 0

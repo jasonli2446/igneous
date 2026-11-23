@@ -64,7 +64,9 @@ for _formal, _short in _NICK.items():
 
 
 def same_first(a: str, b: str) -> bool:
-    return a == b or a.startswith(b) or b.startswith(a) or b in NICKNAMES.get(a, ())
+    """Whether two first names can be one person's, either way round: equal, one a prefix of the other (an initial),
+    or nicknames of one name."""
+    return a == b or a.startswith(b) or b.startswith(a) or b in NICKNAMES.get(a, ()) or a in NICKNAMES.get(b, ())
 
 
 @dataclass
@@ -130,7 +132,7 @@ def unresolvable(p: P) -> bool:
 # SAME_AS from these sources is ground truth (a contact card, the signed-in account, a user correction, a
 # commit's verified email): never second-guess it with name heuristics. Without this, "Me" (first name "me")
 # could never join the user's named cluster.
-TRUSTED = ("self", "contacts", "user", "github", "linkedin")
+TRUSTED = identity.TRUSTED
 
 
 def _clusters(links) -> dict[int, int]:
@@ -155,15 +157,13 @@ def load(s: Session) -> list[P]:
     head = dict(s.execute(text("""
         SELECT c.node_id, c.canonical_id FROM canonical c JOIN nodes n ON n.id = c.node_id AND n.type = 'Person'
     """)).all())
-    known = _clusters(s.execute(text("""
-        SELECT e.src, e.dst FROM edges e JOIN nodes a ON a.id = e.src AND a.type = 'Person'
-        JOIN nodes b ON b.id = e.dst AND b.type = 'Person'
-        WHERE e.type = 'SAME_AS' AND e.extractor = ANY(:trusted)
-    """), {"trusted": list(TRUSTED)}).all())
+    known = identity.known(s)
     me = identity.self_id(s)
     mine = {n for n, root in known.items() if me is not None and root == known.get(me)} | ({me} - {None})
+    # In key order, so blocks and candidate pairs come out the same however the rows are stored.
     rows = s.execute(text("""
         SELECT id, key, name, COALESCE(props->>'kind', '') = 'service' AS service FROM nodes WHERE type = 'Person'
+        ORDER BY key
     """)).all()
     never = mine | {r.id for r in rows if r.service}
     peers: dict[int, set[int]] = defaultdict(set)
@@ -202,17 +202,20 @@ def blocks(people: list[P]) -> dict[str, list[P]]:
 
 def shared_weight(a: P, b: P) -> float:
     """The correspondents two identities share, each counted by its rarity."""
-    return sum(a.weight.get(c, 1.0) for c in a.peers & b.peers)
+    return math.fsum(a.weight.get(c, 1.0) for c in a.peers & b.peers)  # exact: the same in any order
 
 
 def score(a: P, b: P) -> tuple[float, dict]:
-    """Returns (score in [0,1], features). Name evidence is required; it can't merge a pair on its own."""
+    """Returns (score in [0,1], features), the same for (a, b) and (b, a). Name evidence is required; it can't merge
+    a pair on its own."""
+    a, b = sorted((a, b), key=lambda p: p.key)  # one order per pair: the comparisons below are read in it
     first_compatible = same_first(a.first, b.first)
     # Score name similarity on surnames when first names are nickname-equivalent (Rick ~ Richard).
-    a_first = b.first if first_compatible and b.first in NICKNAMES.get(a.first, ()) else a.first
+    nicknames = b.first in NICKNAMES.get(a.first, ()) or a.first in NICKNAMES.get(b.first, ())
+    a_first = b.first if nicknames else a.first
     name_sim = SequenceMatcher(None, f"{a_first} {a.last}", f"{b.first} {b.last}").ratio()
     shared = shared_weight(a, b)
-    union = sum(a.weight.get(c, 1.0) for c in a.peers | b.peers)
+    union = math.fsum(a.weight.get(c, 1.0) for c in a.peers | b.peers)
     jaccard = shared / union if union else 0.0
     same_domain = a.is_email and b.is_email and a.domain == b.domain
     # Mentions (name:...) and phone handles have no mail correspondents; they lean on exact full-name agreement
@@ -298,10 +301,12 @@ def candidates(s: Session) -> list[tuple[P, P, float, dict]]:
                     out.append((a, b, 0.0, {"rejected": True}))
                     continue
                 sc, f = score(a, b)
-                if sc and (not a.is_email or not b.is_email):
-                    x, y = (a, b) if not a.is_email else (b, a)
-                    if not _only_bearer(x, y, holders.get((a.first, a.last), {})):
-                        sc, f = 0.0, {**f, "ambiguous_name": True}
+                # A side with no mail of its own joins on the name alone. With two such sides (a phone and a
+                # mention), either may be the one that joins, so the pair holds when either could.
+                lone = [(x, y) for x, y in ((a, b), (b, a)) if not x.is_email]
+                named = holders.get((a.first, a.last), {})
+                if sc and lone and not any(_only_bearer(x, y, named) for x, y in lone):
+                    sc, f = 0.0, {**f, "ambiguous_name": True}
                 out.append((a, b, sc, f))
     return out
 
@@ -309,8 +314,9 @@ def candidates(s: Session) -> list[tuple[P, P, float, dict]]:
 def run(s: Session, threshold: float = THRESHOLD, rescore: bool = False) -> dict:
     """Rebuild identity clusters from every SAME_AS link. Before that, score candidate pairs again (replacing every
     'er' link) when source records changed since the last scoring, when the links in place come from another
-    scoring VERSION, or when `rescore` asks. Returns {rescored, same_as: scored links in place, clusters}."""
-    clusters = refresh_canonical(s)  # who you are and who is already one person, which scoring reads
+    scoring VERSION, or when `rescore` asks. Scoring reads the clusters only trusted links form (TRUSTED), never an
+    earlier scoring's, so its links depend on the graph as it is and not on how often it was scored. Returns
+    {rescored, same_as: scored links in place, clusters}."""
     changes = dirty.pending(s, "resolve")
     stale = s.execute(text("""
         SELECT EXISTS (SELECT 1 FROM edges WHERE type = 'SAME_AS' AND extractor = :ex AND extractor_version <> :v)
@@ -320,6 +326,7 @@ def run(s: Session, threshold: float = THRESHOLD, rescore: bool = False) -> dict
         from igneous.graph.derived import rejections
 
         s.execute(text("DELETE FROM edges WHERE type = 'SAME_AS' AND extractor = :ex"), {"ex": EXTRACTOR})
+        refresh_canonical(s)  # who you are and who is known to be one person, which scoring reads
         blocked = rejections(s)  # a pair you said is wrong, on any link, is never one person by score
         links = [{"a": min(a.id, b.id), "b": max(a.id, b.id), "p": json.dumps(f), "c": sc}  # one edge per pair
                  for a, b, sc, f in candidates(s) if sc >= threshold and not blocked.blocks(a.id, b.id)]
@@ -330,7 +337,7 @@ def run(s: Session, threshold: float = THRESHOLD, rescore: bool = False) -> dict
                 ON CONFLICT (src, dst, type, extractor) DO NOTHING
             """), [{**link, "ex": EXTRACTOR, "v": VERSION} for link in links])
         dirty.consume(s, "resolve", changes)
-        clusters = refresh_canonical(s)
+    clusters = refresh_canonical(s)
     same_as = s.execute(text("SELECT count(*) FROM edges WHERE type = 'SAME_AS' AND extractor = :ex"),
                         {"ex": EXTRACTOR}).scalar()
     return {"rescored": rescored, "same_as": same_as, "clusters": clusters}
@@ -362,7 +369,8 @@ def refresh_canonical(s: Session) -> int:
     your own cluster, or join two identities the verifier confidently said are not one person (`rejected`). Each
     cluster's head is you for your own, else its best-connected member (so the explorer shows "Kenneth Lay" with all
     his addresses folded in), and the head shows the cluster's best human name. The head's own name is kept in
-    props.own_name meanwhile and comes back once it no longer heads a cluster named otherwise."""
+    props.own_name meanwhile and comes back once it no longer heads a cluster named otherwise. Links are taken, and
+    ties broken, by natural keys, never by row ids: the same graph forms the same clusters however it was built."""
     edges = s.execute(text("""
         SELECT e.src, e.dst, e.confidence, e.extractor, e.id FROM edges e
         JOIN nodes a ON a.id = e.src AND a.type = 'Person' JOIN nodes b ON b.id = e.dst AND b.type = 'Person'
@@ -392,7 +400,10 @@ def refresh_canonical(s: Session) -> int:
             x = parent[x]
         return x
 
-    for a, b, _conf, ex, _id in sorted(edges, key=lambda e: (e.extractor not in TRUSTED, -(e.confidence or 0), e.id)):
+    # Trusted links first, then the surest; ties by the endpoints' keys, so clusters don't depend on row ids.
+    order = lambda e: (e.extractor not in TRUSTED, -(e.confidence or 0),  # noqa: E731
+                       sorted((meta[e.src].key, meta[e.dst].key)), e.extractor)
+    for a, b, _conf, ex, _id in sorted(edges, key=order):
         ra, rb = find(a), find(b)
         if ra == rb or any(yours[x] & members[rb] for x in members[ra] if x in yours):
             continue
@@ -413,7 +424,7 @@ def refresh_canonical(s: Session) -> int:
         degree[n] += k
     heads, shown = {}, {}
     for c in clusters:
-        head = max(c, key=lambda n: (n == me, degree[n], -n))
+        head = min(c, key=lambda n: (n != me, -degree[n], meta[n].key))
         heads.update({n: head for n in c})
         # Every person is labeled by their best human name in the cluster, never an address or number when a name is
         # known: a real first-and-last name that isn't an address handle ("jlee2026") first, then contact cards, then
@@ -422,7 +433,7 @@ def refresh_canonical(s: Session) -> int:
         names = sorted((n for n in c if n != me and own[n] and "@" not in own[n]
                         and not re.fullmatch(r"\+?\d[\d\s()-]+", own[n])),
                        key=lambda n: (not _human_name(own[n], handles),
-                                      (meta[n].props or {}).get("named_by") != "contacts", -degree[n], n))
+                                      (meta[n].props or {}).get("named_by") != "contacts", -degree[n], meta[n].key))
         if names and own[names[0]] != own[head]:
             shown[head] = own[names[0]]
 

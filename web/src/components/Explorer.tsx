@@ -75,7 +75,8 @@ export default function Explorer() {
   const [why, setWhy] = useState<{ a: number; b: number } | null>(null);
   const [loading, setLoading] = useState(true); // the first view starts loading on mount
   const [error, setError] = useState<Failure | null>(null);
-  // The API answers 404 until a self node exists, i.e. until a source is connected and the graph is built.
+  // The API answers 404 while no source says which person is you: nothing is connected and built yet, or nothing
+  // connected is yours (an archive of several people's mail).
   const [nothingConnected, setNothingConnected] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
   // Bumped by every correction and undo, so the open panel shows the result.
@@ -401,9 +402,9 @@ export default function Explorer() {
 
       {data.nodes.length === 0 && !loading && !error && nothingConnected && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center text-sm text-muted">
-          <p className="text-base text-ink">Your graph is empty</p>
-          <p className="max-w-sm">Connect a source, then build the graph. Setup takes a few minutes and everything stays on this computer.</p>
-          <Link href="/settings" className="btn-primary">Connect your first source</Link>
+          <p className="text-base text-ink">Nobody to start from yet</p>
+          <p className="max-w-sm">No source says which person is you. Connect one of your own accounts and build the graph, or press / to search for someone to start from. Everything stays on this computer.</p>
+          <Link href="/settings" className="btn-primary">Open Sources</Link>
         </div>
       )}
 

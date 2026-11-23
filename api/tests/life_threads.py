@@ -15,7 +15,6 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from pipeline_data import put
-from sqlalchemy import text
 
 ME = "mo@self.test"
 NAMES = {ME: "Mo Self", "ana@pals.test": "Ana Ames", "bo@pals.test": "Bo Berg", "cy@pals.test": "Cy Cole",
@@ -226,15 +225,6 @@ def model(system: str, user: str, schema: dict, **_options):
         return {"keep": [line[2:] for line in user.splitlines() if line.startswith("- ")]}, {}
     return {k: {"array": [], "boolean": False, "number": 0, "integer": 0}.get(v.get("type"), "")
             for k, v in props.items()}, {}
-
-
-def arrived_later(s) -> None:
-    """Records a test added after a run, as a later sync's would be: newer than what that run read. (A test's
-    database is one transaction, where now() stands still, and the spine reads only what was updated after it last
-    ran.)"""
-    s.execute(text("""UPDATE source_items SET updated_at = clock_timestamp()
-                      WHERE updated_at >= (SELECT max(watermark) FROM pipeline_state)"""))
-    s.commit()
 
 
 SOURCES = "gmail,gcal,imessage,drive,fs,github"  # every source the life is in, opted in

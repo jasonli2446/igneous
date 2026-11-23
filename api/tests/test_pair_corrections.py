@@ -29,12 +29,20 @@ def node(s, kind, key, name=None, props=None):
 
 
 def edge(s, a, b, kind="RELATED_TO", extractor="threads", props=None, item=None):
+    """An edge; one you added (extractor 'user') with its intent, as POST /graph/link records it."""
+    props = props or ({"why": "you added this"} if extractor == "user" else {})
+    if extractor == "user":
+        s.execute(text("""INSERT INTO overrides (op, node_keys, value, data)
+                          SELECT 'link', ARRAY[x.type || ':' || x.key, y.type || ':' || y.key], :t,
+                                 jsonb_build_object('props', CAST(:p AS jsonb))
+                          FROM nodes x, nodes y WHERE x.id = :a AND y.id = :b"""),
+                  {"a": a, "b": b, "t": kind, "p": json.dumps(props)})
     return s.execute(text("""
         INSERT INTO edges (src,dst,type,extractor,extractor_version,props,source_item_id,confidence,model,
                            valid_from,valid_to,span_start,span_end)
         VALUES (:a,:b,:t,:x,'2',CAST(:p AS jsonb),:i,.73,'fixture-model',
                 '2025-01-01','2025-01-02',0,5) RETURNING id
-    """), {"a": a, "b": b, "t": kind, "x": extractor, "p": json.dumps(props or {}), "i": item}).scalar_one()
+    """), {"a": a, "b": b, "t": kind, "x": extractor, "p": json.dumps(props), "i": item}).scalar_one()
 
 
 def item(s, key="record"):
@@ -79,7 +87,7 @@ def test_stated_facts_cannot_be_rejected(graph, extractor):
     a, b = node(s, "Person", "A"), node(s, "Project", "B")
     eid = edge(s, a, b, extractor=extractor)
     assert client.post("/graph/edge/wrong", json={"edge": eid}).status_code == 400
-    assert s.execute(text("SELECT 1 FROM overrides")).first() is None
+    assert s.execute(text("SELECT 1 FROM overrides WHERE op <> 'link'")).first() is None  # nothing recorded
     assert s.execute(text("SELECT 1 FROM edges WHERE id=:i"), {"i": eid}).first()
 
 

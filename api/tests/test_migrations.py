@@ -1,4 +1,5 @@
 """The migration chain, and the schema check every entry point runs before touching data."""
+import click
 import pytest
 from conftest import API, TEST_DB
 from sqlalchemy import create_engine, text
@@ -234,8 +235,11 @@ def test_the_cli_refuses_database_commands_on_a_wrong_schema(monkeypatch, tmp_pa
     monkeypatch.setattr(dbm, "schema_status", lambda: PROBLEM)
     refused = CliRunner().invoke(cli.app, ["pipeline", "--stage", "spine"])
     assert refused.exit_code == 2 and "the code needs 0002" in refused.output
-    # Commands that never open the database still run.
+    # Commands that never open the database still run, and every command's help reads without one.
     assert CliRunner().invoke(cli.app, ["synthetic-corpus", str(tmp_path / "corpus")]).exit_code == 0
+    for command in (["sync", "--help"], ["pipeline", "--help"], ["import", "takeout", "--help"], ["--help"]):
+        shown = CliRunner().invoke(cli.app, command)
+        assert shown.exit_code == 0 and "Usage" in click.unstyle(shown.output), command
 
 
 def test_the_mcp_server_refuses_to_start_on_a_wrong_schema(monkeypatch, capsys):

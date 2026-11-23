@@ -210,7 +210,7 @@ def remove_link(s: Session, edge_id: int) -> dict:
     for child, parent, _origin in parents:
         s.execute(text("DELETE FROM thread_parents WHERE child_key = :c AND parent_key = :p"), {"c": child, "p": parent})
     oid = overrides.add(s, "unlink", sorted(ends) if edge["type"] == "SAME_AS" else [edge["b"], edge["a"]], edge["type"],
-                        {"user_link": True, "src_key": edge["a"], "dst_key": edge["b"],
+                        {"user_link": True,
                          "links": [{k: r[k] for k in ("op", "node_keys", "value", "data")} for r in links],
                          "parents": parents})
     return {"removed": edge_id, "override_id": oid, "pairs": [tuple(sorted((edge["src"], edge["dst"])))]}

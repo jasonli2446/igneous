@@ -144,7 +144,7 @@ def test_a_rejected_link_never_comes_back_mid_rebuild_through_another_address_or
     for i in range(16):
         life_threads._mail(db, f"ana-more{i}", "ana@pals.test", [life_threads.ME], f"lunch {i}",
                            life_threads.at(300 + i), "lunch at noon?")
-    life_threads.arrived_later(db)
+    db.commit()
     seen = []
     real = backbone.run
 
@@ -187,6 +187,53 @@ def test_the_writer_skips_a_rejected_pair_through_identity_heads_and_merges(db):
     w = Writer(db, "threads")
     assert w.edge(head, survivor, "INVOLVED_IN") is None and w.edge(survivor, other, "RELATED_TO") is None
     assert w.edge(head, add("Project", "thread:other"), "INVOLVED_IN") is not None and w.skipped == 2
+    assert w.rejected.heads() == {frozenset((head, survivor))}  # as the explorer reads it
+
+
+@pytest.mark.usefixtures("local_models")
+def test_a_message_you_linked_leaves_with_its_record_and_the_link_comes_back_with_it(db):
+    """A link you added is an intent: it never keeps a message whose record is gone (that would be a message built
+    from no record), and it is made again when the record comes back."""
+    from igneous.graph.invariants import check_graph
+
+    mail(db, "plans", "ann@x.test", ["mo@x.test"], "Trip plans", day(1), body="Flights are booked.")
+    pipeline.run(db)
+    message = db.execute(text("SELECT id FROM nodes WHERE type = 'Message'")).scalar_one()
+    trip = db.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Project', 'project:trip', 'Trip') "
+                           "RETURNING id")).scalar_one()
+    assert client.post("/graph/link", json={"src": message, "dst": trip, "type": "PART_OF"}).json()["id"]
+    db.execute(text("DELETE FROM source_items WHERE external_id = 'plans'"))  # a sync saw it deleted
+    pipeline.run(db)
+    assert db.execute(text("SELECT count(*) FROM nodes WHERE type = 'Message'")).scalar() == 0
+    assert "phantom_message" not in {v.code for v in check_graph(db)}
+    mail(db, "plans", "ann@x.test", ["mo@x.test"], "Trip plans", day(1), body="Flights are booked.")
+    pipeline.run(db)
+    assert db.execute(text("""SELECT count(*) FROM edges e JOIN nodes m ON m.id = e.src
+                              WHERE m.type = 'Message' AND e.dst = :t AND e.extractor = 'user'"""),
+                      {"t": trip}).scalar() == 1
+
+
+def test_a_dropped_link_whose_record_is_gone_is_not_brought_back(db):
+    """'This is right' on a link the verifier dropped, after the record behind it was deleted: your verdict stands,
+    and the link stays out (a rebuild makes it again only from records that remain)."""
+    person = db.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Person', 'pat@x.test', 'Pat') "
+                             "RETURNING id")).scalar_one()
+    trip = db.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Project', 'thread:trip', 'Trip') "
+                           "RETURNING id")).scalar_one()
+    record = db.execute(text("""INSERT INTO source_items (source, external_id, content_hash, title)
+                                VALUES ('gmail', 'r1', 'r1', 'Trip?') RETURNING id""")).scalar_one()
+    db.execute(text("""INSERT INTO edges (src, dst, type, extractor, source_item_id)
+                       VALUES (:p, :t, 'INVOLVED_IN', 'threads', :r)"""), {"p": person, "t": trip, "r": record})
+    db.execute(text("""INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, confidence, source)
+                       VALUES ('Person:pat@x.test', 'Project:thread:trip', 'INVOLVED_IN', 'threads', 'd', 'drop', 0.9,
+                               'model')"""))
+    corrections.apply_all(db)
+    dropped = db.execute(text("SELECT id FROM edges_dropped")).scalar_one()
+    db.execute(text("DELETE FROM source_items WHERE id = :r"), {"r": record})
+    back = client.post("/graph/edge/restore", json={"edges": [dropped]}).json()
+    assert back["applied"] == "now" and back["restored"] == [] and back["kept"] == 1
+    assert db.execute(text("SELECT count(*) FROM edges_dropped")).scalar() == 0
+    assert db.execute(text("SELECT verdict, source FROM edge_verdicts")).one() == ("keep", "user")
 
 
 # --- What the verifier dropped is archived once, by natural key, and leaves with its verdict --------------------
@@ -273,8 +320,9 @@ def _pair_graph(db):
     person, thread, chat = add("Person", "pat@x.test"), add("Project", "thread:trip"), add("Thread", "chat:trip")
     derived = db.execute(text("""INSERT INTO edges (src, dst, type, extractor) VALUES (:a, :t, 'INVOLVED_IN', 'threads')
                                  RETURNING id"""), {"a": person, "t": thread}).scalar_one()
-    db.execute(text("INSERT INTO edges (src, dst, type, extractor) VALUES (:t, :a, 'RELATED_TO', 'user')"),
-               {"a": person, "t": thread})
+    corrections.link(db, "Project:thread:trip", "Person:pat@x.test", "RELATED_TO", {"why": "you added this"})
+    db.execute(text("""INSERT INTO edges (src, dst, type, props, extractor)
+                       VALUES (:t, :a, 'RELATED_TO', '{"why": "you added this"}', 'user')"""), {"a": person, "t": thread})
     only = db.execute(text("""INSERT INTO edges (src, dst, type, extractor) VALUES (:c, :t, 'PART_OF', 'threads')
                               RETURNING id"""), {"c": chat, "t": thread}).scalar_one()
     return person, thread, chat, derived, only

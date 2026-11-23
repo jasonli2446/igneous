@@ -55,14 +55,22 @@ def merges(s: Session) -> dict[str, str]:
 
 @dataclass
 class Rejections:
-    """The pairs you rejected, as identities. `pairs` holds the canonical natural keys of each pair (a person's
-    identity head, a Project's survivor); `canon` maps every live node that is one of those identities to its
-    canonical key. A pair whose two sides are one identity (two addresses of one person, still joined by a trusted
-    link) holds between those exact nodes only (`exact`)."""
+    """The pairs you rejected, as identities: the one reading of your rejections that writers and readers share.
+    `pairs` holds the canonical natural keys of each pair (a person's identity head, a Project's survivor); `canon` maps
+    every live node that is one of those identities to its canonical key, and `ids` each canonical key to its node. A
+    pair whose two sides are one identity (two addresses of one person, still joined by a trusted link) holds between
+    those exact nodes only (`exact`)."""
     pairs: set[frozenset[str]] = field(default_factory=set)
     canon: dict[int, str] = field(default_factory=dict)
+    ids: dict[str, int] = field(default_factory=dict)
     exact: set[frozenset[int]] = field(default_factory=set)
     folded: dict[str, str] = field(default_factory=dict)
+
+    def heads(self) -> set[frozenset[int]]:
+        """The rejected pairs as the explorer shows the graph: the node of each identity (a person's head, the Project
+        a merge kept)."""
+        return {frozenset((self.ids[a], self.ids[b])) for a, b in map(sorted, self.pairs)
+                if a in self.ids and b in self.ids}
 
     def blocks(self, a: int, b: int) -> bool:
         if frozenset((a, b)) in self.exact:
@@ -75,6 +83,8 @@ class Rejections:
         key = follow(self.folded, natural)
         if any(key in pair for pair in self.pairs):
             self.canon[node_id] = key
+            if key == natural:
+                self.ids[key] = node_id
 
     def id_pairs(self) -> list[str]:
         """Every blocked (src, dst) node pair, both directions, as 'src>dst' (for SQL: `blocked_sql`)."""
@@ -138,6 +148,8 @@ def rejections(s: Session) -> Rejections:
         key = head_key if type_ == "Person" else follow(folded, natural)
         if key in wanted:
             out.canon[nid] = key
+            if key == natural:
+                out.ids[key] = nid
     return out
 
 
