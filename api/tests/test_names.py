@@ -1,15 +1,19 @@
 """People's names in the order they are read: what `natural_name` turns and what it leaves alone, the spine taking
-every source's names that way, identity resolution reading both orders alike, and a database built with surname-first
-names after the upgrade and one run."""
+every source's names that way, identity resolution reading both orders alike, the names Enron's X-headers give (quoted
+ones too), and databases built before either after the upgrade and one run."""
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from igneous.connectors.base import SourceItem, store
+from igneous.connectors.email_maildir import parse_message
 from igneous.graph import spine
 from igneous.graph.names import natural_name
 from igneous.graph.resolve import split_name
+from igneous.graph.spine import x_names
 
 T0 = datetime(2001, 5, 14, 16, tzinfo=UTC)
 
@@ -109,13 +113,20 @@ def test_the_spine_takes_every_sources_names_first_name_first(db):
 
 
 def test_a_header_name_written_surname_first_is_still_the_header_name(db):
-    """A display name in a header outranks X-From and an address's local part, in either order."""
-    put(db, "email", "box/1", {"from": [{"email": "john.lavorato@enron.com"}], "to": [{"email": "jo@x.test"}],
-                               "fingerprint": "fp-1", "x_from": "John J Lavorato"}, "Bonus")
-    put(db, "gmail", "acct/2", {"from": [{"email": "john.lavorato@enron.com", "name": "Lavorato, John"}],
+    """A display name outranks what an address's local part spells, written surname first too: in a From header
+    ("Lavorato, John"), or in the X-From where Enron keeps the display name its From header lacks."""
+    put(db, "email", "box/1", {"from": [{"email": "john.j.lavorato@enron.com"}], "to": [{"email": "jo@x.test"}],
+                               "fingerprint": "fp-1"}, "Bonus")
+    put(db, "gmail", "acct/2", {"from": [{"email": "john.j.lavorato@enron.com", "name": "Lavorato, John"}],
                                 "to": [{"email": "jo@x.test"}], "fingerprint": "fp-2"}, "Re: Bonus", 1)
+    put(db, "email", "box/3", {"from": [{"email": "phillip.k.allen@enron.com"}], "to": [{"email": "jo@x.test"}],
+                               "fingerprint": "fp-3", "x_from": "Allen, Phil </O=ENRON/OU=NA/CN=RECIPIENTS/CN=PALLEN>"},
+        "Gas", 2)
+    put(db, "email", "box/4", {"from": [{"email": "jo@x.test"}], "to": [{"email": "phillip.k.allen@enron.com"}],
+                               "fingerprint": "fp-4"}, "Re: Gas", 3)
     spine.run(db)
-    assert named(db, "john.lavorato@enron.com") == "John Lavorato"
+    assert named(db, "john.j.lavorato@enron.com") == "John Lavorato"   # not "John J Lavorato", the longer name
+    assert named(db, "phillip.k.allen@enron.com") == "Phil Allen"
 
 
 def test_two_cards_writing_one_name_in_either_order_name_one_person(db):
@@ -128,17 +139,93 @@ def test_two_cards_writing_one_name_in_either_order_name_one_person(db):
     assert db.execute(text("SELECT count(*) FROM edges WHERE type = 'SAME_AS' AND extractor = 'contacts'")).scalar() == 2
 
 
-# --- upgrading a database built with surname-first names -----------------------------------------------------------
+# --- the names in Enron's X-headers ------------------------------------------------------------------------------
 
-def test_a_database_built_with_surname_first_names_reads_them_first_name_first_after_one_run(test_db, monkeypatch):
-    """Migration 0014: the records whose stored contribution names a person with a comma are pending for the spine
-    again, and the next run builds them, and only them, with the names they give now."""
+SENDER = "sender@x.test"
+
+
+@pytest.mark.parametrize(("x_from", "name"), [
+    ('"Mark Skilling" <markskilling@hotmail.com>', "Mark Skilling"),                   # quoted
+    ('"Garten, Jeffrey" <jeffrey.garten@yale.edu>', "Garten, Jeffrey"),                # a comma inside the quotes
+    ('"Mark \\"Sharky\\" Skilling" <mark@x.test>', 'Mark "Sharky" Skilling'),          # an escaped quote
+    ('\\"Jose Garcia\\" <jg@x.test>@ENRON', "Jose Garcia"),                            # quotes escaped outside quotes
+    ('"Susan Varga" <svarga@kudlow.com>@ENRON', "Susan Varga"),                        # after Lotus Notes' gateway
+    ('"Dennis Elkins" <delkins@interwoven.com>@ENRON <IMCEANOTES-+22Dennis+20Elkins+22@ENRON.com>', "Dennis Elkins"),
+    ("Rob Bradley <iertx@hern.org>@ENRON", "Rob Bradley"),                             # unquoted
+    ("Faircloth, Linda </O=ENRON/OU=NA/CN=RECIPIENTS/CN=LFAIRCLO>", "Faircloth, Linda"),  # Exchange: surname first
+    ("Phillip K Allen", "Phillip K Allen"),                                            # a name alone
+    ("Kristin Armstrong (E-mail) <karmstrong@x.test>", "Kristin Armstrong"),           # Outlook's comment
+    ('"\\"Rob Bradley\\" <Rob Bradley" <rbradle@x.test>', "Rob Bradley"),               # an address in the name
+    ('"\'Ken Lay\'" <klay@enron.com>', "Ken Lay"),
+    ('"julia@x.test" <julia@x.test>@ENRON', None),                                     # an address is no name
+    ("<svarga@kudlow.com>@ENRON", None),
+    ("MZinCS@aol.com@ENRON", None),
+    ('"Sender" <sender@x.test>', None),                                                # nor the address's local part
+    ("", None),
+])
+def test_x_from_names_the_sender_as_the_standard_address_parser_reads_it(x_from, name):
+    assert x_names({"from": [{"email": SENDER}], "x_from": x_from}).get(SENDER) == name
+
+
+def test_x_to_x_cc_and_x_bcc_name_each_recipient_by_its_own_entry():
+    """Several addresses in one header, each entry matched to its recipient by address. A comma can be inside an
+    unquoted name, so an unquoted name after an entry without an address may be the rest of that entry's name
+    ("Zuver, Christina") and names no one; a quoted name always counts."""
+    to = ["twells@x.test", "markskilling@hotmail.com", "christinazuver@msn.com", "czenner@x.test", "klay@enron.com"]
+    meta = {"from": [{"email": SENDER}], "to": [{"email": e} for e in to],
+            "cc": [{"email": "jgarten@yale.test"}], "bcc": [{"email": "rob@x.test"}],
+            "x_to": ('Rosalee Fleming, Tori L Wells <twells@x.test>, "Mark Skilling" <MarkSkilling@hotmail.com>, '
+                     "Zuver, Christina <christinazuver@msn.com>, Lay, Kenneth </O=ENRON/OU=NA/CN=RECIPIENTS/CN=KLAY>, "
+                     'Eric Zenner <czenner@x.test>, klay@enron.com, "Pat Ames" <pat@x.test>'),
+            "x_cc": '"Garten, Jeffrey" <jgarten@yale.test>@ENRON',
+            "x_bcc": "Rob Bradley <rob@x.test>"}
+    assert x_names(meta) == {"markskilling@hotmail.com": "Mark Skilling", "czenner@x.test": "Eric Zenner",
+                             "jgarten@yale.test": "Garten, Jeffrey", "rob@x.test": "Rob Bradley"}
+
+
+def test_the_maildir_keeps_the_recipients_x_headers_only_when_a_message_has_them():
+    raw = (b'From: ann@x.test\nTo: bo@x.test\nCc: cy@x.test\nSubject: Hi\nX-From: "Ann Lee" <ann@x.test>\n'
+           b'X-To: "Bo Ray" <bo@x.test>\nX-cc: Cy Young <cy@x.test>\nX-bcc: \n\nbody\n')
+    meta = parse_message(raw, "box/1").raw_meta
+    assert (meta["x_from"], meta["x_to"], meta["x_cc"]) == ('"Ann Lee" <ann@x.test>', '"Bo Ray" <bo@x.test>',
+                                                            "Cy Young <cy@x.test>")
+    assert "x_bcc" not in meta
+    plain = parse_message(b"From: ann@x.test\nTo: bo@x.test\nSubject: Hi\n\nbody\n", "box/2").raw_meta
+    assert not {"x_to", "x_cc", "x_bcc"} & set(plain)   # mail without them keeps its content hash
+
+
+def test_the_spine_names_people_by_the_names_their_x_headers_quote(db):
+    """"Mark Skilling" <markskilling@hotmail.com> names him "Mark Skilling", never "Markskilling", as the sender in
+    X-From and as a recipient in X-To. A name an X-header gives that reads as a person's is a header name: of those,
+    the one most records give names the person, not the longest ("Mr. Jeffrey Skilling" in one invitation)."""
+    put(db, "email", "lay-k/inbox/1", {
+        "from": [{"email": "markskilling@hotmail.com"}], "to": [{"email": "jeff.skilling@enron.com"}],
+        "fingerprint": "fp-1", "x_from": '"Mark Skilling" <markskilling@hotmail.com>'}, "Hello")
+    for n in (2, 3):
+        put(db, "email", f"skilling-j/sent/{n}", {
+            "from": [{"email": "jeff.skilling@enron.com"}], "fingerprint": f"fp-{n}", "x_from": "Jeff Skilling",
+            "to": [{"email": "markskilling@hotmail.com"}, {"email": "sweison@enron.com"}],
+            "x_to": '"Mark Skilling" <markskilling@hotmail.com>, "Weison, Susan" <sweison@enron.com>'}, "Re: Hello", n)
+    put(db, "email", "skilling-j/inbox/4", {
+        "from": [{"email": "events@x.test"}], "to": [{"email": "jeff.skilling@enron.com"}], "fingerprint": "fp-4",
+        "x_to": '"Mr. Jeffrey Skilling" <jeff.skilling@enron.com>'}, "Invitation", 4)
+    spine.run(db)
+    assert named(db, "markskilling@hotmail.com") == "Mark Skilling"
+    assert named(db, "sweison@enron.com") == "Susan Weison"
+    assert named(db, "jeff.skilling@enron.com") == "Jeff Skilling"
+    assert named(db, "events@x.test") == "Events"   # no X-From: its address's local part
+
+
+# --- upgrading a database built before ------------------------------------------------------------------------------
+
+@contextmanager
+def database_at(revision, monkeypatch):
+    """A database of its own migrated to `revision`: yields its engine and a function that migrates it further."""
     from alembic import command
     from alembic.config import Config
     from conftest import API, TEST_DB
     from sqlalchemy import create_engine
     from sqlalchemy.engine import make_url
-    from sqlalchemy.orm import Session
 
     from igneous.config import settings
 
@@ -153,7 +240,23 @@ def test_a_database_built_with_surname_first_names_reads_them_first_name_first_a
         with admin.connect() as c:
             c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
             c.execute(text(f'CREATE DATABASE "{name}"'))
-        command.upgrade(config, "0013")
+        command.upgrade(config, revision)
+        yield engine, lambda to: command.upgrade(config, to)
+    finally:
+        engine.dispose()
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+def pending(s) -> list[str]:
+    return s.execute(text("SELECT external_id FROM source_items WHERE spined_hash IS NULL ORDER BY id")).scalars().all()
+
+
+def test_a_database_built_with_surname_first_names_reads_them_first_name_first_after_one_run(test_db, monkeypatch):
+    """Migration 0014: the records whose stored contribution names a person with a comma are pending for the spine
+    again, and the next run builds them, and only them, with the names they give now."""
+    with database_at("0013", monkeypatch) as (engine, upgrade):
         with Session(engine) as s:   # the spine as it was: names as the records write them
             monkeypatch.setattr(spine, "natural_name", lambda name: name)
             put(s, "email", "allen-p/inbox/1", {
@@ -166,18 +269,38 @@ def test_a_database_built_with_surname_first_names_reads_them_first_name_first_a
             assert spine.run(s) == 3
             assert named(s, "ina.rangel@enron.com") == "Rangel, Ina"
             monkeypatch.setattr(spine, "natural_name", natural_name)
-        command.upgrade(config, "head")
+        upgrade("0014")
         with Session(engine) as s:
-            assert s.execute(text("SELECT external_id FROM source_items WHERE spined_hash IS NULL ORDER BY id")) \
-                .scalars().all() == ["allen-p/inbox/1", "acct/people/1"]
+            assert pending(s) == ["allen-p/inbox/1", "acct/people/1"]
             assert spine.run(s) == 2
             assert (named(s, "ina.rangel@enron.com"), named(s, "phillip.allen@enron.com"),
                     named(s, "orders@acme.test")) == ("Ina Rangel", "Phillip K Allen", "Acme, Inc.")
             assert s.execute(text("SELECT DISTINCT name FROM spine_node_support WHERE name LIKE '%Ina%'")) \
                 .scalars().all() == ["Ina Rangel"]
             assert spine.run(s) == 0
-    finally:
-        engine.dispose()
-        with admin.connect() as c:
-            c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
-        admin.dispose()
+
+
+def test_a_database_built_before_reads_the_names_x_from_quotes_after_one_run(test_db, monkeypatch):
+    """Migration 0016: every mail record with an X-From is pending for the spine again, and the next run builds it, and
+    only it, with the names its X-headers give: "Mark Skilling" for "Mark Skilling" <markskilling@hotmail.com>."""
+    with database_at("0015", monkeypatch) as (engine, upgrade):
+        with Session(engine) as s:   # a quoted X-From named no one
+            current = spine.x_names
+            monkeypatch.setattr(spine, "x_names", lambda meta: {})
+            put(s, "email", "lay-k/inbox/1", {
+                "from": [{"email": "markskilling@hotmail.com"}], "to": [{"email": "kenneth.lay@enron.com"}],
+                "fingerprint": "fp-1", "x_from": '"Mark Skilling" <markskilling@hotmail.com>'}, "Hello")
+            put(s, "email", "lay-k/inbox/2", {
+                "from": [{"email": "jeff.skilling@enron.com"}], "to": [{"email": "kenneth.lay@enron.com"}],
+                "fingerprint": "fp-2", "x_from": None}, "Hi", 1)
+            put(s, "gmail", "acct/3", {"from": [{"email": "ann@x.test", "name": "Ann Lee"}],
+                                       "to": [{"email": "jo@x.test"}], "fingerprint": "fp-3"}, "Lunch", 2)
+            assert spine.run(s) == 3
+            assert named(s, "markskilling@hotmail.com") == "Markskilling"
+            monkeypatch.setattr(spine, "x_names", current)
+        upgrade("head")
+        with Session(engine) as s:
+            assert pending(s) == ["lay-k/inbox/1"]
+            assert spine.run(s) == 1
+            assert named(s, "markskilling@hotmail.com") == "Mark Skilling"
+            assert spine.run(s) == 0
