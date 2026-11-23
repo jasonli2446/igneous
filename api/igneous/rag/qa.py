@@ -15,7 +15,7 @@ The eval's baseline is `use_graph=False` with `mode="dense"`: dense retrieval on
 import logging
 import time
 from collections import defaultdict
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -189,26 +189,35 @@ def _not_opted_in(message: str, filters: dict) -> dict:
             "reason": "no_opted_in_sources", "filters": filters}
 
 
-def answer(s: Session, question: str, f: Filters | None = None, use_graph: bool = True,
-           mode: str = "hybrid") -> dict:
-    """A cited answer, or `answerable: false` with what is missing. `citations` (each an evidence passage with its
-    chunk, source item and node ids) is empty unless the answer stands; `evidence` is everything the model saw;
-    `filters` is what narrowed the search (constraints.describe), within the opted-in sources."""
+@dataclass(frozen=True)
+class Evidence:
+    """What Ask shows the model for a question, found before any model call."""
+    passages: list[dict]       # in the order the model reads them
+    filters: dict              # what narrowed the search (constraints.describe), within the opted-in sources
+    retrieve_s: float
+    refusal: str | None = None  # why no model may read what the question reaches (nothing of it is opted in)
+
+
+def gather(s: Session, question: str, f: Filters | None = None, use_graph: bool = True,
+           mode: str = "hybrid") -> Evidence:
+    """The evidence for `question`: retrieval inside the opted-in sources and any filter the question states, then,
+    with `use_graph`, each hit's graph neighbours and the choice among them (`choose`)."""
     t0 = time.time()
     # A question is consent to ask a model about the sources opted in for it, not about everything: retrieval and
     # graph expansion stay inside that list, and with nothing on it no model is called at all.
     approved = llm.allowed_sources()
     if not approved:
-        return _not_opted_in(NO_SOURCES, describe(s, f or Filters()))
+        return Evidence([], describe(s, f or Filters()), 0.0, NO_SOURCES)
     f = apply(s, question, f)
     if f.sources:  # the question or the caller limited where to look: only the opted-in part of that is read
         sources = approved.intersection(f.sources)
         if not sources:
             asked = sorted({source_catalog.BY_VALUE[v].connector if v in source_catalog.BY_VALUE else v
                             for v in f.sources})
-            return _not_opted_in(f"This question is limited to {', '.join(asked)}, and none of that is opted in to "
-                                 f"the hosted model (opted in: {', '.join(sorted(approved))}). To ask about it, add "
-                                 "its id to IGNEOUS_LLM_SOURCES in api/.env and restart the API.", describe(s, f))
+            return Evidence([], describe(s, f), 0.0,
+                            f"This question is limited to {', '.join(asked)}, and none of that is opted in to the "
+                            f"hosted model (opted in: {', '.join(sorted(approved))}). To ask about it, add its id to "
+                            "IGNEOUS_LLM_SOURCES in api/.env and restart the API.")
         f = replace(f, sources=tuple(sorted(sources)))
     filters = describe(s, f)
     f = f if f.sources else replace(f, sources=tuple(sorted(approved)))
@@ -216,12 +225,24 @@ def answer(s: Session, question: str, f: Filters | None = None, use_graph: bool 
         hits = hybrid(s, question, f, k=max(settings.reranker_pool_size, CONTEXT_CHUNKS), mode=mode)
         neighbours = expand(s, hits, f=f)
         t_choose = time.time()
-        context = choose(question, hits, neighbours)
+        passages = choose(question, hits, neighbours)
         log.info("Q&A evidence: %d hits and %d graph neighbours -> %d passages (choosing took %.3fs)",
-                 len(hits), len(neighbours), len(context), time.time() - t_choose)
+                 len(hits), len(neighbours), len(passages), time.time() - t_choose)
     else:
-        context = hybrid(s, question, f, k=CONTEXT_CHUNKS, mode=mode)
-    t_retrieve = time.time() - t0
+        passages = hybrid(s, question, f, k=CONTEXT_CHUNKS, mode=mode)
+    return Evidence(passages, filters, time.time() - t0)
+
+
+def answer(s: Session, question: str, f: Filters | None = None, use_graph: bool = True,
+           mode: str = "hybrid") -> dict:
+    """A cited answer, or `answerable: false` with what is missing. `citations` (each an evidence passage with its
+    chunk, source item and node ids) is empty unless the answer stands; `evidence` is everything the model saw;
+    `filters` is what narrowed the search (constraints.describe), within the opted-in sources."""
+    t0 = time.time()
+    found = gather(s, question, f, use_graph, mode)
+    if found.refusal:
+        return _not_opted_in(found.refusal, found.filters)
+    context, filters, t_retrieve = found.passages, found.filters, found.retrieve_s
     if not context:
         return {"answerable": False, "answer": "No matching evidence.", "citations": [], "evidence": [],
                 "timing": {"retrieve_s": round(t_retrieve, 2)}, "filters": filters}
