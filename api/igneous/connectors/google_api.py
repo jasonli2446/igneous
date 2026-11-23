@@ -43,20 +43,22 @@ BUCKETS = {
 }
 
 
-def call(api: str, request, units: float = 1, tries: int = 6):
-    """Execute a googleapiclient request against `api`'s bucket. Backs off on rate limits (429, 403 rateLimitExceeded)
-    and transient 5xx; Google's per-user window is a minute, so rate-limit waits grow to 64 s."""
+def call(api: str, request, units: float = 1, attempts: int = 7):
+    """Execute a googleapiclient request against `api`'s bucket, up to `attempts` times. Backs off on rate limits
+    (429, 403 rateLimitExceeded), transient 5xx and a dropped or timed-out connection; Google's per-user window is a
+    minute, so rate-limit waits grow to 64 s. The last attempt's error is raised."""
     bucket = BUCKETS[api]
-    for i in range(tries):
+    for attempt in range(attempts):
         bucket.take(units)
         try:
             return request.execute()
         except HttpError as e:
             status = e.resp.status
             limited = status == 429 or (status == 403 and b"ateLimit" in (e.content or b""))
-            if limited or status in (500, 502, 503):
-                time.sleep(min(64, 2 ** (i + 1)) if limited else min(16, 2 ** i))
-                continue
-            raise
-    bucket.take(units)
-    return request.execute()
+            if not (limited or status in (500, 502, 503)) or attempt == attempts - 1:
+                raise
+            time.sleep(min(64, 2 ** (attempt + 1)) if limited else min(16, 2 ** attempt))
+        except (ConnectionError, TimeoutError):
+            if attempt == attempts - 1:
+                raise
+            time.sleep(min(16, 2 ** attempt))

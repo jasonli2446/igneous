@@ -1,9 +1,12 @@
 """Read-only GitHub connector for repositories, issues/PRs, READMEs, and daily commit activity.
 
-The first sync reads every repository the token can see; later syncs read what changed since the last complete
-one: issues and pull requests through `/issues?since` (one listing covers both), their comments when they have
-any, READMEs of repositories pushed since, and the commit days touched since. The cursor: `synced_at` (when the
-last complete scan began), `repos` (the names it listed) and `repos_etag`, all saved only when a scan completes.
+The first sync reads every repository you own or collaborate on that the token can see; later syncs read what
+changed since the last complete one: issues and pull requests through `/issues?since` (one listing covers both),
+their comments when they have any, READMEs of repositories pushed since, and the commit days touched since. A
+repository the last sync didn't list is read in full. The cursor: `synced_at` (when the last complete scan began),
+`repos` (the names it listed) and `repos_etag`, saved when a scan completes; while a first scan runs, `scan` (when
+it began, the repositories it finished and the ids it observed), so an interrupted one (a rate limit runs out)
+continues where it stopped.
 """
 from __future__ import annotations
 
@@ -16,7 +19,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem, Tombstone
+from igneous.connectors.base import Checkpoint, CompletedScan, Every, SourceItem, Tombstone
 
 API = "https://api.github.com"
 CHECKPOINT_EVERY = 50
@@ -72,9 +75,13 @@ class GithubClient:
             with self.opener(Request(url, headers=headers, method="GET"), timeout=30) as response:
                 return json.load(response), response.headers
         except HTTPError as e:
-            if e.code == 304 or e.code in missing:
-                return None, e.headers or {}
-            raise _error(e, path) from e
+            try:
+                if e.code == 304 or e.code in missing:
+                    return None, e.headers or {}
+                raise _error(e, path) from e
+            finally:
+                if e.fp is not None:
+                    e.close()  # an error response holds its connection until it is closed
 
     def get(self, path: str, params: dict | None = None, etag: str | None = None,
             missing: tuple[int, ...] = ()) -> tuple[object | None, str | None, str | None]:
@@ -203,10 +210,11 @@ class GithubConnector:
                                           for c in group]})
 
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | CompletedScan | Tombstone]:
-        # Advance only to the instant this scan began. An endpoint listed later cannot miss a mutation that
+        scan = cursor.get("scan")  # an interrupted first scan's progress
+        full = scan is not None or not cursor.get("synced_at")
+        # Advance only to the instant the scan began. An endpoint listed later cannot miss a mutation that
         # happened during a long scan on the next invocation.
-        watermark = _iso(datetime.now(UTC))
-        full = not cursor.get("synced_at")
+        watermark = scan["started"] if scan else _iso(datetime.now(UTC))
         since = None if full else _iso(_when(cursor["synced_at"]) - OVERLAP)
         # The ETag covers the first page only: use it when the whole list fit on one.
         etag = cursor.get("repos_etag") if not full and len(cursor.get("repos", [])) < PER_PAGE else None
@@ -216,24 +224,43 @@ class GithubConnector:
         if not listed:  # 304: the same repositories as last time, and none pushed since
             repos, new_etag = [{"full_name": n} for n in cursor.get("repos", [])], etag
         names = {repo["full_name"] for repo in repos}
+        known = set(cursor.get("repos", []))
         if listed:
-            for missing in sorted(set(cursor.get("repos", [])) - names):
+            for missing in sorted(known - names):
                 yield Tombstone(self.name, f"{self.account}/{missing}", prefix=True)
-        observed, emitted = set(), 0
+        done, observed = set((scan or {}).get("done", [])), set((scan or {}).get("observed", []))
+        emitted, due = 0, Every()
+
+        def progress() -> Checkpoint:
+            """Commits the items so far. A first scan's cursor records how far it got (its cursor names every id it
+            observed, so it is written by time); a later sync's moves only when it completes."""
+            if not full:
+                return Checkpoint(cursor)
+            return Checkpoint({"scan": {"started": watermark, "done": sorted(done), "observed": sorted(observed)}})
+
         for repo in repos:
             name = repo["full_name"]
+            if name in done:
+                continue
+            # A repository this account didn't list before (new, renamed, or newly shared) is read in full.
+            repo_since = since if name in known else None
             found = [self._item("repo", name, repo)] if listed else []
             pushed = _when(repo.get("pushed_at"))
-            if listed and (full or pushed is None or pushed >= _when(since)):  # a README changes with a push
-                found += [r for r in [self._readme(repo)] if r]
-            for item in chain(found, self._discussions(repo, since), self._commit_days(name, since)):
+            if listed and (repo_since is None or pushed is None or pushed >= _when(repo_since)):
+                found += [r for r in [self._readme(repo)] if r]  # a README changes only with a push
+            for item in chain(found, self._discussions(repo, repo_since), self._commit_days(name, repo_since)):
                 observed.add(item.external_id)
                 emitted += 1
                 yield item
-                if emitted % CHECKPOINT_EVERY == 0:
-                    yield Checkpoint(cursor)  # commits the items; the cursor moves only when the scan completes
+                if (due() if full else emitted % CHECKPOINT_EVERY == 0):
+                    yield progress()
+            done.add(name)
+            if full and due():
+                yield progress()
         next_cursor = {"repos_etag": new_etag, "repos": sorted(names), "synced_at": watermark}
         if full:
-            yield CompletedScan(next_cursor, self.name, frozenset(observed), scopes=(self.account,))
+            # A repository that went while the scan was interrupted takes the items it observed.
+            kept = frozenset(i for i in observed if "/".join(i.split("/")[1:3]) in names)
+            yield CompletedScan(next_cursor, self.name, kept, scopes=(self.account,))
         else:
             yield Checkpoint(next_cursor)

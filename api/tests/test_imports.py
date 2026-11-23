@@ -3,11 +3,11 @@
 import io
 import json
 import os
-import time
 import zipfile
 from datetime import UTC, datetime
 
 import pytest
+from conftest import finished_job
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
@@ -125,16 +125,6 @@ def test_an_export_is_read_one_conversation_at_a_time(tmp_path):
 
 # ---- the routes: staged uploads, background jobs ----
 
-def wait(job_id: str) -> dict:
-    for _ in range(200):
-        with SessionLocal() as s:
-            job = jobs.get(s, job_id)
-        if job["status"] != "running":
-            return job
-        time.sleep(0.05)
-    raise AssertionError("job never finished")
-
-
 def staged_folders() -> set:
     return set(uploads.ROOT.glob("*")) if uploads.ROOT.is_dir() else set()
 
@@ -146,7 +136,7 @@ def test_an_ai_export_upload_imports_in_the_background_and_its_copy_goes(committ
     assert response.status_code == 200, response.text
     job = response.json()
     assert job["kind"] == "import" and job["source"] == "chatgpt"
-    done = wait(job["id"])
+    done = finished_job(job["id"])
     assert done["status"] == "succeeded", done["error"]
     assert done["result"]["provider"] == "chatgpt" and done["result"]["conversations"] == 2
     assert done["result"]["inserted"] == 2 and done["result"]["redactions"] == 1
@@ -196,6 +186,21 @@ def test_uploads_are_copied_off_the_event_loop(monkeypatch):
     assert calls == ["_copy"]
 
 
+def test_staged_uploads_are_this_users_alone_and_named_inside_their_folder(tmp_path, monkeypatch):
+    """Exports are personal data, and the system's temporary folder may be shared: only this user can open the
+    staged copy. An upload's name can't place it outside its folder."""
+    import stat
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(uploads, "ROOT", tmp_path / "igneous-uploads")
+    staged = uploads._copy([SimpleNamespace(filename="../../export.zip", file=io.BytesIO(b"PK"))], "takeout")
+    try:
+        assert stat.S_IMODE(staged.folder.stat().st_mode) == 0o700
+        assert [(p.parent, p.name) for p in staged.files] == [(staged.folder, "0-export.zip")]
+    finally:
+        staged.remove()
+
+
 def test_folders_of_processes_that_died_are_swept(tmp_path, monkeypatch):
     monkeypatch.setattr(uploads, "ROOT", tmp_path)
     gone = tmp_path / "999999999-takeout-aa"  # no such pid
@@ -218,6 +223,6 @@ def test_the_cli_and_the_route_store_the_same_items(committed_db, tmp_path):
     with SessionLocal() as s:
         first = s.execute(text("SELECT external_id, content_hash FROM source_items ORDER BY 1")).all()
     job = TestClient(app).post("/import/ai-export", json={"path": str(export)}).json()
-    assert wait(job["id"])["result"]["unchanged"] == 2
+    assert finished_job(job["id"])["result"]["unchanged"] == 2
     with SessionLocal() as s:
         assert s.execute(text("SELECT external_id, content_hash FROM source_items ORDER BY 1")).all() == first

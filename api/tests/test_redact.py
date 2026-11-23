@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from igneous.config import settings
 from igneous.connectors import ai_chats
+from igneous.connectors import redact as rules
 from igneous.connectors.base import SourceItem, run_sync, stored
 from igneous.connectors.redact import PATTERNS, redact, url_without_credentials
 
@@ -62,6 +63,9 @@ EVERY_KIND = {  # one synthetic credential per pattern
     "stripe_key": "sk_live_" + "h" * 20, "jwt": "eyJ" + "i" * 12 + ".eyJ" + "j" * 12 + "." + "k" * 12,
     "private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----",
     "url_credentials": "postgres://user:pw12345@db/x", "assigned_secret": 'DB_PASSWORD="supersecretvalue"',
+    "slack_webhook": "https://hooks.slack.com/services/T0000/B0000/" + "l" * 24, "huggingface_token": "hf_" + "m" * 34,
+    "gitlab_token": "glpat-" + "n" * 20, "npm_token": "npm_" + "o" * 36,
+    "sendgrid_key": "SG." + "p" * 22 + "." + "q" * 43, "authorization_header": "Authorization: Bearer " + "r" * 32,
 }
 
 
@@ -70,6 +74,26 @@ def test_redaction_is_idempotent_for_every_pattern():
     assert set(counts) == {kind for kind, _ in PATTERNS}  # the sample covers every pattern
     twice, again = redact(once)
     assert twice == once and again == {}  # a placeholder never matches again: stored text redacts to itself
+
+
+def test_credentials_in_headers_and_urls_are_matched_and_prose_is_not():
+    opaque = "9f8e7d6c5b4a39281706f5e4d3c2b1a0"  # no format of its own: only where it sits says it's a secret
+    for text_, kept in (
+            (f'curl -H "Authorization: Bearer {opaque}" https://api.example.com', 'curl -H "Authorization: Bearer '),
+            (f'headers = {{"Authorization": "Bearer {opaque}"}}', 'headers = {"Authorization": "Bearer '),
+            ("Authorization: Basic dXNlcjpwYXNzd29yZDEyMzQ=", "Authorization: Basic "),
+            (f"Proxy-Authorization: token {opaque}", "Proxy-Authorization: token "),
+            (f'-H "x-api-key: {opaque}"', '-H "x-api-key: '),
+            (f"AccountKey={opaque}", "AccountKey=")):
+        out, counts = redact(text_)
+        assert opaque not in out and "dXNlcjpwYXNz" not in out and out.startswith(kept), out
+        assert sum(counts.values()) == 1, (text_, counts)
+    out, _ = redact("postgres://igneous:p@ss:w0rd@db:5432/x and mongodb+srv://me:s3cret@cluster0.example.net/db")
+    assert out == ("postgres://[REDACTED:url_credentials]@db:5432/x and "
+                   "mongodb+srv://[REDACTED:url_credentials]@cluster0.example.net/db")
+    for prose in ("Bearer bonds and other bearer instruments were discussed.", "the authorization: pending review",
+                  "See https://medium.com/@someone/post and email me@example.com", "basic responsibilities apply"):
+        assert redact(prose) == (prose, {}), prose
 
 
 def test_a_remote_loses_its_user_name_and_token():
@@ -202,7 +226,7 @@ def test_items_stored_before_the_rules_are_redacted_and_chunked_again(committed_
         assert after["title"] == "Plan [REDACTED:github_token]" and GH not in text_
         assert text_[b1["start"]:b1["end"]] == "Deploy with [REDACTED:github_token] today" and text_[b2["start"]:b2["end"]] == page2
         assert after["raw_meta"]["redactions"] == 2 and after["raw_meta"]["boundaries_redacted"] is True
-        assert after["redaction_version"] == 1 and after["updated_at"] > before["updated_at"]
+        assert after["redaction_version"] == rules.VERSION and after["updated_at"] > before["updated_at"]
         span = s.execute(text("SELECT span_start, span_end FROM edges WHERE source_item_id = :i"), {"i": item}).one()
         assert text_[span.span_start:span.span_end] == page2  # the model's span still points at its words
         assert s.execute(text("SELECT name FROM nodes WHERE id = :n"), {"n": file_node}).scalar_one() == after["title"]
@@ -227,21 +251,20 @@ def test_stored_metadata_is_redacted_in_place_too(db):
     after = item_row(db, event)
     assert after["raw_meta"]["attendees"] == [{"name": "bot [REDACTED:github_token]", "email": "bot@x.com"}]
     assert after["raw_meta"]["event_key"] == "gcal:e1@google.com" and after["raw_meta"]["redactions"] == 1
-    assert after["redaction_version"] == 1 and after["content_hash"] != before["content_hash"]
+    assert after["redaction_version"] == rules.VERSION and after["content_hash"] != before["content_hash"]
 
 
 def test_a_new_version_of_the_rules_checks_every_item_again(db, monkeypatch):
-    from igneous.connectors import redact as rules
     from igneous.connectors.base import redact_stored
 
     item = old_row(db, "gmail", "m1", "Hello", f"key {GH}", {"labels": []})
     assert redact_stored(db) == {"checked": 1, "redacted": 1}
     first = item_row(db, item)
     assert redact_stored(db) == {"checked": 0, "redacted": 0}
-    monkeypatch.setattr(rules, "VERSION", 2)
+    monkeypatch.setattr(rules, "VERSION", rules.VERSION + 1)
     assert redact_stored(db) == {"checked": 1, "redacted": 0}  # redacted text stays as it is
     again = item_row(db, item)
-    assert again["redaction_version"] == 2 and (again["body_text"], again["content_hash"]) == (
+    assert again["redaction_version"] == rules.VERSION and (again["body_text"], again["content_hash"]) == (
         first["body_text"], first["content_hash"])
 
 

@@ -5,6 +5,7 @@ import email.policy
 import hashlib
 import re
 from collections.abc import Iterator
+from datetime import UTC
 from email.utils import getaddresses, parsedate_to_datetime
 from pathlib import Path
 
@@ -40,6 +41,8 @@ def parse_message(raw: bytes, external_id: str) -> SourceItem:
         occurred = parsedate_to_datetime(msg["date"]) if msg["date"] else None
     except (TypeError, ValueError):
         occurred = None
+    if occurred is not None and occurred.tzinfo is None:
+        occurred = occurred.replace(tzinfo=UTC)  # "-0000": the time is UTC, the sender's own zone unknown (RFC 5322)
     refs = re.findall(r"<[^>]+>", str(msg.get("references", "")))
     body = _body(msg)
     sender = (_addrs(msg, "from") or [{"email": ""}])[0]["email"]
@@ -56,7 +59,7 @@ def parse_message(raw: bytes, external_id: str) -> SourceItem:
         "to": _addrs(msg, "to"),
         "cc": _addrs(msg, "cc"),
         "bcc": _addrs(msg, "bcc"),
-        # Enron's X-From/X-To carry the human-readable names the address headers lack.
+        # Enron's X-From carries the sender's human-readable name, which the address header lacks.
         "x_from": str(msg.get("x-from", "")) or None,
         "folder": str(msg.get("x-folder", "")) or None,
     }
@@ -71,7 +74,8 @@ def parse_message(raw: bytes, external_id: str) -> SourceItem:
 
 class MaildirConnector:
     """Walks <root>/<mailbox>/... with each mailbox's files in path order. The cursor holds, per mailbox, the last
-    path fully processed, so syncing another mailbox starts that one from its beginning."""
+    path fully processed (`mailboxes`), so syncing another mailbox starts that one from its beginning. A cursor with
+    one position for every mailbox (`last_path`) holds it for that path's own mailbox."""
     name = "email"
 
     def __init__(self, root: Path, mailboxes: list[str] | None = None):
@@ -93,8 +97,8 @@ class MaildirConnector:
 
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint]:
         done = dict(cursor.get("mailboxes") or {})
-        if legacy := cursor.get("last_path"):  # one position shared by every mailbox: it holds for its own only
-            done.setdefault(legacy.split("/", 1)[0], legacy)
+        if shared := cursor.get("last_path"):
+            done.setdefault(shared.split("/", 1)[0], shared)
         n = 0
         for box in self._boxes():
             after = done.get(box)

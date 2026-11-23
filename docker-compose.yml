@@ -22,7 +22,7 @@ services:
       IGNEOUS_DATABASE_URL: postgresql+psycopg://igneous:igneous@db:5432/igneous
       IGNEOUS_DATA_DIR: /data
     ports: ["8000:8000"]
-    # The data folder holds the Google OAuth client, the token key, the Enron mailboxes and the model cache.
+    # The data folder holds the Google OAuth client, the token key, the Enron mailboxes, the persona and the model cache.
     volumes: [./api/igneous:/app/igneous, ./api/migrations:/app/migrations, ./data:/data]
     depends_on: { db: { condition: service_healthy } }
 

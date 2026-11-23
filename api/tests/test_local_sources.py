@@ -191,8 +191,74 @@ def test_apple_notes_gzip_protobuf_body_and_locked_rows(tmp_path):
     events = list(AppleNotesConnector(db).sync({}))
     items = [event for event in events if isinstance(event, SourceItem)]
     assert [(item.external_id, item.title) for item in items] == [("note-1", "Plan"), ("3", "Fallback")]
-    assert "Ship safely" in items[0].body_text and items[0].raw_meta["model_opt_in"] is False
+    assert "Ship safely" in items[0].body_text
     assert next(event for event in events if isinstance(event, CompletedScan)).external_ids == frozenset({"note-1", "3"})
+
+
+def test_a_notes_date_comes_from_the_column_its_macos_version_uses(tmp_path):
+    """A note's dates carry a suffix in the shared object table (ZMODIFICATIONDATE1); without a date column a note
+    has no date, never one made of its row number."""
+    when = datetime(2025, 3, 9, 15, 30, tzinfo=UTC)
+    seconds = (when - APPLE_EPOCH).total_seconds()
+    for column, expected in (("ZMODIFICATIONDATE1", when), ("ZMODIFICATIONDATE", when), ("ZNOTEDATE", None)):
+        path = tmp_path / f"{column}.sqlite"
+        connection = sqlite3.connect(path)
+        connection.executescript(f"""
+            CREATE TABLE ZICCLOUDSYNCINGOBJECT (Z_PK INTEGER, ZTITLE1 TEXT, ZIDENTIFIER TEXT, {column} REAL);
+            CREATE TABLE ZICNOTEDATA (ZNOTE INTEGER, ZDATA BLOB);
+        """)
+        connection.execute("INSERT INTO ZICCLOUDSYNCINGOBJECT VALUES (7, 'Plan', 'note-7', ?)", (seconds,))
+        connection.execute("INSERT INTO ZICNOTEDATA VALUES (7, ?)", (gzip.compress(PLAN),))
+        connection.commit()
+        connection.close()
+        (item,) = [e for e in AppleNotesConnector(path).sync({}) if isinstance(e, SourceItem)]
+        assert item.occurred_at == expected, column
+
+
+def test_a_notes_store_without_its_tables_is_an_error_not_every_note_deleted(db, tmp_path):
+    path = notes_db(tmp_path / "NoteStore.sqlite", [(1, "Plan", "note-1", 0, PLAN)])
+    run_sync(db, AppleNotesConnector(path))
+    connection = sqlite3.connect(path)
+    connection.execute("ALTER TABLE ZICNOTEDATA RENAME TO ZNOTEBODY")  # a layout this version doesn't know
+    connection.commit()
+    connection.close()
+    with pytest.raises(RuntimeError, match="no notes tables"):
+        run_sync(db, AppleNotesConnector(path))
+    db.rollback()
+    assert stored(db, "notes") == ["note-1"]
+
+
+def test_the_mac_databases_are_closed_after_a_sync_and_a_blocked_one_says_why(db, tmp_path, monkeypatch):
+    from igneous.connectors import macos
+
+    chats = chat_db(tmp_path / "chat.db")
+    text_message(chats, 1, datetime(2025, 6, 2, 12, tzinfo=UTC), "see you Tuesday")
+    book = contacts_db(tmp_path / "Sources" / "A1" / "AddressBook-v22.abcddb", [("card-1", "Sam", "(614) 555-0101")])
+    notes = notes_db(tmp_path / "NoteStore.sqlite", [(1, "Plan", "note-1", 0, PLAN)])
+    opened = []
+    connect = sqlite3.connect
+
+    def recording(*args, **kwargs):
+        opened.append(connect(*args, **kwargs))
+        return opened[-1]
+
+    monkeypatch.setattr(macos.sqlite3, "connect", recording)
+    run_sync(db, MessagesConnector(chats))
+    run_sync(db, MacContactsConnector(str(book)))
+    run_sync(db, AppleNotesConnector(notes))
+    sync = MessagesConnector(chats).sync({})
+    next(sync)
+    sync.close()  # a sync stopped early closes its database too
+    assert len(opened) == 4
+    for connection in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+    monkeypatch.setattr(macos.sqlite3, "connect", connect)
+
+    blocked = tmp_path / "blocked.db"
+    blocked.write_bytes(b"not a database")
+    with pytest.raises(PermissionError, match="Full Disk Access"):
+        list(AppleNotesConnector(blocked).sync({}))
 
 
 def test_the_locked_flag_is_chosen_the_same_way_every_run(tmp_path):
@@ -279,6 +345,29 @@ def test_ai_chat_checkpoints_come_by_time_not_per_file(tmp_path, monkeypatch):
     assert len(checkpoints) == 1 and len(checkpoints[0].cursor["files"]) == 4  # a quick scan writes its cursor once
     monkeypatch.setattr(base, "CHECKPOINT_SECONDS", 0)
     assert len([o for o in conn.sync({}) if isinstance(o, Checkpoint)]) == 5
+
+
+def test_a_session_file_deleted_mid_sync_is_skipped_and_leaves_the_cursor(tmp_path, monkeypatch):
+    """Claude Code and Codex delete old sessions on their own. One that goes between the listing and the read is
+    skipped (its items stay), and a file that is gone leaves the cursor."""
+    from igneous.connectors import ai_chats
+
+    proj = tmp_path / "claude" / "-Users-x-repo"
+    proj.mkdir(parents=True)
+    for n in range(3):
+        (proj / f"s{n}.jsonl").write_text(json.dumps({"type": "user", "timestamp": "2026-10-21T10:00:00Z",
+                                                      "message": {"content": f"session {n}"}}))
+    conn = AIChatConnector(claude_root=str(tmp_path / "claude"), codex_root=str(tmp_path / "none"))
+    cursor = [o for o in conn.sync({}) if isinstance(o, Checkpoint)][-1].cursor
+    (proj / "s3.jsonl").write_text(json.dumps({"type": "user", "timestamp": "2026-10-22T10:00:00Z",
+                                               "message": {"content": "session 3"}}))
+    listed = conn._files()
+    (proj / "s0.jsonl").unlink()
+    (proj / "s3.jsonl").unlink()  # gone between the listing and the read
+    monkeypatch.setattr(ai_chats.AIChatConnector, "_files", lambda self: listed)
+    events = list(conn.sync(cursor))
+    assert not [o for o in events if isinstance(o, SourceItem)]
+    assert sorted(os.path.basename(p) for p in events[-1].cursor["files"]) == ["s1.jsonl", "s2.jsonl"]
 
 
 def test_queued_prompts_with_images_keep_their_text(tmp_path):

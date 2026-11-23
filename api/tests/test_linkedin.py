@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import text
 
 from igneous.connectors import linkedin
+from igneous.connectors.base import stored
 from igneous.db import SessionLocal
 
 TOKEN = "ghp_" + "Q" * 36
@@ -55,7 +56,9 @@ def test_parse_profile_and_connections(zpath):
         "projects": [{"name": "Widget Tracker", "description": "Tracks widgets", "org": ""}]}
     assert prof["skills"] == ["Python", "Go"]
     assert "Birth Date" not in str(prof) and "Nowhere" not in str(prof)
-    assert TOKEN not in by_id["profile"].body_text and TOKEN not in str(prof)
+    stored_profile = stored(by_id["profile"])  # redacted as it is stored, like every source's items
+    assert TOKEN not in stored_profile.body_text and TOKEN not in str(stored_profile.raw_meta)
+    assert stored_profile.raw_meta["redactions"] == 2  # the body's and the position's description
     sam = by_id["connection/sam-lee-123"]
     assert sam.raw_meta["email"] == "sam.lee@linkedin-test.example" and sam.raw_meta["connected_on"] == "2024-03-03"
     assert sam.raw_meta["company"] == "Globex" and sam.title == "Sam Lee"
@@ -70,6 +73,22 @@ def test_folder_connections_only_and_missing_columns(tmp_path):
     (tmp_path / "Connections.csv").write_text("First Name,Last Name\nNo,Url\n")  # no URL, no date: hashed id
     items, _ = linkedin.find_items([tmp_path])
     assert len(items) == 1 and items[0].external_id.startswith("connection/h-")
+
+
+def test_the_export_zips_are_closed_once_read(zpath, tmp_path, monkeypatch):
+    opened = []
+
+    class Recorded(zipfile.ZipFile):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            opened.append(self)
+
+    monkeypatch.setattr(linkedin.zipfile, "ZipFile", Recorded)
+    linkedin.preflight([zpath])
+    linkedin.find_items([zpath])
+    with pytest.raises(linkedin.LinkedInError):  # a later path that isn't an export closes the zips before it
+        linkedin.preflight([zpath, tmp_path / "notes.txt"])
+    assert len(opened) == 3 and all(zf.fp is None for zf in opened)
 
 
 def test_preflight_rejects_empty(tmp_path):

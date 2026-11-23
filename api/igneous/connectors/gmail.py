@@ -149,16 +149,21 @@ class GmailConnector:
         # The position is (page token, offset in that page), so a resume skips what that page already stored.
         page, skip_n = resume.get("backfill_page"), resume.get("backfill_offset", 0)
         while True:
-            resp = _retry(self.svc.users().messages().list(userId="me", q=q or None, pageToken=page,
+            resp = _retry(self.svc.users().messages().list(userId="me", q=q, pageToken=page,
                                                            maxResults=500, includeSpamTrash=False))
             refs = list(enumerate(resp.get("messages", []), 1))[skip_n:]
             # Fetch in parallel but yield in order, so checkpoints still mean "everything before i is stored".
-            with ThreadPoolExecutor(FETCH_WORKERS) as pool:
+            # The page's fetches are queued at once: a sync that stops early (--limit, a failure while storing)
+            # cancels the ones not started instead of spending quota on them.
+            pool = ThreadPoolExecutor(FETCH_WORKERS)
+            try:
                 fetched = pool.map(lambda r: self._fetch(r[1]["id"], skip), refs)
                 for (i, _), event in zip(refs, fetched, strict=True):
                     yield event
                     if i % CHECKPOINT_EVERY == 0:
                         yield Checkpoint({**state, "backfill_page": page, "backfill_offset": i})
+            finally:
+                pool.shutdown(cancel_futures=True)
             skip_n = 0
             page = resp.get("nextPageToken")
             if not page:

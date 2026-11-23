@@ -66,7 +66,51 @@ def test_secret_files_are_never_stored_and_a_checkout_is_one_item(tmp_path):
     repo = next(item for item in items if item.title == "igneous")
     assert repo.raw_meta["kind"] == "repo" and repo.raw_meta["remote"] == "git@github.com:a/igneous.git"
     assert repo.external_id == f"{_root_key(tmp_path)}/.repos/igneous"
-    assert not [e for e in emitted(connector, events[-1].cursor) if isinstance(e, SourceItem)]  # nothing changed
+    # Nothing changed: no file is read again. The checkout's config is read on every scan (an unchanged item
+    # stores nothing), so its item comes again.
+    assert [e.title for e in emitted(connector, events[-1].cursor) if isinstance(e, SourceItem)] == ["igneous"]
+
+
+def test_a_checkout_sits_in_every_folder_above_it(db, tmp_path):
+    """Its folders run from the scanned folder down to the checkout, as a file's do; a checkout that is the scanned
+    folder itself is in that folder only."""
+    nested = tmp_path / "docs" / "Projects" / "tidepool"
+    write(nested / ".git" / "config", '[remote "origin"]\n\turl = git@github.com:a/tidepool.git\n')
+    write(nested / "README.md", "# Tidepool")
+    key = _root_key(tmp_path / "docs")
+    items = {e.external_id: e for e in emitted(FilesystemConnector(tmp_path / "docs")) if isinstance(e, SourceItem)}
+    repo, readme = items[f"{key}/.repos/Projects/tidepool"], items[f"{key}/Projects/tidepool/README.md"]
+    assert repo.raw_meta["folders"] == readme.raw_meta["folders"] == [key, f"{key}/Projects", f"{key}/Projects/tidepool"]
+    assert repo.raw_meta["path"] == f"{key}/Projects/tidepool"
+
+    checkout = tmp_path / "tidepool"
+    write(checkout / ".git" / "config", '[remote "origin"]\n\turl = git@github.com:a/tidepool.git\n')
+    (own,) = [e for e in emitted(FilesystemConnector(checkout)) if isinstance(e, SourceItem)]
+    assert own.raw_meta["folders"] == [_root_key(checkout)]  # not a folder named "."
+
+    # A checkout's item stored with other folders is stored again with these on the next scan; then it is unchanged.
+    run_sync(db, FilesystemConnector(tmp_path / "docs"))
+    db.execute(text("UPDATE source_items SET raw_meta = jsonb_set(raw_meta, '{folders}', CAST(:f AS jsonb)), "
+                    "content_hash = 'earlier' WHERE external_id = :i"),
+               {"f": f'["{key}", "{key}/Projects/tidepool"]', "i": repo.external_id})
+    assert run_sync(db, FilesystemConnector(tmp_path / "docs"))["updated"] == 1
+    assert run_sync(db, FilesystemConnector(tmp_path / "docs"))["updated"] == 0
+
+
+def test_a_checkouts_remote_is_origins(tmp_path):
+    from igneous.connectors.filesystem import _git_remote
+
+    token = "ghp_" + "T" * 36
+    config = write(tmp_path / "repo" / ".git" / "config", "\n".join([
+        "[core]", "\trepositoryformatversion = 0",
+        '[submodule "vendor/lib"]', "\turl = https://example.com/lib.git",
+        '[remote "upstream"]', "\turl = https://github.com/them/repo.git",
+        '[remote "origin"]', f"\turl=https://me:{token}@github.com/me/repo.git"]))
+    assert _git_remote(tmp_path / "repo") == "https://github.com/me/repo.git"  # origin's, and no credentials
+    config.write_text('[remote "upstream"]\n\turl = https://github.com/them/repo.git\n')
+    assert _git_remote(tmp_path / "repo") == "https://github.com/them/repo.git"
+    config.write_text('[submodule "lib"]\n\turl = https://example.com/lib.git\n')
+    assert _git_remote(tmp_path / "repo") is None  # a submodule's url is not the checkout's remote
 
 
 def test_syncing_one_folder_reconciles_only_that_folder_and_keeps_the_configured_ids(db, tmp_path):

@@ -26,7 +26,8 @@ Every field is a string, as in that stage's JSON schema: "" when unknown. Dates 
 or still ongoing). A year-only date becomes January for a start and December for an end. domain_hint and a
 project's org are "": LinkedIn exports carry neither. (The structured raw_meta lists beside "profile" keep None.)
 
-Everything stored passes through redact(). The export is read-only input; no credentials are involved or stored.
+Every item is redacted as it is stored (`base.run_sync`), like every source's. The export is read-only input; no
+credentials are involved or stored.
 LinkedIn data stays out of every model call unless named in IGNEOUS_LLM_SOURCES.
 """
 import csv
@@ -40,7 +41,6 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from igneous.connectors.base import SourceItem
-from igneous.connectors.redact import redact
 
 MAX_MEMBER_BYTES = 256 * 1024 * 1024
 
@@ -77,23 +77,40 @@ def pick(row: dict[str, str], *names: str) -> str:
 # ---- reading the export ----
 
 class Export:
-    """The CSV files of one or more zips / folders, by lowercase base name."""
+    """The CSV files of one or more zips / folders, by lowercase base name. A context manager: the zips it opens
+    stay open until it closes."""
 
     def __init__(self, paths: list[Path]):
         self.files: dict[str, Callable[[], bytes]] = {}
-        for p in paths:
-            if p.is_dir():
-                for f in sorted(p.rglob("*.csv")):
-                    self._add(f.name, lambda f=f: f.read_bytes(), f.stat().st_size)
-            elif zipfile.is_zipfile(p):
-                zf = zipfile.ZipFile(p)
-                for info in zf.infolist():
-                    if info.filename.lower().endswith(".csv") and not info.is_dir():
-                        self._add(Path(info.filename).name, lambda zf=zf, i=info: zf.read(i), info.file_size)
-            elif p.suffix.lower() == ".csv" and p.is_file():
-                self._add(p.name, p.read_bytes, p.stat().st_size)
-            else:
-                raise LinkedInError(f"{p.name} is not a zip, folder or .csv file.")
+        self._zips: list[zipfile.ZipFile] = []
+        try:
+            for p in paths:
+                if p.is_dir():
+                    for f in sorted(p.rglob("*.csv")):
+                        self._add(f.name, lambda f=f: f.read_bytes(), f.stat().st_size)
+                elif zipfile.is_zipfile(p):
+                    zf = zipfile.ZipFile(p)
+                    self._zips.append(zf)
+                    for info in zf.infolist():
+                        if info.filename.lower().endswith(".csv") and not info.is_dir():
+                            self._add(Path(info.filename).name, lambda zf=zf, i=info: zf.read(i), info.file_size)
+                elif p.suffix.lower() == ".csv" and p.is_file():
+                    self._add(p.name, p.read_bytes, p.stat().st_size)
+                else:
+                    raise LinkedInError(f"{p.name} is not a zip, folder or .csv file.")
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        for zf in self._zips:
+            zf.close()
+
+    def __enter__(self) -> "Export":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     def _add(self, name: str, opener: Callable[[], bytes], size: int) -> None:
         name = name.lower()
@@ -172,14 +189,7 @@ def day_dt(s: str) -> datetime | None:
 
 # ---- items ----
 
-def _clean(text: str, counts: dict[str, int]) -> str:
-    out, c = redact(text)
-    for k, v in c.items():
-        counts[k] = counts.get(k, 0) + v
-    return (out or "").strip()
-
-
-def profile_item(x: Export, counts: dict[str, int]) -> SourceItem | None:
+def profile_item(x: Export) -> SourceItem | None:
     prof = (x.rows("profile.csv") or [{}])[0]
     name = " ".join(p for p in (pick(prof, "first name"), pick(prof, "last name")) if p) or None
     positions, education, projects = [], [], []
@@ -187,32 +197,32 @@ def profile_item(x: Export, counts: dict[str, int]) -> SourceItem | None:
         org, title = pick(r, "company name", "company", "organization"), pick(r, "title", "position")
         if org or title:
             positions.append({
-                "org": _clean(org, counts), "title": _clean(title, counts),
-                "description": _clean(pick(r, "description"), counts), "location": _clean(pick(r, "location"), counts),
+                "org": org, "title": title,
+                "description": pick(r, "description"), "location": pick(r, "location"),
                 "start": month_str(pick(r, "started on", "start date", "start")),
                 "end": month_str(pick(r, "finished on", "end date", "end"), end=True)})
     for r in x.rows("education.csv"):
         school = pick(r, "school name", "school")
         if school:
-            education.append({"school": _clean(school, counts), "degree": _clean(pick(r, "degree name", "degree"), counts),
+            education.append({"school": school, "degree": pick(r, "degree name", "degree"),
                               "start": month_str(pick(r, "start date", "started on", "start")),
                               "end": month_str(pick(r, "end date", "finished on", "end"), end=True)})
     for r in x.rows("projects.csv"):
         pname = pick(r, "title", "name")
         if pname:
-            projects.append({"name": _clean(pname, counts), "description": _clean(pick(r, "description"), counts),
+            projects.append({"name": pname, "description": pick(r, "description"),
                              "url": pick(r, "url"), "start": month_str(pick(r, "started on", "start date")),
                              "end": month_str(pick(r, "finished on", "end date"), end=True)})
-    skills = [_clean(pick(r, "name", "skill"), counts) for r in x.rows("skills.csv")]
-    certs = [{"name": _clean(pick(r, "name"), counts), "authority": _clean(pick(r, "authority"), counts),
+    skills = [pick(r, "name", "skill") for r in x.rows("skills.csv")]
+    certs = [{"name": pick(r, "name"), "authority": pick(r, "authority"),
               "start": month_str(pick(r, "started on", "start date")), "end": month_str(pick(r, "finished on", "end date"), end=True)}
              for r in x.rows("certifications.csv") if pick(r, "name")]
-    honors = [{"title": _clean(pick(r, "title", "name"), counts), "description": _clean(pick(r, "description"), counts),
+    honors = [{"title": pick(r, "title", "name"), "description": pick(r, "description"),
                "issued": month_str(pick(r, "issued on", "date"))} for r in x.rows("honors.csv") if pick(r, "title", "name")]
-    languages = [{"name": _clean(pick(r, "name", "language"), counts), "proficiency": pick(r, "proficiency")}
+    languages = [{"name": pick(r, "name", "language"), "proficiency": pick(r, "proficiency")}
                  for r in x.rows("languages.csv") if pick(r, "name", "language")]
     skills = [s for s in skills if s]
-    headline, summary, industry = (_clean(pick(prof, k), counts) for k in ("headline", "summary", "industry"))
+    headline, summary, industry = (pick(prof, k) for k in ("headline", "summary", "industry"))
     if not (name or positions or education or projects or skills or headline or summary):
         return None
 
@@ -274,11 +284,11 @@ def profile_slug(url: str) -> str | None:
     return parts[-1].lower() if parts else None
 
 
-def connection_items(x: Export, counts: dict[str, int]) -> Iterator[SourceItem]:
+def connection_items(x: Export) -> Iterator[SourceItem]:
     seen: set[str] = set()
     for r in x.rows("connections.csv"):
         first, last = pick(r, "first name"), pick(r, "last name")
-        name = _clean(" ".join(p for p in (first, last) if p), counts)
+        name = " ".join(p for p in (first, last) if p)
         url = pick(r, "url", "profile url")
         connected = pick(r, "connected on", "connected")
         iso = day_dt(connected)
@@ -291,7 +301,7 @@ def connection_items(x: Export, counts: dict[str, int]) -> Iterator[SourceItem]:
         seen.add(cid)
         email = pick(r, "email address", "email").lower()
         email = email if re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email) else ""
-        company, position = _clean(pick(r, "company"), counts), _clean(pick(r, "position", "title"), counts)
+        company, position = pick(r, "company"), pick(r, "position", "title")
         body = f"{name}" + (f", {position}" if position else "") + (f" at {company}" if company else "")
         body += f". Connected on {iso.date()}." if iso else "."
         yield SourceItem(
@@ -303,18 +313,16 @@ def connection_items(x: Export, counts: dict[str, int]) -> Iterator[SourceItem]:
 
 
 def find_items(paths: list[Path]) -> tuple[list[SourceItem], dict]:
-    x = Export(paths)
-    counts: dict[str, int] = {}
-    items: list[SourceItem] = []
-    if p := profile_item(x, counts):
-        items.append(p)
-    conns = list(connection_items(x, counts))
-    items += conns
+    """The export's items as read, and what was found. They are redacted where every item is, as they are stored
+    (`base.run_sync`)."""
+    with Export(paths) as x:
+        p = profile_item(x)
+        conns = list(connection_items(x))
+        files = sorted(x.files)
     report = {"profile": int(p is not None), "connections": len(conns),
               "positions": len(p.raw_meta["positions"]) if p else 0,
-              "education": len(p.raw_meta["education"]) if p else 0,
-              "files": sorted(x.files), "redactions": sum(counts.values())}
-    return items, report
+              "education": len(p.raw_meta["education"]) if p else 0, "files": files}
+    return ([p] if p else []) + conns, report
 
 
 class LinkedInConnector:
@@ -333,11 +341,12 @@ class LinkedInConnector:
 
 def preflight(paths: list[Path]) -> dict:
     """Cheap synchronous check: fail fast with a readable reason when the input has nothing to read."""
-    x = Export(paths)
-    if not x.files:
+    with Export(paths) as x:
+        files = sorted(x.files)
+    if not files:
         raise LinkedInError("No LinkedIn data found. Expected Connections.csv, Positions.csv or Profile.csv in the "
                             "zip or folder.")
-    return {"files": sorted(x.files)}
+    return {"files": files}
 
 
 def run_import(s, paths: list[Path], progress: Callable[..., None] | None = None) -> dict:

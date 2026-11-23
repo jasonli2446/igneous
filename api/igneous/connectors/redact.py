@@ -3,19 +3,20 @@
 Mail, chats and AI transcripts are full of pasted secrets (tokens, keys, connection strings). The sync runner
 (`base.run_sync`) passes every item's title, text and metadata text (not its ids, paths or addresses) through here
 before storing it, so a match is replaced with `[REDACTED:<kind>]` and never reaches source_items, chunks,
-embeddings or a prompt. Items stored under an earlier
-VERSION of these rules are brought up to date by the pipeline's first step (`base.redact_stored`). A connector that
-shortens text redacts it first, so a secret cut in half can't slip through. Patterns are deliberately broad: a false
-positive costs a few characters of context; a false negative leaks a credential.
+embeddings or a prompt. Items stored under an earlier VERSION of these rules are brought up to date by the
+pipeline's first step (`base.redact_stored`). A connector that shortens text redacts it first, so a secret cut in
+half can't slip through. Patterns are deliberately broad: a false positive costs a few characters of context; a
+false negative leaks a credential.
 """
 import re
 
 # The version of PATTERNS that stored items carry (`source_items.redaction_version`). Bump it with any change to
 # PATTERNS: the next pipeline run applies the new rules to every item stored under the old ones. Redacting is
 # idempotent (a placeholder never matches again), so items without new matches stay as they are.
-VERSION = 1
+VERSION = 2
 
-# (kind, pattern). Order matters: specific formats before the generic catch-alls.
+# (kind, pattern). Order matters: specific formats before the generic catch-alls. A pattern's `keep` group (a
+# header's or a variable's name) is context, not a secret: it stays, and only the rest of the match is replaced.
 PATTERNS: list[tuple[str, re.Pattern]] = [
     ("github_token", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}\b|\bgithub_pat_[A-Za-z0-9_]{40,}\b")),
     ("anthropic_key", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}")),
@@ -26,15 +27,26 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
     ("google_oauth", re.compile(r"\bya29\.[0-9A-Za-z_-]{20,}|\b1//[0-9A-Za-z_-]{30,}")),
     ("google_client_secret", re.compile(r"\bGOCSPX-[A-Za-z0-9_-]{20,}")),
     ("slack_token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}")),
+    ("slack_webhook", re.compile(r"\bhooks\.slack\.com/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/[A-Za-z0-9]{16,}")),
     ("stripe_key", re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}")),
+    ("huggingface_token", re.compile(r"\bhf_[A-Za-z0-9]{30,}\b")),
+    ("gitlab_token", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}")),
+    ("npm_token", re.compile(r"\bnpm_[A-Za-z0-9]{36}\b")),
+    ("sendgrid_key", re.compile(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
     ("private_key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)),
-    # user:password@host in any URL scheme (postgres://, mongodb+srv://, https://...)
-    ("url_credentials", re.compile(r"(?<=://)(?!\[REDACTED)[^\s:/@]+:[^\s@/]+(?=@)")),
-    # KEY=value, key: value, and JSON's "key": "value" (escaped quotes too) where the name says it's a secret
+    # user:password@host in any URL scheme (postgres://, mongodb+srv://, https://...); the password runs to the
+    # last @ before the host, as it may hold one.
+    ("url_credentials", re.compile(r"(?<=://)(?!\[REDACTED)[^\s:/@]+:[^\s/]+(?=@)")),
+    # An HTTP Authorization header's credentials (curl -H, a request in code or a log): Bearer, Basic, token.
+    ("authorization_header", re.compile(
+        r"(?i)(?P<keep>\b(?:proxy-)?authorization(?:\\?['\"])?\s*[:=]\s*(?:\\?['\"])?(?:bearer|basic|token|bot)\s+)"
+        r"(?!\[REDACTED)[A-Za-z0-9._~+/-]{8,}=*")),
+    # KEY=value, key: value, a header (x-api-key: value) and JSON's "key": "value" (escaped quotes too) where the
+    # name says it's a secret
     ("assigned_secret", re.compile(
-        r"(?i)\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|AUTH)[A-Z0-9_]*)"
-        r"((?:\\?['\"])?\s*[:=]\s*(?:\\?['\"])?)(?!\[REDACTED)([^\s'\",;]{8,})")),
+        r"(?i)(?P<keep>\b[A-Z0-9_-]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|"
+        r"ACCOUNT[_-]?KEY|AUTH)[A-Z0-9_-]*(?:\\?['\"])?\s*[:=]\s*(?:\\?['\"])?)(?!\[REDACTED)[^\s'\",;]{8,}")),
 ]
 # scheme://user:password@ or scheme://token@ at the start of a URL
 USERINFO = re.compile(r"^([a-z][a-z0-9+.-]*://)[^/@\s]*@", re.I)
@@ -63,8 +75,7 @@ def redact_moving(text: str | None, positions: list[int]) -> tuple[str | None, d
         pieces, edits, last = [], [], 0  # edits: (start, end, replacement length) in this pass's input
         for m in pat.finditer(text):
             counts[kind] = counts.get(kind, 0) + 1
-            # assigned_secret keeps the variable name; it's useful context and not secret
-            new = f"{m.group(1)}{m.group(2)}[REDACTED:{kind}]" if kind == "assigned_secret" else f"[REDACTED:{kind}]"
+            new = f"{m.groupdict().get('keep') or ''}[REDACTED:{kind}]"
             pieces += [text[last:m.start()], new]
             edits.append((m.start(), m.end(), len(new)))
             last = m.end()

@@ -65,21 +65,38 @@ def _in(external_id: str, scopes: Iterable[str]) -> bool:
     return any(external_id == s or external_id.startswith(s + "/") for s in scopes)
 
 
+_SECTION = re.compile(r'^\s*\[\s*([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]')
+_URL = re.compile(r"^\s*url\s*=\s*(.*?)\s*$", re.I)
+
+
 def _git_remote(directory: Path) -> str | None:
-    """The first remote URL in a checkout's git config, without the user name and token an HTTPS remote may
-    embed. A worktree's `.git` file points at its gitdir, whose `commondir` holds the shared config."""
+    """The checkout's remote URL (origin's, else the first remote's) from its git config, without the user name and
+    token an HTTPS remote may embed. A worktree's `.git` file points at its gitdir, whose `commondir` holds the
+    shared config."""
     git = directory / ".git"
+    remotes: dict[str, str] = {}
     try:
         if git.is_file():
             git = (directory / git.read_text(errors="replace").strip().removeprefix("gitdir:").strip()).resolve()
             if (git / "commondir").is_file():
                 git = (git / (git / "commondir").read_text(errors="replace").strip()).resolve()
+        remote = None  # the remote whose section the line is in
         for line in (git / "config").read_text(errors="replace").splitlines():
-            if line.strip().startswith("url ="):
-                return url_without_credentials(line.split("=", 1)[1])
+            if section := _SECTION.match(line):
+                remote = section[2] if section[1].lower() == "remote" else None
+            elif remote is not None and (url := _URL.match(line)) and url[1]:
+                remotes.setdefault(remote, url[1])
     except OSError:
         return None
-    return None
+    url = remotes.get("origin") or next(iter(remotes.values()), None)
+    return url_without_credentials(url) if url else None
+
+
+def _folders(folder: str) -> list[str]:
+    """`folder` (an id path: `key/a/b`, or `key/.` for the anchor itself) and every folder above it to the anchor,
+    outermost first."""
+    parts = [part for part in folder.split("/") if part != "."]
+    return ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
 
 
 # (id, the item to store or None when there is nothing new, fingerprint to record or None to read it again)
@@ -189,7 +206,7 @@ class FilesystemConnector:
             inside = {o.path for o in self.roots if o.path != root.path and o.path.is_relative_to(root.path)}
             blocked: list[Path] = []
             for kind, path in self._walk(root.path, blocked, inside, listed):
-                seen = (self._repo if kind == "repo" else self._file)(root, path, previous)
+                seen = self._repo(root, path) if kind == "repo" else self._file(root, path, previous)
                 if seen is None:
                     continue
                 external_id, item, fingerprint = seen
@@ -225,9 +242,7 @@ class FilesystemConnector:
         fingerprint = _fingerprint(stat)
         if previous.get(external_id) == fingerprint:
             return external_id, None, fingerprint
-        folders = external_id.split("/")[:-1]
-        meta = {"path": external_id, "folders": ["/".join(folders[:i]) for i in range(1, len(folders) + 1)],
-                "size": stat.st_size, "model_opt_in": False}
+        meta = {"path": external_id, "folders": _folders(external_id.rsplit("/", 1)[0]), "size": stat.st_size}
         body, mime = None, None
         # Only a document the parsers read, and not too large, is opened at all; anything else is its metadata.
         if not supported(path.name):
@@ -249,8 +264,9 @@ class FilesystemConnector:
             source=self.name, external_id=external_id, title=path.name, body_text=body,
             occurred_at=datetime.fromtimestamp(stat.st_mtime, UTC), mime=mime, raw_meta=meta), fingerprint
 
-    def _repo(self, root: _Root, directory: Path, previous: dict) -> _Seen | None:
-        """A git checkout is one evidence-bearing item (its name and remote), not an import of its files."""
+    def _repo(self, root: _Root, directory: Path) -> _Seen | None:
+        """A git checkout is one evidence-bearing item (its name and remote), not an import of its files. Its config
+        is read on every scan anyway (an unchanged item stores nothing), so the cursor keeps nothing for it."""
         remote = _git_remote(directory)
         if remote is None:
             return None
@@ -261,12 +277,8 @@ class FilesystemConnector:
             stat = git.stat() if git.is_file() else (git / "config").stat()
         except OSError:
             return repo_id, None, None
-        fingerprint = _fingerprint(stat)
-        if previous.get(repo_id) == fingerprint:
-            return repo_id, None, fingerprint
-        name = directory.name
+        folder, name = f"{root.key}/{below}", directory.name
         return repo_id, SourceItem(
             source=self.name, external_id=repo_id, title=name, body_text=None,
             occurred_at=datetime.fromtimestamp(stat.st_mtime, UTC),
-            raw_meta={"path": f"{root.key}/{below}", "folders": [root.key, f"{root.key}/{below}"],
-                      "kind": "repo", "repo": name, "remote": remote, "model_opt_in": False}), fingerprint
+            raw_meta={"path": folder, "folders": _folders(folder), "kind": "repo", "repo": name, "remote": remote}), None

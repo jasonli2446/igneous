@@ -1,11 +1,12 @@
 """Google OAuth for the Gmail / Drive / Calendar / Contacts connectors.
 
-`igneous connect google` runs the installed-app loopback flow once per account and stores the refresh token
-in Postgres, **encrypted at rest** (CO-5) with a key in data/google/token.key (git-ignored, mode 600). The
+`igneous connect google` runs the installed-app loopback flow once per account (Connect a Google account on the
+Sources page runs the same consent through the API, `sources.google_authorization_url`) and stores the refresh
+token in Postgres, **encrypted at rest** (CO-5) with a key in data/google/token.key (git-ignored, mode 600). The
 OAuth client JSON lives in data/google/client_secret.json, also git-ignored.
 
 The Google Cloud project is in Testing mode (FD-1), so refresh tokens expire after 7 days. When that happens
-the connectors raise ReauthRequired and you re-run `igneous connect google`.
+the connectors raise ReauthRequired, and the account is connected again the same way.
 """
 import json
 from pathlib import Path
@@ -49,24 +50,21 @@ def save(s: Session, account: str, creds: Credentials) -> None:
     secrets.save(s, "google", account, creds.to_json())
 
 
-def accounts(s: Session) -> list[str]:
-    """The connected Google accounts (emails)."""
-    return secrets.accounts(s, "google")
-
-
-def load(s: Session, account: str | None = None) -> tuple[str, Credentials]:
-    """Credentials for `account` (or the only connected account), refreshed and re-saved if needed."""
+def load(s: Session, account: str) -> tuple[str, Credentials]:
+    """The connected `account` and its credentials, refreshed and re-saved if needed."""
     try:
         saved_account, saved = secrets.load(s, "google", account)
     except RuntimeError as e:
-        raise ReauthRequired("no Google account connected: run `igneous connect google`") from e
+        raise ReauthRequired(f"{account} is not connected: connect it on the Sources page or with "
+                             "`igneous connect google`.") from e
     creds = Credentials.from_authorized_user_info(json.loads(saved), SCOPES)
     if not creds.valid:
         try:
             creds.refresh(Request())
         except RefreshError as e:  # Testing-mode tokens die after 7 days
-            raise ReauthRequired(f"Google token for {saved_account} expired or was revoked: "
-                                 "run `igneous connect google` again") from e
+            raise ReauthRequired(
+                f"Google token for {saved_account} expired or was revoked: connect the account again (Connect a "
+                "Google account on the Sources page, or `igneous connect google`).") from e
         save(s, saved_account, creds)
     return saved_account, creds
 

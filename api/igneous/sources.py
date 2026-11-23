@@ -11,7 +11,6 @@ inside the functions that use them.
 """
 import glob
 import os
-import sqlite3
 import sys
 import time
 from collections.abc import Callable
@@ -23,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from igneous import source_catalog
 from igneous.config import settings
-from igneous.connectors import ai_chats, apple_notes, imessage, mac_contacts
+from igneous.connectors import ai_chats, apple_notes, imessage, mac_contacts, macos
 from igneous.connectors.base import Connector
 from igneous.parsers import MAX_DOCUMENT_BYTES
 
@@ -185,7 +184,8 @@ SOURCES: list[dict] = [
               f"{MAX_DOCUMENT_BYTES // 2**20} MB. Anything else is never downloaded.",
      "steps": GOOGLE_STEPS, "cli": "igneous sync drive", "build": _google(_drive), "options": set()},
     {"id": "github", "kind": "remote", "name": "GitHub", "group": "Connected accounts",
-     "reads": "Your repositories, README files, issues, pull requests, comments, and daily commit activity (read-only).",
+     "reads": "The repositories you own or collaborate on that the token can read: their README files, issues, pull "
+              "requests, comments, and daily commit activity (read-only).",
      "steps": ["On github.com open Settings, Developer settings, Fine-grained tokens, and generate a token.",
                "Give it read-only access (Contents, Issues, Pull requests: Read) to the repositories you want.",
                "Paste it below. It is stored encrypted on this computer and never shown again. When it expires, "
@@ -241,8 +241,8 @@ SOURCES: list[dict] = [
      "cli": "igneous sync maccontacts",
      "build": _local(lambda o: mac_contacts.MacContactsConnector()), "options": set()},
     {"id": "ai_chats", "kind": "local", "name": "Claude Code and Codex chats", "group": "On this computer",
-     "reads": "Your prompts and the assistant's written replies from coding sessions on this Mac. Tool output and "
-              "file contents are skipped, and secrets are redacted.",
+     "reads": "Your prompts and the assistant's written replies from coding sessions on this computer. Tool output "
+              "and file contents are skipped, and secrets are redacted.",
      "steps": ["Nothing to set up: it reads ~/.claude/projects and ~/.codex/sessions if you use those tools.",
                "Press Sync now."],
      "cli": "igneous sync ai_chats", "build": _local(lambda o: ai_chats.AIChatConnector()), "options": set()},
@@ -336,12 +336,9 @@ def _sqlite_readable(path: str) -> str | None:
     if not os.path.exists(path):
         return f"{path} not found."
     try:
-        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        try:
-            db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
-        finally:
-            db.close()
-    except (sqlite3.Error, PermissionError):
+        with macos.read_only(path):
+            pass
+    except PermissionError:
         return "macOS is blocking access. Grant Full Disk Access (steps above), restart the API, and check again."
     return None
 
@@ -368,7 +365,7 @@ def check_requirements(source_id: str) -> tuple[bool, str | None]:
         return (problem is None), problem
     elif source_id == "ai_chats":
         if not (os.path.isdir(ai_chats.CLAUDE_ROOT) or os.path.isdir(ai_chats.CODEX_ROOT)):
-            return False, "No Claude Code or Codex sessions found on this Mac."
+            return False, "No Claude Code or Codex sessions found on this computer."
     elif source_id == "fs":
         roots = fs_roots()
         if not roots:

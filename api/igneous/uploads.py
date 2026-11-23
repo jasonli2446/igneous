@@ -52,7 +52,8 @@ class Staged:
 
 def _copy(uploads: list, prefix: str) -> Staged:
     folder = ROOT / f"{os.getpid()}-{prefix}-{uuid.uuid4().hex[:8]}"
-    folder.mkdir(parents=True)
+    ROOT.mkdir(parents=True, exist_ok=True)
+    folder.mkdir(mode=0o700)  # exports are personal data, and the temp folder may be shared with other users
     _MINE.add(folder)
     staged = Staged(folder, [])
     try:

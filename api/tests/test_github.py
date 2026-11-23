@@ -6,7 +6,6 @@ import pytest
 from fakes import FakeGitHub
 from sqlalchemy import text
 
-from igneous.connectors import github
 from igneous.connectors.base import CompletedScan, SourceItem, load_cursor, run_sync
 from igneous.connectors.github import GithubClient, GithubConnector, GithubError, account_for
 
@@ -51,7 +50,9 @@ def test_lists_issues_and_pull_requests_in_one_listing_and_groups_commits_by_day
 
 
 def test_an_interrupted_first_sync_never_saves_the_etag(db, monkeypatch):
-    monkeypatch.setattr(github, "CHECKPOINT_EVERY", 1)
+    from igneous.connectors import base
+
+    monkeypatch.setattr(base, "CHECKPOINT_SECONDS", 0)  # a first scan checkpoints by time
     fake = api()
     run_sync(db, connector(fake), account="me", limit=1)
     assert "repos_etag" not in load_cursor(db, "github", "me")
@@ -69,6 +70,62 @@ def test_an_unchanged_repository_list_still_syncs_new_issues():
     assert ("/repos/me/repo/issues", {"state": "all", "per_page": "100", "sort": "updated", "direction": "asc",
                                       "since": "2023-12-31T23:55:00Z"}, None) in fake.calls
     assert events[-1].cursor["repos_etag"] == fake.etag and events[-1].cursor["repos"] == ["me/repo"]
+
+
+def test_a_repository_new_since_the_last_sync_is_read_in_full():
+    """A repository the last sync didn't list (created, renamed, or shared with you since) has history older than
+    that sync: its issues, commits and README are read from the start, not only what changed since."""
+    two = {**REPO, "full_name": "me/two", "name": "two", "pushed_at": "2020-01-01T00:00:00Z"}
+    fake = api(**{"/user/repos": [REPO, two], "/repos/me/two/issues": [ISSUE], "/repos/me/two/issues/3/comments": [],
+                  "/repos/me/two/commits": [COMMIT],
+                  "/repos/me/two/readme": {"encoding": "base64", "content": "IyBSRUFETUU="}})
+    cursor = {"synced_at": "2024-06-01T00:00:00Z", "repos": ["me/repo"], "repos_etag": '"before"'}
+    events = list(connector(fake).sync(cursor))
+
+    def since(path: str) -> list:
+        return [query.get("since") for p, query, _ in fake.calls if p == path]
+
+    assert since("/repos/me/two/issues") == [None] and since("/repos/me/two/commits") == [None]
+    assert since("/repos/me/repo/issues") == ["2024-05-31T23:55:00Z"]
+    ids = {e.external_id for e in events if isinstance(e, SourceItem)}
+    assert {"me/me/two/readme", "me/me/two/issue/3", "me/me/two/commits/2024-01-02"} <= ids
+    assert "me/me/repo/readme" not in ids  # not pushed since the last sync
+
+
+def test_an_interrupted_first_scan_continues_where_it_stopped(db, monkeypatch):
+    """A first scan can outlast the token's rate limit. The next sync skips the repositories it finished, and its
+    completed scan still keeps what they stored."""
+    from igneous.connectors import base
+
+    monkeypatch.setattr(base, "CHECKPOINT_SECONDS", 0)
+    two = {**REPO, "full_name": "me/two", "name": "two"}
+    fake = api(**{"/user/repos": [REPO, two], "/repos/me/two/issues": 500, "/repos/me/two/commits": []})
+    with pytest.raises(GithubError):
+        run_sync(db, connector(fake), account="me")
+    db.rollback()  # what the last checkpoint committed stays
+    assert load_cursor(db, "github", "me")["scan"]["done"] == ["me/repo"]
+    fake.routes["/repos/me/two/issues"] = []
+    fake.calls.clear()
+    stats = run_sync(db, connector(fake), account="me")
+    assert not [path for path in fake.paths() if path.startswith("/repos/me/repo/")]
+    assert stats["deleted"] == 0 and len(stored(db)) == 6  # me/repo's five items and me/two's own
+    cursor = load_cursor(db, "github", "me")
+    assert "scan" not in cursor and cursor["repos"] == ["me/repo", "me/two"] and cursor["synced_at"]
+
+
+def test_an_error_response_is_closed():
+    """An error response keeps its connection until it is closed: a missing README, a 304, a refusal all close it."""
+    raised = []
+
+    def opener(request, timeout=30):
+        raised.append(HTTPError(request.full_url, 404, "Not Found", {}, io.BytesIO(b'{"message": "Not Found"}')))
+        raise raised[-1]
+
+    client = GithubClient("token", opener=opener)
+    assert client.get("/repos/me/repo/readme", missing=(404,)) == (None, None, None)
+    with pytest.raises(GithubError):
+        client.get("/user")
+    assert len(raised) == 2 and all(error.fp.closed for error in raised)
 
 
 def test_a_repository_without_issues_reads_its_pull_requests_and_an_empty_one_has_no_commits():

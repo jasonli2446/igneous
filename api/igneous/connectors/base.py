@@ -91,7 +91,8 @@ def _redact_meta(value, key: str | None = None) -> tuple[object, int]:
 
 
 def _count(redactions) -> int:
-    """A redaction count as stored: a number, or (on items stored before counts were totals) one per kind."""
+    """`raw_meta["redactions"]` as a number: stored as one, or (on some Local files and Notes items) as one per
+    kind."""
     if isinstance(redactions, dict):
         return sum(v for v in redactions.values() if isinstance(v, int))
     return redactions if isinstance(redactions, int) else 0

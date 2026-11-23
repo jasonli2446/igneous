@@ -1,5 +1,7 @@
 from datetime import datetime
 
+import pytest
+
 from igneous.connectors.email_maildir import parse_message
 from igneous.graph.spine import _name_from, _thread_key
 from igneous.rag.chunking import split, strip_quoted
@@ -33,6 +35,10 @@ def test_synthetic_cross_source_corpus_is_deterministic_and_valid(tmp_path):
     assert NOTICE in (first / "README.md").read_text()
     assert NOTICE in (first / "calendar.ics").read_text()
     assert "phillip.allen@enron.com" in (first / "files/2001-05-14-forecast-memo.md").read_text()
+    calendar = (first / "calendar.ics").read_text()
+    (first / "calendar.ics").write_text(calendar.replace("END:VEVENT\nEND:VCALENDAR", "END:VCALENDAR"))
+    with pytest.raises(ValueError, match=r"calendar\.ics"):
+        verify(first)
 
 
 def test_parse_message():
@@ -43,6 +49,15 @@ def test_parse_message():
     assert m["in_reply_to"] == "<100.JavaMail.evans@thyme>"
     assert item.title == "Re: Forecast"
     assert item.occurred_at.year == 2001
+
+
+def test_a_date_without_a_zone_is_utc():
+    """RFC 5322's "-0000" is UTC with the sender's own zone unknown. Stored without a zone it would be read in
+    whatever zone the database server runs in."""
+    from datetime import UTC
+
+    raw = RAW.replace(b"Mon, 14 May 2001 16:39:00 -0700 (PDT)", b"Mon, 14 May 2001 16:39:00 -0000")
+    assert parse_message(raw, "a").occurred_at == datetime(2001, 5, 14, 16, 39, tzinfo=UTC)
 
 
 def test_content_hash_stable():
