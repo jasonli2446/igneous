@@ -12,12 +12,12 @@ change on every rebuild:
                                         it was, for undo
   unlink  node_keys=[b, a]             a pair rejection (graph/corrections.py): your 'drop' verdicts on the pair, and
                                         exact copies of the links it removed, for undo; or, with data.user_link, a
-                                        link you added and took out again (value=its type), holding its intents
-  link    node_keys=[src, dst]         value=the edge type: a connection you added (extractor 'user'); data.props
-                                        are its props
+                                        link you added and took out again (value=its type), holding the intents it
+                                        took out, for undo
+  link    node_keys=[src, dst]         value=the edge type: a connection you added; data.props are its props
 
 A Project you put under another Project is in `thread_parents` (origin 'user') instead: the threads stage reads it as
-it builds.
+it builds. The edges with extractor 'user' are exactly what these intents say: one for each, and no other.
 
 `apply` is a pure function of these rows. It completes undos first (an undo marks its row `undone_at`; apply reverses
 the correction and forgets the row), puts every Project back to its derived state (its props.original_name, neither
