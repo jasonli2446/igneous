@@ -1,4 +1,9 @@
-"""Stage one: deterministic graph from metadata alone. Exactly correct, no model calls, idempotent."""
+"""Stage one: deterministic graph from metadata alone, no model calls, idempotent.
+
+A record is pending while `spined_hash` differs from its `content_hash` (a sync that changes it clears the
+marker). `run` builds pending records in id order, a batch per transaction, and writes back the hash it read:
+a record that changes while it runs stays pending, and a run that stops leaves every record it didn't commit
+pending."""
 import json
 import re
 from itertools import pairwise
@@ -8,9 +13,7 @@ from sqlalchemy.orm import Session
 
 from igneous.connectors.mac_contacts import norm_phone
 from igneous.graph import dirty
-from igneous.pipeline import advance, watermark
 
-STAGE = "spine"
 BATCH = 1000
 
 UPSERT_NODE = text("""
@@ -514,40 +517,44 @@ def name_from_headers(s: Session) -> int:
     return s.execute(NAME_FROM_HEADERS).rowcount
 
 
+PENDING = text("""
+SELECT id, source, external_id, title, raw_meta, occurred_at, content_hash
+FROM source_items WHERE spined_hash IS DISTINCT FROM content_hash ORDER BY id LIMIT :n
+""")
+
+
 def run(s: Session) -> int:
-    since = watermark(s, STAGE)
-    rows = s.execute(text("""
-        SELECT id, source, external_id, title, raw_meta, occurred_at, updated_at
-        FROM source_items WHERE updated_at > :since ORDER BY updated_at, id
-    """), {"since": since}).all()
-    b = Builder(s)
-    for i, item in enumerate(rows, 1):
-        b.touched.clear()
-        if item.source in ("email", "gmail"):
-            build_email(b, item)
-        elif item.source == "imessage":
-            build_chat(b, item)
-        elif item.source == "ai_chats":
-            build_ai_chat(b, item)
-        elif item.source == "github":
-            build_github(b, item)
-        elif item.source.startswith("takeout_"):
-            build_takeout(b, item)
-        elif item.source == "gcal":
-            build_event(b, item)
-        elif item.source in ("gcontacts", "maccontacts"):
-            build_contact(b, item)
-        elif item.source == "linkedin":
-            build_linkedin(b, item)
-        elif item.source in ("fs", "drive", "notes"):
-            build_file(b, item)
-        dirty.mark(s, b.touched, f"source item {item.id} changed")
-        if i % BATCH == 0:
-            advance(s, STAGE, item.updated_at)
-            s.commit()
-    if rows:
-        advance(s, STAGE, rows[-1].updated_at)
+    """Build every pending record. Returns the number of records built."""
+    built = 0
+    while rows := s.execute(PENDING, {"n": BATCH}).all():
+        b = Builder(s)
+        for item in rows:
+            b.touched.clear()
+            if item.source in ("email", "gmail"):
+                build_email(b, item)
+            elif item.source == "imessage":
+                build_chat(b, item)
+            elif item.source == "ai_chats":
+                build_ai_chat(b, item)
+            elif item.source == "github":
+                build_github(b, item)
+            elif item.source.startswith("takeout_"):
+                build_takeout(b, item)
+            elif item.source == "gcal":
+                build_event(b, item)
+            elif item.source in ("gcontacts", "maccontacts"):
+                build_contact(b, item)
+            elif item.source == "linkedin":
+                build_linkedin(b, item)
+            elif item.source in ("fs", "drive", "notes"):
+                build_file(b, item)
+            dirty.mark(s, b.touched, f"source item {item.id} changed")
+        # Marked at the hash that was read: a record changed meanwhile stays pending.
+        s.execute(text("UPDATE source_items SET spined_hash = :h WHERE id = :id AND content_hash = :h"),
+                  [{"id": r.id, "h": r.content_hash} for r in rows])
         s.commit()
+        built += len(rows)
+    if built:
         from igneous.graph import quoted
 
         name_from_headers(s)        # each address's most common display name, across all mail
@@ -559,4 +566,4 @@ def run(s: Session) -> int:
     s.commit()
     from igneous.graph import item_class
     item_class.apply(s)  # classify new items and mirror the class onto Message/Thread nodes
-    return len(rows)
+    return built

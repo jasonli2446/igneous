@@ -94,40 +94,60 @@ def test_redaction_moves_a_local_files_page_boundaries(tmp_path):
         "deck.pptx, slide 1 to slide 3\nSetup uses [REDACTED:anthropic_key] for now\n\nSecond slide\n\nThird slide"]
 
 
-def test_documents_chunked_the_old_way_are_rechunked_once(test_db):
+def test_documents_chunked_the_old_way_are_rechunked_once(db):
     import json
-    from datetime import UTC, datetime
 
     from sqlalchemy import text
 
-    from igneous.db import SessionLocal
-    from igneous.pipeline import advance, watermark
-
     body, bounds = pages("First page", "Second page")
-    with SessionLocal() as s:
-        s.execute(text("TRUNCATE source_items, nodes, chunks, pipeline_state RESTART IDENTITY CASCADE"))
-        ids = {}
-        for source, ext, raw, chunk in (("drive", "doc", {"boundaries": bounds}, body),
-                                        ("gmail", "mail", {}, "Subject: Hi\nhello")):
-            ids[source] = sid = s.execute(text("""
-                INSERT INTO source_items (source, external_id, content_hash, title, body_text, raw_meta)
-                VALUES (:s, :e, :e, :t, :b, CAST(:m AS jsonb)) RETURNING id"""),
-                {"s": source, "e": ext, "t": "plan.pdf" if source == "drive" else "Hi",
-                 "b": body if source == "drive" else "hello", "m": json.dumps(raw)}).scalar_one()
-            nid = s.execute(text("INSERT INTO nodes (type, key, name, source_item_id) VALUES "
-                                 "(:t, :k, :k, :i) RETURNING id"),
-                            {"t": "File" if source == "drive" else "Message", "k": ext, "i": sid}).scalar_one()
-            s.execute(text("INSERT INTO chunks (source_item_id, node_id, ord, text, meta) VALUES (:i, :n, 0, :c, '{}')"),
-                      {"i": sid, "n": nid, "c": chunk})  # chunked before layouts existed
-        watermark(s, chunking.STAGE)
-        advance(s, chunking.STAGE, datetime.now(UTC))  # both are behind the watermark
-        s.commit()
-        assert chunking.run(s) == 1   # only the document
-        doc = s.execute(text("SELECT text, meta->>'layout' FROM chunks WHERE source_item_id = :i"),
-                        {"i": ids["drive"]}).all()
-        assert doc == [("plan.pdf, page 1 to page 2\nFirst page\n\nSecond page", str(chunking.LAYOUT))]
-        assert s.execute(text("SELECT text FROM chunks WHERE source_item_id = :i"),
-                         {"i": ids["gmail"]}).scalar() == "Subject: Hi\nhello"  # untouched, embedding kept
-        assert chunking.run(s) == 0   # once
-        s.execute(text("TRUNCATE source_items, nodes, chunks, pipeline_state RESTART IDENTITY CASCADE"))
-        s.commit()
+    ids = {}
+    for source, ext, raw, chunk in (("drive", "doc", {"boundaries": bounds}, body),
+                                    ("gmail", "mail", {}, "Subject: Hi\nhello")):
+        # Both already built and chunked at their current content.
+        ids[source] = sid = db.execute(text("""
+            INSERT INTO source_items (source, external_id, content_hash, title, body_text, raw_meta, spined_hash,
+                                      chunked_hash)
+            VALUES (:s, :e, :e, :t, :b, CAST(:m AS jsonb), :e, :e) RETURNING id"""),
+            {"s": source, "e": ext, "t": "plan.pdf" if source == "drive" else "Hi",
+             "b": body if source == "drive" else "hello", "m": json.dumps(raw)}).scalar_one()
+        nid = db.execute(text("INSERT INTO nodes (type, key, name, source_item_id) VALUES "
+                              "(:t, :k, :k, :i) RETURNING id"),
+                         {"t": "File" if source == "drive" else "Message", "k": ext, "i": sid}).scalar_one()
+        db.execute(text("INSERT INTO chunks (source_item_id, node_id, ord, text, meta) VALUES (:i, :n, 0, :c, '{}')"),
+                   {"i": sid, "n": nid, "c": chunk})  # chunked before layouts existed
+    assert chunking.run(db) == 1   # only the document
+    doc = db.execute(text("SELECT text, meta->>'layout' FROM chunks WHERE source_item_id = :i"),
+                     {"i": ids["drive"]}).all()
+    assert doc == [("plan.pdf, page 1 to page 2\nFirst page\n\nSecond page", str(chunking.LAYOUT))]
+    assert db.execute(text("SELECT text FROM chunks WHERE source_item_id = :i"),
+                      {"i": ids["gmail"]}).scalar() == "Subject: Hi\nhello"  # untouched, embedding kept
+    assert chunking.run(db) == 0   # once
+
+
+def test_chunk_reads_what_changed_once_the_spine_built_it(db):
+    """A record is chunked after the spine has built its current content, once; a change makes it pending again."""
+    import json
+
+    from sqlalchemy import text
+
+    from igneous.graph import spine
+
+    def put(body):
+        return db.execute(text("""
+            INSERT INTO source_items (source, external_id, content_hash, title, body_text, raw_meta)
+            VALUES ('email', 'box/inbox/1', md5(:b), 'Plans', :b, CAST(:m AS jsonb))
+            ON CONFLICT (source, external_id) DO UPDATE SET content_hash = EXCLUDED.content_hash,
+                body_text = EXCLUDED.body_text, raw_meta = EXCLUDED.raw_meta RETURNING id
+        """), {"b": body, "m": json.dumps({"message_id": "<plans@x.test>", "from": [{"email": "a@x.test"}],
+                                           "to": [{"email": "b@x.test"}]})}).scalar_one()
+
+    sid = put("first draft")
+    assert chunking.run(db) == 0          # not built yet: nothing to chunk it under
+    spine.run(db)
+    assert chunking.run(db) == 1 and chunking.run(db) == 0
+    put("second draft")                   # a sync changes it: both stages see it again
+    assert chunking.run(db) == 0
+    spine.run(db)
+    assert chunking.run(db) == 1
+    assert db.execute(text("SELECT text FROM chunks WHERE source_item_id = :i"), {"i": sid}).scalar() \
+        == "Subject: Plans\nsecond draft"

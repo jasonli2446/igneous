@@ -127,8 +127,8 @@ def test_reimport_is_noop_and_graph(db, zpath):
         assert [v for v in check_graph(s) if v.details and v.details.get("edge_type") in ("MEMBER_OF", "SAME_AS")
                 and v.edge_id in set(s.execute(text("SELECT id FROM edges WHERE extractor='linkedin'")).scalars())] == []
         n_edges = s.execute(text("SELECT count(*) FROM edges WHERE extractor='linkedin'")).scalar()
-        # a second spine pass over unchanged data adds nothing
-        s.execute(text("UPDATE source_items SET updated_at = now() WHERE source = 'linkedin'"))
+        # building the same records again adds nothing
+        s.execute(text("UPDATE source_items SET spined_hash = NULL WHERE source = 'linkedin'"))
         s.commit()
         spine.run(s)
         assert s.execute(text("SELECT count(*) FROM edges WHERE extractor='linkedin'")).scalar() == n_edges

@@ -82,7 +82,7 @@ def test_a_spine_build_of_every_message_source_passes_check_graph(test_db):
             {"key": "place:1", "name": "Cafe", "start": when.isoformat()}]}),
     ]
     with SessionLocal() as s:
-        s.execute(text("TRUNCATE source_items, nodes, edges, edge_evidence, chunks, canonical, pipeline_state, "
+        s.execute(text("TRUNCATE source_items, nodes, edges, edge_evidence, chunks, canonical, "
                        "dirty_nodes, dirty_rebuild RESTART IDENTITY CASCADE"))
         for source, external_id, title, meta in items:
             s.execute(text("""
@@ -94,7 +94,7 @@ def test_a_spine_build_of_every_message_source_passes_check_graph(test_db):
         types = set(s.execute(text("SELECT DISTINCT n.props->>'source' FROM nodes n WHERE n.type = 'Message'")).scalars())
         assert {"gmail", "email", "imessage", "takeout_chat", "ai_chats", "github"} <= types
         assert [v.as_dict() for v in invariants.check_graph(s)] == []
-        s.execute(text("TRUNCATE source_items, nodes, edges, edge_evidence, chunks, canonical, pipeline_state, "
+        s.execute(text("TRUNCATE source_items, nodes, edges, edge_evidence, chunks, canonical, "
                        "dirty_nodes, dirty_rebuild RESTART IDENTITY CASCADE"))
         s.commit()
 
