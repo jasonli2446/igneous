@@ -152,15 +152,23 @@ def unlink(node_id: int, body: UnlinkBody, s: Session = Depends(correction_sessi
 
 
 @router.delete("/overrides/{override_id}")
-def undo(override_id: int, s: Session = Depends(correction_session)):
-    """Undo one correction. Hide / rename / unlink are replayed from the table; a merge needs the folded
-    entity back, so the entities stage re-derives it and publishes, replaying the remaining corrections."""
+def undo(override_id: int, s: Session = Depends(get_session)):
+    """Undo one correction. Hide / rename / unlink are replayed from the table. A merge needs the folded entity back:
+    the undo and an entities run publish together (replaying the remaining corrections), or, when a rebuild keeps
+    publishing, nothing changes and the answer is 503."""
+    op = s.execute(text("SELECT op FROM overrides WHERE id = :i"), {"i": override_id}).scalar()
+    if op is None:
+        raise HTTPException(404, "No such correction (already undone?)")
+    if op != "merge":
+        correction_session(s)
     row = overrides.remove(s, override_id)
     if row is None:
         raise HTTPException(404, "No such correction (already undone?)")
     if row["op"] == "merge":
-        s.commit()  # the undo itself, which also ends this correction's hold on publishing
-        pipeline.run(s, ["entities"])
+        try:
+            pipeline.run(s, ["entities"], wait_ms=pipeline.CORRECTION_WAIT_MS)
+        except pipeline.PublishBusy as e:
+            raise HTTPException(503, str(e)) from e
     else:
         if row["op"] == "unlink":
             if (row["data"] or {}).get("pair_correction"):

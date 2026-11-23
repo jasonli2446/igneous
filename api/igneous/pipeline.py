@@ -183,15 +183,36 @@ def plan(names: list[str] | None = None, extract: int = 0) -> list[Stage]:
 
 
 class PublishBusy(RuntimeError):
-    """A rebuild is publishing the graph, and a correction waited for it as long as it may."""
+    """A rebuild is publishing the graph, and a request waited for it as long as it may."""
+
+
+CORRECTION_WAIT_MS = 15_000  # how long a request made through the API waits for a publishing rebuild
+
+
+def _publish_lock(s: Session, function: str, wait_ms: int | None) -> None:
+    """Take the publish lock in the session's transaction: `function` is pg_advisory_xact_lock for a publisher, the
+    _shared variant for a correction. With `wait_ms`, give up after that long: roll the transaction back (whatever it
+    did is undone) and raise PublishBusy."""
+    if wait_ms is not None:
+        s.execute(text(f"SET LOCAL lock_timeout = {int(wait_ms)}"))
+    try:
+        s.execute(text(f"SELECT {function}(hashtext('igneous:publish'))"))
+    except OperationalError as e:
+        if getattr(e.orig, "sqlstate", None) != "55P03":  # lock_not_available: the wait ran out
+            raise
+        s.rollback()
+        raise PublishBusy("The graph is being rebuilt. Try again when Rebuild on the Sources page finishes.") from e
+    if wait_ms is not None:
+        s.execute(text("SET LOCAL lock_timeout = DEFAULT"))
 
 
 @contextmanager
-def publishing(s: Session):
-    """One change to the derived graph, published at once: wait for any other publisher, run the body in the
-    session's transaction, then bump the graph version once and commit. An exception rolls everything back, so
-    readers keep the previous graph. Corrections made through the API wait for it (`hold_off_publishing`)."""
-    s.execute(text("SELECT pg_advisory_xact_lock(hashtext('igneous:publish'))"))
+def publishing(s: Session, wait_ms: int | None = None):
+    """One change to the derived graph, published at once: wait for any other publisher (at most `wait_ms`, if
+    given), run the body in the session's transaction, then bump the graph version once and commit. An exception
+    rolls everything back, so readers keep the previous graph. Corrections made through the API wait for it
+    (`hold_off_publishing`)."""
+    _publish_lock(s, "pg_advisory_xact_lock", wait_ms)
     try:
         yield
         from igneous.graph import dirty
@@ -202,23 +223,12 @@ def publishing(s: Session):
         raise
 
 
-CORRECTION_WAIT_MS = 15_000  # how long a correction waits for a publishing rebuild before it gives up
-
-
 def hold_off_publishing(s: Session) -> None:
     """For a correction made through the API, before it reads or writes the graph: wait until no rebuild is
     publishing, and keep the next one from starting until the caller's transaction ends. The correction then never
     interleaves with a rebuild's writes (so neither can deadlock the other) and lands on the graph the rebuild just
     published. Raises PublishBusy after CORRECTION_WAIT_MS."""
-    s.execute(text(f"SET LOCAL lock_timeout = {int(CORRECTION_WAIT_MS)}"))
-    try:
-        s.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext('igneous:publish'))"))
-    except OperationalError as e:
-        if getattr(e.orig, "sqlstate", None) != "55P03":  # lock_not_available: the wait ran out
-            raise
-        s.rollback()
-        raise PublishBusy("The graph is being rebuilt. Try again when Rebuild on the Sources page finishes.") from e
-    s.execute(text("SET LOCAL lock_timeout = DEFAULT"))
+    _publish_lock(s, "pg_advisory_xact_lock_shared", CORRECTION_WAIT_MS)
 
 
 @contextmanager
@@ -237,8 +247,10 @@ def _one_run_at_a_time(waiting: Callable[[], None]):
             c.execute(text("SELECT pg_advisory_unlock(hashtext('igneous:run'))"))
 
 
-def run(s: Session, names: list[str] | None = None, *, extract: int = 0, progress: Progress | None = None) -> dict:
-    """Run `plan(names, extract)`: the source stages, then the derived ones in one publishing transaction.
+def run(s: Session, names: list[str] | None = None, *, extract: int = 0, progress: Progress | None = None,
+        wait_ms: int | None = None) -> dict:
+    """Run `plan(names, extract)`: the source stages, then the derived ones in one publishing transaction, which
+    waits at most `wait_ms` (if given) for another publisher, then raises PublishBusy with nothing published.
 
     `progress(state, force)` gets the run's state when a stage starts (force=True) and as a long one counts
     (force=False): {stage, label, step, steps, count, total, note, results}, where `results` maps each finished stage
@@ -271,7 +283,7 @@ def run(s: Session, names: list[str] | None = None, *, extract: int = 0, progres
         for st in stages:
             if not st.derived:
                 execute(st)
-        with publishing(s):
+        with publishing(s, wait_ms):
             for st in stages:
                 if st.derived:
                     execute(st)

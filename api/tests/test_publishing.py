@@ -152,3 +152,30 @@ def test_a_correction_waits_for_a_publishing_rebuild(committed_db, monkeypatch):
         rebuild.rollback()  # published
     assert client.post(f"/graph/entity/{project}/rename", json={"name": "Game Night"}).status_code == 200
     assert s.execute(text("SELECT name FROM nodes WHERE id = :p"), {"p": project}).scalar() == "Game Night"
+
+
+def test_undoing_a_merge_publishes_with_the_undo_or_changes_nothing(committed_db, monkeypatch):
+    """The folded project comes back through an entities run of its own, which waits for a publishing rebuild only
+    as long as a correction may; meanwhile the merge stays as it was."""
+    from igneous.main import app
+
+    s = committed_db
+    first_build(s)
+    new_records(s)
+    pipeline.run(s)
+    project = {n: i for i, n in s.execute(text("SELECT id, name FROM nodes WHERE type = 'Project'"))}
+    client = TestClient(app)
+    merge = client.post(f"/graph/entity/{project['Gloomhaven Night']}/merge", json={"other": project["Book Club"]})
+    undo = f"/overrides/{merge.json()['override_id']}"
+    names = lambda: sorted(s.execute(text("SELECT name FROM nodes WHERE type = 'Project'")).scalars())  # noqa: E731
+    assert names() == ["Gloomhaven Night"]
+    monkeypatch.setattr(pipeline, "CORRECTION_WAIT_MS", 200)
+    with engine.connect() as rebuild:
+        rebuild.execute(text("SELECT pg_advisory_xact_lock(hashtext('igneous:publish'))"))  # publishing now
+        busy = client.delete(undo)
+        assert busy.status_code == 503 and "being rebuilt" in busy.json()["detail"]
+        rebuild.rollback()
+    assert names() == ["Gloomhaven Night"]
+    assert s.execute(text("SELECT count(*) FROM overrides WHERE op = 'merge'")).scalar() == 1
+    assert client.delete(undo).status_code == 200
+    assert names() == ["Book Club", "Gloomhaven Night"]
