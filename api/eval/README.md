@@ -189,30 +189,35 @@ IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous
   uv run python eval/persona_eval.py
 ```
 
-On the default seed with the model off (2026-11-23, main at `ed585c1`), after `make persona` (one pipeline run) and
-after a second run:
+On the default seed with the model off (2026-11-23), after `make persona` (one pipeline run) and after a second run:
 
 | | One run | Two runs |
 |---|---|---|
 | Gold threads found | 12 of 12 | 12 of 12 |
-| Found twice or more (another Project for the same thing) | 11 | 10 |
+| Found twice or more (another Project for the same thing) | 12 | 11 |
 | Records that must not be in their thread, but are | 1 | 1 |
-| Placed right (under its school or job, or under nothing) | 7 of 10 | 7 of 10 |
+| Placed right (under its school or job, or under nothing) | 6 of 10 | 6 of 10 |
 | Who took part: missing or wrongly there | 0 | 0 |
 | Identities: clusters P / R | 1.00 / 0.94 | 1.00 / 0.94 |
 | Identities: pairs ≥ 0.5, P / R | 1.00 / 0.83 | 1.00 / 0.83 |
 | Ask retrieval, recall@10 over 13 answerable questions: hybrid / dense / lexical | 0.85 / 0.77 / 0.85 | the same |
 
-- Most duplicates are a Project the entities stage named from a folder ("Lisbon 2025", "CS 341 Operating Systems",
-  "tidepool") beside the thread the threads stage found for the same thing; CS 481 is also split in two threads
-  ("Harborline", "Demo Day").
+- Every gold thread holds all its records but Heron (4 of its 6: below).
+- Most duplicates are a Project the entities stage named from a folder ("Lisbon 2025", "tidepool"), a named group
+  chat ("Lisbon spring break", "CS 362 study group", "Northwind software") or a calendar series ("CS 341 Operating
+  Systems", "Heron field trials") beside the thread the threads stage found for the same thing. Without the model,
+  the threads stage also finds a named chat or series beside the burst for the same thing ("Lisbon spring break ·
+  Jan-Sep 2025" beside "Lisbon · Jan-Mar 2025", "Heron field trials · May-Jul 2025" beside "Heron · May-Jul 2025"):
+  a judge that names both alike merges them.
 - Each organization is two nodes: the company LinkedIn's connections name (`org:lakeshore-university`) and the one
   found by email domain (`lakeshore.example.edu`). The first run ties Mira's LinkedIn positions to the company nodes,
   so the backbone gives both nodes a thread, and only the domain's holds anything; the second run ties the school to
   its domain node (the one with more links by then), and its empty thread goes.
 - The placements are by email domain: the classes, the Heron field trials and the hiring thread go under the right
   organization, and the Lisbon and Iceland trips and Tidepool under Lakeshore University too, since most of their
-  people write from the school's domain.
+  people write from the school's domain. Heron counts as misplaced because the Project named exactly like its gold
+  thread is the entities stage's "Heron field trials" (the calendar series, under nothing: 8 records, 4 of the 6 gold
+  ones); the threads stage's "Heron · May-Jul 2025" holds all 6, under Northwind Robotics.
 - The leak is a "remember Lisbon?" chat six months after the trip: the folder-named "Lisbon 2025" takes in every
   record that mentions Lisbon.
 - The only identity left apart is classmate Alex Chen's LinkedIn profile: two people share the name, so the name

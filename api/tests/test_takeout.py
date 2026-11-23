@@ -479,6 +479,39 @@ def test_a_newer_export_replaces_a_calendars_records_and_an_older_one_leaves_the
         assert len(calendar_records(s)) == 4
 
 
+def test_two_calendars_keyed_alike_in_one_export_keep_each_others_records(db, tmp_path):
+    """Two calendars called "Work", and nothing says whose they are: both are keyed under takeout/Work, and importing
+    the export again changes nothing (neither removes the other's events)."""
+    export = build_zip(tmp_path / "takeout-20250801T000000Z-001.zip", {
+        "Calendar/Work.ics": ics("20250801T000000Z", RETRO, name="Work"),
+        "Calendar/Work (1).ics": ics("20250801T000000Z", STANDUP, name="Work")})
+    with SessionLocal() as s:
+        assert takeout.run_import(s, [export])["inserted"] == 2
+        again = takeout.run_import(s, [export])
+        assert (again["inserted"], again["updated"], again["deleted"], again["unchanged"]) == (0, 0, 0, 2)
+
+
+def test_a_calendar_emptied_or_keyed_by_a_later_export_keeps_no_stale_events(db, tmp_path):
+    """A newer export whose Work calendar holds nothing removes its events; and a calendar an earlier export couldn't
+    key (no Chat export said whose it was) is replaced by the same calendar a later export keys."""
+    work = "DTSTART:20250602T150000Z\nORGANIZER;CN=Work:mailto:w1@group.calendar.google.com\nUID:plan@google.com\nSUMMARY:Plan"
+    chat_user = {"Google Chat/Users/User 1/user_info.json": {"user": {"name": "Me", "email": "me@example.com"}}}
+    early = build_zip(tmp_path / "takeout-20250701T000000Z-001.zip", {
+        "Calendar/Work.ics": ics("20250701T000000Z", work, name="Work")})
+    later = build_zip(tmp_path / "takeout-20250801T000000Z-001.zip", {
+        "Calendar/Work.ics": ics("20250801T000000Z", work, name="Work"), **chat_user})
+    emptied = build_zip(tmp_path / "takeout-20250901T000000Z-001.zip", {
+        "Calendar/me@example.com.ics": ics("20250901T000000Z", RETRO),
+        "Calendar/Work.ics": ics("20250901T000000Z", name="Work"), **chat_user})
+    with SessionLocal() as s:
+        takeout.run_import(s, [early])
+        assert set(calendar_records(s)) == {"takeout/Work/plan"}
+        takeout.run_import(s, [later])
+        assert set(calendar_records(s)) == {"me@example.com/w1@group.calendar.google.com/plan"}
+        takeout.run_import(s, [emptied])
+        assert set(calendar_records(s)) == {"me@example.com/me@example.com/retro"}
+
+
 def test_a_calendar_sync_keeps_its_window_and_the_export_adds_only_what_came_before(db, tmp_path):
     from fakes import FakeCalendar
 
@@ -527,6 +560,20 @@ def test_only_the_calendar_folder_or_a_calendar_file_given_on_its_own_is_your_ca
     loose.write_bytes(invite)
     items, _ = takeout.parse([loose])
     assert [i.external_id for i in items] == ["takeout/Team/retro"]  # no account in a file alone: keyed by the export
+
+
+def test_a_calendar_that_cannot_be_read_in_part_never_stops_the_import(tmp_path):
+    """An event out of Python's range, and a property in a CHARSET nobody knows: the rest of the export is read."""
+    odd = ics("20250801T000000Z", "DTSTART:99991231T230000Z\nDURATION:P2D\nRRULE:FREQ=DAILY\nUID:far@google.com",
+              "DTSTART:20250605T180000Z\nUID:caf@google.com\nSUMMARY;ENCODING=QUOTED-PRINTABLE;CHARSET=X-NOPE:caf=C3=A9",
+              name="Odd")
+    export = build_zip(tmp_path / "takeout-20250801T000000Z-001.zip", {
+        "Calendar/me@example.com.ics": ics("20250801T000000Z", STANDUP), "Calendar/Odd.ics": odd,
+        "Tasks/Tasks.json": TASKS})
+    items, report = takeout.parse([export])
+    titles = sorted(i.title for i in items if i.source == "gcal")
+    assert titles == ["Standup", "café"] and any(i.source == "takeout_tasks" for i in items)
+    assert any("couldn't be read were left out (1)" in n for n in report["notes"])
 
 
 def test_without_user_info_you_are_the_one_person_in_every_conversation(tmp_path):

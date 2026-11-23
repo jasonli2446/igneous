@@ -247,7 +247,7 @@ def test_a_slice_builds_its_graph_through_the_sources_registry_and_the_pipeline(
                        ("nico.c@mailbox.example.com", "+14405550139")):
         assert len({cluster(k) for k in identities}) == 1, identities
 
-    def thread(name: str):  # the threads stage's (the entities stage may name a calendar series the same: #237)
+    def thread(name: str):  # the threads stage's (the entities stage can name a calendar series the same)
         return db.execute(text("SELECT id, props FROM nodes WHERE type = 'Project' AND name = :n "
                                "AND props->>'derived' = 'threads'"), {"n": name}).one()
 
