@@ -866,7 +866,7 @@ def _parse(paths: list[Path], progress: Callable[[dict], None] | None = None
 
 
 @dataclass
-class Stored:
+class CalendarState:
     """What is stored for one calendar an export holds (its scope): the records an earlier export stored, the records
     a Google Calendar sync stored, and the start of the window that sync keeps (None when no sync keeps it)."""
     exported: set[str]
@@ -880,13 +880,13 @@ class TakeoutConnector:
     Each calendar of the export is that calendar as it was when it was exported. The cursor keeps, for each calendar,
     when the newest export of it imported was taken: an older export leaves the calendar as it is (it would bring back
     what was deleted since and move what was moved back), and a newer one replaces the records earlier exports stored
-    (a record it no longer holds is removed). What a Google Calendar sync keeps is the sync's, since the live calendar
+    (a record it doesn't hold is removed). What a Google Calendar sync keeps is the sync's, since the live calendar
     is newer than any export: its records, and every event in its window (connectors/gcal.py), which the export
     doesn't add. `stored` reads what is stored for the calendars (`stored_calendars`)."""
     name = "takeout"
 
     def __init__(self, paths: list[Path], progress: Callable[[dict], None] | None = None,
-                 stored: Callable[[list[str]], dict[str, Stored]] | None = None):
+                 stored: Callable[[list[str]], dict[str, CalendarState]] | None = None):
         self.paths, self.progress, self.stored, self.report = paths, progress, stored, {}
 
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | Tombstone]:
@@ -894,7 +894,7 @@ class TakeoutConnector:
         imported = dict(cursor.get("calendars") or {})  # calendar scope -> when the newest export of it was taken
         state = self.stored([c.scope for c in listings]) if self.stored and listings else {}
         left: set[str] = set()  # the export's calendar records not stored
-        gone: list[str] = []    # records earlier exports stored that this one no longer holds
+        gone: list[str] = []    # records earlier exports stored that this one doesn't hold
         notes = self.report["notes"]
         for cal in listings:
             ours = {i.external_id for i in cal.items}
@@ -904,7 +904,7 @@ class TakeoutConnector:
                 notes.append(f"The calendar {cal.name} in this export ({cal.exported:%Y-%m-%d}) is older than one "
                              f"imported before ({had[:10]}): its events were left as they are.")
                 continue
-            st = state.get(cal.scope) or Stored(set(), set(), None)
+            st = state.get(cal.scope) or CalendarState(set(), set(), None)
             synced = {i.external_id for i in cal.items
                       if i.external_id in st.synced or (st.window and i.occurred_at >= st.window)}
             if synced:
@@ -925,12 +925,12 @@ class TakeoutConnector:
         yield Checkpoint({**cursor, "items": len(items), "calendars": imported})
 
 
-def stored_calendars(s) -> Callable[[list[str]], dict[str, Stored]]:
+def stored_calendars(s) -> Callable[[list[str]], dict[str, CalendarState]]:
     """What is stored for these calendar scopes (`<account>/<calendar id>`, or `takeout/<calendar name>`): the gcal
     records under each, as an export stored them (raw_meta.product 'Calendar') or a Google Calendar sync did, and the
     window that sync keeps (its cursor's `since`)."""
-    def stored(scopes: list[str]) -> dict[str, Stored]:
-        out = {scope: Stored(set(), set(), None) for scope in scopes}
+    def stored(scopes: list[str]) -> dict[str, CalendarState]:
+        out = {scope: CalendarState(set(), set(), None) for scope in scopes}
         for scope, external_id, product in s.execute(text("""
             SELECT scope.id, si.external_id, si.raw_meta->>'product'
             FROM unnest(CAST(:scopes AS text[])) AS scope(id)

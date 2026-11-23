@@ -11,7 +11,7 @@ iCalUID), its occurrences the records behind it. Each record says it came from t
 An export is each calendar as it was when it was exported (Google stamps every event with that time): a repeating
 event's occurrences are the ones up to then, not a forecast of the ones still to come. Each calendar is one `Listing`:
 all its records, under the external-id prefix they share (its scope), and when it was exported, so the importer can
-tell which stored records a newer export no longer holds (connectors/takeout.py).
+tell which stored records a newer export doesn't hold (connectors/takeout.py).
 
 What the export doesn't name, and how such an event is keyed instead:
 - The account and a calendar's id. Takeout names each file after its calendar (X-WR-CALNAME too), and an account's

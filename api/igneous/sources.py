@@ -177,7 +177,7 @@ SOURCES: list[dict] = [
     {"id": "gcal", "kind": "google", "name": "Google Calendar", "group": "Connected accounts",
      "reads": f"Your events from the last {FIRST_SYNC_DAYS['gcal']} days on, in every calendar on your list: titles, "
               "times, attendees, and places. Events a Google Takeout import already stored are updated, not added "
-              "again, and those its first sync no longer finds are removed.",
+              "again, and those its first sync doesn't find are removed.",
      "steps": GOOGLE_STEPS, "cli": "igneous sync gcal", "build": _google(_gcal), "options": {"since_days"}},
     {"id": "gcontacts", "kind": "google", "name": "Google Contacts", "group": "Connected accounts",
      "reads": "Names, emails, phone numbers, and organizations on your contact cards. Helps merge duplicate people.",
