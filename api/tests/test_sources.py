@@ -69,16 +69,6 @@ class FakeConnector:
         yield Checkpoint({"n": self.n})
 
 
-@pytest.fixture
-def db(test_db):
-    yield
-    with SessionLocal() as s:
-        s.execute(text("DELETE FROM source_items WHERE source = 'fake'"))
-        s.execute(text("DELETE FROM sync_state WHERE connector = 'fake'"))
-        s.execute(text("DELETE FROM jobs WHERE source LIKE 'jobtest%'"))
-        s.commit()
-
-
 def wait_done(job_id: str) -> dict:
     for _ in range(100):
         with SessionLocal() as s:
@@ -89,7 +79,7 @@ def wait_done(job_id: str) -> dict:
     raise AssertionError("job never finished")
 
 
-def test_job_runs_in_background_and_records_counts(db):
+def test_job_runs_in_background_and_records_counts(committed_db):
     job = jobs.start("sync", "jobtest-ok", lambda s, p: jobs.run_connector(s, FakeConnector(3), "default", p))
     assert job["status"] == "running"
     done = wait_done(job["id"])
@@ -98,13 +88,13 @@ def test_job_runs_in_background_and_records_counts(db):
     assert done["finished_at"] is not None
 
 
-def test_failed_job_keeps_error_text(db):
+def test_failed_job_keeps_error_text(committed_db):
     job = jobs.start("sync", "jobtest-bad", lambda s, p: jobs.run_connector(s, FakeConnector(1, fail=True), "x", p))
     done = wait_done(job["id"])
     assert done["status"] == "failed" and done["error"] == "boom"
 
 
-def test_one_running_job_per_source(db):
+def test_one_running_job_per_source(committed_db):
     release = []
 
     def slow(s, p):
@@ -120,7 +110,7 @@ def test_one_running_job_per_source(db):
     wait_done(again["id"])
 
 
-def test_interrupted_jobs_are_marked_failed_on_startup(db):
+def test_interrupted_jobs_are_marked_failed_on_startup(committed_db):
     with SessionLocal() as s:
         s.execute(text("INSERT INTO jobs (id, kind, source) VALUES ('jobtest-stale', 'sync', 'jobtest-stale')"))
         s.commit()
@@ -128,7 +118,7 @@ def test_interrupted_jobs_are_marked_failed_on_startup(db):
         assert jobs.get(s, "jobtest-stale")["status"] == "failed"
 
 
-def test_describe_lists_every_source_with_status(db):
+def test_describe_lists_every_source_with_status(committed_db):
     with SessionLocal() as s:
         rows = sources.describe(s)
     assert [r["id"] for r in rows] == [s["id"] for s in sources.SOURCES]

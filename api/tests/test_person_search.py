@@ -1,25 +1,19 @@
-"""GitHub repositories stay repositories; unconfirmed handles do not displace people (#171)."""
+"""GitHub repositories stay repositories; unconfirmed handles do not displace people."""
 import json
-from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from igneous.db import SessionLocal, get_session
 from igneous.graph.find import find
 from igneous.graph.spine import Builder, build_github
 from igneous.main import app
 
 
 @pytest.fixture
-def graph(test_db):
-    with SessionLocal() as s:
-        # All changes, including these truncates, roll back at the end of each test.
-        s.execute(text("TRUNCATE nodes, source_items, canonical RESTART IDENTITY CASCADE"))
-        yield s
-        s.rollback()
+def graph(db):
+    return db
 
 
 def node(s, name, key=None, props=None, kind="Person"):
@@ -107,22 +101,15 @@ def test_self_mail_or_hidden_traffic_does_not_confirm_a_handle(graph):
     assert find(s, "sam")[0]["id"] == human
 
 
-def test_http_and_mcp_share_person_search_policy(graph, monkeypatch):
-    from igneous import db, mcp_server
+def test_http_and_mcp_share_person_search_policy(graph):
+    from igneous import mcp_server
 
     s = graph
     node(s, "sam/repo", "github:sam/repo")
     human = node(s, "Sam Lee", "sam@example.test")
     node(s, "sam", "github:sam")
-    app.dependency_overrides[get_session] = lambda: s
-    # NamedResponse also opens a session to render contact names: it must see this transaction.
-    monkeypatch.setattr(db, "SessionLocal", lambda: nullcontext(s))
-    monkeypatch.setattr(mcp_server, "SessionLocal", lambda: nullcontext(s))
-    try:
-        response = TestClient(app).get("/graph/find", params={"q": "sam"})
-        assert response.status_code == 200
-        assert response.json()["results"][0]["id"] == human
-        assert mcp_server.find("sam")[0]["node_id"] == human
-        assert all(h["name"] != "sam/repo" for h in response.json()["results"])
-    finally:
-        app.dependency_overrides.clear()
+    response = TestClient(app).get("/graph/find", params={"q": "sam"})
+    assert response.status_code == 200
+    assert response.json()["results"][0]["id"] == human
+    assert mcp_server.find("sam")[0]["node_id"] == human
+    assert all(h["name"] != "sam/repo" for h in response.json()["results"])

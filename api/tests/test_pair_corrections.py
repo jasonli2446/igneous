@@ -1,40 +1,26 @@
-"""A rejected pair stays rejected across rules and rebuilds; undo keeps its exact provenance (#173)."""
+"""A rejected pair stays rejected across rules and rebuilds; undo keeps its exact provenance."""
 import json
-from contextlib import nullcontext
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from igneous import db, llm, mcp_server, providers
-from igneous.db import engine, get_session
+from igneous import llm, mcp_server, providers
 from igneous.graph import verify
 from igneous.graph.resolve import refresh_canonical
 from igneous.main import app
 
 
 @pytest.fixture
-def graph(test_db, monkeypatch):
+def graph(db, monkeypatch):
     def forbidden(*_a, **_kw):
         raise AssertionError("corrections never need a model")
 
     monkeypatch.setattr(llm, "structured", forbidden)
     monkeypatch.setattr(providers, "chat", forbidden)
     monkeypatch.setattr(verify.settings, "llm_enabled", False)
-    with engine.connect() as connection:
-        outer = connection.begin()
-        with Session(bind=connection, join_transaction_mode="create_savepoint") as s:
-            s.execute(text("TRUNCATE nodes,source_items,canonical RESTART IDENTITY CASCADE"))
-            s.execute(text("TRUNCATE overrides,edge_verdicts,edges_dropped RESTART IDENTITY"))
-            app.dependency_overrides[get_session] = lambda: s
-            monkeypatch.setattr(db, "SessionLocal", lambda: nullcontext(s))
-            monkeypatch.setattr(mcp_server, "SessionLocal", lambda: nullcontext(s))
-            try:
-                yield s, TestClient(app)
-            finally:
-                app.dependency_overrides.clear()
-        outer.rollback()
+    yield db, TestClient(app)
 
 
 def node(s, kind, key, name=None):
@@ -193,13 +179,13 @@ def test_rejecting_and_restoring_identity_link_refreshes_canonical_state(graph, 
     eid = edge(s, a, b, "SAME_AS", "er")
     refresh_canonical(s)
     assert s.execute(text("SELECT count(*) FROM canonical")).scalar() == 2
-    original_commit, commits = s.commit, []
+    original_commit, commits = Session.commit, []
 
-    def commit():
-        commits.append(True)
-        original_commit()
+    def commit(session):
+        commits.append(session)
+        original_commit(session)
 
-    monkeypatch.setattr(s, "commit", commit)
+    monkeypatch.setattr(Session, "commit", commit)
     result = client.post("/graph/edge/wrong", json={"edge": eid}).json()
     assert len(commits) == 1  # the verdict, snapshot and identity change commit atomically in the route
     assert s.execute(text("SELECT count(*) FROM canonical")).scalar() == 0

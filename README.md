@@ -30,8 +30,9 @@ The default connection is `postgresql+psycopg://igneous:igneous@localhost:5432/i
 Every table comes from a migration. After pulling, run `uv run alembic upgrade head` again (once per database); the
 API refuses to start on an older schema and prints that command.
 
-Tests (`make test`) never use that database or your personal one: `api/tests/conftest.py` points them at
-`igneous_test` on the same server, recreated and migrated on every run.
+Tests (`make test`) never use that database or your personal one, nor your `api/.env` or model credentials: each
+run creates, migrates and finally drops its own `igneous_test_<pid>` database on the same server
+(`api/tests/conftest.py`), so two runs can share a server.
 
 ### 3. Configuration (`api/.env`)
 

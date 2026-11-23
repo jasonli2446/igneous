@@ -1,7 +1,6 @@
-"""Timeline and commitment tools read the same cited graph as the HTTP API (#99)."""
+"""Timeline and commitment tools read the same cited graph as the HTTP API."""
 import asyncio
 import json
-from contextlib import nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -9,7 +8,6 @@ import pytest
 from sqlalchemy import text
 
 from igneous import mcp_server
-from igneous.db import SessionLocal
 from igneous.graph.history import commitments, store_claims
 
 
@@ -44,7 +42,7 @@ def promise(s, label, year, *, status="open"):
 
 
 @pytest.fixture
-def graph(test_db, monkeypatch):
+def graph(db, monkeypatch):
     from igneous import llm, providers
 
     def forbidden(*_args, **_kwargs):
@@ -53,36 +51,33 @@ def graph(test_db, monkeypatch):
     monkeypatch.setattr(llm, "chat", forbidden)
     monkeypatch.setattr(providers, "chat", forbidden)
     monkeypatch.setattr(llm, "structured", forbidden)
-    with SessionLocal() as s:
-        s.execute(text("TRUNCATE nodes, source_items, canonical RESTART IDENTITY CASCADE"))
-        sam = node(s, "Person", "Sam Lee")
-        alias = node(s, "Person", "sam@example.test")
-        alex = node(s, "Person", "Alex Example")
-        project = node(s, "Project", "Widget Tracker")
-        thread = node(s, "Thread", "Widget chat")
-        org = node(s, "Organization", "Example University")
-        empty = node(s, "Organization", "Empty organization")
-        s.execute(text("INSERT INTO canonical VALUES (:alias,:head)"), {"alias": alias, "head": sam})
-        sid, msg, claim = promise(s, "the draft", 2024)
-        edge(s, alias, msg, "SENT", sid)
-        edge(s, msg, alex, "RECEIVED", sid)
-        edge(s, msg, project, "PART_OF", sid)
-        edge(s, msg, thread, "IN_THREAD", sid)
-        other_sid, reply, resolved = promise(s, "the release", 2025, status="resolved")
-        edge(s, alex, reply, "SENT", other_sid)
-        edge(s, reply, alias, "RECEIVED", other_sid)
-        edge(s, reply, project, "PART_OF", other_sid)
-        _, unrelated, _ = promise(s, "an unrelated task", 2026)
-        other = node(s, "Project", "Other project")
-        edge(s, unrelated, other, "PART_OF")
-        s.execute(text("""
-            INSERT INTO edges (src,dst,type,extractor,source_item_id,valid_from,valid_to)
-            VALUES (:sam,:org,'WORKED_AT','organizations',:sid,'2023-01-01','2024-01-01')
-        """), {"sam": alias, "org": org, "sid": sid})
-        monkeypatch.setattr(mcp_server, "SessionLocal", lambda: nullcontext(s))
-        yield SimpleNamespace(s=s, sam=sam, alias=alias, project=project, thread=thread, org=org, empty=empty,
-                              sid=sid, msg=msg, claim=claim, resolved=resolved)
-        s.rollback()
+    s = db
+    sam = node(s, "Person", "Sam Lee")
+    alias = node(s, "Person", "sam@example.test")
+    alex = node(s, "Person", "Alex Example")
+    project = node(s, "Project", "Widget Tracker")
+    thread = node(s, "Thread", "Widget chat")
+    org = node(s, "Organization", "Example University")
+    empty = node(s, "Organization", "Empty organization")
+    s.execute(text("INSERT INTO canonical VALUES (:alias,:head)"), {"alias": alias, "head": sam})
+    sid, msg, claim = promise(s, "the draft", 2024)
+    edge(s, alias, msg, "SENT", sid)
+    edge(s, msg, alex, "RECEIVED", sid)
+    edge(s, msg, project, "PART_OF", sid)
+    edge(s, msg, thread, "IN_THREAD", sid)
+    other_sid, reply, resolved = promise(s, "the release", 2025, status="resolved")
+    edge(s, alex, reply, "SENT", other_sid)
+    edge(s, reply, alias, "RECEIVED", other_sid)
+    edge(s, reply, project, "PART_OF", other_sid)
+    _, unrelated, _ = promise(s, "an unrelated task", 2026)
+    other = node(s, "Project", "Other project")
+    edge(s, unrelated, other, "PART_OF")
+    s.execute(text("""
+        INSERT INTO edges (src,dst,type,extractor,source_item_id,valid_from,valid_to)
+        VALUES (:sam,:org,'WORKED_AT','organizations',:sid,'2023-01-01','2024-01-01')
+    """), {"sam": alias, "org": org, "sid": sid})
+    yield SimpleNamespace(s=s, sam=sam, alias=alias, project=project, thread=thread, org=org, empty=empty,
+                          sid=sid, msg=msg, claim=claim, resolved=resolved)
 
 
 def call(name, **args):
