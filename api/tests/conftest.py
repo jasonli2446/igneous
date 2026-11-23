@@ -66,8 +66,8 @@ def _run_key(name: str) -> int | None:
 
 
 def _drop_abandoned(c) -> None:
-    """Drop the test databases whose run is gone: no session holds the advisory lock on its key any more, which
-    Postgres knows whatever process namespace or computer the run was in. A test database without a key is left
+    """Drop the test databases whose run is gone: no session holds the advisory lock on its key, which Postgres
+    knows whatever process namespace or computer the run was in. A test database without a key is left
     alone: whether its run is alive can't be known."""
     for (name,) in c.execute(text("SELECT datname FROM pg_database WHERE starts_with(datname, :p)"),
                              {"p": TEST_DB_PREFIX}).all():

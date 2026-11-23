@@ -107,7 +107,7 @@ class MaildirConnector:
         for box in self._boxes():
             after = done.get(box)
             messages, not_messages = self._paths(box)
-            for rel in not_messages:  # an earlier reader stored them as mail, wherever the cursor is now
+            for rel in not_messages:  # none is mail: one stored as mail goes, wherever the cursor is
                 yield Tombstone(self.name, rel)
             for rel in messages:
                 if after and rel <= after:

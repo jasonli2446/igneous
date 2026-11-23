@@ -59,15 +59,15 @@ def test_a_resumed_mailbox_skips_nothing_whatever_the_folder_names(db, tmp_path,
 
 
 def test_files_finder_leaves_in_a_mailbox_are_not_messages(db, tmp_path):
-    """Finder leaves .DS_Store and ._ files in a folder you open. They are not read, and one an earlier reader
-    stored as mail is removed, though the mailbox's cursor is past it."""
+    """Finder leaves .DS_Store and ._ files in a folder you open. They are not read, and one stored as mail is
+    removed, though the mailbox's cursor is past it."""
     root = maildir(tmp_path, "allen-p/inbox/1.")
     (root / "allen-p" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
     (root / "allen-p" / "inbox" / "._1.").write_bytes(b"\x00\x05\x16\x07")
     events = list(MaildirConnector(root, ["allen-p"]).sync({}))
     assert [e.external_id for e in events if isinstance(e, SourceItem)] == ["allen-p/inbox/1."]
     run_sync(db, MaildirConnector(root, ["allen-p"]))
-    store(db, email_maildir.parse_message(b"Bud1", "allen-p/.DS_Store"))  # as the earlier reader stored it
+    store(db, email_maildir.parse_message(b"Bud1", "allen-p/.DS_Store"))  # read as mail
     assert run_sync(db, MaildirConnector(root, ["allen-p"]))["deleted"] == 1
     assert stored(db, "email") == ["allen-p/inbox/1."]
 
@@ -232,8 +232,9 @@ def test_a_notes_date_comes_from_the_column_its_macos_version_uses(tmp_path):
 
 
 def test_notes_an_earlier_reader_stored_are_read_again_once(db, tmp_path):
-    """An earlier reader dated a macOS note by its row number, kept a model_opt_in flag, and fingerprinted only the
-    body and title. Such a note, unchanged since, is read again once, and stored as this reader makes it."""
+    """A note stored by a reader that made its item differently (dated by its row number, with a flag this reader
+    doesn't write) and fingerprinted only its body and title is read again once, though the note is unchanged, and
+    stored as this reader makes it."""
     when = datetime(2025, 3, 9, 15, 30, tzinfo=UTC)
     path, blob = tmp_path / "NoteStore.sqlite", gzip.compress(PLAN)
     connection = sqlite3.connect(path)
