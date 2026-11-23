@@ -12,9 +12,12 @@ dependencies = [
     "alembic>=1.14",
     "pydantic-settings>=2.6",
     "typer>=0.15",
-    "fastembed>=0.9",
+    # 0.9.0 caps Pillow below 13, and Pillow 12 has known advisories.
+    "fastembed>=0.9.1",
     "beautifulsoup4>=4.12",
-    "anthropic>=1.15.0",
+    # 2.x sends API version 2026-10-21, which Bedrock accepts only for Claude 4.7 and later models;
+    # llm_cheap_model is Claude Haiku 4.5.
+    "anthropic>=1.15.0,<2",
     "mcp>=2.3",
     "google-auth-oauthlib>=1.5.0",
     "google-api-python-client>=2.201.0",
