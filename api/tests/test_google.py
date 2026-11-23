@@ -86,7 +86,57 @@ def test_gmail_fetches_a_message_that_leaves_a_skipped_label():
             {"message": {"id": "read", "labelIds": ["INBOX"]}, "labelIds": ["UNREAD"]}]}], "historyId": "11"}])
     events = gmail_sync(fake, {"history_id": "10", "synced_at": 1})
     assert [i.external_id for i in items(events)] == ["moved"]
-    assert fake.calls[0][1]["historyTypes"] == ["messageAdded", "labelRemoved"]
+    assert fake.calls[0][1]["historyTypes"] == ["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"]
+
+
+def tombstones(events) -> list[str]:
+    return [e.external_id for e in events if isinstance(e, Tombstone)]
+
+
+def test_gmail_removes_mail_that_is_deleted_or_enters_a_skipped_label():
+    record = {"id": "11", "messagesDeleted": [{"message": {"id": "deleted"}}], "labelsAdded": [
+        {"message": {"id": "spammed", "labelIds": ["SPAM"]}, "labelIds": ["SPAM"]},
+        {"message": {"id": "binned", "labelIds": ["TRASH"]}, "labelIds": ["TRASH"]},
+        {"message": {"id": "promo", "labelIds": ["CATEGORY_PROMOTIONS"]}, "labelIds": ["CATEGORY_PROMOTIONS"]},
+        {"message": {"id": "starred", "labelIds": ["INBOX", "STARRED"]}, "labelIds": ["STARRED"]}]}
+    narrow = gmail_sync(FakeGmail({}, history=[{"history": [record], "historyId": "11"}]),
+                        {"history_id": "10", "synced_at": 1})
+    assert tombstones(narrow) == ["deleted", "spammed", "binned", "promo"]
+    everything = gmail_sync(FakeGmail({}, history=[{"history": [record], "historyId": "11"}]),
+                            {"history_id": "10", "synced_at": 1, "all_mail": True})
+    assert tombstones(everything) == ["deleted", "spammed", "binned"]  # all mail keeps Promotions
+
+
+def test_gmail_removes_a_fetched_message_that_now_carries_a_skipped_label():
+    fake = FakeGmail({"now-spam": ["SPAM"]}, history=[{"history": [{"id": "11", "labelsRemoved": [
+        {"message": {"id": "now-spam", "labelIds": ["INBOX"]}, "labelIds": ["CATEGORY_PROMOTIONS"]}]}],
+        "historyId": "11"}])
+    assert tombstones(gmail_sync(fake, {"history_id": "10", "synced_at": 1})) == ["now-spam"]
+
+
+def test_turning_all_mail_off_removes_the_accounts_bulk_mail(db):
+    from sqlalchemy import text
+
+    from igneous.connectors.base import SourceItem as Item
+    from igneous.connectors.base import run_sync
+
+    class Stored:
+        name = "gmail"
+
+        def sync(self, cursor):
+            for i, account in (("promo", "me@x.com"), ("chat", "me@x.com"), ("other-promo", "you@y.com")):
+                yield Item("gmail", i, i, "x", raw_meta={"account": account})
+
+    run_sync(db, Stored(), account="seed")
+    db.execute(text("INSERT INTO sync_state (connector, account, cursor) VALUES ('gmail', 'me@x.com', "
+                    "CAST(:c AS jsonb))"), {"c": '{"history_id": "10", "synced_at": 1, "all_mail": true, "after": 5}'})
+    fake = FakeGmail({"chat": ["INBOX"]}, pages=[["chat"]], queries={"{category:promotions": [["promo"]]})
+    run_sync(db, GmailConnector(None, "me@x.com", service=fake, all_mail=False), account="me@x.com")
+    listings = [kwargs["q"] for call, kwargs in fake.calls if call == "list"]
+    assert listings == [gmail.query(False, 5), "{category:promotions category:social category:forums} after:5"]
+    # The other account's mail stays: only ids this mailbox lists as bulk are removed.
+    assert set(db.execute(text("SELECT external_id FROM source_items WHERE source = 'gmail'")).scalars()) == {
+        "chat", "other-promo"}
 
 
 def test_gmail_checkpoints_fall_between_history_records(monkeypatch):
@@ -116,9 +166,9 @@ def test_drive_backfill_exports_workspace_files_and_preserves_all_parent_ids():
     assert item.raw_meta["parents"] == ["folder-a", "folder-b"] and item.raw_meta["path"] == "drive/doc-1"
     assert item.raw_meta["parent_names"] == {"folder-a": "Gloomhaven Night"}  # folder-b isn't visible: no name
     assert ("export", {"fileId": "doc-1", "mimeType": "text/plain"}) in drive.calls
-    completed = events[-1]
-    assert completed == CompletedScan({"start_page_token": "before-backfill"}, "drive", frozenset(
-        {"me@example.com/doc-1", "me@example.com/image-1", "me@example.com/folder-a"}), scopes=("me@example.com",))
+    completed = events[-1]  # observes what it stored: a stored file that no longer qualifies is removed
+    assert completed == CompletedScan({"start_page_token": "before-backfill"}, "drive",
+                                      frozenset({"me@example.com/doc-1"}), scopes=("me@example.com",))
 
 
 def test_drive_changes_emit_tombstones_and_advance_only_at_final_page():
@@ -130,6 +180,15 @@ def test_drive_changes_emit_tombstones_and_advance_only_at_final_page():
     assert drive.calls[0][1]["pageToken"] == "cursor-1"
     assert events == [Tombstone("drive", "me@example.com/deleted"), Tombstone("drive", "me@example.com/trashed"),
                       Checkpoint({"start_page_token": "cursor-2"})]
+
+
+def test_a_drive_change_that_makes_a_file_unreadable_removes_it():
+    drive = FakeDrive([], {"doc": b"\x00\x01binary now"}, changes=[{"changes": [
+        {"fileId": "doc", "file": {"id": "doc", "name": "notes.txt", "mimeType": "text/plain"}},
+        {"fileId": "form", "file": {"id": "form", "name": "Survey", "mimeType": "application/vnd.google-apps.form"}},
+    ], "newStartPageToken": "cursor-2"}])
+    events = list(DriveConnector(None, "me@example.com", drive).sync({"start_page_token": "cursor-1"}))
+    assert events[:2] == [Tombstone("drive", "me@example.com/doc"), Tombstone("drive", "me@example.com/form")]
 
 
 def test_drive_skips_non_downloadable_workspace_files_and_export_limits():
@@ -163,7 +222,29 @@ def test_calendar_uses_clean_incremental_params_and_tombstones_cancelled_events(
     events = list(CalendarConnector(None, "me@example.com", service=calendar).sync({"sync_tokens": {"team": "old-token"}}))
     (params,) = calendar.calls
     assert params["syncToken"] == "old-token" and "timeMin" not in params and params["showDeleted"] is True
-    assert events == [Tombstone("gcal", "me@example.com/team/gone"), Checkpoint({"sync_tokens": {"team": "new-token"}})]
+    done = Checkpoint({"sync_tokens": {"team": "new-token"}, "calendars": ["team"]})
+    assert events == [Tombstone("gcal", "me@example.com/team/gone"), done, done]
+
+
+def test_a_calendar_that_leaves_the_list_takes_its_events(db):
+    from sqlalchemy import text
+
+    from igneous.connectors.base import run_sync
+
+    for external_id in ("me@x.com/old/e1", "me@x.com/team/e2", "you@y.com/old/e3"):
+        db.execute(text("INSERT INTO source_items (source, external_id, content_hash) VALUES ('gcal', :e, 'h')"),
+                   {"e": external_id})
+    db.execute(text("INSERT INTO sync_state (connector, account, cursor) VALUES ('gcal', 'me@x.com', CAST(:c AS jsonb))"),
+               {"c": '{"sync_tokens": {"team": "t1", "old": "t2"}, "calendars": ["old", "team"]}'})
+    calendar = FakeCalendar([{"id": "team", "summary": "Team"}], [{"items": [], "nextSyncToken": "t3"}])
+    run_sync(db, CalendarConnector(None, "me@x.com", service=calendar), account="me@x.com")
+    assert set(db.execute(text("SELECT external_id FROM source_items")).scalars()) == {
+        "me@x.com/team/e2", "you@y.com/old/e3"}  # another account's calendar of that name stays
+    cursor = db.execute(text("SELECT cursor FROM sync_state WHERE account = 'me@x.com'")).scalar_one()
+    assert cursor == {"sync_tokens": {"team": "t3"}, "calendars": ["team"]}
+    # An empty list is a failure to list, not every calendar gone.
+    events = list(CalendarConnector(None, "me@x.com", service=FakeCalendar([], [])).sync(cursor))
+    assert not tombstones(events)
 
 
 def test_contacts_complete_scan_is_account_scoped():

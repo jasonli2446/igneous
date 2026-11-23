@@ -51,10 +51,10 @@ def _is_expired_change_token(exc: HttpError) -> bool:
 class DriveConnector:
     """Synchronize Drive files by immutable Drive ID, never by a synthesized path.
 
-    The first sync obtains a Changes API token before a complete ``files.list`` snapshot.
-    Subsequent syncs consume the Changes API. Explicit removed/trashed changes become
-    ``Tombstone`` events; they never misuse ``CompletedScan``, which is only for a full
-    listing whose observed IDs are known complete.
+    A file is stored when it is in Drive, not trashed, and readable: a format the parsers read, and downloadable.
+    The first sync obtains a Changes API token before a complete `files.list` snapshot, whose CompletedScan observes
+    only the files it stored, so a stored file that no longer qualifies is removed. Later syncs consume the Changes
+    API: a file removed, trashed or no longer readable becomes a Tombstone.
     """
 
     name = "drive"
@@ -80,8 +80,7 @@ class DriveConnector:
         if mime_type == FOLDER_MIME or file.get("trashed"):
             return None
         export = WORKSPACE_EXPORTS.get(mime_type)
-        # Workspace types without an export format (Forms, Sites, shortcuts, etc.) cannot
-        # be downloaded. They remain observed during a full scan but have no SourceItem.
+        # Workspace types without an export format (Forms, Sites, shortcuts, etc.) cannot be downloaded.
         if mime_type and mime_type.startswith("application/vnd.google-apps.") and not export:
             return None
         try:
@@ -135,9 +134,9 @@ class DriveConnector:
                 fields=f"nextPageToken,files({FILE_FIELDS})", orderBy="name", supportsAllDrives=True,
                 includeItemsFromAllDrives=True))
             for file in response.get("files", []):
-                observed.add(_external_id(self.account, file["id"]))
                 item = self._source_item(file)
                 if item:
+                    observed.add(item.external_id)
                     yield item
             page = response.get("nextPageToken")
             if not page:
@@ -171,12 +170,8 @@ class DriveConnector:
                     continue
                 external_id = _external_id(self.account, file_id)
                 file = change.get("file")
-                if change.get("removed") or not file or file.get("trashed"):
-                    yield Tombstone(self.name, external_id)
-                    continue
-                item = self._source_item(file)
-                if item:
-                    yield item
+                item = None if change.get("removed") or not file else self._source_item(file)
+                yield item or Tombstone(self.name, external_id)  # removed, trashed or no longer readable
             page = response.get("nextPageToken")
             if not page:
                 new_token = response.get("newStartPageToken", start)

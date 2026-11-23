@@ -1,8 +1,8 @@
 """Google Calendar + Contacts connectors.
 
-Calendar events are bootstrapped for a bounded history and then kept current with
-per-calendar sync tokens. Contacts are small enough for a complete People API scan
-on every run, allowing safe deletion reconciliation after that scan finishes.
+Calendar events are bootstrapped for a bounded history and then kept current with per-calendar sync tokens: a
+cancelled event is removed, and so are the events of a calendar that leaves the account's list. Contacts are small
+enough for a complete People API scan on every run, allowing safe deletion reconciliation after that scan finishes.
 """
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -46,7 +46,14 @@ class CalendarConnector:
 
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | Tombstone]:
         tokens = dict(cursor.get("sync_tokens", {}))
-        for cal in self._calendars():
+        calendars = list(self._calendars())
+        listed = sorted(cal["id"] for cal in calendars)
+        # A calendar that left the list (unsubscribed, deleted, hidden) takes its events with it. Every account
+        # lists at least its own calendar, so an empty list is a failure, not a reason to remove everything.
+        for gone in sorted(set(cursor.get("calendars", tokens)) - set(listed)) if listed else []:
+            tokens.pop(gone, None)
+            yield Tombstone(self.name, _external_id(self.account, gone), prefix=True)
+        for cal in calendars:
             cid = cal["id"]
             token = tokens.get(cid)
             # Google rejects timeMin combined with syncToken. The bounded initial list
@@ -110,7 +117,8 @@ class CalendarConnector:
                     if response.get("nextSyncToken"):
                         tokens[cid] = response["nextSyncToken"]
                     break
-            yield Checkpoint({"sync_tokens": tokens})
+            yield Checkpoint({"sync_tokens": tokens, "calendars": listed})
+        yield Checkpoint({"sync_tokens": tokens, "calendars": listed})
 
 
 class ContactsConnector:

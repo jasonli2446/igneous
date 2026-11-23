@@ -95,13 +95,15 @@ class FakeCalendar:
 class FakeGmail:
     """users().getProfile/messages().list/messages().get/history().list over `messages` (id -> labelIds).
 
-    `pages` are the messages.list pages (lists of ids) and `history` the history.list responses in turn (a dict, or
-    an exception to raise). Every message's raw form is a minimal RFC 822 mail."""
+    `pages` are the messages.list pages (lists of ids), and `queries` the pages for a query containing a given
+    text; `history` holds the history.list responses in turn (a dict, or an exception to raise). Every message's raw
+    form is a minimal RFC 822 mail."""
 
     def __init__(self, messages: dict[str, list[str]], pages: list[list[str]] | None = None,
-                 history: list | None = None, history_id: str = "100"):
+                 history: list | None = None, history_id: str = "100",
+                 queries: dict[str, list[list[str]]] | None = None):
         self.labels, self.pages, self.history_responses = messages, pages or [], list(history or [])
-        self.history_id = history_id
+        self.history_id, self.queries = history_id, queries or {}
         self.calls: list[tuple[str, dict]] = []
 
     def users(self):
@@ -118,9 +120,10 @@ class FakeGmail:
 
     def _list(self, pageToken=None, **kwargs):
         self.calls.append(("list", {"pageToken": pageToken, **kwargs}))
+        pages = next((p for text, p in self.queries.items() if text in (kwargs.get("q") or "")), self.pages)
         index = int(pageToken or 0)
-        page = {"messages": [{"id": i} for i in self.pages[index]]} if self.pages else {}
-        return Request({**page, **({"nextPageToken": str(index + 1)} if index + 1 < len(self.pages) else {})})
+        page = {"messages": [{"id": i} for i in pages[index]]} if pages else {}
+        return Request({**page, **({"nextPageToken": str(index + 1)} if index + 1 < len(pages) else {})})
 
     def _get(self, id, **kwargs):
         self.calls.append(("get", {"id": id}))
