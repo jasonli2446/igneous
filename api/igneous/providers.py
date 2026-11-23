@@ -103,6 +103,14 @@ def accepts_effort(model_id: str) -> bool:
     return version >= (4, 6) or (m["family"] == "opus" and version >= (4, 5))
 
 
+def bedrock_key() -> str | None:
+    """The Bedrock API key: AWS_BEARER_TOKEN_BEDROCK in the environment, else the one `igneous connect bedrock` saved
+    (encrypted in the data folder), so a process its own client starts (the MCP server) finds it too."""
+    from igneous.connectors import secrets
+
+    return os.environ.get("AWS_BEARER_TOKEN_BEDROCK") or secrets.load_local("bedrock")
+
+
 class BedrockProvider:
     """Claude on Amazon Bedrock through the Anthropic SDK. The SDK retries connection errors and 408, 409, 429 and
     5xx responses, with backoff, up to IGNEOUS_HOSTED_RETRIES times; nothing here retries again."""
@@ -116,9 +124,10 @@ class BedrockProvider:
         if not settings.llm_enabled:
             raise LLMDisabled("model calls are turned off (IGNEOUS_LLM_ENABLED=false)")
         if self._instance is None:
-            token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+            token = bedrock_key()
             if not token:
-                raise LLMDisabled("AWS_BEARER_TOKEN_BEDROCK is not set")
+                raise LLMDisabled("no Bedrock key: set AWS_BEARER_TOKEN_BEDROCK, or save one with "
+                                  "`igneous connect bedrock`")
             self._instance = anthropic.AnthropicBedrock(aws_region=os.environ.get("AWS_REGION", "us-east-1"),
                                                         api_key=token, max_retries=self.max_retries)
         return self._instance

@@ -196,16 +196,28 @@ def import_ai_export(path: Path = typer.Argument(..., exists=True, dir_okay=Fals
 
 
 @app.command()
-def connect(provider: str = typer.Argument(..., metavar="PROVIDER", help="google or github"),
+def connect(provider: str = typer.Argument(..., metavar="PROVIDER", help="google, github or bedrock"),
             browser: bool = typer.Option(True, help="google: open the browser; --no-browser just prints the URL")):
-    """Connect an account, read-only; tokens are stored encrypted.
+    """Connect an account, read-only, or save the model key; everything is stored encrypted.
 
     google: sign in through the browser, once per account (run it again to add another). A Google project in Testing
     mode issues tokens that last 7 days: connect again when a sync says the token expired.
 
     github: a fine-grained token with Contents, Issues and Pull requests: Read, typed at the hidden prompt or given
-    on stdin (`igneous connect github < token.txt`). Saving a token for the same account replaces it."""
-    if provider == "google":
+    on stdin (`igneous connect github < token.txt`). Saving a token for the same account replaces it.
+
+    bedrock: the Amazon Bedrock API key the hosted model calls use, typed at the hidden prompt or given on stdin. It
+    is saved in the data folder, not the database, so every database and every process (the API, the CLI, the MCP
+    server its client starts) finds it; AWS_BEARER_TOKEN_BEDROCK in the environment wins over it."""
+    if provider == "bedrock":
+        from igneous.connectors import secrets
+
+        key = typer.prompt("Bedrock API key", hide_input=True) if sys.stdin.isatty() else sys.stdin.read()
+        if not key.strip():
+            raise typer.BadParameter("no key given")
+        secrets.save_local("bedrock", key)
+        print("saved the Bedrock key")
+    elif provider == "google":
         from igneous.connectors import google_auth
 
         with session() as s:
@@ -222,17 +234,25 @@ def connect(provider: str = typer.Argument(..., metavar="PROVIDER", help="google
             secrets.save(s, "github", login, token.strip())
         print("connected", login)
     else:
-        raise typer.BadParameter("connect google or github")
+        raise typer.BadParameter("connect google, github or bedrock")
 
 
 @app.command()
-def disconnect(provider: str = typer.Argument(..., metavar="PROVIDER", help="google or github"),
-               account: str = typer.Argument(..., help="the account's email (google) or login (github)")):
-    """Forget an account's stored token, so nothing syncs it. What it synced stays; connecting it again resumes."""
-    if provider not in ("google", "github"):
-        raise typer.BadParameter("disconnect google or github")
+def disconnect(provider: str = typer.Argument(..., metavar="PROVIDER", help="google, github or bedrock"),
+               account: str = typer.Argument(None, help="the account's email (google) or login (github)")):
+    """Forget an account's stored token, so nothing syncs it (what it synced stays; connecting it again resumes), or
+    the saved model key."""
     from igneous.connectors import secrets
 
+    if provider == "bedrock":
+        if not secrets.delete_local("bedrock"):
+            raise typer.BadParameter("no Bedrock key is saved")
+        print("forgot the Bedrock key")
+        return
+    if provider not in ("google", "github"):
+        raise typer.BadParameter("disconnect google, github or bedrock")
+    if not account:
+        raise typer.BadParameter(f"which {provider} account?", param_hint="ACCOUNT")
     with session() as s:
         if not secrets.delete(s, provider, account):
             raise typer.BadParameter(f"no {provider} account {account} is connected")
@@ -409,12 +429,74 @@ def check_graph():
     raise typer.Exit(code=1)
 
 
-@app.command()
-def mcp():
-    """Serve the graph to MCP clients (Claude Code, Claude Desktop, Cursor) over stdio. Read-only."""
-    from igneous.mcp_server import main
+mcp_app = typer.Typer()
+app.add_typer(mcp_app, name="mcp")
+DATABASE_HELP = "serve this database on the server api/.env names (its user and password too) instead of api/.env's"
+SOURCES_HELP = ("the sources whose records and names the tools may share, comma-separated ids, instead of "
+                "IGNEOUS_LLM_SOURCES")
 
-    main()
+
+@mcp_app.callback(invoke_without_command=True)
+def mcp(ctx: typer.Context, database: str = typer.Option(None, help=DATABASE_HELP),
+        sources: str = typer.Option(None, help=SOURCES_HELP)):
+    """Serve the graph over stdio: the command an MCP client runs (`igneous mcp install` registers it with Claude
+    Code). Its tools share text only from the sources opted in to hosted models, and names only of what those records
+    name; the rest are counts. Read-only, except that `ask` calls the hosted model."""
+    if ctx.invoked_subcommand is None:
+        from igneous.mcp_server import main as serve
+
+        serve(database, sources)
+
+
+@mcp_app.command("install")
+def mcp_install(name: str = typer.Option("igneous", help="the name Claude Code lists the server under"),
+                database: str = typer.Option(None, help=DATABASE_HELP),
+                sources: str = typer.Option(None, help=SOURCES_HELP),
+                scope: str = typer.Option("user", help="user (every project), project or local")):
+    """Register this checkout's server with Claude Code (`claude mcp add`), replacing one registered under the same
+    name. No credential goes into Claude Code's configuration: the server reads the database password from api/.env
+    and the model key (only `ask` needs it) from AWS_BEARER_TOKEN_BEDROCK or `igneous connect bedrock`."""
+    from igneous import db, mcp_client
+
+    if database:
+        db.use_database(database)
+    if problem := db.schema_status():
+        typer.echo(f"igneous: {problem}", err=True)
+        raise typer.Exit(code=2)
+    try:
+        registered = mcp_client.install(name, database, sources, scope)
+    except RuntimeError as e:
+        typer.echo(f"igneous: {e}", err=True)
+        raise typer.Exit(code=1) from e
+    print(f"registered {name} ({scope} scope): {' '.join(registered)}")
+    print("check it with `claude mcp list`, and every tool with `igneous mcp check`")
+
+
+@mcp_app.command("check")
+def mcp_check(database: str = typer.Option(None, help=DATABASE_HELP),
+              sources: str = typer.Option(None, help=SOURCES_HELP),
+              query: str = typer.Option(None, help="a name for `find` and words for `search` (default: from `me`)"),
+              ask: bool = typer.Option(False, "--ask", help="also call `ask`, which calls the paid hosted model")):
+    """Start the server as a client would, call each tool once, and report each call's time and outcome. Exits 1 if
+    a tool fails. Paid tools run only when asked for."""
+    from igneous import db, mcp_client
+
+    if database:
+        db.use_database(database)
+    if problem := db.schema_status():
+        typer.echo(f"igneous: {problem}", err=True)
+        raise typer.Exit(code=2)
+    calls = mcp_client.check(database=database, sources=sources, ask=ask, query=query)
+    for c in calls:
+        outcome = {True: "ok", False: "FAILED", None: "-"}[c.ok]
+        print(f"{c.tool:15s} {c.seconds * 1000:8.0f} ms  {outcome:6s}  {c.note}")
+    failed = [c.tool for c in calls if c.ok is False]
+    if failed:
+        typer.echo(f"igneous: {len(failed)} of {len(calls)} tools failed: {', '.join(failed)}", err=True)
+        raise typer.Exit(code=1)
+    answered = sum(1 for c in calls if c.ok)
+    print(f"{answered} of {len(calls)} tools answered, none failed"
+          + ("" if answered == len(calls) else "; opt a source in (--sources) to call the rest"))
 
 
 @app.command()
