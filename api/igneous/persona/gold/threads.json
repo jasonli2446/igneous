@@ -13,7 +13,9 @@
     {"source": "email", "external_id": "mira/Archive/cur/1733438400.M652538P5647.mira-laptop,S=737:2,S", "fingerprint": "973ecb16bcc1ce23170b5784685da519888994e5"},
     {"source": "email", "external_id": "mira/Archive/cur/1734020100.M11700038P38171.mira-laptop,S=1152:2,S", "fingerprint": "36769267a5d33f7da92c5b7953b1684e50e84da3"},
     {"source": "ai_chats", "external_id": "chatgpt/3db5b590-8902-4151-a377-55ee8afdae31/2024-12-01"},
-    {"source": "fs", "path": "Work/Northwind/Northwind offer letter 2024.pdf"}
+    {"source": "fs", "path": "Work/Northwind/Northwind offer letter 2024.pdf"},
+    {"source": "gcal", "external_id": "mcastellanos@lakeshore.example.edu/mcastellanos@lakeshore.example.edu/2ec1efc514aa34b60963501ad9"},
+    {"source": "gcal", "external_id": "mcastellanos@lakeshore.example.edu/mcastellanos@lakeshore.example.edu/6d25e0db1a5ae7cf3e6a1de660_20250122T143000Z"}
    ]
   },
   {
@@ -28,7 +30,8 @@
     {"source": "takeout_chat", "external_id": "chat/space-aaaac2zfdem/2025-03-11"},
     {"source": "ai_chats", "external_id": "chatgpt/a22fa81e-2726-430e-ae5c-82e29ea60725/2025-02-11"},
     {"source": "fs", "path": "Travel/Lisbon 2025/itinerary.md"},
-    {"source": "takeout_tasks", "external_id": "tasks/cc376966601d218f4c7845"}
+    {"source": "takeout_tasks", "external_id": "tasks/cc376966601d218f4c7845"},
+    {"source": "gcal", "external_id": "mcastellanos@lakeshore.example.edu/mcastellanos@lakeshore.example.edu/0be16743d8e48dab9467f34ade"}
    ],
    "must_exclude": [
     {"source": "takeout_chat", "external_id": "chat/space-aaaac2zfdem/2025-09-14"}
@@ -46,7 +49,8 @@
     {"source": "takeout_chat", "external_id": "chat/space-aaaapogsokf/2026-06-09"},
     {"source": "ai_chats", "external_id": "chatgpt/229418d9-75ad-49c1-afe8-c8124c9f3a59/2026-04-23"},
     {"source": "fs", "path": "Travel/Iceland 2026/ring-road-plan.md"},
-    {"source": "takeout_tasks", "external_id": "tasks/23baee3eec035ee812e1d1"}
+    {"source": "takeout_tasks", "external_id": "tasks/23baee3eec035ee812e1d1"},
+    {"source": "gcal", "external_id": "mcastellanos@lakeshore.example.edu/mcastellanos@lakeshore.example.edu/630ab38c042d762bd5e565ec6c"}
    ]
   },
   {
@@ -59,7 +63,8 @@
     {"source": "email", "external_id": "mira/Archive/cur/1731111300.M5159540P10363.mira-laptop,S=646:2,S", "fingerprint": "c5fa136eb5e18d9a71c8da53cad78e875838f616"},
     {"source": "ai_chats", "external_id": "chatgpt/5c4dbab6-d64c-4e8c-a464-7e6b46510aff/2024-11-06"},
     {"source": "fs", "path": "School/Fall 2024/CS 341 Operating Systems/p3-thread-pool-design.md"},
-    {"source": "takeout_tasks", "external_id": "tasks/9a222129c1709925926e3d"}
+    {"source": "takeout_tasks", "external_id": "tasks/9a222129c1709925926e3d"},
+    {"source": "gcal", "external_id": "mcastellanos@lakeshore.example.edu/mcastellanos@lakeshore.example.edu/cb13ddf1a51559b41dd56025cd_20240826T140000Z"}
    ]
   },
   {
@@ -71,7 +76,8 @@
     {"source": "email", "external_id": "mira/Archive/cur/1727818200.M355251P30803.mira-laptop,S=592:2,S", "fingerprint": "27e6650cfd3ff91ad4a96bffffca6c0d4cd6e2f8"},
     {"source": "email", "external_id": "mira/Sent/cur/1730751000.M5275463P13474.mira-laptop,S=686:2,S", "fingerprint": "b2e1218eb9129cb08d4f3c06220971a6c1f0d110"},
     {"source": "ai_chats", "external_id": "chatgpt/36949681-0644-4082-a2d0-f4d6c4c70b16/2024-12-03"},
-    {"source": "fs", "path": "School/Fall 2024/ENVS 210 Freshwater Ecology/field-day-notes.md"}
+    {"source": "fs", "path": "School/Fall 2024/ENVS 210 Freshwater Ecology/field-day-notes.md"},
+    {"source": "gcal", "external_id": "mcastellanos@lakeshore.example.edu/mcastellanos@lakeshore.example.edu/5cafd6d3ee15a2d7fd50040407_20240827T170000Z"}
    ]
   },
   {
@@ -83,7 +89,8 @@
     {"source": "email", "external_id": "mira/Sent/cur/1740532500.M15841862P21810.mira-laptop,S=786:2,S", "fingerprint": "d4559f575e6c9355dec992f4c2bf849a01baea5a"},
     {"source": "email", "external_id": "mira/Sent/cur/1740778800.M3089725P3206.mira-laptop,S=1138:2,S", "fingerprint": "f411c5c2b30ee1180ba79a09ba70158cbe09067f"},
     {"source": "ai_chats", "external_id": "chatgpt/b8720ead-ac8a-4390-a007-5a6fbee1fb21/2025-02-25"},
-    {"source": "fs", "path": "School/Spring 2025/CS 375 Machine Learning/project-proposal.md"}
+    {"source": "fs", "path": "School/Spring 2025/CS 375 Machine Learning/project-proposal.md"},
+    {"source": "gcal", "external_id": "mcastellanos@lakeshore.example.edu/mcastellanos@lakeshore.example.edu/e537910435a8b540cb899aafe4_20250114T160000Z"}
    ]
   },
   {
@@ -94,7 +101,8 @@
    "must_include": [
     {"source": "email", "external_id": "mira/Sent/cur/1743693300.M5519086P65347.mira-laptop,S=597:2,S", "fingerprint": "abc695638213d539df8667347c5bb22f5a5cf8de"},
     {"source": "ai_chats", "external_id": "chatgpt/c972d8c8-c869-4161-abb7-9e0dce3369e5/2025-04-29"},
-    {"source": "fs", "path": "School/Spring 2025/CS 362 Database Systems/a3-optimizer-notes.md"}
+    {"source": "fs", "path": "School/Spring 2025/CS 362 Database Systems/a3-optimizer-notes.md"},
+    {"source": "gcal", "external_id": "mcastellanos@lakeshore.example.edu/mcastellanos@lakeshore.example.edu/1d0eb252a1f5481f012e099da6_20250113T190000Z"}
    ]
   },
   {
@@ -108,7 +116,8 @@
     {"source": "email", "external_id": "mira/Archive/cur/1764599400.M3480422P3227.mira-laptop,S=706:2,S", "fingerprint": "68beb7a5a1e5748c74b67f072640c845bd45e023"},
     {"source": "ai_chats", "external_id": "chatgpt/53863772-de64-40d5-aa81-f7ed8e154e31/2025-10-23"},
     {"source": "fs", "path": "School/Fall 2025/CS 452 Distributed Systems/raft-notes.md"},
-    {"source": "takeout_tasks", "external_id": "tasks/fe90358628834cbb5a1aa4"}
+    {"source": "takeout_tasks", "external_id": "tasks/fe90358628834cbb5a1aa4"},
+    {"source": "gcal", "external_id": "mcastellanos@lakeshore.example.edu/mcastellanos@lakeshore.example.edu/ba0f1c78bdfea0aa18b3cb6c66_20250826T183000Z"}
    ]
   },
   {
@@ -121,7 +130,8 @@
     {"source": "email", "external_id": "mira/Sent/cur/1768438800.M12638092P13303.mira-laptop,S=755:2,S", "fingerprint": "542681bc63f43ac372af227009b33f6d01c5a5aa"},
     {"source": "email", "external_id": "mira/Archive/cur/1771871400.M6043107P35101.mira-laptop,S=790:2,S", "fingerprint": "d525d200b0243a98829eadbd585afa441aa722fd"},
     {"source": "ai_chats", "external_id": "chatgpt/0a0923e6-7ee2-41b3-aae2-62140d512f9e/2026-02-19"},
-    {"source": "fs", "path": "School/Spring 2026/CS 481 Senior Capstone/harborline-design.md"}
+    {"source": "fs", "path": "School/Spring 2026/CS 481 Senior Capstone/harborline-design.md"},
+    {"source": "gcal", "external_id": "mcastellanos@lakeshore.example.edu/mcastellanos@lakeshore.example.edu/dccbd760747b6065b5fa846985_20260113T200000Z"}
    ]
   },
   {
@@ -135,7 +145,8 @@
     {"source": "email", "external_id": "mira/Sent/cur/1750266300.M7528360P40232.mira-laptop,S=687:2,S", "fingerprint": "80f9f7937e66ca79196f8963c3ff9c47aeaf693d"},
     {"source": "email", "external_id": "mira/Archive/cur/1751576400.M12379432P53919.mira-laptop,S=724:2,S", "fingerprint": "03faca0a7263039475f58dde1bb07d06d70422de"},
     {"source": "ai_chats", "external_id": "chatgpt/85466050-16c3-441c-a012-02370c537674/2025-06-19"},
-    {"source": "fs", "path": "Work/Northwind/heron-field-trial-log.md"}
+    {"source": "fs", "path": "Work/Northwind/heron-field-trial-log.md"},
+    {"source": "gcal", "external_id": "mcastellanos@lakeshore.example.edu/mcastellanos@lakeshore.example.edu/12031031b5a2e73f70ed2e5c3e_20250609T110000Z"}
    ]
   },
   {
@@ -150,7 +161,8 @@
     {"source": "email", "external_id": "mira/Archive/cur/1789412400.M9347510P51162.mira-laptop,S=1067:2,S", "fingerprint": "cf0b164310794a4a987c47e1556bf39f02f20cd2"},
     {"source": "ai_chats", "external_id": "chatgpt/90890c8e-fa3d-4a1d-ae7c-ce823a84be87/2025-02-10"},
     {"source": "fs", "path": "Projects/tidepool/README.md"},
-    {"source": "takeout_tasks", "external_id": "tasks/05996541a351b88bcaf5c6"}
+    {"source": "takeout_tasks", "external_id": "tasks/05996541a351b88bcaf5c6"},
+    {"source": "gcal", "external_id": "mcastellanos@lakeshore.example.edu/mcastellanos@lakeshore.example.edu/9017c887f9d8cc5eeed6811cf3"}
    ]
   }
 ]}
