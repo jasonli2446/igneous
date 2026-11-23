@@ -365,7 +365,7 @@ def test_undo_says_per_pair_whether_a_link_joins_it_again(db):
 
 
 def test_a_pair_is_answered_as_the_people_the_explorer_shows(db):
-    """A link from another address of a person is answered as that person, their identity head (#224)."""
+    """A link from another address of a person is answered as that person, their identity head."""
     person, thread, _chat, _derived, _only = _pair_graph(db)
     alias = db.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Person', 'pat@y.test', 'Pat') RETURNING id")
                        ).scalar_one()
