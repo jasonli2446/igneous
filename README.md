@@ -221,7 +221,10 @@ cd api && uv run igneous sync imessage --since-days 90 && uv run igneous pipelin
   rebuilds only the rows it owns (its extractor), stores paid model results with `llm.cache_store` as they arrive, and
   leaves corrections to the last step. `igneous pipeline --stage NAME` runs it alone, then publishes. The spine's edges
   (`spine`, `contacts`, `github`, `linkedin`) list their records in `spine_edge_support`, and a person or organization
-  the spine built stays while another stage's edge uses it.
+  the spine built stays while another stage's edge uses it. Set `source_item_id` (or `edge_evidence`) on what your
+  stage writes from a record: deleting the record deletes a node or edge it alone holds. On a node the spine built,
+  write only props it doesn't own (`SPINE_PROPS` in `graph/spine.py`): it recomputes its own from the records that
+  remain.
 
 ## Known gaps in the baseline
 

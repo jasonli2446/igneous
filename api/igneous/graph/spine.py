@@ -15,8 +15,11 @@ email filed in two folders, a Drive file two accounts see, a person in many mess
 and its `source_item_id` points at one of the records it is. An edge's interval spans what its records observed: a
 weekly series' attendance runs from the first occurrence to the last.
 
-Each batch writes every node once, with all its records' names and props merged, and classifies every record
-(item_class) in the same transaction. Replies come from the built graph: In-Reply-To names its parent by Message-ID,
+What each record says about a node (the name it gives, how strongly, and its props) is stored with its support row,
+and the node's name and props are recomputed from the records that support it whenever they change (`refresh`,
+SPINE_PROPS), so a changed or deleted record's description goes once no other record gives it, and the result is the
+same whatever order the records came in. Each batch writes every node once and classifies every record (item_class)
+in the same transaction. Replies come from the built graph: In-Reply-To names its parent by Message-ID,
 a quoted "Original Message" header names its parent by time, subject and sender (quoted.py), and mail with neither
 infers one within its thread. Each is recomputed for the messages and threads that changed, and so are the flags of
 the threads a batch touched.
@@ -33,7 +36,7 @@ from sqlalchemy.orm import Session
 
 from igneous.connectors.mac_contacts import norm_phone
 from igneous.graph import dirty, item_class, quoted
-from igneous.graph.identity import OWNER_KEY, card_keys
+from igneous.graph.identity import OWNER_KEY, OWNER_NAME, card_keys
 from igneous.graph.organizations import company_key
 
 BATCH = 1000
@@ -52,16 +55,63 @@ SPINE_TYPES = ("Message", "Thread", "Event", "File", "Folder", "Place")
 # Nodes that are one record (copies of one email, one file two accounts see): named by their record's own title.
 TITLED = ("Message", "File")
 
+# What the spine owns on a node it builds. Each record's contribution is stored with its support row
+# (spine_node_support: name, rank, props), and `refresh` recomputes the node from the records that remain:
+#   - its name, unless you renamed it (props.renamed) or another stage named it (props.named_by other than 'contacts'
+#     or 'linkedin'). While entity resolution shows the cluster's name there (props.shown_name), the spine's name
+#     waits in props.own_name, where resolve.own_name reads it. With no record naming it, a node shows its key.
+#   - props.named_by: 'contacts' or 'linkedin' when the name shown comes from your card or a LinkedIn connection.
+#   - the props below, by node type: each the latest supporting record's value (by occurred_at, then source and
+#     external id); one no remaining record gives is removed.
+SPINE_PROPS = {
+    "Message": ("source", "tool"),
+    "Thread": ("source", "tool", "group"),
+    "Person": ("email", "handle", "github_login", "linkedin_url", "position"),
+    "Event": ("series",),
+    "File": ("source", "path", "kind"),
+    "Folder": ("path", "kind", "source", "remote"),
+    "Place": ("address", "lat", "lng", "place_id"),
+    "Organization": ("source",),
+}
+# Props the spine sets only when it creates a node: the owner's mark (which the self stage keeps) and an
+# organization's kind (which the organizations stage decides for the organizations it makes).
+CREATION_PROPS = {"Person": ("self",), "Organization": ("kind",)}
+# Every other prop belongs to another stage and the spine never writes it: kind and service_reason (self_identity),
+# own_name and shown_name (resolve; the spine fills own_name only as said above), item_class, conversational and
+# hidden (item_class), renamed, hidden, original_name and merged_names (corrections), named_by 'profile' or 'user',
+# named_from and inferred_by (organizations), and any other.
+
+# How strongly a record names a node (spine_node_support.rank). A node shows the strongest name its records give;
+# among a card's, a LinkedIn connection's or a stated name, the latest record's; among header names, the one most
+# records give, then the longest; among the rest, the longest; ties alphabetically.
+RANK_CARD = 6      # your contact card's name for the identifier
+RANK_LINKEDIN = 5  # a LinkedIn connection's name
+RANK_STATED = 4    # what a record calls itself (the message or file it is) or states (a Drive folder's own name)
+RANK_HEADER = 3    # a display name mail headers give an address ("Jordan Lee")
+RANK_NAMED = 2     # any other name: a subject, a handle, an event title, X-From, an address's local part
+RANK_FALLBACK = 1  # a placeholder until a record names it: "(no subject)", "Me", "Drive folder"
+NAMED_BY = {RANK_CARD: "contacts", RANK_LINKEDIN: "linkedin"}
+
+
+@dataclass
+class _Support:
+    """What one record contributes to a node."""
+    represents: bool = False     # the node is this record (a message, a file, an event occurrence)
+    name: str | None = None
+    rank: int = 0
+    props: dict = field(default_factory=dict)
+
+    def offer(self, name: str, rank: int) -> None:
+        if (rank, len(name)) > (self.rank, len(self.name or "")):
+            self.name, self.rank = name, rank
+
 
 @dataclass
 class _Node:
     ord: int
-    name: str | None = None      # the best real name this batch's records give it (longest; the first on a tie)
-    fallback: str | None = None  # shown until a record gives a real name ("(no subject)", "Drive folder")
-    named: str | None = None     # a name a record states for it (a contact card's, a Drive folder's own); last wins
-    props: dict = field(default_factory=dict)
     sid: int | None = None       # the first record of this batch the node is
-    records: dict[int, bool] = field(default_factory=dict)  # supporting record -> the node is that record
+    created: dict = field(default_factory=dict)  # CREATION_PROPS, written only if this batch creates the node
+    records: dict[int, _Support] = field(default_factory=dict)  # supporting record -> its contribution
 
 
 @dataclass
@@ -127,27 +177,35 @@ class Builder:
             builder(self, item)
 
     def node(self, type_: str, key: str, name: str | None = None, props: dict | None = None, *,
-             record: bool = False, fallback: str | None = None, named: str | None = None) -> tuple[str, str]:
-        """The node (type, key), supported by the current record. `record`: the node is this record (a message, a
-        file, an event occurrence), so its source_item_id may point here."""
+             record: bool = False, rank: int = RANK_NAMED, fallback: str | None = None) -> tuple[str, str]:
+        """The node (type, key), supported by the current record, which names it `name` (as strongly as `rank`, or
+        `fallback` until a record names it) and gives it `props` (SPINE_PROPS, or CREATION_PROPS; a value of None
+        gives nothing). `record`: the node is this record (a message, a file, an event occurrence), so its
+        source_item_id may point here."""
         k = (type_, key)
         n = self.nodes.get(k)
         if n is None:
             n = self.nodes[k] = _Node(ord=len(self.nodes))
         rid = self.item.id
-        n.records[rid] = n.records.get(rid, False) or record
+        support = n.records.setdefault(rid, _Support())
+        support.represents |= record
         if record and n.sid is None:
             n.sid = rid
-        if record and name and type_ in TITLED:
-            named = name  # a message or file is called what its record calls it now
-        if name and name != key and (n.name is None or len(name) > len(n.name)):
-            n.name = name
-        if fallback and n.fallback is None:
-            n.fallback = fallback
-        if named:
-            n.named = named
-        if props:
-            n.props.update(props)
+        if record and type_ in TITLED:
+            rank = RANK_STATED  # a message or file is called what its record calls it
+        if name and name != key:
+            support.offer(name, rank)
+        if fallback:
+            support.offer(fallback, RANK_FALLBACK)
+        for prop, value in (props or {}).items():
+            if value is None:
+                continue
+            if prop in SPINE_PROPS.get(type_, ()):
+                support.props[prop] = value
+            elif prop in CREATION_PROPS.get(type_, ()):
+                n.created[prop] = value
+            else:
+                raise ValueError(f"the spine doesn't own {type_} prop {prop!r} (SPINE_PROPS, CREATION_PROPS)")
         return k
 
     def ref(self, type_: str, key: str) -> tuple[str, str]:
@@ -181,34 +239,46 @@ class Builder:
     # --- writing ------------------------------------------------------------------------------------------------
 
     def flush(self) -> None:
+        """Write the batch: new nodes, every node's supporting records with what each contributes, the names and
+        props that follow from them, then the edges."""
         s = self.s
         handles = list(self.nodes) + sorted(self.refs - set(self.nodes))
         ids = _node_ids(s, handles)
         fresh = [k for k in self.nodes if k not in ids]
         if fresh:
             for i, t, k in s.execute(INSERT_NODES, {"rows": _rows([
-                    {"ord": self.nodes[h].ord, "type": h[0], "key": h[1], "name": self.nodes[h].name,
-                     "named": self.nodes[h].named, "fallback": self.nodes[h].fallback, "props": self.nodes[h].props,
+                    {"ord": self.nodes[h].ord, "type": h[0], "key": h[1], "props": self.nodes[h].created,
                      "sid": self.nodes[h].sid} for h in fresh])}):
                 ids[(t, k)] = i
                 self.new.add(i)
             ids.update(_node_ids(s, [h for h in fresh if h not in ids]))  # built meanwhile by another run
-        known = [h for h in self.nodes if h in ids and ids[h] not in self.new]
-        if known:
-            s.execute(UPDATE_NODES, {"rows": _rows([
-                {"id": ids[h], "name": self.nodes[h].name, "named": self.nodes[h].named,
-                 "fallback": self.nodes[h].fallback, "props": self.nodes[h].props, "sid": self.nodes[h].sid}
-                for h in known])})
-        self.ids = ids
-        support = [(ids[h], rid, rep) for h, n in self.nodes.items() if h in ids for rid, rep in n.records.items()]
-        if support:
-            n_, r_, x_ = zip(*support, strict=True)
+        pointless = [(ids[h], n.sid) for h, n in self.nodes.items()
+                     if h in ids and ids[h] not in self.new and n.sid is not None]
+        if pointless:  # a node first built from records it isn't (a reply's parent, say) now has one it is
+            n_, sid_ = zip(*pointless, strict=True)
             s.execute(text("""
-                INSERT INTO spine_node_support (node_id, source_item_id, represents)
-                SELECT * FROM unnest(CAST(:n AS bigint[]), CAST(:r AS bigint[]), CAST(:x AS boolean[]))
-                ON CONFLICT (node_id, source_item_id) DO UPDATE
-                    SET represents = spine_node_support.represents OR EXCLUDED.represents
-            """), {"n": list(n_), "r": list(r_), "x": list(x_)})
+                UPDATE nodes n SET source_item_id = r.sid
+                FROM unnest(CAST(:n AS bigint[]), CAST(:sid AS bigint[])) AS r(id, sid)
+                WHERE n.id = r.id AND n.source_item_id IS NULL
+            """), {"n": list(n_), "sid": list(sid_)})
+        self.ids = ids
+        support = [(ids[h], rid, x) for h, n in self.nodes.items() if h in ids for rid, x in n.records.items()]
+        if support:
+            s.execute(text("""
+                INSERT INTO spine_node_support (node_id, source_item_id, represents, name, rank, props)
+                SELECT r.node_id, r.source_item_id, r.represents, r.name, r.rank, r.props
+                FROM jsonb_to_recordset(CAST(:rows AS jsonb))
+                    AS r(node_id bigint, source_item_id bigint, represents boolean, name text, rank smallint,
+                         props jsonb)
+                ON CONFLICT (node_id, source_item_id) DO UPDATE SET
+                    represents = spine_node_support.represents OR EXCLUDED.represents,
+                    name = CASE WHEN EXCLUDED.rank > spine_node_support.rank THEN EXCLUDED.name
+                                ELSE spine_node_support.name END,
+                    rank = GREATEST(spine_node_support.rank, EXCLUDED.rank),
+                    props = spine_node_support.props || EXCLUDED.props
+            """), {"rows": _rows([{"node_id": node, "source_item_id": rid, "represents": x.represents,
+                                   "name": x.name, "rank": x.rank, "props": x.props} for node, rid, x in support])})
+            refresh(s, sorted({node for node, _rid, _x in support}))
         self._flush_edges()
 
     def _flush_edges(self) -> None:
@@ -307,36 +377,81 @@ def _node_ids(s: Session, handles: list[tuple[str, str]]) -> dict[tuple[str, str
     """), {"t": [h[0] for h in handles], "k": [h[1] for h in handles]})}
 
 
+# A new node is named by its key until `refresh` names it from its records.
 INSERT_NODES = text("""
 INSERT INTO nodes (type, key, name, props, source_item_id)
-SELECT r.type, r.key, COALESCE(r.named, r.name, r.fallback, r.key), COALESCE(r.props, '{}'), r.sid
-FROM jsonb_to_recordset(CAST(:rows AS jsonb)) AS r(ord int, type text, key text, name text, named text, fallback text,
-                                                    props jsonb, sid bigint)
+SELECT r.type, r.key, r.key, COALESCE(r.props, '{}'), r.sid
+FROM jsonb_to_recordset(CAST(:rows AS jsonb)) AS r(ord int, type text, key text, props jsonb, sid bigint)
 ORDER BY r.ord
 ON CONFLICT (type, key) DO NOTHING
 RETURNING id, type, key
 """)
 
-# A node's name: your own rename stands; then a name a record states for it (a contact card's, a Drive folder's own);
-# a card's name is not replaced by anything less; otherwise a real name replaces the key or a placeholder, and a
-# longer name a shorter one ("J. Doe" -> "Jane Doe"). Props merge, later records winning per key. source_item_id keeps
-# the record it points at (settle moves it when that record stops being this node).
-UPDATE_NODES = text("""
-UPDATE nodes n SET name = v.name, props = v.props, source_item_id = v.sid
-FROM (
-    SELECT n.id,
-           CASE WHEN n.props->>'renamed' = 'true' THEN n.name
-                WHEN r.named IS NOT NULL THEN r.named
-                WHEN n.props->>'named_by' = 'contacts' OR r.name IS NULL THEN n.name
-                WHEN n.name = n.key OR n.name = r.fallback THEN r.name
-                WHEN length(r.name) > length(n.name) THEN r.name ELSE n.name END AS name,
-           n.props || COALESCE(r.props, '{}') AS props,
-           COALESCE(n.source_item_id, r.sid) AS sid
-    FROM jsonb_to_recordset(CAST(:rows AS jsonb)) AS r(id bigint, name text, named text, fallback text, props jsonb,
-                                                        sid bigint)
-    JOIN nodes n ON n.id = r.id) v
-WHERE n.id = v.id AND (n.name, n.props, n.source_item_id) IS DISTINCT FROM (v.name, v.props, v.sid)
+# The spine's name and props of each node, from the records that support it (see SPINE_PROPS and the ranks).
+REFRESH_NODES = text(f"""
+WITH s AS MATERIALIZED (
+    SELECT x.node_id, x.name, x.rank, x.props, si.occurred_at, si.source, si.external_id
+    FROM spine_node_support x JOIN source_items si ON si.id = x.source_item_id
+    WHERE x.node_id = ANY(CAST(:ids AS bigint[]))),
+stated AS (
+    SELECT DISTINCT ON (node_id) node_id, name, rank FROM s WHERE rank >= {RANK_STATED} AND name IS NOT NULL
+    ORDER BY node_id, rank DESC, occurred_at DESC NULLS LAST, source DESC, external_id DESC),
+header AS (
+    SELECT DISTINCT ON (node_id) node_id, name, rank
+    FROM (SELECT node_id, name, rank, count(*) AS records FROM s WHERE rank = {RANK_HEADER} AND name IS NOT NULL
+          GROUP BY node_id, name, rank) h
+    ORDER BY node_id, records DESC, length(name) DESC, name),
+other AS (
+    SELECT DISTINCT ON (node_id) node_id, name, rank FROM s WHERE rank < {RANK_HEADER} AND name IS NOT NULL
+    ORDER BY node_id, rank DESC, length(name) DESC, name),
+best AS (
+    SELECT DISTINCT ON (node_id) node_id, name, rank
+    FROM (SELECT * FROM stated UNION ALL SELECT * FROM header UNION ALL SELECT * FROM other) c
+    ORDER BY node_id, rank DESC),
+given AS (
+    SELECT node_id, jsonb_object_agg(k, v) AS props
+    FROM (SELECT DISTINCT ON (s.node_id, p.key) s.node_id, p.key AS k, p.value AS v
+          FROM s CROSS JOIN LATERAL jsonb_each(s.props) p
+          ORDER BY s.node_id, p.key, s.occurred_at DESC NULLS LAST, s.source DESC, s.external_id DESC) g
+    GROUP BY node_id),
+owned AS (SELECT * FROM jsonb_to_recordset(CAST(:owned AS jsonb)) AS o(type text, keys text[])),
+v AS (
+    SELECT n.id, n.name AS was,
+           COALESCE(best.name, CASE WHEN n.type = 'Person' AND n.key = :owner THEN :owner_name ELSE n.key END) AS name,
+           -- named_by is the spine's unless another stage set it; then so is the name, and a rename is yours
+           COALESCE(n.props->>'named_by', 'contacts') IN ('contacts', 'linkedin') AS ours,
+           COALESCE((n.props->>'renamed')::bool, false) AS renamed,
+           n.props ? 'shown_name' AND n.name = n.props->>'shown_name' AS shown,
+           CAST(:named_by AS jsonb)->>CAST(best.rank AS text) AS named_by,
+           (n.props - COALESCE(owned.keys, CAST('{{}}' AS text[]))) || COALESCE(given.props, '{{}}') AS props
+    FROM nodes n LEFT JOIN best ON best.node_id = n.id LEFT JOIN given ON given.node_id = n.id
+    LEFT JOIN owned ON owned.type = n.type
+    WHERE n.id = ANY(CAST(:ids AS bigint[]))),
+w AS (
+    SELECT id,
+           CASE WHEN ours AND NOT renamed AND NOT shown THEN name ELSE was END AS name,
+           CASE WHEN NOT ours THEN props
+                ELSE (props - 'named_by')
+                     || CASE WHEN named_by IS NULL THEN '{{}}' ELSE jsonb_build_object('named_by', named_by) END
+                     || CASE WHEN NOT renamed AND shown THEN jsonb_build_object('own_name', name) ELSE '{{}}' END
+           END AS props
+    FROM v)
+UPDATE nodes n SET name = w.name, props = w.props
+FROM w WHERE n.id = w.id AND (n.name, n.props) IS DISTINCT FROM (w.name, w.props)
 """)
+
+
+def refresh(s: Session, node_ids: list[int]) -> int:
+    """Recompute the spine's name and props of these nodes from the records that support them now: what a removed or
+    changed record contributed goes when no remaining record gives it. Nothing another stage owns is touched (see
+    SPINE_PROPS). Returns the number of nodes changed."""
+    if not node_ids:
+        return 0
+    return s.execute(REFRESH_NODES, {
+        "ids": node_ids, "owner": OWNER_KEY, "owner_name": OWNER_NAME,
+        "named_by": json.dumps({str(rank): by for rank, by in NAMED_BY.items()}),
+        "owned": json.dumps([{"type": t, "keys": list(keys)} for t, keys in SPINE_PROPS.items()]),
+    }).rowcount
 
 
 def span(s: Session, edge_ids: list[int]) -> None:
@@ -361,6 +476,18 @@ def _name_from(addr: dict, x_from: str | None) -> str:
             return clean
     local = addr["email"].split("@")[0]
     return " ".join(w.capitalize() for w in re.split(r"[._]", local) if w)
+
+
+TWO_WORDS = re.compile(r"[^\W\d_] [^\W\d_]")  # a letter, a space, a letter: "Jordan Lee", not "jlee" or "J."
+
+
+def _header_name(addr: dict, x_from: str | None = None) -> tuple[str, int]:
+    """The name a mail header gives an address and its rank: the display name when it reads as a person's (two
+    words, no address), else a weaker one (`_name_from`: a one-word name, X-From, the address's local part)."""
+    shown = (addr.get("name") or "").strip(' "')
+    if shown and "@" not in shown and TWO_WORDS.search(shown):
+        return shown, RANK_HEADER
+    return _name_from(addr, x_from), RANK_NAMED
 
 
 REPLY_PREFIX = re.compile(r"^\s*((re|fw|fwd)\s*:\s*)+", re.I)
@@ -426,11 +553,13 @@ def build_email(b: Builder, item) -> None:
     key = message_key(meta, item.id)
     mid = b.node("Message", key, item.title, {"source": item.source}, record=True, fallback="(no subject)")
     for addr in meta.get("from", [])[:1]:
-        sender = b.node("Person", addr["email"], _name_from(addr, meta.get("x_from")), {"email": addr["email"]})
+        name, rank = _header_name(addr, meta.get("x_from"))
+        sender = b.node("Person", addr["email"], name, {"email": addr["email"]}, rank=rank)
         b.edge(sender, mid, "SENT", item.occurred_at, record=True)
     for field_ in ("to", "cc", "bcc"):
         for addr in meta.get(field_, []):
-            recipient = b.node("Person", addr["email"], _name_from(addr, None), {"email": addr["email"]})
+            name, rank = _header_name(addr)
+            recipient = b.node("Person", addr["email"], name, {"email": addr["email"]}, rank=rank)
             b.edge(mid, recipient, "RECEIVED", item.occurred_at, record=True)
     tid = b.node("Thread", _thread_key(meta, item.title), REPLY_PREFIX.sub("", item.title or "").strip() or None,
                  fallback="(no subject)")
@@ -451,7 +580,7 @@ def build_chat(b: Builder, item) -> None:
                  {"source": "imessage", "group": bool(meta.get("group")) or len(meta.get("participants", [])) > 1},
                  fallback="chat")
     b.edge(mid, tid, "IN_THREAD", item.occurred_at, record=True)
-    me = b.node("Person", OWNER_KEY, None, {"self": True}, fallback="Me")
+    me = b.node("Person", OWNER_KEY, None, {"self": True}, fallback=OWNER_NAME)
     senders = set(meta.get("senders", []))
     members = {h.lower(): h for h in meta.get("participants", [])}
     # Everyone in the chat received the day's conversation, and whoever spoke also SENT it, so two members who both
@@ -479,7 +608,7 @@ def build_ai_chat(b: Builder, item) -> None:
     tid = b.node("Thread", f"ai-session:{tool}/{meta.get('session')}", (item.title or "").rsplit(" (", 1)[0] or None,
                  {"source": "ai_chats", "tool": tool}, fallback="AI session")
     b.edge(mid, tid, "IN_THREAD", item.occurred_at, record=True)
-    me = b.node("Person", OWNER_KEY, None, {"self": True}, fallback="Me")
+    me = b.node("Person", OWNER_KEY, None, {"self": True}, fallback=OWNER_NAME)
     b.edge(me, mid, "SENT", item.occurred_at, record=True)
     if meta.get("repo"):
         repo = b.node("Folder", f"repo:{meta['repo'].lower()}", meta["repo"], {"path": meta.get("cwd"), "kind": "repo"})
@@ -536,10 +665,9 @@ def build_contact(b: Builder, item) -> None:
     for k in keys:
         props = {"handle": k} if "@" not in k else {"email": k}
         if b.ctx.shared(k):
-            b.node("Person", k, None, {**props, "named_by": None}, named=k)
+            b.node("Person", k, None, props)
             continue
-        pid = b.node("Person", k, None, {**props, "named_by": "contacts"} if name else props, named=name)
-        linked.append(pid)
+        linked.append(b.node("Person", k, name, props, rank=RANK_CARD))
     for a, c in pairwise(linked):
         b.edge(a, c, "SAME_AS", record=True, extractor="contacts", confidence=1.0)
 
@@ -579,25 +707,24 @@ def build_linkedin(b: Builder, item) -> None:
     """Your LinkedIn export. The profile item is you: it names the owner node, and graph/profile.py reads its
     positions and schools. A connection names one human, keyed by the connection's email when the export has one
     (so it merges with mail identities by key), else by `linkedin:<profile slug>`; either way named by LinkedIn
-    (props.named_by='linkedin') and MEMBER_OF its company, keyed by the company's own name (`org:<slug>`, as your
-    resume's employers are), never by the connection's address. With an email, the profile identity
-    `linkedin:<slug>` is joined to the address by a trusted SAME_AS."""
+    unless your contact card names it (props.named_by='linkedin', RANK_LINKEDIN) and MEMBER_OF its company, keyed by
+    the company's own name (`org:<slug>`, as your resume's employers are), never by the connection's address. With
+    an email, the profile identity `linkedin:<slug>` is joined to the address by a trusted SAME_AS."""
     from igneous.connectors.linkedin import profile_slug
 
     meta = item.raw_meta
     if meta.get("kind") == "profile":
-        b.node("Person", OWNER_KEY, meta.get("person_name") or None, {"self": True}, fallback="Me")
+        b.node("Person", OWNER_KEY, meta.get("person_name") or None, {"self": True}, fallback=OWNER_NAME)
         return
     if meta.get("kind") != "connection" or not meta.get("name"):
         return
     name, email = meta["name"], (meta.get("email") or "").lower() or None
     slug = profile_slug(meta.get("url") or "")
-    props = {"named_by": "linkedin", "linkedin_url": meta.get("url"), "position": meta.get("position") or None}
-    props = {k: v for k, v in props.items() if v}
+    props = {"linkedin_url": meta.get("url") or None, "position": meta.get("position") or None}
     key = email or (f"linkedin:{slug}" if slug else f"linkedin:{item.external_id.split('/', 1)[-1]}")
-    pid = b.node("Person", key, name, {**props, **({"email": email} if email else {})}, record=True)
+    pid = b.node("Person", key, name, {**props, "email": email}, record=True, rank=RANK_LINKEDIN)
     if email and slug:
-        lid = b.node("Person", f"linkedin:{slug}", name, props, record=True)
+        lid = b.node("Person", f"linkedin:{slug}", name, props, record=True, rank=RANK_LINKEDIN)
         b.edge(lid, pid, "SAME_AS", record=True, extractor="linkedin", confidence=1.0)
     if company := company_key(meta.get("company")):
         oid = b.node("Organization", company[0], company[1], {"kind": "employer", "source": "linkedin"})
@@ -628,8 +755,8 @@ def build_file(b: Builder, item) -> None:
         names = item.raw_meta.get("parent_names") or {}
         for parent in parents:
             # The folder's own name, when Drive gave one, replaces the placeholder.
-            folder = b.node("Folder", f"{item.source}:drive/{parent}", None, {"path": f"drive/{parent}"},
-                            fallback="Drive folder", named=names.get(parent) or None)
+            folder = b.node("Folder", f"{item.source}:drive/{parent}", names.get(parent) or None,
+                            {"path": f"drive/{parent}"}, rank=RANK_STATED, fallback="Drive folder")
             b.edge(folder, fid, "CONTAINS")
         return
     child = fid
@@ -687,7 +814,7 @@ def build_takeout(b: Builder, item) -> None:
         b.edge(fid, b.ref("Event", event), "RELATED_TO", item.occurred_at, until=item.occurred_at, record=True)
     if item.source != "takeout_maps":
         return
-    me = b.node("Person", OWNER_KEY, None, {"self": True}, fallback="Me")
+    me = b.node("Person", OWNER_KEY, None, {"self": True}, fallback=OWNER_NAME)
     visited = meta.get("kind") == "visits"
     for v in meta.get("visits" if visited else "places", []):
         props = {k: v[k] for k in ("address", "lat", "lng", "place_id") if v.get(k) is not None}
@@ -921,6 +1048,7 @@ def settle(s: Session, cards: dict) -> dict:
         reread = sorted({sid for type_, sid in moved if sid is not None and type_ in ("Message", "File", "Event")})
         if reread:
             s.execute(text("UPDATE source_items SET chunked_hash = NULL WHERE id = ANY(:ids)"), {"ids": reread})
+        refresh(s, survivors)  # named and described by the records that remain
     kept = sorted(set(edge_q) - {g.id for g in gone})
     if kept:
         s.execute(text("""
@@ -962,14 +1090,10 @@ def settle(s: Session, cards: dict) -> dict:
 
 
 def _recheck_cards(s: Session, cards: dict) -> int:
-    """Make the identities contact cards name agree with the cards as they are now. A person no card names any more
-    loses the card's name. The cards carrying an identifier whose graph disagrees with them (named or linked by a card
-    while another person's card shares it, or unnamed while one card alone names it) are marked for rebuilding. Returns
-    how many cards were marked."""
-    s.execute(text("""
-        UPDATE nodes SET name = CASE WHEN props->>'renamed' = 'true' THEN name ELSE key END, props = props - 'named_by'
-        WHERE type = 'Person' AND props->>'named_by' = 'contacts' AND key <> ALL(:k)
-    """), {"k": sorted(k for k, on in cards.items() if any(on.values()))})
+    """Make the identities contact cards name and link agree with the cards as they are now. A card decides when it is
+    built whether another person's card shares an identifier; the cards carrying an identifier whose graph disagrees
+    with them (named or linked by a card while another person's card shares it, or unnamed while one card alone names
+    it) are marked for rebuilding. Returns how many cards were marked."""
     if not cards:
         return 0
     state = {r.key: (r.named, r.linked) for r in s.execute(text("""
@@ -991,32 +1115,6 @@ def _recheck_cards(s: Session, cards: dict) -> int:
     return s.execute(text("""
         UPDATE source_items SET spined_hash = NULL WHERE id = ANY(:ids) AND spined_hash = content_hash
     """), {"ids": sorted(stale)}).rowcount
-
-
-# --- names ---------------------------------------------------------------------------------------------------------
-
-NAME_FROM_HEADERS = text(r"""
-WITH seen AS (
-    SELECT lower(a->>'email') AS key, btrim(a->>'name', ' "') AS name
-    FROM source_items si,
-         LATERAL jsonb_array_elements(COALESCE(si.raw_meta->'from', '[]') || COALESCE(si.raw_meta->'to', '[]')
-                                      || COALESCE(si.raw_meta->'cc', '[]')) a
-    WHERE si.source IN ('gmail', 'email') AND COALESCE(a->>'name', '') <> ''
-), counted AS (
-    SELECT key, name, count(*) AS n FROM seen
-    WHERE name !~ '@' AND name ~ '[[:alpha:]] [[:alpha:]]' GROUP BY key, name
-), best AS (SELECT DISTINCT ON (key) key, name FROM counted ORDER BY key, n DESC, length(name) DESC, name)
-UPDATE nodes p SET name = best.name
-FROM best
-WHERE p.type = 'Person' AND p.key = best.key AND p.name IS DISTINCT FROM best.name
-  AND COALESCE(p.props->>'named_by', '') <> 'contacts' AND NOT COALESCE((p.props->>'renamed')::bool, false)
-""")
-
-
-def name_from_headers(s: Session) -> int:
-    """Name each address by what most mail calls it ("Jordan Lee" in 50 headers beats "J Lee" in 26),
-    whatever order items arrived in. A contact card or a user rename always wins."""
-    return s.execute(NAME_FROM_HEADERS).rowcount
 
 
 # --- the stage -----------------------------------------------------------------------------------------------------
@@ -1052,9 +1150,7 @@ def run(s: Session) -> int:
         rounds += 1
         if not settled["pending"] or rounds == RECHECKS:
             break
-    if built or deleted:
-        if built + deleted >= BATCH:
-            _analyze(s)
-        name_from_headers(s)  # each address's most common display name, across all mail
+    if built + deleted >= BATCH:
+        _analyze(s)
         s.commit()
     return built

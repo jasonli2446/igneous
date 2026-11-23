@@ -312,6 +312,154 @@ def test_a_nameless_card_names_nobody(db):
     assert len(edges(db, "SAME_AS")) == 1   # still one person's two addresses
 
 
+def described(s, key):
+    return tuple(s.execute(text("SELECT name, props FROM nodes WHERE key = :k"), {"k": key}).one())
+
+
+def test_a_shared_persons_name_and_props_follow_the_records_that_remain(db):
+    """Jane's mail headers call her "Jane Dee" twice and "Jane Q Dee" once, your card calls her "Janet Dee", and a
+    LinkedIn connection gives her name, profile and position. What a record gave goes with it once no other record
+    gives it; what other stages set stays."""
+    def note(n, name):
+        put(db, "gmail", f"acct/{n}", {"from": [{"email": "jane@x.test", "name": name}],
+                                       "to": [{"email": "me@x.test"}], "fingerprint": f"fp-{n}"},
+            f"Note {n}", T0 + timedelta(hours=n))
+
+    def connection(position):
+        put(db, "linkedin", "connection/jane", {"kind": "connection", "name": "Jane Q. Dee", "email": "jane@x.test",
+                                                "url": "https://www.linkedin.com/in/jane", "position": position},
+            "Jane Q. Dee")
+
+    for n, name in enumerate(("Jane Dee", "Jane Dee", "Jane Q Dee")):
+        note(n, name)
+    put(db, "gcontacts", "acct/people/1", {"emails": ["jane@x.test"]}, "Janet Dee")
+    connection("CTO")
+    spine.run(db)
+    db.execute(text("""UPDATE nodes SET props = props || '{"kind": "service", "hidden": true}'
+                       WHERE key = 'jane@x.test'"""))   # what other stages decide about her
+    linkedin = {"linkedin_url": "https://www.linkedin.com/in/jane"}
+    theirs = {"email": "jane@x.test", "kind": "service", "hidden": True}
+    assert described(db, "jane@x.test") == ("Janet Dee", {**theirs, **linkedin, "position": "CTO",
+                                                          "named_by": "contacts"})
+    put(db, "gcontacts", "acct/people/1", {"emails": ["jane@x.test"]}, "Janet D. Dee")   # updates
+    connection("CEO")
+    spine.run(db)
+    assert described(db, "jane@x.test") == ("Janet D. Dee", {**theirs, **linkedin, "position": "CEO",
+                                                             "named_by": "contacts"})
+    gone(db, "gcontacts", "acct/people/1")
+    spine.run(db)
+    assert described(db, "jane@x.test") == ("Jane Q. Dee", {**theirs, **linkedin, "position": "CEO",
+                                                            "named_by": "linkedin"})
+    gone(db, "linkedin", "connection/jane")
+    spine.run(db)
+    assert described(db, "jane@x.test") == ("Jane Dee", theirs)   # what most headers call her
+    note(0, "Jane Q Dee")
+    spine.run(db)
+    assert described(db, "jane@x.test")[0] == "Jane Q Dee"
+    gone(db, "gmail", "acct/0")
+    gone(db, "gmail", "acct/2")
+    spine.run(db)
+    assert described(db, "jane@x.test") == ("Jane Dee", theirs)
+    legal(db)
+
+
+def test_a_series_is_named_and_described_by_the_occurrences_that_remain(db):
+    """A weekly book club: one occurrence is renamed, the last one isn't recurring, and only the third names Ann."""
+    def meeting(n, title, recurring=True, ann="Ann"):
+        put(db, "gcal", f"acct/cal/club_{n}", {
+            "event_key": "gcal:club", "series_key": "acct/cal/club", "recurring": recurring,
+            "attendees": [{"email": "ann@x.test", "name": ann, "response": "accepted"}]}, title,
+            T0 + timedelta(days=7 * n))
+
+    for n in range(3):
+        meeting(n, "Book club", ann="Ann Lee" if n == 2 else "")
+    spine.run(db)
+    assert described(db, "gcal:club") == ("Book club", {"series": True})
+    assert described(db, "ann@x.test")[0] == "Ann Lee"
+    meeting(1, "Book club: Middlemarch")
+    meeting(3, "Book club (final)", recurring=False)
+    spine.run(db)
+    assert described(db, "gcal:club") == ("Book club: Middlemarch", {"series": False})
+    gone(db, "gcal", "acct/cal/club_1")
+    gone(db, "gcal", "acct/cal/club_3")
+    gone(db, "gcal", "acct/cal/club_2")
+    spine.run(db)
+    assert described(db, "gcal:club") == ("Book club", {"series": True})
+    assert described(db, "ann@x.test")[0] == "Ann"   # from her address, as the occurrence left names her
+    legal(db)
+
+
+def test_names_and_props_another_stage_owns_stay_its_own(db):
+    """Your rename stands; a company your resume named keeps that name; while resolution shows a cluster's name on
+    Sam, the name his records give him waits in own_name."""
+    put(db, "linkedin", "connection/kim", {"kind": "connection", "name": "Kim Wu", "company": "Globex",
+                                           "url": "https://www.linkedin.com/in/kim"}, "Kim Wu")
+    mail(db, 1, "pat@x.test", ["sam@x.test"], "Hi", x_from="Pat Ames")
+    spine.run(db)
+    db.execute(text("""UPDATE nodes SET name = 'Patty', props = props || '{"renamed": true}' WHERE key = 'pat@x.test';
+                       UPDATE nodes SET name = 'Globex Corporation', props = props || '{"named_by": "profile"}'
+                           WHERE key = 'org:globex';
+                       UPDATE nodes SET name = 'Samuel Ito',
+                           props = props || '{"shown_name": "Samuel Ito", "own_name": "Sam"}'
+                           WHERE key = 'sam@x.test'"""))
+    put(db, "linkedin", "connection/kim", {"kind": "connection", "name": "Kim Wu", "company": "Globex",
+                                           "url": "https://www.linkedin.com/in/kim-wu"}, "Kim Wu")
+    put(db, "email", "box/inbox/1", {"from": [{"email": "pat@x.test"}], "to": [{"email": "sam@x.test",
+                                                                                "name": "Sam Ito"}],
+                                     "fingerprint": "fp-1", "x_from": "Patricia Ames"}, "Hi", T0 + timedelta(hours=1))
+    spine.run(db)
+    assert described(db, "pat@x.test") == ("Patty", {"email": "pat@x.test", "renamed": True})
+    assert described(db, "org:globex") == ("Globex Corporation", {"kind": "employer", "source": "linkedin",
+                                                                  "named_by": "profile"})
+    assert described(db, "sam@x.test") == ("Samuel Ito", {"email": "sam@x.test", "shown_name": "Samuel Ito",
+                                                           "own_name": "Sam Ito"})
+    gone(db, "linkedin", "connection/kim")
+    db.execute(text("INSERT INTO edges (src, dst, type, extractor) SELECT p.id, o.id, 'WORKED_AT', 'organizations' "
+                    "FROM nodes p, nodes o WHERE p.key = 'pat@x.test' AND o.key = 'org:globex'"))
+    spine.run(db)   # the company stays for the stage that uses it, without what LinkedIn said about it
+    assert described(db, "org:globex") == ("Globex Corporation", {"kind": "employer", "named_by": "profile"})
+
+
+def test_a_deleted_record_takes_what_other_stages_hung_off_it_alone(db):
+    """Extraction's commitment and mention from one message go with it, as a derived edge goes once none of its
+    evidence is left. One with evidence from another record, or beyond any record, stays; so do your corrections."""
+    first = mail(db, 1, "ann@x.test", ["bo@x.test"], "Plans")
+    second = mail(db, 2, "bo@x.test", ["ann@x.test"], "Re: Plans")
+    spine.run(db)
+    ids = dict(db.execute(text("SELECT key, id FROM nodes")).all())
+    ids |= dict(db.execute(text("""
+        INSERT INTO nodes (type, key, name, source_item_id) VALUES
+            ('Commitment', 'commitment:1', 'Send the deck', :m), ('Organization', 'acme.test', 'Acme', NULL),
+            ('Project', 'project:plans', 'Plans', NULL)
+        RETURNING key, id"""), {"m": first}).all())
+
+    def edge(a, b, type_, extractor, sid, evidence=()):
+        e = db.execute(text("INSERT INTO edges (src, dst, type, extractor, source_item_id) VALUES (:a, :b, :t, :x, :s) "
+                            "RETURNING id"), {"a": ids[a], "b": ids[b], "t": type_, "x": extractor, "s": sid})
+        e = e.scalar_one()
+        for ev in evidence:
+            db.execute(text("INSERT INTO edge_evidence (edge_id, source_item_id, kind) VALUES (:e, :s, 'test')"),
+                       {"e": e, "s": ev})
+        return e
+
+    edge("fp-1", "commitment:1", "HAS_COMMITMENT", "relationship-history", first)
+    edge("fp-1", "acme.test", "MENTIONS", "llm-extract", first)
+    both = edge("ann@x.test", "acme.test", "WORKED_AT", "organizations", first, evidence=(first, second))
+    only = edge("bo@x.test", "acme.test", "WORKED_AT", "organizations", None, evidence=(first,))
+    beyond = edge("ann@x.test", "project:plans", "INVOLVED_IN", "entities", first, evidence=(first, None))
+    yours = edge("bo@x.test", "project:plans", "INVOLVED_IN", "user", first)
+    gone(db, "email", "box/inbox/1")
+    assert keys(db, "Commitment") == set()
+    assert {r.id: (r.source_item_id, r.evidence) for r in db.execute(text("""
+        SELECT e.id, e.source_item_id, array_agg(ev.source_item_id ORDER BY ev.source_item_id) AS evidence
+        FROM edges e LEFT JOIN edge_evidence ev ON ev.edge_id = e.id
+        WHERE e.extractor NOT IN ('spine', 'spine-quoted', 'spine-inferred') GROUP BY e.id"""))} == {
+        both: (second, [second]), beyond: (None, [None]), yours: (None, [None])}
+    assert only not in (both, beyond, yours)
+    spine.run(db)
+    legal(db)
+
+
 # --- replies -----------------------------------------------------------------------------------------------------------
 
 def gmail(s, n, frm, to, title, **meta):

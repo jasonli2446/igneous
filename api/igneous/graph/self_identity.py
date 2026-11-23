@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 from igneous.connectors.mac_contacts import SOURCES as CONTACT_DBS
 from igneous.connectors.mac_contacts import norm_phone
 from igneous.graph import identity
-from igneous.graph.identity import OWNER_KEY, self_id
+from igneous.graph.identity import OWNER_KEY, OWNER_NAME, self_id
 from igneous.graph.organizations import PERSONAL_DOMAINS
 
 EXTRACTOR = "self"
@@ -222,9 +222,9 @@ def run(s: Session) -> dict:
     """), {"me": me}).scalar()
     if found or built:
         me = s.execute(text("""
-            INSERT INTO nodes (type, key, name, props) VALUES ('Person', :me, 'Me', '{"self": true}')
+            INSERT INTO nodes (type, key, name, props) VALUES ('Person', :me, :name, '{"self": true}')
             ON CONFLICT (type, key) DO UPDATE SET props = nodes.props || '{"self": true}' RETURNING id
-        """), {"me": OWNER_KEY}).scalar_one()
+        """), {"me": OWNER_KEY, "name": OWNER_NAME}).scalar_one()
         for node, signals in found.items():
             a, b = sorted((me, node))
             s.execute(text("""

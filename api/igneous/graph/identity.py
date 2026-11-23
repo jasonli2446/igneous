@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 OWNER_KEY = "me"
+OWNER_NAME = "Me"  # the owner's name until a source names you
 # SAME_AS links that are ground truth, which entity resolution never second-guesses: your identity signals, contact
 # cards, your corrections, a commit's verified email, a LinkedIn connection's address.
 TRUSTED = ("self", "contacts", "user", "github", "linkedin")
