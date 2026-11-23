@@ -325,11 +325,7 @@ def test_extraction_reads_only_opted_in_messages(graph, monkeypatch):
     from igneous.graph import extract
 
     monkeypatch.setattr(extract, "MIN_CHARS", 20)  # the fixture's messages are short
-    with SessionLocal() as s:  # inbox labels on both sources: only the opt-in tells the texts apart
-        s.execute(text("""UPDATE source_items SET raw_meta = '{"labels": ["INBOX"]}'
-                          WHERE source IN ('gmail', 'imessage')"""))
-        s.commit()
-    rec = _record_prompts(monkeypatch, "gmail")
+    rec = _record_prompts(monkeypatch, "gmail")  # emails and texts alike carry no labels: only the opt-in tells them apart
     with SessionLocal() as s:
         extract.run(s, limit=50, log=lambda *_: None)
     assert len(rec.prompts) == 9 and all("Atlas" in p or "Same Sam" in p for p in rec.prompts)
