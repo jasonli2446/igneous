@@ -355,7 +355,7 @@ def _as_drawn(s: Session, node: dict) -> tuple[list[int], dict[int, int]]:
     since what is placed under the organization hangs on its thread."""
     ids = identity.members(s, node["id"])
     thread = (node["props"] or {}).get("thread") if node["type"] == "Organization" else None
-    return (ids + [int(thread)], {int(thread): node["id"]}) if thread else (ids, {})
+    return ([*ids, int(thread)], {int(thread): node["id"]}) if thread else (ids, {})
 
 
 def explain(s: Session, a: int, b: int, limit: int = 8, named: dict[str, str] | None = None) -> dict:
