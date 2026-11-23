@@ -1,9 +1,13 @@
 import json
 from contextlib import nullcontext
+from datetime import UTC, datetime
 
+from sqlalchemy import text
 from typer.testing import CliRunner
 
 from igneous.graph import invariants
+
+WHEN = datetime(2025, 3, 1, 12, tzinfo=UTC)
 
 
 def test_endpoint_violations_reject_illegal_and_derived_edges():
@@ -21,27 +25,29 @@ def test_endpoint_violations_reject_illegal_and_derived_edges():
     assert violations[1].message == "CORRESPONDS is not a persisted edge type"
 
 
-def test_message_cardinality_reports_each_failed_constraint():
+def test_message_participants_come_from_each_records_own_headers():
+    mail = {"from": [{"email": "a@x.test"}], "to": [{"email": "b@x.test"}], "cc": [{"email": "c@x.test"}]}
     violations = invariants.message_cardinality_violations([
-        {"id": 10, "source": "email", "sent_count": 0, "received_count": 0},
-        {"id": 11, "source": "email", "sent_count": 2, "received_count": 1},
-        {"id": 12, "source": "imessage", "sent_count": 2, "received_count": 3},
-        {"id": 13, "source": "imessage", "sent_count": 0, "received_count": 1},
+        {"id": 10, "source": "email", "metas": [mail], "sent": ["a@x.test"], "received": ["b@x.test", "c@x.test"]},
+        # Mail with no To or Cc has no recipient: legal, not a violation.
+        {"id": 11, "source": "email", "metas": [{"from": [{"email": "a@x.test"}]}], "sent": ["a@x.test"],
+         "received": []},
+        {"id": 12, "source": "email", "metas": [mail], "sent": [], "received": ["b@x.test"]},
+        {"id": 13, "source": "imessage", "metas": [{"participants": ["6145551234"], "senders": ["6145551234", "me"]}],
+         "sent": ["+16145551234", "me"], "received": ["+16145551234", "me"]},
         # An AI session is you talking to an assistant: nobody receives it. GitHub activity isn't checked.
-        {"id": 14, "source": "ai_chats", "sent_count": 1, "received_count": 0},
-        {"id": 15, "source": "ai_chats", "sent_count": 2, "received_count": 0},
-        {"id": 16, "source": "github", "sent_count": 3, "received_count": 0},
+        {"id": 14, "source": "ai_chats", "metas": [{}], "sent": ["me"], "received": []},
+        {"id": 15, "source": "github", "metas": [{"author": {"login": "sam"}}], "sent": ["github:sam", "github:pat"],
+         "received": []},
+        {"id": 16, "source": "email", "metas": None, "sent": [], "received": []},  # a phantom, reported elsewhere
     ])
 
     assert [(v.code, v.node_id) for v in violations] == [
-        ("message_sent_cardinality", 10),
-        ("message_received_cardinality", 10),
-        ("message_sent_cardinality", 11),
-        ("message_sent_cardinality", 13),
-        ("message_sent_cardinality", 15),
+        ("message_sent_cardinality", 12),
+        ("message_received_cardinality", 12),
     ]
-    assert violations[0].details == {"sent_count": 0, "expected": 1}
-    assert violations[3].details == {"sent_count": 0, "minimum": 1}
+    assert violations[0].details == {"missing": ["a@x.test"], "unexpected": []}
+    assert violations[1].details == {"missing": ["c@x.test"], "unexpected": []}
 
 
 def test_edges_the_code_writes_on_purpose_are_legal():
@@ -53,21 +59,28 @@ def test_edges_the_code_writes_on_purpose_are_legal():
     assert invariants.endpoint_violations(rows) == []
 
 
-def test_a_spine_build_of_every_message_source_passes_check_graph(test_db):
-    """The checker and the spine agree: one record of each kind, built for real, is a legal graph (#181)."""
-    from datetime import UTC, datetime
+def _put(s, source, external_id, title, meta, when=WHEN, body="body"):
+    return s.execute(text("""
+        INSERT INTO source_items (source, external_id, content_hash, title, body_text, raw_meta, occurred_at)
+        VALUES (:s, :e, :e, :t, :b, CAST(:m AS jsonb), :w) RETURNING id"""),
+        {"s": source, "e": external_id, "t": title, "b": body, "m": json.dumps(meta), "w": when}).scalar_one()
 
-    from sqlalchemy import text
 
-    from igneous.db import SessionLocal
-    from igneous.graph import spine
+def test_a_spine_build_of_every_message_source_passes_check_graph(db):
+    """The checker and the spine agree: one record of each kind, built for real, is a legal graph, including mail
+    nobody was addressed to."""
+    from igneous.graph import resolve, self_identity, spine
 
-    when = datetime(2025, 3, 1, 12, tzinfo=UTC)
     items = [
         ("gmail", "g1", "Plans", {"from": [{"email": "sam@x.test", "name": "Sam"}], "to": [{"email": "me@x.test"}],
-                                  "message_id": "<g1@x.test>", "gmail_thread_id": "t1"}),
-        ("email", "e1", "Re: Plans", {"from": [{"email": "me@x.test"}], "to": [{"email": "sam@x.test"}],
-                                      "message_id": "<e1@x.test>", "fingerprint": "fp-e1"}),
+                                  "message_id": "<g1@x.test>", "gmail_thread_id": "t1", "fingerprint": "fp-g1"}),
+        ("gmail", "g2", "Re: Plans", {"from": [{"email": "me@x.test"}], "to": [{"email": "sam@x.test"}],
+                                      "message_id": "<g2@x.test>", "in_reply_to": "<g1@x.test>",
+                                      "gmail_thread_id": "t1", "fingerprint": "fp-g2", "labels": ["SENT"]}),
+        ("email", "box/inbox/1", "Re: Plans", {"from": [{"email": "me@x.test"}], "to": [{"email": "sam@x.test"}],
+                                              "message_id": "<e1@x.test>", "fingerprint": "fp-e1"}),
+        ("email", "box/inbox/2", "Memo", {"from": [{"email": "sam@x.test"}], "message_id": "<e2@x.test>",
+                                         "fingerprint": "fp-e2"}),
         ("imessage", "c1/2025-03-01", "Pat", {"chat": "c1", "participants": ["+15550001111"],
                                               "senders": ["+15550001111", "me"]}),
         ("takeout_chat", "g/2025-03-01", "Chat", {"group": "g", "participants": ["a@x.test", "me@x.test"],
@@ -77,26 +90,72 @@ def test_a_spine_build_of_every_message_source_passes_check_graph(test_db):
                                                "author": {"login": "sam"}, "comments": [{"login": "pat"}]}),
         ("gcal", "cal/ev1", "Review", {"attendees": [{"email": "sam@x.test", "response": "accepted"}],
                                        "organizer": {"email": "me@x.test"}}),
+        ("gcontacts", "acct/people/1", "Sam Lee", {"emails": ["sam@x.test"], "phones": ["+15550001111"]}),
         ("fs", "home/notes/a.txt", "a.txt", {"path": "home/notes/a.txt", "folders": ["home", "home/notes"]}),
         ("takeout_maps", "visits/2025-03-01", "Visits", {"kind": "visits", "visits": [
-            {"key": "place:1", "name": "Cafe", "start": when.isoformat()}]}),
+            {"key": "place:1", "name": "Cafe", "start": WHEN.isoformat()}]}),
     ]
-    with SessionLocal() as s:
-        s.execute(text("TRUNCATE source_items, nodes, edges, edge_evidence, chunks, canonical, "
-                       "dirty_nodes, dirty_rebuild RESTART IDENTITY CASCADE"))
-        for source, external_id, title, meta in items:
-            s.execute(text("""
-                INSERT INTO source_items (source, external_id, content_hash, title, body_text, raw_meta, occurred_at)
-                VALUES (:s, :e, :e, :t, 'body', CAST(:m AS jsonb), :w)"""),
-                      {"s": source, "e": external_id, "t": title, "m": json.dumps(meta), "w": when})
-        s.commit()
-        assert spine.run(s) == len(items)
-        types = set(s.execute(text("SELECT DISTINCT n.props->>'source' FROM nodes n WHERE n.type = 'Message'")).scalars())
-        assert {"gmail", "email", "imessage", "takeout_chat", "ai_chats", "github"} <= types
-        assert [v.as_dict() for v in invariants.check_graph(s)] == []
-        s.execute(text("TRUNCATE source_items, nodes, edges, edge_evidence, chunks, canonical, "
-                       "dirty_nodes, dirty_rebuild RESTART IDENTITY CASCADE"))
-        s.commit()
+    for source, external_id, title, meta in items:
+        _put(db, source, external_id, title, meta)
+    assert spine.run(db) == len(items)
+    self_identity.run(db)
+    resolve.refresh_canonical(db)
+    sources = set(db.execute(text("SELECT DISTINCT props->>'source' FROM nodes WHERE type = 'Message'")).scalars())
+    assert {"gmail", "email", "imessage", "takeout_chat", "ai_chats", "github"} <= sources
+    assert [v.as_dict() for v in invariants.check_graph(db)] == []
+
+
+def _codes(s):
+    return sorted((v.code, v.node_id or v.edge_id) for v in invariants.check_graph(s)
+                  if v.code not in ("message_received_cardinality", "message_sent_cardinality"))
+
+
+def test_check_graph_reports_what_the_spine_never_builds(db):
+    def node(type_, key, props=None):
+        return db.execute(text("INSERT INTO nodes (type, key, name, props) VALUES (:t, :k, :k, CAST(:p AS jsonb)) "
+                               "RETURNING id"), {"t": type_, "k": key, "p": json.dumps(props or {})}).scalar_one()
+
+    def edge(a, b, type_, extractor="spine"):
+        return db.execute(text("INSERT INTO edges (src, dst, type, extractor) VALUES (:a, :b, :t, :x) RETURNING id"),
+                          {"a": a, "b": b, "t": type_, "x": extractor}).scalar_one()
+
+    phantom = node("Message", "<never-ingested@x.test>")       # a reply parent no record holds, in no thread
+    a, b = node("Person", "a@x.test"), node("Person", "b@x.test")
+    backwards = edge(b, a, "SAME_AS", "er")                     # stored src > dst, and canonical never formed
+    unsupported = edge(a, phantom, "SENT")                      # a spine edge no record supports
+    _put(db, "myspace", "1", "?", {})                           # a source the catalog doesn't know
+    assert _codes(db) == sorted([
+        ("canonical_missing", a), ("canonical_missing", b), ("message_without_thread", phantom),
+        ("phantom_message", phantom), ("same_as_malformed", backwards), ("spine_edge_unsupported", unsupported),
+        ("unknown_source", None)])
+
+
+def test_canonical_must_be_the_clusters_same_as_forms(db):
+    from igneous.graph import resolve
+
+    def person(key, name):
+        return db.execute(text("INSERT INTO nodes (type, key, name) VALUES ('Person', :k, :n) RETURNING id"),
+                          {"k": key, "n": name}).scalar_one()
+
+    def link(a, b, extractor):
+        return db.execute(text("INSERT INTO edges (src, dst, type, extractor) VALUES (:a, :b, 'SAME_AS', :x) "
+                               "RETURNING id"), {"a": min(a, b), "b": max(a, b), "x": extractor}).scalar_one()
+
+    liz, larry, taylor = person("liz@x.test", "Liz Taylor"), person("larry@x.test", "Larry Taylor"), \
+        person("taylor@x.test", "Taylor")
+    jo, jo2 = person("jo@x.test", "Jo Park"), person("jpark@x.test", "Jo Park")
+    link(liz, taylor, "er")
+    refused = link(larry, taylor, "er")   # would put Liz and Larry in one cluster: resolution refuses it
+    link(jo, jo2, "user")
+    resolve.refresh_canonical(db, commit=False)
+    assert _codes(db) == []               # canonical is exactly what SAME_AS forms, refusals included
+
+    db.execute(text("DELETE FROM canonical WHERE node_id = :n"), {"n": jo2})
+    db.execute(text("UPDATE canonical SET canonical_id = :n WHERE node_id = :n"), {"n": jo2})
+    db.execute(text("INSERT INTO canonical (node_id, canonical_id) VALUES (:n, :n)"), {"n": jo2})
+    trusted = db.execute(text("SELECT id FROM edges WHERE extractor = 'user'")).scalar_one()
+    assert ("canonical_split", trusted) in _codes(db)       # a link you stated, kept apart
+    assert ("canonical_split", refused) not in _codes(db)
 
 
 def test_replies_thread_violations_include_edge_endpoints():
@@ -107,44 +166,12 @@ def test_replies_thread_violations_include_edge_endpoints():
     assert violation.details == {"src": 11, "dst": 12}
 
 
-def test_check_graph_runs_all_read_only_checks():
-    class Result:
-        def __init__(self, rows):
-            self.rows = rows
-
-        def mappings(self):
-            return self.rows
-
-    class Session:
-        def __init__(self):
-            self.rows = {
-                str(invariants._ENDPOINT_ROWS): [{"id": 1, "type": "SENT", "src_type": "Person", "dst_type": "Message"}],
-                str(invariants._MESSAGE_CARDINALITIES): [{"id": 2, "source": "email", "sent_count": 1, "received_count": 0}],
-                str(invariants._REPLIES_OUTSIDE_THREAD): [{"id": 3, "src": 2, "dst": 4}],
-            }
-
-        def execute(self, statement):
-            return Result(self.rows[str(statement)])
-
-    violations = invariants.check_graph(Session())
-
-    assert [v.code for v in violations] == ["message_received_cardinality", "reply_crosses_threads"]
-
-
-def test_cardinality_and_thread_queries_skip_expected_partial_messages():
-    assert "m.source_item_id IS NOT NULL" in str(invariants._MESSAGE_CARDINALITIES)
-    replies_query = str(invariants._REPLIES_OUTSIDE_THREAD)
-    assert "child.source_item_id IS NOT NULL" in replies_query
-    assert "parent.source_item_id IS NOT NULL" in replies_query
-    assert "r.extractor <> 'spine-quoted'" in replies_query
-
-
 def test_check_graph_cli_prints_json_violations_and_fails(monkeypatch):
     from igneous import cli
 
     monkeypatch.setattr(cli, "SessionLocal", lambda: nullcontext(object()))
     monkeypatch.setattr(invariants, "check_graph", lambda session: [invariants.Violation(
-        code="message_sent_cardinality", message="Message has 0 SENT edges; expected exactly 1", node_id=9,
+        code="message_sent_cardinality", message="Message has 0 senders; its records name 1", node_id=9,
     )])
 
     result = CliRunner().invoke(cli.app, ["check-graph"])
@@ -152,6 +179,6 @@ def test_check_graph_cli_prints_json_violations_and_fails(monkeypatch):
     assert result.exit_code == 1
     assert json.loads(result.output) == {
         "code": "message_sent_cardinality",
-        "message": "Message has 0 SENT edges; expected exactly 1",
+        "message": "Message has 0 senders; its records name 1",
         "node_id": 9,
     }
