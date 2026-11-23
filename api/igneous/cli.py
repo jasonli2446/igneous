@@ -15,24 +15,27 @@ schedule_app = typer.Typer(no_args_is_help=True, help="macOS: sync the sources y
                                                       "graph every 30 minutes.")
 app.add_typer(schedule_app, name="schedule")
 
-# Commands that never open the database (the schedule group checks in `schedule run`, the one that does).
-NO_DATABASE = {"synthetic-corpus", "verify-synthetic-corpus", "schedule"}
-
 
 @app.callback()
-def main(ctx: typer.Context):
-    """Build and query your personal knowledge graph. Every command reads the database IGNEOUS_DATABASE_URL names
+def main():
+    """Build and query your personal knowledge graph. Commands read the database IGNEOUS_DATABASE_URL names
     (api/.env); run `igneous COMMAND --help` for one command."""
-    if ctx.invoked_subcommand not in NO_DATABASE:
-        _require_schema()
 
 
 def _require_schema() -> None:
+    """Exit (code 2) with what to run when the database isn't at the code's migration head."""
     from igneous.db import schema_status
 
     if problem := schema_status():
         typer.echo(f"igneous: {problem}", err=True)
         raise typer.Exit(code=2)
+
+
+def session():
+    """A session on the database, once it is at the code's migration head. Every command opens the database through
+    it, so help and the commands that never touch the database work whatever its schema."""
+    _require_schema()
+    return SessionLocal()
 
 
 @schedule_app.command("install")
@@ -111,7 +114,7 @@ def sync(source: str = typer.Argument(..., metavar="SOURCE", help=SOURCE_HELP),
         sources.check_options(source, opts, account)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
-    with SessionLocal() as s:
+    with session() as s:
         try:
             result = sources.sync(source, s, account, opts, progress=_counter(), limit=limit)
         except sources.SetupNeeded as e:
@@ -145,7 +148,7 @@ def import_takeout(paths: list[Path] = typer.Argument(None, help="Takeout .zip f
     except takeout.TakeoutError as e:
         raise typer.BadParameter(str(e)) from e
     t = time.time()
-    with SessionLocal() as s:
+    with session() as s:
         result = takeout.run_import(s, resolved, lambda p, force=False: print(
             f"\r  {p.get('items', 0)}/{p['items_total']} items" if "items_total" in p else "", end="", flush=True))
     print()
@@ -166,7 +169,7 @@ def import_linkedin(paths: list[Path] = typer.Argument(..., help="LinkedIn expor
     except linkedin.LinkedInError as e:
         raise typer.BadParameter(str(e)) from e
     t = time.time()
-    with SessionLocal() as s:
+    with session() as s:
         result = linkedin.run_import(s, resolved)
     print(result, f"in {time.time() - t:.1f}s")
 
@@ -183,7 +186,7 @@ def import_ai_export(path: Path = typer.Argument(..., exists=True, dir_okay=Fals
     from igneous.connectors import ai_exports
 
     t = time.time()
-    with SessionLocal() as s:
+    with session() as s:
         try:
             result = ai_exports.run_import(s, path, provider)
         except ai_exports.ExportError as e:
@@ -204,7 +207,7 @@ def connect(provider: str = typer.Argument(..., metavar="PROVIDER", help="google
     if provider == "google":
         from igneous.connectors import google_auth
 
-        with SessionLocal() as s:
+        with session() as s:
             print("connected", google_auth.connect(s, open_browser=browser), flush=True)
     elif provider == "github":
         from igneous.connectors import github, secrets
@@ -214,7 +217,7 @@ def connect(provider: str = typer.Argument(..., metavar="PROVIDER", help="google
             login = github.account_for(token)
         except github.GithubError as e:
             raise typer.BadParameter(str(e)) from e
-        with SessionLocal() as s:
+        with session() as s:
             secrets.save(s, "github", login, token.strip())
         print("connected", login)
     else:
@@ -229,7 +232,7 @@ def disconnect(provider: str = typer.Argument(..., metavar="PROVIDER", help="goo
         raise typer.BadParameter("disconnect google or github")
     from igneous.connectors import secrets
 
-    with SessionLocal() as s:
+    with session() as s:
         if not secrets.delete(s, provider, account):
             raise typer.BadParameter(f"no {provider} account {account} is connected")
     print("disconnected", account)
@@ -270,7 +273,7 @@ def _run_stages(names: list[str] | None, extract: int = 0) -> None:
         runner.plan(names, extract)
     except ValueError as e:
         raise typer.BadParameter(str(e), param_hint="--stage") from e
-    with SessionLocal() as s:
+    with session() as s:
         runner.run(s, names, extract=extract, progress=_Printer())
 
 
@@ -304,7 +307,7 @@ def resolve(undo: bool = typer.Option(False, help="instead, delete the merges en
     from igneous import pipeline as runner
     from igneous.graph import resolve as er
 
-    with SessionLocal() as s, runner.publishing(s):
+    with session() as s, runner.publishing(s):
         result = {"removed": er.undo(s)} if undo else er.run(s, rescore=True)
     print(json.dumps(result), flush=True)
 
@@ -322,7 +325,7 @@ def export(target: str = typer.Argument(..., help="lightrag"), out: Path = typer
         raise typer.BadParameter("LightRAG sends the export to its model, so it holds only opted-in sources and "
                                  "none is: set IGNEOUS_LLM_SOURCES (email for the Enron demo)")
 
-    with SessionLocal() as s:
+    with session() as s:
         print(write(s, out, limit))
 
 
@@ -350,7 +353,7 @@ def check_graph():
     """Validate persisted graph invariants without changing any data."""
     from igneous.graph.invariants import check_graph as run_checks
 
-    with SessionLocal() as s:
+    with session() as s:
         violations = run_checks(s)
     if not violations:
         print("graph check passed (0 violations)")
@@ -379,7 +382,7 @@ def search(q: str = typer.Argument(..., help="what to find; -word leaves a word 
     from igneous.rag.constraints import apply, describe
     from igneous.rag.search import hybrid
 
-    with SessionLocal() as s:
+    with session() as s:
         f = apply(s, q)
         applied = describe(s, f)
         if applied["from_question"]:
