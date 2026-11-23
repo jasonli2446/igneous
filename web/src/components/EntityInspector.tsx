@@ -6,7 +6,7 @@ import type { Corrected } from "@/components/Inspector";
 import NodeSummary from "@/components/NodeSummary";
 import Sources from "@/components/SourceList";
 import { InlineError, Section, Skeleton } from "@/components/ui";
-import { api, type Correction, type GEdge, type GNode } from "@/lib/api";
+import { api, type Correction, type GEdge, type GNode, type Thing } from "@/lib/api";
 import { formatDay } from "@/lib/dates";
 import { nodeColor } from "@/lib/graph-style";
 import { useLiveSearch, useRequest } from "@/lib/hooks";
@@ -47,10 +47,10 @@ function RemoveButton({ label, onClick, disabled }: { label: string; onClick: ()
   );
 }
 
-function MergePicker({ self, onPick, onCancel }: { self: number; onPick: (n: GNode) => void; onCancel: () => void }) {
+function MergePicker({ self, onPick, onCancel }: { self: number; onPick: (n: Thing) => void; onCancel: () => void }) {
   const [q, setQ] = useState("");
   const projects = useLiveSearch(q,
-    (text) => api.findNodes(text, "Project").then((r) => r.nodes.filter((n) => n.type === "Project" && n.id !== self)));
+    (text, signal) => api.findThings(text, { types: ["Project"] }, signal).then((r) => r.results.filter((n) => n.id !== self)));
   return (
     <div className="mt-2 rounded-md border border-line p-2">
       <div className="flex items-center gap-2">
@@ -64,7 +64,7 @@ function MergePicker({ self, onPick, onCancel }: { self: number; onPick: (n: GNo
           {projects.results?.map((n) => (
             <li key={n.id}>
               <button type="button" onClick={() => onPick(n)} className="btn-option">
-                <span className="truncate">{n.name}</span><span className="text-muted tabular-nums">{n.degree}</span>
+                <span className="truncate">{n.name}</span><span className="shrink-0 text-muted">{n.context}</span>
               </button>
             </li>
           ))}
@@ -79,7 +79,7 @@ function MergePicker({ self, onPick, onCancel }: { self: number; onPick: (n: GNo
 }
 
 export default function EntityInspector({ id, revision, onSelectAction, onCloseAction, onCorrectedAction, onLinkedAction }: Props) {
-  const { data: e, error: loadError, loading, retry } = useRequest(id, () => api.entity(id), revision);
+  const { data: e, error: loadError, loading, retry } = useRequest(id, (signal) => api.entity(id, signal), revision);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);

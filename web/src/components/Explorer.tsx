@@ -7,7 +7,7 @@ import { useEffect, useEffectEvent, useId, useMemo, useRef, useState } from "rea
 import Inspector, { type Corrected } from "@/components/Inspector";
 import { InlineError, TopProgress } from "@/components/ui";
 import WhyConnected from "@/components/WhyConnected";
-import { API, api, type GEdge, type GNode, type Subgraph, type Thing } from "@/lib/api";
+import { API, ApiError, api, type GEdge, type GNode, type NodeDetail, type Subgraph, type Thing } from "@/lib/api";
 import { nodeColor, sectionOf } from "@/lib/graph-style";
 import { useLiveSearch } from "@/lib/hooks";
 
@@ -27,6 +27,8 @@ type Step = "push" | "back";
 
 const EMPTY: Subgraph = { nodes: [], edges: [] };
 const edgeKey = (e: GEdge) => `${e.src}-${e.dst}-${e.type}`;
+/** A node the inspector read, as the graph draws it. */
+const asNode = ({ id, type, name, key, category }: NodeDetail): GNode => ({ id, type, name, key, category });
 
 /** What is on screen: the centre's view plus every layer whose node is still shown, each node and link once. */
 function compose(base: Subgraph, layers: Layer[]) {
@@ -75,8 +77,9 @@ export default function Explorer() {
   const [why, setWhy] = useState<{ a: number; b: number } | null>(null);
   const [loading, setLoading] = useState(true); // the first view starts loading on mount
   const [error, setError] = useState<Failure | null>(null);
-  // The API answers 404 until a self node exists, i.e. until a source is connected and the graph is built.
-  const [nothingConnected, setNothingConnected] = useState(false);
+  // Why there is no one to open on, when the API's opening view is empty: nothing is built yet, or no source says
+  // which person is you.
+  const [empty, setEmpty] = useState<"nothing_built" | "no_owner" | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
   // Bumped by every correction and undo, so the open panel shows the result.
   const [revision, setRevision] = useState(0);
@@ -110,11 +113,15 @@ export default function Explorer() {
       const { version } = await api.graphVersion(request.signal);
       const g = await api.view(id ?? undefined, request.signal);
       if (mine !== generation.current) return;
+      if (g.empty) {
+        setShown(null);
+        setEmpty(g.reason);
+        return;
+      }
       const next: Shown = { seed: g.seed, base: { nodes: g.nodes, edges: g.edges }, layers: [] };
       if (id === null) self.current = g.seed;
       builtAt.current = { seed: g.seed, version };
       setShown(next);
-      setNothingConnected(id === null && g.nodes.length === 0);
       setSelected(open ? g.seed : null);
       setWhy(null);
       setQuery("");
@@ -127,8 +134,7 @@ export default function Explorer() {
       if (open) await expand(g.seed, next);
     } catch (e) {
       if (request.signal.aborted) return;
-      if (id === null && String(e).startsWith("Error: 404")) setNothingConnected(true);
-      else setError({ text: `Couldn't load the graph. Check that the API is running at ${API}. (${String(e)})`, retry: () => go(id, step, open) });
+      setError({ text: `Couldn't load the graph. Check that the API is running at ${API}. (${String(e)})`, retry: () => go(id, step, open) });
     } finally {
       if (inFlight.current.seed === request) {
         inFlight.current.seed = null;
@@ -141,7 +147,7 @@ export default function Explorer() {
   function go(id: number | null, step: Step, open = false) {
     setLoading(true);
     setError(null);
-    setNothingConnected(false);
+    setEmpty(null);
     void load(id, step, open);
   }
 
@@ -175,7 +181,7 @@ export default function Explorer() {
     setError(null);
     try {
       const visible = compose(from.base, from.layers).data.nodes.map((n) => n.id);
-      const got = await api.expandNode(from.seed, id, visible, 0, request.signal);
+      const got = await api.expandNode(from.seed, id, visible, request.signal);
       // A group whose members are all on screen returns only links (no new nodes): keep them, they're the point.
       if (mine !== generation.current || (!got.nodes.length && !got.edges.length)) return;
       const layer: Layer = { key: `x${id}`, kind: "expand", by: id, nodes: got.nodes, edges: got.edges };
@@ -213,13 +219,15 @@ export default function Explorer() {
         const on = compose(base, layers).data.nodes;
         if (!on.some((n) => n.id === layer.by)) continue;
         if (layer.kind === "expand") {
-          const got = await api.expandNode(from.seed, layer.by, on.map((n) => n.id), 0, request.signal);
+          const got = await api.expandNode(from.seed, layer.by, on.map((n) => n.id), request.signal);
           if (got.nodes.length || got.edges.length) layers.push({ ...layer, nodes: got.nodes, edges: got.edges });
         } else {
           const [node] = layer.nodes;
-          const got = await api.subgraph([node.id], 0, 1, {}, request.signal);
-          const now = got.nodes.find((n) => n.id === node.id);
-          if (now) layers.push({ ...layer, nodes: [{ ...node, ...now }] });
+          const now = await api.node(node.id, request.signal).catch((e: unknown) => {
+            if (e instanceof ApiError && e.status === 404) return null; // it left the graph
+            throw e;
+          });
+          if (now) layers.push({ ...layer, nodes: [{ ...node, ...asNode(now) }] });
         }
       }
       if (mine !== generation.current) return;
@@ -265,15 +273,14 @@ export default function Explorer() {
     const request = new AbortController();
     inFlight.current.open = request;
     try {
-      const got = await api.subgraph([id], 0, 1, {}, request.signal);
-      const node = got.nodes.find((n) => n.id === id);
-      if (!node || mine !== generation.current) return;
+      const node = asNode(await api.node(id, request.signal));
+      if (mine !== generation.current) return;
       const layer: Layer = {
-        key: `o${id}`, kind: "open", by: anchor, nodes: [{ ...node, expandable: true, strength: 0.5 }],
-        edges: [{ id: -(700000 + id), src: anchor, dst: id, type: "RELATED", extractor: "derived", confidence: null, weight: 1 }],
+        key: `o${node.id}`, kind: "open", by: anchor, nodes: [{ ...node, expandable: true, strength: 0.5 }],
+        edges: [{ id: -(700000 + node.id), src: anchor, dst: node.id, type: "RELATED", weight: 1, origin: "derived", stated: false }],
       };
       setShown((s) => (s && s.seed === at.seed ? { ...s, layers: [...s.layers.filter((l) => l.key !== layer.key), layer] } : s));
-      setSelected(id);
+      setSelected(node.id);
     } catch (e) {
       if (!request.signal.aborted) setError({ text: `Couldn't open that. (${String(e)})`, retry: () => void openFromPanel(id, from) });
     } finally {
@@ -317,7 +324,7 @@ export default function Explorer() {
   }, [toast]);
 
   // Search: people, projects, groups, events and the like, best match first. Messages live behind the last option.
-  const search = useLiveSearch(query, (q, signal) => api.findThings(q, seed, signal).then((r) => r.results), {
+  const search = useLiveSearch(query, (q, signal) => api.findThings(q, { seed }, signal).then((r) => r.results), {
     delay: 150,
     onResults: (q, results) => {
       // Enter pressed while typing: open the best match for what was typed, now that it's known.
@@ -399,7 +406,7 @@ export default function Explorer() {
           onLinkAction={(a, b) => setWhy({ a: a.id, b: b.id })} />
       )}
 
-      {data.nodes.length === 0 && !loading && !error && nothingConnected && (
+      {data.nodes.length === 0 && !loading && !error && empty === "nothing_built" && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center text-sm text-muted">
           <p className="text-base text-ink">Your graph is empty</p>
           <p className="max-w-sm">Connect a source, then build the graph. Setup takes a few minutes and everything stays on this computer.</p>
@@ -407,7 +414,15 @@ export default function Explorer() {
         </div>
       )}
 
-      {data.nodes.length === 0 && !loading && !error && !nothingConnected && (
+      {data.nodes.length === 0 && !loading && !error && empty === "no_owner" && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center text-sm text-muted">
+          <p className="text-base text-ink">Nobody to start from yet</p>
+          <p className="max-w-sm">No source says which person is you, or nothing links you to anyone yet. Press / to search for someone to start from, or connect one of your own accounts and build the graph. Everything stays on this computer.</p>
+          <Link href="/settings" className="btn-primary">Open Sources</Link>
+        </div>
+      )}
+
+      {data.nodes.length === 0 && !loading && !error && empty === null && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 px-6 text-center text-sm text-muted">
           <p className="text-base text-ink">Nothing to show yet</p>
           <p>Search for a person, conversation, or event to start. Press / to search.</p>
