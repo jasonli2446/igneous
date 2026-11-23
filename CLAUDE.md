@@ -72,6 +72,8 @@ Export formats are sources too: add the entry to `SOURCES` and an inline form in
 ## Checks before any PR
 
 `cd api && uv run ruff check . && uv run pytest -q` and `cd web && npx next typegen && npx tsc --noEmit && npm run build`.
-pytest runs against its own `igneous_test` database (`api/tests/conftest.py`); DB-backed tests request the
-`test_db` fixture.
+pytest is hermetic (`api/tests/conftest.py`): settings start from their defaults, no model credentials reach it,
+and each run uses its own `igneous_test_<pid>` database, so parallel runs are safe. DB-backed tests request `db` (an
+empty graph rolled back after the test; every `SessionLocal` session joins it) or `committed_db` (for code that
+commits from other threads or processes).
 For UI changes, verify in the browser with `playwright-cli`.

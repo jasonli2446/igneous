@@ -1,62 +1,41 @@
-"""Introduction derivation on synthetic rows, in a throwaway database (never the real ones)."""
-import uuid
-from datetime import datetime, timedelta
+"""Introduction derivation on synthetic messages in the migrated schema."""
+import json
+from datetime import UTC, datetime, timedelta
+from itertools import count
 
 import pytest
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import make_url
-from sqlalchemy.orm import Session
+from sqlalchemy import text
 
-from igneous.config import settings
 from igneous.graph.history import EXTRACTOR, derive_introductions
 
-T0 = datetime(2024, 1, 1)
+T0 = datetime(2024, 1, 1, tzinfo=UTC)
+_message_ids = count(1000)  # people use small explicit ids; messages never collide with them
 
 
 @pytest.fixture
-def s():
-    admin_url = make_url(settings.database_url).set(database="postgres")
-    admin = create_engine(admin_url, isolation_level="AUTOCOMMIT")
-    name = f"igneous_test_{uuid.uuid4().hex[:8]}"
-    try:
-        with admin.connect() as c:
-            c.execute(text(f'CREATE DATABASE "{name}"'))
-    except Exception as e:
-        pytest.skip(f"no scratch database available: {type(e).__name__}")
-    engine = create_engine(admin_url.set(database=name))
-    try:
-        with engine.begin() as c:
-            c.execute(text("CREATE TABLE nodes (id bigint PRIMARY KEY, props jsonb NOT NULL DEFAULT '{}')"))
-            c.execute(text("CREATE TABLE canonical (node_id bigint PRIMARY KEY, canonical_id bigint NOT NULL)"))
-            c.execute(text("""
-                CREATE TABLE edges (id bigserial PRIMARY KEY, src bigint, dst bigint, type text, props jsonb,
-                    valid_from timestamp, valid_to timestamp, extractor text, extractor_version text,
-                    confidence real, source_item_id bigint, UNIQUE (src, dst, type, extractor))"""))
-        with Session(engine) as session:
-            yield session
-    finally:
-        engine.dispose()
-        with admin.connect() as c:
-            c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
-        admin.dispose()
+def s(db):
+    return db
 
 
 def _people(s, *ids, services=()):
     for i in ids:
-        s.execute(text("INSERT INTO nodes (id, props) VALUES (:i, CAST(:p AS jsonb))"),
-                  {"i": i, "p": '{"kind": "service"}' if i in services else "{}"})
-
-
-_msg = iter(range(1000, 10**6))
+        s.execute(text("""INSERT INTO nodes (id, type, key, name, props)
+                          VALUES (:i, 'Person', :k, :k, CAST(:p AS jsonb))"""),
+                  {"i": i, "k": f"p{i}@example.test", "p": json.dumps({"kind": "service"} if i in services else {})})
 
 
 def _send(s, day, sender, *recipients):
-    m, at = next(_msg), T0 + timedelta(days=day)
-    s.execute(text("INSERT INTO edges (src, dst, type, valid_from, source_item_id) VALUES (:p, :m, 'SENT', :at, :m)"),
-              {"p": sender, "m": m, "at": at})
+    """One email from `sender` to `recipients`, `day` days after T0."""
+    m, at = next(_message_ids), T0 + timedelta(days=day)
+    sid = s.execute(text("""INSERT INTO source_items (source, external_id, content_hash, occurred_at)
+                            VALUES ('email', :x, :x, :at) RETURNING id"""), {"x": f"m{m}", "at": at}).scalar_one()
+    s.execute(text("INSERT INTO nodes (id, type, key, name, source_item_id) VALUES (:m, 'Message', :k, :k, :sid)"),
+              {"m": m, "k": f"m{m}", "sid": sid})
+    s.execute(text("""INSERT INTO edges (src, dst, type, valid_from, valid_to, source_item_id)
+                      VALUES (:p, :m, 'SENT', :at, :at, :sid)"""), {"p": sender, "m": m, "at": at, "sid": sid})
     for r in recipients:
-        s.execute(text("INSERT INTO edges (src, dst, type, valid_from, source_item_id) "
-                       "VALUES (:m, :p, 'RECEIVED', :at, :m)"), {"p": r, "m": m, "at": at})
+        s.execute(text("""INSERT INTO edges (src, dst, type, valid_from, valid_to, source_item_id)
+                          VALUES (:m, :p, 'RECEIVED', :at, :at, :sid)"""), {"p": r, "m": m, "at": at, "sid": sid})
 
 
 def _introduced(s):
