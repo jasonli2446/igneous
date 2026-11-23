@@ -81,6 +81,11 @@ n=5 is small, and model answers vary by several points from run to run on the sa
 under about 5 points as noise. The blind A/B grading of answer quality is still to do;
 `results/2026-10-18-answers.jsonl` has the pairs.
 
+Retrieval alone, measured again 2026-11-23 at commit `63994a9` on a fresh build (`results/2026-11-23.json`, no model
+calls): recall@10 0.829 hybrid, 0.800 dense, 0.386 lexical; on the 20 multi-hop questions 0.65 hybrid, 0.70 dense.
+Search ranks as it did on 2026-10-18 (that code scores the same on this build), so the differences from the table
+come from the build.
+
 ## Entity resolution (criterion 3)
 
 `er_pairs.csv`: 240 Person pairs sampled across the resolver's score range (¼ low, ½ middle, ¼ high), each named by
