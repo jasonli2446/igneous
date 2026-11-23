@@ -20,8 +20,19 @@ named by the model or by the domain itself. Which key a domain takes depends on 
 earlier build left, so two builds of the same data give the same organizations. A name your resume gave an
 organization always stays, and so does the name a company's own records give it.
 
+So an organization's key changes when the records do: acme.test is `acme.test` until a card names Acme Robotics, then
+`org:acme-robotics`; your resume's "Acme" at acme.test is `org:acme` until its people's records call it Acme Robotics.
+Your corrections are keyed by natural keys, so before it writes anything the stage records where every key it has
+known stands now (`organization_keys`): each domain with the organization holding it, your resume's spelling of a
+company its people name otherwise with that company, and a key that held domains and holds none now with the
+organization its domains all went to, unless something else (LinkedIn, a mention, your resume) keeps it an
+organization of its own. What an earlier build recorded stays, so a correction keeps following an organization
+whatever key it takes. Every reader of a correction resolves its keys through it (graph/derived.py `rekeyed`), and the
+links you added to an organization's earlier key move to the organization it is now.
+
 The stage owns its own rows, written through graph/derived.py's Writer (a person and an organization you said aren't
-connected never are again), and `props.domains` on every organization.
+connected never are again, under any of the organization's keys), `props.domains` on every organization, and
+`organization_keys`.
 """
 import json
 import re
@@ -34,7 +45,7 @@ from sqlalchemy.orm import Session
 
 from igneous.config import settings
 from igneous.graph import identity
-from igneous.graph.derived import Writer
+from igneous.graph.derived import Writer, follow
 
 EXTRACTOR = "organizations"
 VERSION = "2"
@@ -67,6 +78,11 @@ def domain_of(value: str | None) -> str | None:
 
 def slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def is_domain(key: str) -> bool:
+    """An organization key that is an email domain (`acme.test`), not a company's name (`org:acme-robotics`)."""
+    return "." in key and ":" not in key
 
 
 def company_key(name: str | None) -> tuple[str, str] | None:
@@ -300,6 +316,73 @@ def _companies(s: Session) -> set[str]:
     """)).scalars())
 
 
+def _standing(s: Session) -> set[str]:
+    """The organizations something besides this stage and your own links keeps: LinkedIn, a model mention, your
+    resume's reading (read after this stage's links are gone)."""
+    return set(s.execute(text("""
+        SELECT n.key FROM nodes n WHERE n.type = 'Organization'
+          AND (EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id AND e.extractor <> 'user')
+               OR EXISTS (SELECT 1 FROM edges e WHERE e.dst = n.id AND e.extractor <> 'user')
+               OR EXISTS (SELECT 1 FROM spine_node_support x WHERE x.node_id = n.id))
+    """)).scalars())
+
+
+def _keys_now(s: Session, owners: dict[str, str], spellings: dict[str, str], standing: set[str]) -> dict[str, str]:
+    """Record where every key an organization is known by stands now (`organization_keys`), and return those another
+    organization's key stands for now ({earlier key: key now}):
+      - each domain: the organization holding it (itself, for a domain of its own);
+      - your resume's spelling of a company its people name otherwise: that company;
+      - a key that held domains in the last build and holds none now: the organization they all went to, unless
+        something else keeps it an organization of its own (`standing`);
+      - what an earlier build recorded, followed to where its organization stands now, unless the key holds domains
+        or stands on its own now."""
+    before = dict(s.execute(text("SELECT key, org_key FROM organization_keys")).all())
+    holding = set(owners.values())
+    now = dict(owners)
+    for key, org in sorted(spellings.items()):
+        if key not in holding:
+            now.setdefault(key, org)
+    held: dict[str, set[str]] = defaultdict(set)  # an organization's domains, as the last build left them
+    for key, org in before.items():
+        if is_domain(key):
+            held[org].add(key)
+    for org, ds in sorted(held.items()):
+        went = {owners[d] for d in ds if d in owners}
+        if len(went) == 1 and org not in now and org not in holding and org not in standing:
+            now[org] = went.pop()
+    for key, org in sorted(before.items()):
+        if key not in now and key not in holding and key not in standing:
+            now[key] = org
+    now = {key: follow(now, key) for key in now}
+    s.execute(text("DELETE FROM organization_keys WHERE NOT (key = ANY(:k))"), {"k": sorted(now)})
+    if now:
+        s.execute(text("""
+            INSERT INTO organization_keys (key, org_key)
+            SELECT k, o FROM unnest(CAST(:k AS text[]), CAST(:o AS text[])) AS m(k, o)
+            ON CONFLICT (key) DO UPDATE SET org_key = EXCLUDED.org_key, updated_at = now()
+                WHERE organization_keys.org_key <> EXCLUDED.org_key
+        """), {"k": sorted(now), "o": [now[k] for k in sorted(now)]})
+    return {key: org for key, org in now.items() if key != org}
+
+
+def _rehome(s: Session, moved: dict[str, str]) -> None:
+    """The links you added to an organization by a key another organization has now go to that one, as the last step
+    writes them from your corrections (graph/overrides.py), so the stages in between see them there."""
+    pairs = s.execute(text("""
+        SELECT o.id, n.id FROM unnest(CAST(:old AS text[]), CAST(:new AS text[])) AS m(old, new)
+        JOIN nodes o ON o.type = 'Organization' AND o.key = m.old JOIN nodes n ON n.type = 'Organization' AND n.key = m.new
+        ORDER BY 1
+    """), {"old": sorted(moved), "new": [moved[k] for k in sorted(moved)]}).all() if moved else []
+    for old, new in pairs:
+        for end, other in (("dst", "src"), ("src", "dst")):
+            s.execute(text(f"""
+                UPDATE edges e SET {end} = :new WHERE e.{end} = :old AND e.extractor = 'user' AND e.{other} <> :new
+                  AND NOT EXISTS (SELECT 1 FROM edges x WHERE x.{end} = :new AND x.{other} = e.{other}
+                                    AND x.type = e.type AND x.extractor = 'user')
+            """), {"old": old, "new": new})
+        s.execute(text("DELETE FROM edges WHERE extractor = 'user' AND (src = :old OR dst = :old)"), {"old": old})
+
+
 def _domain_names(s: Session, domains: set[str], claims: dict[str, tuple[str, str]]) -> dict[str, tuple[str, str]]:
     """domain -> (name, where it came from): your resume, people's own words, the model, or the domain itself."""
     words = _own_words(s, domains - set(claims))
@@ -353,15 +436,18 @@ def _organization(s: Session, key: str, name: str, named: str | None, kind: str)
 
 def run(s: Session) -> dict:
     """Rebuild this stage's WORKED_AT edges from evidence, one per person and organization, key each domain to the
-    organization it belongs to (props.domains), and name the domains that are organizations of their own. Returns
-    {worked_at, organizations}."""
+    organization it belongs to (props.domains), record where every key an organization had stands now, and name the
+    domains that are organizations of their own. Returns {worked_at, organizations, rekeyed}."""
     s.execute(text("DELETE FROM edges WHERE extractor = :x"), {"x": EXTRACTOR})
-    w = Writer(s, EXTRACTOR, VERSION)
     mail = _mail_facts(s)
     cards = _card_facts(s)
     claims = _resume_claims(s)
     names = _domain_names(s, {f.key for f in mail} | set(claims), claims)
     owners = _owners(names, claims, _companies(s) | {f.key for f in cards})
+    spellings = {yours[0]: key for key, name in claims.values() if (yours := company_key(name)) and yours[0] != key}
+    moved = _keys_now(s, owners, spellings, _standing(s) | {f.key for f in cards})
+    # Only now: the rejections it reads follow every key an organization had to the one it has now.
+    w = Writer(s, EXTRACTOR, VERSION)
     domains: dict[str, list[str]] = defaultdict(list)  # organization key -> its domains
     for domain, key in sorted(owners.items()):
         domains[key].append(domain)
@@ -385,6 +471,7 @@ def run(s: Session) -> dict:
                 name, named = Counter(f.spelling for f in facts if f.spelling).most_common(1)[0][0], None
             kind = _kind(domains.get(key, []), name)
             orgs[key] = (_organization(s, key, name, named, kind), kind)
+            w.rejected.track(orgs[key][0], f"Organization:{key}")  # a new node: a rejection under its earlier key
         dates = [f.at for f in facts if f.at is not None]
         latest: dict[int, datetime | None] = {}
         for f in facts:
@@ -406,6 +493,7 @@ def run(s: Session) -> dict:
         s.execute(text("""UPDATE nodes SET props = props || jsonb_build_object('domains', CAST(:d AS jsonb))
                           WHERE type = 'Organization' AND key = :k AND props->'domains' IS DISTINCT FROM CAST(:d AS jsonb)"""),
                   {"k": key, "d": json.dumps(ds)})
+    _rehome(s, moved)
     # Organizations a derived stage made (this one, or your resume's reading) that nothing points at any more: their
     # evidence is gone, or their domain now belongs to a company.
     s.execute(text("""
@@ -414,4 +502,4 @@ def run(s: Session) -> dict:
           AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id) AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.dst = n.id)
           AND NOT EXISTS (SELECT 1 FROM spine_node_support x WHERE x.node_id = n.id)
     """), {"x": EXTRACTOR})
-    return {"worked_at": len(grouped), "organizations": len(orgs)}
+    return {"worked_at": len(grouped), "organizations": len(orgs), "rekeyed": len(moved)}

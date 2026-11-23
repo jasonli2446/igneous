@@ -73,8 +73,9 @@ def _within(props: dict, org: dict) -> bool:
 def _threads(s: Session) -> list[dict]:
     """Every Project except the ones you hid, and the org threads this stage makes."""
     from igneous.graph import overrides
+    from igneous.graph.derived import rekeyed
 
-    hidden = overrides.plan(overrides.load(s)).hidden
+    hidden = overrides.plan(overrides.load(s), rekeyed(s)).hidden
     return [dict(r) for r in s.execute(text("""
         SELECT n.id, n.key, n.name, n.props FROM nodes n
         WHERE n.type = 'Project' AND n.props->>'derived' IS DISTINCT FROM :x AND NOT (n.type || ':' || n.key = ANY(:h))
@@ -188,6 +189,9 @@ def run(s: Session, log=print) -> dict:
     # Org threads of orgs no longer on your backbone (or now with a thread of their own name) go.
     s.execute(text("""DELETE FROM nodes WHERE type = 'Project' AND props->>'derived' = :x AND NOT (key = ANY(:k))"""),
               {"x": EXTRACTOR, "k": sorted(key for _tid, key in made.values() if key)})
+    # A thread you put under an org's thread is under the one made now, which is keyed by the org's key now.
+    from igneous.graph.threads import stated_hierarchy
+    stated_hierarchy(s)
     # Threads that already have a parent you stated keep it; the backbone fills in the rest.
     has_parent = set(s.execute(text("""
         SELECT e.src FROM edges e JOIN nodes p ON p.id = e.dst AND p.type = 'Project'
