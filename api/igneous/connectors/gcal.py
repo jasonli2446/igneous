@@ -1,8 +1,12 @@
 """Google Calendar + Contacts connectors.
 
 Calendar events are bootstrapped for a bounded history and then kept current with per-calendar sync tokens: a
-cancelled event is removed, and so are the events of a calendar that leaves the account's list. Contacts are small
-enough for a complete People API scan on every run, allowing safe deletion reconciliation after that scan finishes.
+cancelled event is removed, and so are the events of a calendar that leaves the account's list. A calendar's first
+listing (every event from `since_days` back on, again when its token expires) is complete for that window, so an event
+stored before it that it doesn't list there is removed: one a Google Takeout import stored that was deleted since, or
+one an earlier listing stored before its token expired. The cursor keeps each calendar's window (`since`, the earliest
+start a listing covered): connectors/takeout.py leaves what lies in it to this sync. Contacts are small enough for a
+complete People API scan on every run, allowing safe deletion reconciliation after that scan finishes.
 """
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -11,7 +15,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from igneous.connectors import google_api
-from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem, Tombstone
+from igneous.connectors.base import Checkpoint, CompletedScan, CompletedWindow, SourceItem, Tombstone
 
 
 def _when(t: dict) -> datetime | None:
@@ -44,26 +48,33 @@ class CalendarConnector:
             if not page:
                 return
 
-    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | Tombstone]:
+    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | CompletedWindow | Tombstone]:
         tokens = dict(cursor.get("sync_tokens", {}))
+        since = dict(cursor.get("since", {}))
         calendars = list(self._calendars())
         listed = sorted(cal["id"] for cal in calendars)
         # A calendar that left the list (unsubscribed, deleted, hidden) takes its events with it. Every account
         # lists at least its own calendar, so an empty list is a failure, not a reason to remove everything.
         for gone in sorted(set(cursor.get("calendars", tokens)) - set(listed)) if listed else []:
             tokens.pop(gone, None)
+            since.pop(gone, None)
             yield Tombstone(self.name, _external_id(self.account, gone), prefix=True)
         for cal in calendars:
             cid = cal["id"]
+            if cid not in since:  # a window not recorded: list the calendar from the start of one
+                tokens.pop(cid, None)
             token = tokens.get(cid)
-            # Google rejects timeMin combined with syncToken. The bounded initial list
-            # deliberately has no CompletedScan: it is not a complete source snapshot.
+            # Google rejects timeMin combined with syncToken. The bounded first list is complete only for its window:
+            # a CompletedWindow, not a CompletedScan.
             params = {"calendarId": cid, "singleEvents": True, "maxResults": 250,
                       "showDeleted": bool(token)}
+            window = None
             if token:
                 params["syncToken"] = token
             else:
-                params["timeMin"] = (datetime.now(UTC) - timedelta(days=self.since_days)).isoformat()
+                window = datetime.now(UTC) - timedelta(days=self.since_days)
+                params["timeMin"] = window.isoformat()
+            observed: set[str] = set()
             page = None
             while True:
                 try:
@@ -76,13 +87,15 @@ class CalendarConnector:
                     token, page = None, None
                     params.pop("syncToken", None)
                     params["showDeleted"] = False
-                    params["timeMin"] = (datetime.now(UTC) - timedelta(days=self.since_days)).isoformat()
+                    window = datetime.now(UTC) - timedelta(days=self.since_days)
+                    params["timeMin"] = window.isoformat()
                     continue
                 for event in response.get("items", []):
                     external_id = _external_id(self.account, f"{cid}/{event['id']}")
                     if event.get("status") == "cancelled":
                         yield Tombstone(self.name, external_id)
                         continue
+                    observed.add(external_id)
                     attendees = [{"name": attendee.get("displayName", ""),
                                   "email": attendee["email"].lower(),
                                   "response": attendee.get("responseStatus")}
@@ -117,8 +130,14 @@ class CalendarConnector:
                     if response.get("nextSyncToken"):
                         tokens[cid] = response["nextSyncToken"]
                     break
-            yield Checkpoint({"sync_tokens": tokens, "calendars": listed})
-        yield Checkpoint({"sync_tokens": tokens, "calendars": listed})
+            if window is not None:
+                yield CompletedWindow(self.name, _external_id(self.account, cid), window, frozenset(observed))
+                # The window only grows: the change feed reports every later change, at any date, from the first
+                # listing on.
+                earlier = since.get(cid)
+                since[cid] = (min(window, datetime.fromisoformat(earlier)) if earlier else window).isoformat()
+            yield Checkpoint({"sync_tokens": tokens, "calendars": listed, "since": since})
+        yield Checkpoint({"sync_tokens": tokens, "calendars": listed, "since": since})
 
 
 class ContactsConnector:

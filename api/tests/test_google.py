@@ -1,5 +1,6 @@
 """Google connectors (Drive, Calendar, Contacts, Gmail) against in-memory API fakes. No network."""
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fakes import FakeCalendar, FakeDrive, FakeGmail, FakePeople, Request, http_error
@@ -304,11 +305,39 @@ def test_drive_ignores_changes_that_are_not_about_a_file():
 def test_calendar_uses_clean_incremental_params_and_tombstones_cancelled_events():
     calendar = FakeCalendar([{"id": "team", "summary": "Team"}], [
         {"items": [{"id": "gone", "status": "cancelled"}], "nextSyncToken": "new-token"}])
-    events = list(CalendarConnector(None, "me@example.com", service=calendar).sync({"sync_tokens": {"team": "old-token"}}))
+    since = {"team": "2025-01-01T00:00:00+00:00"}
+    events = list(CalendarConnector(None, "me@example.com", service=calendar).sync(
+        {"sync_tokens": {"team": "old-token"}, "since": since}))
     (params,) = calendar.calls
     assert params["syncToken"] == "old-token" and "timeMin" not in params and params["showDeleted"] is True
-    done = Checkpoint({"sync_tokens": {"team": "new-token"}, "calendars": ["team"]})
+    done = Checkpoint({"sync_tokens": {"team": "new-token"}, "calendars": ["team"], "since": since})
     assert events == [Tombstone("gcal", "me@example.com/team/gone"), done, done]
+
+
+def test_a_calendars_first_listing_removes_what_it_no_longer_lists_in_its_window(db):
+    from sqlalchemy import text
+
+    from igneous.connectors.base import run_sync
+
+    now = datetime.now(UTC)
+    for external_id, at in (("me@x.com/team/old", now - timedelta(days=400)),  # before the window: not listed
+                            ("me@x.com/team/gone", now - timedelta(days=10)),   # deleted while the token had expired
+                            ("me@x.com/team/kept", now - timedelta(days=5))):
+        db.execute(text("INSERT INTO source_items (source, external_id, content_hash, occurred_at) "
+                        "VALUES ('gcal', :e, 'h', :at)"), {"e": external_id, "at": at})
+    # A cursor from before windows were recorded: the calendar is listed again from the start of its window.
+    db.execute(text("INSERT INTO sync_state (connector, account, cursor) VALUES ('gcal', 'me@x.com', CAST(:c AS jsonb))"),
+               {"c": '{"sync_tokens": {"team": "t1"}, "calendars": ["team"]}'})
+    kept = {"id": "kept", "summary": "Kept", "start": {"dateTime": (now - timedelta(days=5)).isoformat()}}
+    calendar = FakeCalendar([{"id": "team", "summary": "Team"}], [{"items": [kept], "nextSyncToken": "t2"}])
+    stats = run_sync(db, CalendarConnector(None, "me@x.com", service=calendar), account="me@x.com")
+    (params,) = calendar.calls
+    assert "syncToken" not in params and params["timeMin"]
+    assert stats["deleted"] == 1
+    assert set(db.execute(text("SELECT external_id FROM source_items")).scalars()) == {
+        "me@x.com/team/old", "me@x.com/team/kept"}
+    cursor = db.execute(text("SELECT cursor FROM sync_state WHERE account = 'me@x.com'")).scalar_one()
+    assert cursor["sync_tokens"] == {"team": "t2"} and cursor["since"] == {"team": params["timeMin"]}
 
 
 def test_a_calendar_that_leaves_the_list_takes_its_events(db):
@@ -319,14 +348,16 @@ def test_a_calendar_that_leaves_the_list_takes_its_events(db):
     for external_id in ("me@x.com/old/e1", "me@x.com/team/e2", "you@y.com/old/e3"):
         db.execute(text("INSERT INTO source_items (source, external_id, content_hash) VALUES ('gcal', :e, 'h')"),
                    {"e": external_id})
+    since = '"since": {"team": "2025-01-01T00:00:00+00:00", "old": "2025-01-01T00:00:00+00:00"}'
     db.execute(text("INSERT INTO sync_state (connector, account, cursor) VALUES ('gcal', 'me@x.com', CAST(:c AS jsonb))"),
-               {"c": '{"sync_tokens": {"team": "t1", "old": "t2"}, "calendars": ["old", "team"]}'})
+               {"c": '{"sync_tokens": {"team": "t1", "old": "t2"}, "calendars": ["old", "team"], ' + since + "}"})
     calendar = FakeCalendar([{"id": "team", "summary": "Team"}], [{"items": [], "nextSyncToken": "t3"}])
     run_sync(db, CalendarConnector(None, "me@x.com", service=calendar), account="me@x.com")
     assert set(db.execute(text("SELECT external_id FROM source_items")).scalars()) == {
         "me@x.com/team/e2", "you@y.com/old/e3"}  # another account's calendar of that name stays
     cursor = db.execute(text("SELECT cursor FROM sync_state WHERE account = 'me@x.com'")).scalar_one()
-    assert cursor == {"sync_tokens": {"team": "t3"}, "calendars": ["team"]}
+    assert cursor == {"sync_tokens": {"team": "t3"}, "calendars": ["team"],
+                      "since": {"team": "2025-01-01T00:00:00+00:00"}}
     # An empty list is a failure to list, not every calendar gone.
     events = list(CalendarConnector(None, "me@x.com", service=FakeCalendar([], [])).sync(cursor))
     assert not tombstones(events)

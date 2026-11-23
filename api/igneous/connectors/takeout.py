@@ -1,7 +1,8 @@
 """Google Takeout (My Activity incl. Gemini, Chrome, Maps, Chat, Tasks, Meet, Calendar) as day-items, places, visits
 and events.
 
-Input: one or several Takeout .zip files (a split export), an extracted folder, or a loose JSON or .ics file. Big JSON
+Input: one or several Takeout .zip files (a split export), an extracted folder, or a loose JSON or .ics file (or a zip
+of .ics files, as Google Calendar's own export is). Big JSON
 members are streamed with ijson, so a multi-GB zip is never read into memory; only the compact per-day
 aggregates are. Pass every zip of an export in one run: a day's items are rebuilt from everything seen, so
 importing the parts one at a time would overwrite a day with its partial view.
@@ -19,12 +20,16 @@ What is read (names are matched case-insensitively and tolerate a missing "Takeo
   Records.json (raw location points) is skipped: huge and low value.
   Google Chat/Groups/<space or DM>/           one item per conversation per day, called by the space's name
                                               (group_info.json), a direct message by the people in it besides you
-                                              (Google Chat/Users/*/user_info.json names you); every member by
-                                              address and the name Chat gives them, writing or not
+                                              (Google Chat/Users/*/user_info.json names you; without it, you are the
+                                              one person in every conversation); every member by address and the
+                                              name Chat gives them, writing or not
   Tasks/Tasks.json                            one item per list
   Google Meet/ConferenceHistory/conference_history_records.csv   one item per call
-  Calendar/<calendar>.ics                     one Google Calendar record per occurrence, keyed as a Google Calendar
-                                              sync keys the same event (connectors/ical.py)
+  Calendar/<calendar>.ics                     one Google Calendar record per occurrence up to the export, keyed as a
+                                              Google Calendar sync keys the same event (connectors/ical.py). An .ics
+                                              elsewhere in the export (a Chat attachment, a Drive file) is not read.
+A newer export of a calendar replaces what an earlier one stored, an older one leaves it as it is, and what a Google
+Calendar sync keeps stays the sync's (TakeoutConnector).
 Formats are not guaranteed by Google and change without notice, so every field is read defensively and a
 file that fails to parse is reported in `notes` rather than aborting the import.
 
@@ -55,7 +60,7 @@ from igneous import source_catalog
 from igneous.connectors import ical
 from igneous.connectors.ai_chats import _ts
 from igneous.connectors.ai_exports import export_items, gemini_conversations
-from igneous.connectors.base import Checkpoint, SourceItem
+from igneous.connectors.base import Checkpoint, SourceItem, Tombstone
 from igneous.connectors.redact import redact
 
 TAKEOUT_SOURCES = source_catalog.of_connector("takeout")
@@ -287,7 +292,9 @@ def classify(path: str) -> tuple[str, str | None] | None:
             return "chat_user", None
     if "tasks" in dirs and name == "tasks.json":
         return "tasks", None
-    if name.endswith(".ics"):  # Calendar/<calendar>.ics
+    # Calendar/<calendar>.ics, or a calendar file given on its own (Google Calendar's own export is a zip of them). An
+    # .ics anywhere else (a Chat attachment, a file in Drive) is someone's invitation or a file, not your calendar.
+    if name.endswith(".ics") and dirs[:1] in (["calendar"], []):
         return "calendar", Path(parts[-1]).stem
     if name == "conference_history_records.csv":
         return "meet", None
@@ -418,6 +425,7 @@ class _Import:
         self.chat_user: str | None = None  # you, as Chat's export names you
         self.calendars: list[ical.Calendar] = []
         self.calendar_report = ical.Report()
+        self.listings: list[ical.Listing] = []  # each calendar's records, once every file is read
         self.tasks: list[dict] = []
         self.meet: list[dict] = []
         self.notes: list[str] = []
@@ -430,7 +438,7 @@ class _Import:
     def _safe(self, m: Member, fn: Callable[[], None]):
         try:
             fn()
-        except (ijson.JSONError, ijson.IncompleteJSONError, UnicodeDecodeError, ValueError) as e:
+        except (ijson.JSONError, ijson.IncompleteJSONError, UnicodeDecodeError, ValueError, OverflowError) as e:
             self.note(f"{m.path}: could not be read completely ({type(e).__name__}); what was readable was kept.")
 
     # -- activity
@@ -478,6 +486,14 @@ class _Import:
                 g["days"][at.date().isoformat()].append((at, who["email"].lower(), text_))
                 self.counts["chat_messages"] += 1
         self._safe(m, go)
+
+    def you(self) -> str | None:
+        """You, as Chat's export names you (user_info.json), else the one person in every conversation of the export
+        (when it holds two or more)."""
+        if self.chat_user or len(self.chat) < 2:
+            return self.chat_user
+        common = set.intersection(*(set(g["members"]) for g in self.chat.values()))
+        return common.pop() if len(common) == 1 else None
 
     def read_chat_user(self, m: Member):
         """Chat's user_info.json: who you are, so a direct message is called by the other people in it."""
@@ -753,8 +769,8 @@ class _Import:
                                            "names": {e: n for e, n in sorted(members.items()) if n and n != e},
                                            "senders": sorted({m_[1] for m_ in msgs}), "turns": len(msgs),
                                            "redactions": red[0]})
-        if self.calendars:
-            yield from ical.items(self.calendars, ical.account(self.calendars, self.chat_user), self.calendar_report)
+        for listing in self.listings:
+            yield from listing.items
 
     def _bookmark_item(self) -> Iterator[SourceItem]:
         if not self.bookmarks:
@@ -773,6 +789,13 @@ class _Import:
 
 def parse(paths: list[Path], progress: Callable[[dict], None] | None = None) -> tuple[list[SourceItem], dict]:
     """(items, report). report: parts (counts), notes (things the user should know), redactions, places."""
+    items, report, _ = _parse(paths, progress)
+    return items, report
+
+
+def _parse(paths: list[Path], progress: Callable[[dict], None] | None = None
+           ) -> tuple[list[SourceItem], dict, list[ical.Listing]]:
+    """`parse`, and each calendar's listing."""
     imp = _Import(progress)
     with Tree(paths) as members:
         todo = [(m, c) for m in members if (c := classify(m.path)) is not None]
@@ -821,6 +844,8 @@ def parse(paths: list[Path], progress: Callable[[dict], None] | None = None) -> 
         if html:
             imp.note(f"{len(html)} My Activity file(s) are in HTML format and were skipped. Re-export My Activity "
                      "with Multiple formats set to JSON.")
+        imp.chat_user = imp.you()
+        imp.listings = ical.listings(imp.calendars, ical.account(imp.calendars, imp.chat_user), imp.calendar_report)
         items = list(imp.items())
         for note in imp.calendar_report.notes():
             imp.note(note)
@@ -837,41 +862,88 @@ def parse(paths: list[Path], progress: Callable[[dict], None] | None = None) -> 
         by_source[PART.get(it.source) or it.source.removeprefix("takeout_")] += 1
     report = {"parts": dict(by_source), "counts": dict(imp.counts), "notes": imp.notes, "places": len(places),
               "redactions": sum(i.raw_meta.get("redactions", 0) for i in items)}
-    return items, report
+    return items, report, imp.listings
+
+
+@dataclass
+class Stored:
+    """What is stored for one calendar an export holds (its scope): the records an earlier export stored, the records
+    a Google Calendar sync stored, and the start of the window that sync keeps (None when no sync keeps it)."""
+    exported: set[str]
+    synced: set[str]
+    window: datetime | None
 
 
 class TakeoutConnector:
-    """Adapter for run_sync. Parses everything first (day-items need the whole export), then emits. `synced` names the
-    calendar events among the export's that a Google Calendar sync stored (`synced_events`): those stay as synced,
-    since the live calendar is newer than any export, and a sync after an older export brings back nothing it moved."""
+    """Adapter for run_sync. Parses everything first (day-items need the whole export), then emits.
+
+    Each calendar of the export is that calendar as it was when it was exported. The cursor keeps, for each calendar,
+    when the newest export of it imported was taken: an older export leaves the calendar as it is (it would bring back
+    what was deleted since and move what was moved back), and a newer one replaces the records earlier exports stored
+    (a record it no longer holds is removed). What a Google Calendar sync keeps is the sync's, since the live calendar
+    is newer than any export: its records, and every event in its window (connectors/gcal.py), which the export
+    doesn't add. `stored` reads what is stored for the calendars (`stored_calendars`)."""
     name = "takeout"
 
     def __init__(self, paths: list[Path], progress: Callable[[dict], None] | None = None,
-                 synced: Callable[[list[str]], set[str]] | None = None):
-        self.paths, self.progress, self.synced, self.report = paths, progress, synced, {}
+                 stored: Callable[[list[str]], dict[str, Stored]] | None = None):
+        self.paths, self.progress, self.stored, self.report = paths, progress, stored, {}
 
-    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint]:
-        items, self.report = parse(self.paths, self.progress)
-        live = self.synced([i.external_id for i in items if i.source == "gcal"]) if self.synced else set()
-        if live:
-            items = [i for i in items if not (i.source == "gcal" and i.external_id in live)]
-            self.report["notes"].append(f"{len(live)} calendar events were already synced from Google Calendar: "
-                                        "they are kept as synced.")
+    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | Tombstone]:
+        items, self.report, listings = _parse(self.paths, self.progress)
+        imported = dict(cursor.get("calendars") or {})  # calendar scope -> when the newest export of it was taken
+        state = self.stored([c.scope for c in listings]) if self.stored and listings else {}
+        left: set[str] = set()  # the export's calendar records not stored
+        gone: list[str] = []    # records earlier exports stored that this one no longer holds
+        notes = self.report["notes"]
+        for cal in listings:
+            ours = {i.external_id for i in cal.items}
+            had = imported.get(cal.scope)
+            if had and datetime.fromisoformat(had) > cal.exported:
+                left |= ours
+                notes.append(f"The calendar {cal.name} in this export ({cal.exported:%Y-%m-%d}) is older than one "
+                             f"imported before ({had[:10]}): its events were left as they are.")
+                continue
+            st = state.get(cal.scope) or Stored(set(), set(), None)
+            synced = {i.external_id for i in cal.items
+                      if i.external_id in st.synced or (st.window and i.occurred_at >= st.window)}
+            if synced:
+                left |= synced
+                notes.append(f"Google Calendar syncs the calendar {cal.name}: {len(synced)} of its events were left "
+                             "as the sync keeps them" + (f" (every one from {st.window:%Y-%m-%d} on)." if st.window
+                                                         else "."))
+            gone += sorted(st.exported - ours)
+            imported[cal.scope] = cal.exported.isoformat()
+        if left:
+            items = [i for i in items if not (i.source == "gcal" and i.external_id in left)]
         for n, item in enumerate(items, 1):
             if self.progress:
                 self.progress({"items": n, "items_total": len(items)})
             yield item
-        yield Checkpoint({"items": len(items)})
+        for external_id in gone:
+            yield Tombstone("gcal", external_id)
+        yield Checkpoint({**cursor, "items": len(items), "calendars": imported})
 
 
-def synced_events(s) -> Callable[[list[str]], set[str]]:
-    """Which of these calendar records a Google Calendar sync stored (an export's copy names its `product`)."""
-    def synced(ids: list[str]) -> set[str]:
-        return set(s.execute(text("""
-            SELECT external_id FROM source_items
-            WHERE source = 'gcal' AND external_id = ANY(:ids) AND raw_meta->>'product' IS NULL
-        """), {"ids": ids}).scalars()) if ids else set()
-    return synced
+def stored_calendars(s) -> Callable[[list[str]], dict[str, Stored]]:
+    """What is stored for these calendar scopes (`<account>/<calendar id>`, or `takeout/<calendar name>`): the gcal
+    records under each, as an export stored them (raw_meta.product 'Calendar') or a Google Calendar sync did, and the
+    window that sync keeps (its cursor's `since`)."""
+    def stored(scopes: list[str]) -> dict[str, Stored]:
+        out = {scope: Stored(set(), set(), None) for scope in scopes}
+        for scope, external_id, product in s.execute(text("""
+            SELECT scope.id, si.external_id, si.raw_meta->>'product'
+            FROM unnest(CAST(:scopes AS text[])) AS scope(id)
+            JOIN source_items si ON si.source = 'gcal'
+                 AND left(si.external_id, char_length(scope.id) + 1) = scope.id || '/'
+        """), {"scopes": scopes}):
+            (out[scope].exported if product == "Calendar" else out[scope].synced).add(external_id)
+        for account, windows in s.execute(text("SELECT account, cursor->'since' FROM sync_state WHERE connector = 'gcal'")):
+            for calendar, since in (windows or {}).items():
+                if f"{account}/{calendar}" in out:
+                    out[f"{account}/{calendar}"].window = datetime.fromisoformat(since)
+        return out
+    return stored
 
 
 def run_import(s, paths: list[Path], progress: Callable[..., None] | None = None) -> dict:
@@ -879,7 +951,7 @@ def run_import(s, paths: list[Path], progress: Callable[..., None] | None = None
     same export changes nothing: external ids are stable and unchanged items keep their content hash."""
     from igneous.connectors.base import run_sync
 
-    conn = TakeoutConnector(paths, progress, synced_events(s))
+    conn = TakeoutConnector(paths, progress, stored_calendars(s))
     stats = run_sync(s, conn, account="default")
     return {**conn.report, **stats}  # the stored items' redaction count, which includes the parser's
 

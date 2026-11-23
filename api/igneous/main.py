@@ -178,7 +178,8 @@ async def import_ai_export(request: Request):
 
 @app.post("/import/takeout")
 async def import_takeout(request: Request):
-    """Import a Google Takeout export (My Activity incl. Gemini, Chrome, Maps) as a background job; poll /jobs/{id}.
+    """Import a Google Takeout export (My Activity incl. Gemini, Chrome, Maps, Location History, Google Chat, Tasks,
+    Google Meet, Calendar) as a background job; poll /jobs/{id}.
     Send multipart `file` parts (the zip(s) as downloaded) or JSON/form `{"path": "<zip or folder>"}` and/or
     `scan_downloads: true` to read ~/Downloads/takeout-*.zip in place. This API runs on your computer, so reading
     a local path is fine and avoids pushing multi-GB zips through the browser."""

@@ -138,9 +138,11 @@ app.add_typer(import_app, name="import")
 
 @import_app.command("takeout")
 def import_takeout(paths: list[Path] = typer.Argument(None, help="Takeout .zip file(s) (pass every part of a split "
-                                                                 "export), or an extracted folder"),
+                                                                 "export), an extracted folder, or a calendar (.ics)"),
                    downloads: bool = typer.Option(False, "--downloads", help="also use ~/Downloads/takeout-*.zip")):
-    """Google Takeout: My Activity (incl. Gemini), Chrome, Maps and Location History. Re-running is a no-op."""
+    """Google Takeout: My Activity (incl. Gemini), Chrome, Maps, Location History, Google Chat, Tasks, Google Meet
+    and Calendar. Re-running the same export is a no-op; a newer export of a calendar replaces what an older one
+    stored."""
     from igneous.connectors import takeout
 
     try:

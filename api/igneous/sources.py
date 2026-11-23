@@ -177,7 +177,7 @@ SOURCES: list[dict] = [
     {"id": "gcal", "kind": "google", "name": "Google Calendar", "group": "Connected accounts",
      "reads": f"Your events from the last {FIRST_SYNC_DAYS['gcal']} days on, in every calendar on your list: titles, "
               "times, attendees, and places. Events a Google Takeout import already stored are updated, not added "
-              "again.",
+              "again, and those its first sync no longer finds are removed.",
      "steps": GOOGLE_STEPS, "cli": "igneous sync gcal", "build": _google(_gcal), "options": {"since_days"}},
     {"id": "gcontacts", "kind": "google", "name": "Google Contacts", "group": "Connected accounts",
      "reads": "Names, emails, phone numbers, and organizations on your contact cards. Helps merge duplicate people.",
@@ -219,9 +219,11 @@ SOURCES: list[dict] = [
     {"id": "takeout", "kind": "import", "name": "Google Takeout", "group": "Exports you upload",
      "reads": "Your Google My Activity (Search, YouTube, Maps, Gemini and the rest), Chrome history and bookmarks, "
               "Maps places and visits, Google Chat (each space by its name, each direct message by who is in it), "
-              "Tasks, Meet call history, and Calendar: every event, and each occurrence of a repeating one. Gemini "
-              "chats are part of My Activity (a Gemini-only export works too). Calendar events are stored as Google "
-              "Calendar's, so connecting Google Calendar later doesn't add them again.",
+              "Tasks, Meet call history, and Calendar: every event, and each occurrence of a repeating one up to the "
+              "export. Gemini chats are part of My Activity (a Gemini-only export works too). Calendar events are "
+              "stored as Google Calendar's, so connecting Google Calendar later doesn't add them again. Importing a "
+              "newer export replaces what an older one stored; a calendar Google Calendar syncs keeps the sync's "
+              "events.",
      "steps": ["Go to takeout.google.com and click Deselect all.",
                "Tick My Activity, Chrome, Maps (your places), Calendar, Google Chat, Tasks and Google Meet. If you see "
                "Location History (Timeline), tick it too.",
