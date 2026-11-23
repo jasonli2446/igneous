@@ -9,18 +9,23 @@ Threads are found from bursts of different words, so one real project can surfac
   2. One cached judgment per pair from what each thread is (name, kind, span, people, sample records, as a prompt may
      show them): same | part_of (one was done within the other) | related (with the relation in words) | distinct.
      Without the model, or when either thread has no record a model may read, only threads with the same name are
-     the same, and nothing is linked.
+     the same, and nothing is linked. A shared course code within one term is one thread whatever a model says: two
+     threads most of whose records name the same code, with spans that overlap or nearly do, are the same (a class
+     and its capstone project or its demo day, found under their own names), and no model is asked.
   3. Complete-link merging: two clusters merge only when every judged pair across them says 'same' confidently and
-     every thread shares a name word with the other side. Each cluster keeps its biggest thread (a pinned one first);
-     the others fold into it (their links move there, their names become its aliases) and become its facets in the
-     registry, so later runs build their records into it without judging the pair again. A 'part_of' pair writes
-     PART_OF child -> container (extractor 'hierarchy'), a 'related' one RELATED_TO with the reason; the verifier
-     checks both like any other derived edge.
+     every thread shares a name word (or the course code most of its records name) with the other side. Each cluster
+     keeps a pinned thread first, then its class (a thread one of whose own terms is the course code most of its
+     records name), then its biggest; the others fold into it (their links move there, their names become its aliases) and
+     become its facets in the registry, so later runs build their records into it without judging the pair again. A
+     class's project or demo day folded into it is its part (merged_by 'part'), not the class: a name you gave it
+     doesn't name the class (graph/derived.py `merges`). A 'part_of' pair writes PART_OF child -> container
+     (extractor 'hierarchy'), a 'related' one RELATED_TO with the reason; the verifier checks both like any other
+     derived edge.
 """
 import hashlib
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -39,6 +44,7 @@ SAME = 0.8               # a 'same' this confident merges
 def _threads(s: Session) -> list[dict]:
     rows = s.execute(text("""
         SELECT p.id, p.key, p.name, p.props->>'kind' AS kind, COALESCE((p.props->>'pinned')::bool, false) AS pinned,
+               p.props->'terms' AS terms,
                (p.props->>'start')::timestamptz AS a,
                (p.props->>'end')::timestamptz AS b,
                array_remove(array_agg(DISTINCT n.source_item_id), NULL) AS items,
@@ -108,6 +114,41 @@ def candidate_pairs(ts: list[dict], mentions: set[tuple[int, int]] = frozenset()
                 out.append((max(jr, jp, jn, 0.3 if named else 0), a, b))
     out.sort(key=lambda x: (-x[0], x[1].get("key") or "", x[2].get("key") or ""))
     return [(a, b) for _, a, b in out[:MAX_PAIRS]]
+
+
+def _codes(s: Session, ts: list[dict]) -> dict[int, set[str]]:
+    """thread -> the course codes most of its records name (threads.MOSTLY of them)."""
+    from igneous.graph.threads import MOSTLY, course_codes
+
+    items = sorted(set().union(*(t["items"] for t in ts))) if ts else []
+    named = {i: set(course_codes(body)) for i, body in s.execute(text("""
+        SELECT id, coalesce(title, '') || ' ' || left(coalesce(body_text, ''), 4000) FROM source_items
+        WHERE id = ANY(:i)"""), {"i": items})}
+    out = {}
+    for t in ts:
+        counts = Counter(code for i in t["items"] for code in named.get(i, ()))
+        out[t["id"]] = {code for code, n in counts.items() if n >= MOSTLY * len(t["items"])}
+    return out
+
+
+def class_code(t: dict, codes: dict[int, set[str]]) -> str | None:
+    """The course code a thread is the class of: one of its own terms, which most of its records name; None for any
+    other thread."""
+    from igneous.graph.threads import course_code
+
+    return next((c for term in t.get("terms") or [] if (c := course_code(term)) and c in codes.get(t["id"], ())), None)
+
+
+def same_course(a: dict, b: dict, codes: dict[int, set[str]]) -> dict | None:
+    """The verdict 'same', with no model call, for two threads most of whose records name one course code within one
+    term (spans that overlap or lie within NEAR_DAYS of each other); None otherwise."""
+    shared = sorted(codes.get(a["id"], set()) & codes.get(b["id"], set()))
+    if not shared or not (a["a"] and a["b"] and b["a"] and b["b"]):
+        return None
+    if max((b["a"] - a["b"]).days, (a["a"] - b["b"]).days) > NEAR_DAYS:
+        return None
+    return {"relation": "same", "label": "", "confidence": 0.95, "shared_identity": shared[0], "container": "",
+            "reason": f"most records of both name {shared[0]}, in one term"}
 
 
 def _readable(s: Session, ts: list[dict]) -> tuple[set[int], dict[int, str]]:
@@ -186,10 +227,12 @@ def judge(s: Session, a: dict, b: dict, can_see: tuple[set[int], dict[int, str]]
     return out
 
 
-def _clusters_agree(a: set[int], b: set[int], verdicts: dict, names: dict[int, str] | None = None) -> bool:
+def _clusters_agree(a: set[int], b: set[int], verdicts: dict, names: dict[int, str] | None = None,
+                    codes: dict[int, set[str]] | None = None) -> bool:
     """Merge two clusters only on direct evidence: every JUDGED pair across them says 'same' confidently, at
     least half of all cross pairs were actually judged, and every thread shares a name word with the other
-    side. Unjudged pairs can't chain unrelated threads together."""
+    side (the course code most of its records name counts as one: `codes`). Unjudged pairs can't chain unrelated
+    threads together."""
     pairs = [(min(x, y), max(x, y)) for x in a for y in b]
     judged = [verdicts[p] for p in pairs if p in verdicts]
     if not judged or len(judged) < 0.5 * len(pairs):
@@ -197,9 +240,11 @@ def _clusters_agree(a: set[int], b: set[int], verdicts: dict, names: dict[int, s
     if any(v.get("relation") != "same" or (v.get("confidence") or 0) < 0.75 for v in judged):
         return False
     if names:
-        words = lambda ids: set().union(*(_tokens(names.get(i, "")) for i in ids))  # noqa: E731
-        wa, wb = words(a), words(b)
-        if any(not (_tokens(names.get(i, "")) & wb) for i in a) or any(not (_tokens(names.get(i, "")) & wa) for i in b):
+        def tokens(i: int) -> set[str]:
+            return _tokens(names.get(i, "")) | {"course:" + c.lower().replace(" ", "") for c in (codes or {}).get(i, ())}
+
+        wa, wb = set().union(*(tokens(i) for i in a)), set().union(*(tokens(i) for i in b))
+        if any(not (tokens(i) & wb) for i in a) or any(not (tokens(i) & wa) for i in b):
             return False
     return True
 
@@ -218,11 +263,18 @@ def run(s: Session, log=print, writer: Writer | None = None) -> dict:
             x = root[x]
         return x
 
-    related, stats = [], {"pairs": 0, "same": 0, "related": 0, "distinct": 0, "same_not_merged": 0}
+    related, stats = [], {"pairs": 0, "same": 0, "related": 0, "distinct": 0, "same_not_merged": 0, "same_course": 0}
     verdicts: dict[tuple[int, int], dict] = {}
     can_see = _readable(s, ts)
-    for a, b in candidate_pairs(ts, _mentions(s, ts)):
-        v = judge(s, a, b, can_see)
+    codes = _codes(s, ts)
+    pairs = candidate_pairs(ts, _mentions(s, ts))
+    judged = {(min(a["id"], b["id"]), max(a["id"], b["id"])) for a, b in pairs}
+    pairs += [(a, b) for i, a in enumerate(ts) for b in ts[i + 1:]
+              if (min(a["id"], b["id"]), max(a["id"], b["id"])) not in judged and same_course(a, b, codes)]
+    for a, b in pairs:
+        v = same_course(a, b, codes)
+        stats["same_course"] += bool(v)
+        v = v or judge(s, a, b, can_see)
         verdicts[(min(a["id"], b["id"]), max(a["id"], b["id"]))] = v
         stats["pairs"] += 1
         stats[v.get("relation", "distinct")] = stats.get(v.get("relation", "distinct"), 0) + 1
@@ -243,14 +295,17 @@ def run(s: Session, log=print, writer: Writer | None = None) -> dict:
         rx, ry = find(x), find(y)
         if rx == ry:
             continue
-        if _clusters_agree(members_of[rx], members_of[ry], verdicts, names):
+        if _clusters_agree(members_of[rx], members_of[ry], verdicts, names, codes):
             root[rx] = ry
             members_of[ry] |= members_of.pop(rx)
         else:
             stats["same_not_merged"] += 1
             related.append((x, y, {**v, "label": v.get("label") or "closely related"}))
 
-    # Merge: each cluster keeps its biggest thread (a pinned one first); the others fold in and become its facets.
+    # Merge: each cluster keeps a pinned thread first, then its class (over the class's project), then its biggest; the
+    # others fold in and become its facets, a class's project or demo day as its part.
+    from igneous.graph.threads import PART
+
     clusters: dict[int, list[dict]] = defaultdict(list)
     for t in ts:
         clusters[find(t["id"])].append(t)
@@ -259,16 +314,19 @@ def run(s: Session, log=print, writer: Writer | None = None) -> dict:
     for members in clusters.values():
         if len(members) < 2:
             continue
-        keep = min(members, key=lambda t: (not t["pinned"], -len(t["items"]), -len(t["people"]), t["key"]))
+        keep = min(members, key=lambda t: (not t["pinned"], not class_code(t, codes), -len(t["items"]),
+                                           -len(t["people"]), t["key"]))
         survivors.add(keep["key"])
+        whole = class_code(keep, codes)
         for t in sorted(members, key=lambda t: t["key"]):
             if t["id"] == keep["id"]:
                 continue
             folded_into[t["id"]] = keep["id"]
             fold_into(s, t["id"], keep["id"], f"Project:{t['key']}", mark=False)
-            s.execute(text("""UPDATE thread_registry SET status = 'merged', merged_into = :keep, merged_by = NULL,
+            part = whole and whole in codes.get(t["id"], ()) and class_code(t, codes) != whole
+            s.execute(text("""UPDATE thread_registry SET status = 'merged', merged_into = :keep, merged_by = :by,
                               updated_at = now() WHERE key = :gone AND status = 'active'"""),
-                      {"keep": keep["key"], "gone": t["key"]})
+                      {"keep": keep["key"], "gone": t["key"], "by": PART if part else None})
     # Link related threads (after merging, so links land on survivors).
     for x, y, v in related:
         ia, ib = folded_into.get(x, x), folded_into.get(y, y)

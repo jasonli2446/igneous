@@ -1,4 +1,4 @@
-from igneous.graph.overrides import plan
+from igneous.graph.overrides import given_names, plan
 
 A, B, C = "Project:project:a", "Project:project:b", "Project:project:c"
 
@@ -33,6 +33,15 @@ def test_hide_is_idempotent_and_links_keep_their_type_and_props():
               row(4, "unlink", [A, "Person:x"], data={"pair_correction": True})])
     assert p.hidden == {A}
     assert p.links == [("Person:x", A, "INVOLVED_IN", {"why": "you added this"})]
+
+
+def test_a_name_you_gave_a_folded_project_names_the_one_it_went_into_unless_you_named_that_one():
+    folded = {B: A, C: A}  # B and C were found to be A (a rebuild, or a merge of yours)
+    rows = [row(1, "rename", [C], "Old trip"), row(2, "rename", [B], "Spring break"), row(3, "rename", [C], "Lisbon")]
+    assert {k: r["value"] for k, r in given_names(rows, folded).items()} == {A: "Lisbon"}  # the latest of them
+    rows.append(row(4, "rename", [A], "Mine"))
+    rows.append(row(5, "rename", [B], "Later"))
+    assert given_names(rows, folded)[A]["id"] == 4  # a name you gave A itself wins
 
 
 def test_rename_without_value_is_ignored():

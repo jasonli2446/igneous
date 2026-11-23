@@ -215,12 +215,13 @@ cd api && uv run igneous verify-synthetic-corpus ../data/synthetic-cross-source
 ```
 
 `igneous pipeline` runs redact -> spine -> chunk -> embed -> extract -> self -> resolve -> thread_flags -> introductions
--> topics -> entities -> profile -> organizations -> threads -> backbone -> verify -> corrections
+-> topics -> profile -> organizations -> threads -> entities -> backbone -> verify -> corrections
 (`api/igneous/pipeline.py`, the same list Rebuild runs, without extract). The order is what each stage reads: redact
 applies the current credential rules to items stored under older ones before anything reads them, who you are and
 which identities are one person come before everything that counts people, your resume and the organizations your mail
-shows you at before the threads placed under them, the verifier after every link it checks, and your corrections last,
-so they always win. The source stages
+shows you at before the threads placed under them, the threads before the folders, series and group chats that join the
+thread they are about (one real thing is one Project), the verifier after every link it checks, and your corrections
+last, so they always win. The source stages
 (redact through extract) only read what is new; the stages after them recompute what is derived. The topics stage
 lowercases and conservatively lemmatizes keys, merges only high-similarity local-embedding duplicates, and adds
 `RELATED_TO` after three shared messages; moved `ABOUT` edges keep their original provenance. Extraction, like every

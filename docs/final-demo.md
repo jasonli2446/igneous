@@ -179,7 +179,8 @@ in a fresh session before recording: times depend on the model and on the warm c
   cards fold into one person; the resume and LinkedIn are the backbone.
 - **Structure found, not configured:** trips, classes, jobs and projects from activity bursts, course codes, repos and
   recurring events; a persistent registry keeps them stable across rebuilds; classes and projects sit under the
-  school or employer they belong to; course codes are whole identifiers (CS 341 is not ENVS 341).
+  school or employer they belong to; course codes are whole identifiers (CS 341 is not ENVS 341), and a class is one
+  thread with its project and its demo day as its parts (CS 481 holds Harborline).
 - **People done right:** who took part comes from group chats and attendance; people judged relative to a thread's
   core (a passing mention next to people who talk about it constantly is dropped); automated senders and bots are
   never people.
@@ -200,8 +201,8 @@ in a fresh session before recording: times depend on the model and on the warm c
 | Sync now on the persona says it never mixes with other records | The API points at another database. Set `IGNEOUS_DATABASE_URL` to `igneous_persona` and restart the API. |
 | Threads are named like "Lisbon · Jan-Mar 2025" and all sit under Projects | The model hasn't read the persona: set `AWS_BEARER_TOKEN_BEDROCK` and the opt-ins (step 2), then Rebuild once. |
 | Lakeshore University also opens to a trip or Tidepool | They were placed by email domain (most of their people write from the school's address). The model's checker judges each placement; without it nothing does. Either way it's the moment for **This is wrong**. |
-| Search shows two Lisbons (or two Icelands, two Tidepools, a class twice) | The other one is a documents folder made a project ("Lisbon 2025"): it takes in every record that mentions Lisbon, fare newsletters and her mother's mail included. Open the trip thread ("Lisbon · Jan-Mar 2025" without the model). |
 | Lakeshore University or Northwind Robotics shows twice, on her first ring or in search | One is the company her LinkedIn connections name, the other the organization found by its email domain, which holds the threads (in MCP, `find` lists both). Open the one with classes or projects under it. |
+| Search shows Northwind as "Northwind · Dec-Jan 2025" and "Northwind" besides Northwind Robotics | The first is her hiring (interviews and the offer), which sits under Northwind Robotics; the second is her documents folder Work/Northwind, a project of its own, since half its files are from the hiring months and half from the job. Open Northwind Robotics. |
 | Group chats show as "Google Chat Space AAAA…" | The Takeout reader doesn't read a chat's name yet, only its folder's. Open one: its members and messages are right. |
 | `me` lists Northwind only from July 2026 | The profile keeps one position per organization; the internship from January 2025 is in her LinkedIn export and resume. |
 | First tool call says "waiting for MCP servers" | Another configured server is slow; igneous still connects. Remove the slow one before recording. |

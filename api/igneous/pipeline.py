@@ -15,10 +15,13 @@ verdicts (graph/verify.py) are stored the moment they arrive.
   self, resolve       who you are and which identities are one person: every later stage counts people by them
   thread_flags        which conversations are group conversations (counted in merged people)
   introductions       who introduced whom (merged people, never a service)
-  topics, entities    topic merges, and the projects you return to with the people in them (never you)
+  topics              topic merges
   profile             your resume and LinkedIn (needs you)
   organizations       where people work, you included (merged people, and the names your resume gives orgs)
-  threads, backbone   life threads, then threads under your orgs (needs profile, organizations and threads)
+  threads             life threads: trips, classes, jobs and projects (needs profile and organizations)
+  entities            the folders, series and group chats you return to: each joins the thread it is about, or is a
+                      project of its own with the people in it (needs threads)
+  backbone            threads and projects under your orgs (needs profile, organizations, threads and entities)
   verify              checks the derived links every stage above wrote
   corrections         re-applies every correction committed before it, so a correction always wins
 
@@ -154,10 +157,10 @@ STAGES: tuple[Stage, ...] = (
     Stage("thread_flags", "Finding your group conversations", _thread_flags, derived=True),
     Stage("introductions", "Finding who introduced whom", _introductions, derived=True),
     Stage("topics", "Merging duplicate topics", _topics, derived=True),
-    Stage("entities", "Finding the projects, groups and series you return to", _entities, derived=True),
     Stage("profile", "Reading your resume and LinkedIn", _profile, derived=True),
     Stage("organizations", "Finding where people work", _organizations, derived=True),
     Stage("threads", "Finding trips, classes, jobs and projects", _threads, derived=True),
+    Stage("entities", "Finding the folders, groups and series you return to", _entities, derived=True),
     Stage("backbone", "Placing them under your schools and workplaces", _backbone, derived=True),
     Stage("verify", "Checking each connection against its sources", _verify, derived=True),
     Stage("corrections", "Applying your corrections", _corrections, derived=True),

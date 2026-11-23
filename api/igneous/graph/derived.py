@@ -4,8 +4,9 @@ A rejection of yours ("This is wrong", or unlinking something from a project) is
 nodes, keyed by their natural keys (`Type:key`). It holds for the pair, not one rule's spelling of a link: no
 derived edge of any type, in either direction, joins them again. It also holds for the pair's identities: a person
 is their identity head (another address of theirs is still them), and a Project is the Project it was folded into
-(a merge you made, or two threads found to be one). `rejections` reads those pairs, for the writers and for what reads
-the graph (`Rejections.heads`: the pairs as the explorer shows identities); `Writer` never writes an edge between one.
+(a merge you made, two threads found to be one, or a folder's Project that joined the thread it is about).
+`rejections` reads those pairs, for the writers and for what reads the graph (`Rejections.heads`: the pairs as the
+explorer shows identities); `Writer` never writes an edge between one.
 
 A Project is written under one contract by every stage that derives Projects (entities, threads with their
 umbrellas, backbone): `Writer.project` upserts it by key with the props the stage derives this run, records the name
@@ -42,13 +43,17 @@ def follow(folded: dict[str, str], key: str) -> str:
     return key
 
 
-def merges(s: Session) -> dict[str, str]:
-    """Every Project folded into another, by natural key: threads the registry merged (merged_into) and merges you
-    made in the inspector, each mapped to the Project it ends up in."""
+def merges(s: Session, parts: bool = True) -> dict[str, str]:
+    """Every Project folded into another, by natural key: the registry's merged rows (threads found to be one, a class's
+    project or demo day folded in as its part, and the Project of a folder, series or chat that joined the thread it
+    is about: graph/entities.py) and merges you made in the inspector, each mapped to the Project it ends up in. With
+    `parts` False a part stays itself: it is not the class, so a name you gave it names nothing else
+    (graph/overrides.py `given_names`)."""
     from igneous.graph import overrides
 
     folded = {f"Project:{k}": f"Project:{m}" for k, m in s.execute(text(
-        "SELECT key, merged_into FROM thread_registry WHERE status = 'merged' AND merged_into IS NOT NULL"))}
+        "SELECT key, merged_into FROM thread_registry WHERE status = 'merged' AND merged_into IS NOT NULL"
+        + ("" if parts else " AND merged_by IS DISTINCT FROM 'part'")))}
     folded.update(overrides.plan(overrides.load(s)).merges)
     return {k: follow(folded, k) for k in folded}
 

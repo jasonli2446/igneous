@@ -7,10 +7,15 @@ once. So a thread is found, not configured:
   1. Terms: capitalized phrases from item titles and text ("Portland", "Powell's", "CS 401", "Gloomhaven Night").
   2. Burst: a term in 6+ records from 3+ kinds of source within BURST_DAYS, denser there than its own background
      and in at most MAX_DF of all records, is a candidate; its densest window is its span. Name seeds add
-     long-running things named outright (a repository, a course code, a calendar series, a named group chat).
+     long-running things named outright (a repository, a course code in the titles of your mail or calendar, a
+     calendar series, a named group chat); a seed's window follows its anchor, and a course's anchor is its term.
   3. Members: records that name one of its defining terms (inside its span, give or take a month, unless it is
      ongoing); people who took part (its group chat, its events) or talk about it in its small conversations.
-  4. Overlapping candidates (same window, mostly the same records) merge into one.
+     Evidence: a notice sent to you (a booking, a confirmation; never marketing), a search, a page you visited or a
+     place you went that names it while it happened shows it happened, without being part of it (`evidence`).
+  4. Overlapping candidates (same window, mostly the same records) merge into one. A shared course code within one
+     term makes one thread: a candidate led by another word, most of whose records name a class's code within the
+     class's window (the capstone's project, its demo day), is part of that class.
   5. Judge: with the model enabled and sources opted in (IGNEOUS_LLM_SOURCES), one cached structured call per
      candidate decides keep / kind (trip, class, job, hobby, project, ... free text) / the name you would use / its
      defining terms, from titles and short snippets of opted-in records only (counts for the rest). Without it, a
@@ -23,9 +28,15 @@ runs attach new records to it by its defining terms, with no model call, and jud
             be read, within the run's budget, unless you renamed it (one you merged others into stays, whatever
             the judge says)
   rejected  judged not a thread; never built, never judged again. What had been merged into it (found to be the same
-            thing) stands on its own again.
-  merged    a facet of the thread it was folded into (merged_into): two found to be one (graph/resolve_threads.py), or
-            a merge you made (merged_by 'user'). Its own terms and span keep finding its records, for that thread.
+            thing, or a part of it) stands on its own again; the entities stage places again an anchor that had
+            joined it.
+  merged    a facet of the thread it was folded into (merged_into): two found to be one (graph/resolve_threads.py), a
+            part of a class (merged_by 'part': its project or its demo day, registered as its facet unjudged, or found
+            by graph/resolve_threads.py), or a merge you made (merged_by 'user'). Its own terms and span keep finding its
+            records, for that thread. A part is not the class: a name you gave it doesn't name the class
+            (graph/derived.py `merges`). The entities stage keeps one too (origin 'entities', no terms) for each folder,
+            series or chat a thread is about: that stage adds its records itself, and the row makes what you said about
+            it hold for the thread.
 
 A failed model call writes no row (the candidate is judged on a later run), and the budget (JUDGE_BUDGET model calls)
 is spent only on candidates that are new. Profile projects (graph/profile.py) are pinned rows: built whenever a record
@@ -34,8 +45,9 @@ names them. Terms, candidates, keys and names come out the same whatever the ord
 Writes `Project` nodes (props.derived 'threads', through graph/derived.py's Writer, so a name you gave one stays and a
 link you rejected is never written), PART_OF item -> thread and INVOLVED_IN person -> thread with their evidence; a
 thread no registry row builds any more is deleted. Then: duplicates resolved and related threads linked
-(resolve_threads), umbrellas over them (an org, lab or program several threads sit under), the hierarchy you stated
-(thread_parents), and the group chats and calendar series that are about a thread.
+(resolve_threads), each thread's evidence (RELATED_TO record -> thread, role 'evidence'), umbrellas over them (an org,
+lab or program several threads sit under), the hierarchy you stated (thread_parents), and the group chats and
+calendar series that are about a thread.
 """
 import hashlib
 import json
@@ -65,29 +77,40 @@ PAD = timedelta(days=30)  # around a thread's or anchor's own dates: planning be
 
 # Where the threads of a life show up: messages, calendars, documents, code, AI chats and browsing.
 SOURCES = source_catalog.LIFE
+PLACES = source_catalog.values({"places"})  # where you went: evidence a thread happened, never a member
 
 # Kinds of thread that don't happen in one window (the judge names kinds freely, so match words).
 ONGOING = re.compile(r"^(?!.*\b(project|application|trip|event)\b).*\b(hobby|hobbies|club|sport|recurring|friend|friends|"
                      r"group|team|community|band|league|lessons|practice)\b", re.I)
 
 # A course code: a department of 2-5 letters and a 3-digit number, each a whole word ("CS 401", "cs401", "MATH 221";
-# not "June 2025" or "Invoice 2025"). A month is never a department.
+# not "June 2025" or "Invoice 2025"). A month is never a department, nor a word that numbers a place or a thing ("Room
+# 101", "Suite 200", "Gate 210", "HTTP 404").
 MONTHS = frozenset({"jan", "feb", "mar", "apr", "may", "jun", "june", "jul", "july", "aug", "sep", "sept", "oct",
                     "nov", "dec"})
+NOT_DEPARTMENTS = MONTHS | {
+    "room", "rm", "suite", "ste", "unit", "apt", "floor", "gate", "route", "hwy", "exit", "page", "pg", "box", "ext",
+    "no", "nr", "ref", "pin", "lot", "seat", "row", "line", "issue", "error", "err", "http", "rfc", "model", "step",
+    "phase", "part", "item", "order", "vol", "fig"}
 COURSE = r"([A-Za-z]{2,5})\s?(\d{3})"
 COURSE_CODE = re.compile(rf"\b{COURSE}\b")
-COURSE_SQL = r"\m[A-Za-z]{2,5} ?[0-9]{3}\M"  # the same, as a Postgres regular expression
+# A course code as a class's own titles write it, the department in capitals, as a Postgres regular expression.
+COURSE_TITLE_SQL = r"\m[A-Z]{2,5} ?[0-9]{3}\M"
+COURSE_TITLES = source_catalog.values({"mail", "calendar"})  # where a class is named in titles: mail, calendar
+TERM_GAP = timedelta(days=45)  # a course's mentions with no longer gap between them are one term
+MOSTLY = 0.5  # of a candidate's records naming a course code inside its term, for the candidate to be part of it
+PART = "part"  # thread_registry.merged_by of a class's part (its project, its demo day): a facet, never the class
 
 
 def course_code(text_: str) -> str | None:
     """The course code `text_` is ("CS 401" for "cs401"), or None."""
     m = re.fullmatch(COURSE, (text_ or "").strip())
-    return f"{m.group(1).upper()} {m.group(2)}" if m and m.group(1).lower() not in MONTHS else None
+    return f"{m.group(1).upper()} {m.group(2)}" if m and m.group(1).lower() not in NOT_DEPARTMENTS else None
 
 
 def course_codes(text_: str) -> list[str]:
     """Every course code in `text_`, as course_code spells it."""
-    return [f"{d.upper()} {n}" for d, n in COURSE_CODE.findall(text_ or "") if d.lower() not in MONTHS]
+    return [f"{d.upper()} {n}" for d, n in COURSE_CODE.findall(text_ or "") if d.lower() not in NOT_DEPARTMENTS]
 
 
 # Capitalized phrases (1-3 words), or course codes.
@@ -132,8 +155,8 @@ def _items(s: Session) -> list:
         FROM source_items si
         LEFT JOIN nodes n ON n.source_item_id = si.id AND n.type IN ('Message', 'File', 'Event')
         WHERE si.source = ANY(:src) AND si.occurred_at IS NOT NULL
-          -- Notifications and marketing never make or join a thread (they stay searchable and as evidence):
-          -- a promo that mentions "Chinatown" isn't part of anything.
+          -- Notifications and marketing never make or join a thread: a promo that mentions "Chinatown" isn't part
+          -- of anything. A notice that names a thread while it happened is its evidence (`evidence`).
           AND COALESCE(si.item_class, 'conversation') NOT IN ('notification', 'marketing')
         ORDER BY si.id, n.id
     """), {"src": list(SOURCES)}).all()
@@ -291,6 +314,13 @@ def _sample(items: list, n: int = 40) -> list:
     return _by_time(out[:n])
 
 
+def _fallback_name(c: dict) -> str:
+    """A candidate's name without the model: its first term and its months ("Portland · Aug 2026")."""
+    month = c["start"].strftime("%b %Y") if c["start"].strftime("%b %Y") == c["end"].strftime("%b %Y") \
+        else f"{c['start']:%b}-{c['end']:%b %Y}"
+    return f"{c['terms'][0]} · {month}"
+
+
 def _judge(s: Session, c: dict, may_call: bool = True) -> tuple[dict | None, bool]:
     """Decide what the candidate is, which of its records belong, and which words define it: (verdict, whether a
     model call was made). A model only reads opted-in records, and only the shared terms those records contain;
@@ -300,9 +330,7 @@ def _judge(s: Session, c: dict, may_call: bool = True) -> tuple[dict | None, boo
     from igneous.llm import LLMDisabled, allowed_sources, cache_lookup, cache_store, structured
 
     allowed = allowed_sources()
-    month = c["start"].strftime("%b %Y") if c["start"].strftime("%b %Y") == c["end"].strftime("%b %Y") \
-        else f"{c['start']:%b}-{c['end']:%b %Y}"
-    fallback = {"keep": True, "kind": "thread", "name": f"{c['terms'][0]} · {month}", "confidence": 0.6,
+    fallback = {"keep": True, "kind": "thread", "name": _fallback_name(c), "confidence": 0.6,
                 "judged": False, "defining_terms": [c["terms"][0]], "members": None}
     shown = _sample([r for r in c["items"].values() if r.source in allowed])
     if not settings.llm_enabled or not shown:
@@ -370,15 +398,17 @@ def _belongs(c: dict, verdict: dict) -> list:
 
 
 def name_seeds(s: Session) -> list[dict]:
-    """Long-running things named outright: repositories, course codes, recurring calendar series, named group
-    chats. A burst finds a trip; a name finds a semester-long course or a year-long project."""
+    """Long-running things named outright: repositories, course codes (in the titles of your mail, from any mail
+    source, and your calendar, the department in capitals: a class's own notices count, a promo naming a course
+    doesn't), recurring calendar series, named group chats. A burst finds a trip; a name finds a semester-long course
+    or a year-long project. Courses come first: a class's project or group chat is part of it (`_course_part`)."""
     rows = s.execute(text("""
         SELECT 'repo' AS how, lower(raw_meta->>'repo') AS name FROM source_items
         WHERE source IN ('github', 'ai_chats', 'fs') AND coalesce(raw_meta->>'repo', '') <> ''
         GROUP BY 2 HAVING count(*) >= 5
         UNION ALL
         SELECT 'course', upper(regexp_replace(substring(title from :course), '\\s+', ' ', 'g'))
-        FROM source_items WHERE source IN ('gcal', 'gmail') AND title ~ :course
+        FROM source_items WHERE source = ANY(:titled) AND title ~ :course AND item_class IS DISTINCT FROM 'marketing'
         GROUP BY 2 HAVING count(*) >= 5
         UNION ALL
         SELECT 'series', min(title) FROM source_items
@@ -388,10 +418,10 @@ def name_seeds(s: Session) -> list[dict]:
         SELECT 'chat', name FROM nodes WHERE type = 'Thread' AND COALESCE((props->>'group')::bool, false)
           AND name !~ '[0-9]{4}' AND name !~ ',' AND length(name) >= 3
         ORDER BY 1, 2
-    """), {"course": f"({COURSE_SQL})"}).all()
+    """), {"course": f"({COURSE_TITLE_SQL})", "titled": list(COURSE_TITLES)}).all()
     seeds: list[dict] = []
     seen = set()
-    for how, name in rows:
+    for how, name in sorted(rows, key=lambda r: (r[0] != "course", r[0], r[1] or "")):
         n = (name or "").strip()
         if how == "course":
             n = course_code(n) or ""  # a month is no department
@@ -402,9 +432,31 @@ def name_seeds(s: Session) -> list[dict]:
     return seeds
 
 
+def _term(s: Session, code: str):
+    """A course's term: the longest run of the records naming its code (its notices too, never marketing) with no gap
+    over TERM_GAP inside (the first of runs as long), as (first, last); None when nothing names it. A planning note
+    months before, or a resume line a year after, is outside it."""
+    dept, num = code.lower().split()
+    runs: list[list] = []
+    for (at,) in s.execute(text("""
+        SELECT si.occurred_at FROM source_items si
+        WHERE si.source = ANY(:src) AND si.occurred_at IS NOT NULL AND si.item_class IS DISTINCT FROM 'marketing'
+          AND (coalesce(si.title, '') || ' ' || left(coalesce(si.body_text, ''), 4000)) ~* :code
+        ORDER BY 1"""), {"src": list(SOURCES), "code": rf"\m{dept} ?{num}\M"}):
+        if runs and at - runs[-1][-1] <= TERM_GAP:
+            runs[-1].append(at)
+        else:
+            runs.append([at])
+    term = max(runs, key=len, default=None)
+    return (term[0], term[-1]) if term else None
+
+
 def _anchor_span(s: Session, seed: dict):
-    """When the seed's own anchor was active: (first, last), or None for anchors without dates of their own."""
+    """When the seed's own anchor was active: (first, last), or None for anchors without dates of their own. A
+    course's anchor is its term."""
     name = seed["name"]
+    if seed["how"] == "course":
+        return _term(s, name)
     if seed["how"] == "series":
         q = "SELECT min(occurred_at), max(occurred_at) FROM source_items WHERE source = 'gcal' AND title = :n"
     elif seed["how"] == "repo":
@@ -414,7 +466,7 @@ def _anchor_span(s: Session, seed: dict):
         q = ("SELECT min(si.occurred_at), max(si.occurred_at) FROM nodes t JOIN edges it ON it.dst = t.id AND it.type = 'IN_THREAD' "
              "JOIN nodes m ON m.id = it.src JOIN source_items si ON si.id = m.source_item_id WHERE t.type = 'Thread' AND t.name = :n")
     else:
-        return None  # course codes and the like: their mentions define them
+        return None
     row = s.execute(text(q), {"n": name}).first()
     return (row[0], row[1]) if row and row[0] else None
 
@@ -442,7 +494,7 @@ def _seed_candidate(s: Session, seed: dict, items_by_id: dict) -> dict | None:
             "anchor": anchor}
 
 
-def _pattern(t: str) -> str:
+def term_pattern(t: str) -> str:
     """A defining term as a whole-word pattern; a course code matches with or without its space, never without its
     department."""
     code = course_code(t)
@@ -452,21 +504,26 @@ def _pattern(t: str) -> str:
     return re.escape(t)
 
 
+def window(row) -> tuple[datetime, datetime] | None:
+    """When a registry row's records happen: its span give or take PAD, or None when they count whenever they happened
+    (a hobby, club or friend group, a pinned project, a row with no span)."""
+    if row.span_start and row.span_end and row.origin in ("burst", "name") and not ONGOING.search(row.kind or ""):
+        return row.span_start - PAD, row.span_end + PAD
+    return None
+
+
 def registered(rows, items: list) -> dict[str, dict]:
     """Every registry row's records now, in one pass over the items: those naming one of its defining terms, inside
-    its span (+/- PAD) unless it is ongoing (a hobby, club or friend group counts every mention whenever it
-    happened). Deterministic, which is what keeps a found thread found."""
+    its window (`window`). Deterministic, which is what keeps a found thread found."""
     specs = []
     for row in rows:
         # A bare number ("395") is shared by different courses, rooms and years: never a defining term alone.
         terms = sorted({t.lower() for t in (row.terms or []) if len(t) >= 3 and not t.strip().isdigit()})
         if not terms:
             continue
-        lo = hi = None
-        if row.span_start and row.span_end and row.origin in ("burst", "name") and not ONGOING.search(row.kind or ""):
-            lo, hi = row.span_start - PAD, row.span_end + PAD
+        lo, hi = window(row) or (None, None)
         # Whole words: a short defining term ("eta") must not match inside other words ("beta", "theta").
-        pattern = re.compile(r"(?<![a-z0-9])(" + "|".join(_pattern(t) for t in terms) + r")(?![a-z0-9])")
+        pattern = re.compile(r"(?<![a-z0-9])(" + "|".join(term_pattern(t) for t in terms) + r")(?![a-z0-9])")
         specs.append((row.key, pattern, lo, hi))
     out: dict[str, dict] = {k: {} for k, *_ in specs}
     for it in items:
@@ -477,6 +534,76 @@ def registered(rows, items: list) -> dict[str, dict]:
             if pattern.search(hay):
                 out[key][it.id] = it
     return out
+
+
+def _course(row) -> tuple[str, str, tuple | None] | None:
+    """(key, course code, window) of a class thread: one a course code defines; None for any other."""
+    code = next((c for t in row.terms or [] if (c := course_code(t))), None)
+    return (row.key, code, window(row)) if code else None
+
+
+def _course_part(c: dict, courses: list[tuple[str, str, tuple | None]]) -> str | None:
+    """The key of the class thread a candidate is part of: a shared course code within one term makes one thread. A
+    candidate led by another word (the capstone's project, its demo day) is part of a class when most of its records
+    name the class's code inside the class's window; of two such classes, the one more of them name. None for a
+    candidate that is a course itself, or no course's."""
+    if course_code(c["terms"][0]):
+        return None
+    best = None
+    for key, code, win in courses:
+        pattern = re.compile(rf"(?<![a-z0-9]){term_pattern(code)}(?![a-z0-9])")
+        n = sum(1 for r in c["items"].values()
+                if (win is None or win[0] <= r.occurred_at <= win[1]) and pattern.search((r.title + " " + r.body).lower()))
+        if n >= MOSTLY * len(c["items"]) and (best is None or n > best[0]):
+            best = (n, key)
+    return best[1] if best else None
+
+
+def _evidence_items(s: Session) -> list:
+    """Records that can show a thread happened but never be part of one: a notice sent to you (a booking, a
+    confirmation, a ticket; marketing never counts), what you searched and browsed, and the places you went."""
+    return s.execute(text("""
+        SELECT DISTINCT ON (si.id) si.id, si.source, si.occurred_at, coalesce(si.title, '') AS title,
+               left(coalesce(si.body_text, ''), 4000) AS body, n.id AS node_id
+        FROM source_items si JOIN nodes n ON n.source_item_id = si.id AND n.type IN ('Message', 'File', 'Event')
+        WHERE si.occurred_at IS NOT NULL
+          AND ((si.source = ANY(:life) AND si.item_class = 'notification') OR si.source = ANY(:places))
+        ORDER BY si.id, n.id
+    """), {"life": list(SOURCES), "places": list(PLACES)}).all()
+
+
+def evidence(s: Session, w: Writer, rows: list, held: dict[str, set[int]], items_by_id: dict) -> int:
+    """Link each thread to the records that only show it happened (`_evidence_items`): one that names a defining term
+    of the thread (or of a facet of it) while it happened is RELATED_TO the thread, with props.role 'evidence'. It is
+    never a member (no PART_OF: it counts toward no record total, person or judgment) and never shown as a node, but it
+    is among the records the thread is made of (items.sources_of) and the verifier checks it. While it happened: inside
+    the window of the row whose term it names, or, for a row without one, within PAD of the thread's own records.
+    Returns how many links were written."""
+    into = {r.key: r.merged_into for r in rows if r.status == "merged" and r.merged_into}
+    found = registered([r for r in rows if r.status in ("active", "merged") and r.origin != "entities"],
+                       _evidence_items(s))
+    by_key = {r.key: r for r in rows}
+    ids = dict(s.execute(text("SELECT key, id FROM nodes WHERE type = 'Project' AND key = ANY(:k)"),
+                         {"k": sorted(held)}).all())
+    linked: set[tuple[int, int]] = set()
+    for key, its in sorted(found.items()):
+        thread = follow(into, key)
+        if thread not in ids or not its:
+            continue
+        span = None
+        if window(by_key[key]) is None:
+            dates = sorted(items_by_id[i].occurred_at for i in held.get(thread, ()) if i in items_by_id)
+            if not dates:
+                continue
+            span = (dates[0] - PAD, dates[-1] + PAD)
+        for it in _by_time(its.values()):
+            if span and not span[0] <= it.occurred_at <= span[1]:
+                continue
+            if w.edge(it.node_id, ids[thread], "RELATED_TO",
+                      {"why": f"names {by_key[key].terms[0]} while it happened", "role": "evidence"},
+                      confidence=0.5, source_item_id=it.id, evidence=[(it.id, "evidence", {})]):
+                linked.add((it.node_id, ids[thread]))
+    return len(linked)
 
 
 def _named_from(row) -> str:
@@ -580,7 +707,9 @@ def _build(w: Writer, row, rows: list, found: dict[str, dict]) -> set[int]:
     """Build one active row's thread from its records and those of its facets (the rows merged into it), and return
     the records it holds (none when it has too few to be built: fewer than 3, or none for a pinned row)."""
     into = {r.key: r.merged_into for r in rows if r.status == "merged" and r.merged_into}
-    facets = sorted((r for r in rows if r.status == "merged" and follow(into, r.key) == row.key), key=lambda r: r.key)
+    # The entities stage's rows (an anchor this thread is about) add their records themselves, after this stage.
+    facets = sorted((r for r in rows if r.status == "merged" and r.origin != "entities"
+                     and follow(into, r.key) == row.key), key=lambda r: r.key)
     members = dict(found.get(row.key, {}))
     facet_of: dict[int, str] = {}
     for f in facets:
@@ -616,7 +745,7 @@ def run(s: Session, log=print, report=None) -> dict:
     # Only this stage's own links; yours ('user') are not its to delete.
     s.execute(text("DELETE FROM edges WHERE extractor IN (:x, 'hierarchy', 'thread-resolution')"), {"x": EXTRACTOR})
     w = Writer(s, EXTRACTOR, VERSION)
-    stats = {"threads": 0, "new": 0, "rejected": 0, "rejudged": 0, "calls": 0, "waiting": 0}
+    stats = {"threads": 0, "new": 0, "parts": 0, "rejected": 0, "rejudged": 0, "calls": 0, "waiting": 0}
     yours = overrides.plan(overrides.load(s))
     renamed = {k.removeprefix("Project:") for k in yours.renames}
     kept = {k.removeprefix("Project:") for k in yours.merges.values()}  # threads you merged others into
@@ -651,9 +780,12 @@ def run(s: Session, log=print, report=None) -> dict:
                     status = :st, updated_at = now() WHERE key = :k
             """), {"k": row.key, "n": (verdict.get("name") or row.name)[:80], "kind": verdict.get("kind"), "t": terms,
                    "c": verdict.get("confidence"), "st": "active" if keep else "rejected"})
-            if not keep:  # what was merged into it stands on its own again
-                s.execute(text("""UPDATE thread_registry SET status = 'active', merged_into = NULL, updated_at = now()
-                                  WHERE status = 'merged' AND merged_into = :k"""), {"k": row.key})
+            if not keep:  # what was found to be the same thing, or a part of it, stands on its own again; an anchor
+                # that joined it (origin 'entities') is the entities stage's, which places it again when it runs
+                s.execute(text("""UPDATE thread_registry SET status = 'active', merged_into = NULL, merged_by = NULL,
+                                      updated_at = now()
+                                  WHERE status = 'merged' AND merged_into = :k AND origin <> 'entities'"""),
+                          {"k": row.key})
             stats["rejudged"] += 1
 
     # 1b. Every row's records; a merged row's go to the thread it ends up in.
@@ -662,20 +794,51 @@ def run(s: Session, log=print, report=None) -> dict:
     found = registered([r for r in rows if r.status in ("active", "merged")], items)
     built: list[str] = []
     claimed: set[int] = set()
+    held: dict[str, set[int]] = {}  # each thread built: its records
     for row in sorted((r for r in rows if r.status == "active"), key=lambda r: (not r.pinned, r.key)):
         members = _build(w, row, rows, found)
         if members:
             built.append(row.key)
             claimed |= members
+            held[row.key] = members
     stats["threads"] = len(built)
 
     # 2. New candidates: name seeds first (long-running), then bursts; only what known threads don't cover. A kept
-    # one is built from its registry row, exactly as every later run builds it.
+    # one is built from its registry row, exactly as every later run builds it. One that is part of a class (its
+    # project, its demo day: `_course_part`) is a facet of the class from the start, whose term finds its records for it.
     step("finding new threads")
+    courses = [c for key in built if (c := _course(by_key[key]))]
     cands = [c for c in (_seed_candidate(s, sd, items_by_id) for sd in name_seeds(s)) if c]
     cands += candidates(s)
     for i, c in enumerate(cands, 1):
         report(count=i, total=len(cands), note="judging new threads")
+        if part := _course_part(c, courses):
+            key = thread_key(c)
+            if key not in by_key:
+                span = c.get("anchor") or (c["start"], c["end"])
+                row = SimpleNamespace(key=key, name=_fallback_name(c), kind=None, terms=[c["terms"][0]],
+                                      span_start=span[0], span_end=span[1], status="merged", merged_into=part,
+                                      origin="name" if c.get("seed") else "burst", confidence=None,
+                                      anchor=c.get("seed"), anchor_name=c.get("seed_name"), judged=False,
+                                      pinned=False, merged_by=PART)
+                s.execute(text("""
+                    INSERT INTO thread_registry (key, name, kind, terms, span_start, span_end, status, merged_into,
+                                                 origin, confidence, anchor, anchor_name, judged, merged_by)
+                    VALUES (:key, :name, :kind, :terms, :span_start, :span_end, :status, :merged_into, :origin,
+                            :confidence, :anchor, :anchor_name, :judged, :merged_by)
+                """), {k: getattr(row, k) for k in ("key", "name", "kind", "terms", "span_start", "span_end", "status",
+                                                    "merged_into", "origin", "confidence", "anchor", "anchor_name",
+                                                    "judged", "merged_by")})
+                by_key[key] = row
+                rows.append(row)
+                found[key] = registered([row], items).get(key, {})
+                # The class again, with its new part.
+                s.execute(text("""DELETE FROM edges e USING nodes t WHERE t.id = e.dst AND t.type = 'Project'
+                                  AND t.key = :k AND e.extractor = :x"""), {"k": part, "x": EXTRACTOR})
+                held[part] = _build(w, by_key[part], rows, found)
+                claimed |= held[part]
+                stats["parts"] += 1
+            continue
         fresh = {k: v for k, v in c["items"].items() if k not in claimed}
         if len(fresh) < MIN_ITEMS:
             continue  # already covered by a thread we know
@@ -689,8 +852,9 @@ def run(s: Session, log=print, report=None) -> dict:
             stats["waiting"] += 1  # the call failed or the budget is spent: judged on a later run
             continue
         terms = [t for t in (verdict.get("defining_terms") or c["terms"]) if len(t) >= 3] or c["terms"]
+        span = c.get("anchor") or (c["start"], c["end"])  # a seed's span is its anchor's, as every later run sets it
         row = SimpleNamespace(key=key, name=(verdict.get("name") or c["terms"][0])[:80], kind=verdict.get("kind"),
-                              terms=terms, span_start=c["start"], span_end=c["end"], status="active",
+                              terms=terms, span_start=span[0], span_end=span[1], status="active",
                               origin="name" if c.get("seed") else "burst", confidence=verdict.get("confidence"),
                               anchor=c.get("seed"), anchor_name=c.get("seed_name"), judged=verdict["judged"],
                               pinned=False, merged_into=None, merged_by=None)
@@ -711,8 +875,10 @@ def run(s: Session, log=print, report=None) -> dict:
         if not keep:
             stats["rejected"] += 1
             continue
-        claimed |= _build(w, row, rows, found)
+        held[key] = _build(w, row, rows, found)
+        claimed |= held[key]
         built.append(key)
+        courses += [course] if (course := _course(row)) else []  # a class its project and events may be part of
         stats["new"] += 1
 
     # 3. Threads no row builds any more go (whatever they were); then what sits around the threads.
@@ -727,7 +893,8 @@ def run(s: Session, log=print, report=None) -> dict:
         for row in (r for r in rows if r.key in survivors):
             s.execute(text("""DELETE FROM edges e USING nodes t WHERE t.id = e.dst AND t.type = 'Project'
                               AND t.key = :k AND e.extractor = :x"""), {"k": row.key, "x": EXTRACTOR})
-            _build(w, row, rows, found)
+            held[row.key] = _build(w, row, rows, found)
+    stats["evidence"] = evidence(s, w, _rows(s), held, items_by_id)
     w.refresh()  # threads folded into others: a rejection of either holds for the survivor
     w.prune()
     stats["umbrellas"] = umbrellas(s, w)
@@ -914,6 +1081,7 @@ def _short_named(s: Session, w: Writer) -> int:
                array_remove(array_agg(DISTINCT COALESCE(c.canonical_id, e.src)), NULL) AS people
         FROM nodes p JOIN thread_registry r ON r.key = p.key
         LEFT JOIN edges e ON e.dst = p.id AND e.type IN ('INVOLVED_IN', 'RELATED_TO')
+                          AND e.props->>'role' IS DISTINCT FROM 'evidence'  -- people, not the records it is shown by
         LEFT JOIN canonical c ON c.node_id = e.src
         WHERE p.type = 'Project' AND r.status = 'active' AND p.props ? 'start' GROUP BY p.id, r.terms
         ORDER BY p.id""")).mappings().all()
