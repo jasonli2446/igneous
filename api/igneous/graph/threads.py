@@ -4,7 +4,8 @@ A weekend trip is a flight email, an itinerary doc, browsing, a calendar block a
 labels all of them. What they share is a distinctive term that suddenly shows up in several kinds of source at
 once. So a thread is found, not configured:
 
-  1. Terms: capitalized phrases from item titles and text ("Portland", "Powell's", "CS 401", "Gloomhaven Night").
+  1. Terms: capitalized phrases from item titles and text ("Portland", "Powell's", "CS 401", "Gloomhaven Night"). A
+     repeating event is one record (its Event's), and a chat day counts what was said, not its conversation's name.
   2. Burst: a term in 6+ records from 3+ kinds of source within BURST_DAYS, denser there than its own background
      and in at most MAX_DF of all records, is a candidate; its densest window is its span. Name seeds add
      long-running things named outright (a repository, a course code, a calendar series, a named group chat).
@@ -65,6 +66,7 @@ PAD = timedelta(days=30)  # around a thread's or anchor's own dates: planning be
 
 # Where the threads of a life show up: messages, calendars, documents, code, AI chats and browsing.
 SOURCES = source_catalog.LIFE
+CHATS = source_catalog.values({"chat"})  # a record per conversation per day, titled by the conversation
 
 # Kinds of thread that don't happen in one window (the judge names kinds freely, so match words).
 ONGOING = re.compile(r"^(?!.*\b(project|application|trip|event)\b).*\b(hobby|hobbies|club|sport|recurring|friend|friends|"
@@ -135,6 +137,9 @@ def _items(s: Session) -> list:
           -- Notifications and marketing never make or join a thread (they stay searchable and as evidence):
           -- a promo that mentions "Chinatown" isn't part of anything.
           AND COALESCE(si.item_class, 'conversation') NOT IN ('notification', 'marketing')
+          -- A repeating event is one record here, the one its Event is (as search indexes it): a weekly standup
+          -- named after your employer is one mention, not a hundred that make the name background.
+          AND (si.source <> 'gcal' OR n.id IS NOT NULL)
         ORDER BY si.id, n.id
     """), {"src": list(SOURCES)}).all()
 
@@ -176,8 +181,10 @@ def burst_candidates(items: list, excluded: set[str]) -> list[dict]:
     by_term: dict[str, list] = defaultdict(list)
     for it in items:
         # Names of trips, classes and projects show up in titles and opening lines; the first 1,500 characters
-        # of a body are enough and keep this fast on a large mailbox.
-        for t in sorted(set(_terms(it.title)) | set(_terms(it.body[:1500]))):
+        # of a body are enough and keep this fast on a large mailbox. A chat day's title is its conversation's name
+        # (every day of a team chat names the team), not something said that day: only its text counts.
+        title = "" if it.source in CHATS else it.title
+        for t in sorted(set(_terms(title)) | set(_terms(it.body[:1500]))):
             by_term[t].append(it)
     out = []
     for term in sorted(by_term):

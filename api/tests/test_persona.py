@@ -18,6 +18,7 @@ from igneous.connectors import ai_exports, linkedin, takeout
 from igneous.connectors.base import SourceItem
 from igneous.connectors.email_maildir import MaildirConnector
 from igneous.connectors.filesystem import FilesystemConnector
+from igneous.graph import threads
 from igneous.persona import load, project
 
 SLICE = date(2025, 8, 31)  # the first year: hiring, two semesters of classes, Lisbon, the summer field trials
@@ -217,6 +218,9 @@ def test_a_slice_builds_its_graph_through_the_sources_registry_and_the_pipeline(
     monkeypatch.setattr(llm, "structured", stub)
     monkeypatch.setattr(llm.settings, "llm_sources", sources.PERSONA_IDS)
     monkeypatch.setattr(llm.settings, "local_sources_model_enabled", True)
+    # A small world: the slice's 2% is 19 records, and the job's name is on 21 of them (her calendar adds the
+    # interview, her first standup and her first office day). The whole persona keeps the default.
+    monkeypatch.setattr(threads, "MAX_DF", 0.03)
     pipeline.run(db)
 
     (intro,) = db.execute(text("""
