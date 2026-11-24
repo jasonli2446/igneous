@@ -21,8 +21,12 @@ it builds. The edges with extractor 'user' are exactly what these intents say: o
 
 `apply` is a pure function of these rows. It completes undos first (an undo marks its row `undone_at`; apply reverses
 the correction and forgets the row), puts every Project back to its derived state (its props.original_name, neither
-renamed nor hidden), and applies every correction again. It runs as the pipeline's last step and, when no rebuild is
-running, right after each correction (graph/corrections.py). It bumps nothing: whoever publishes bumps the version.
+renamed nor hidden), and applies every correction again. A Project can be folded into another by your merge, or by a
+rebuild that finds the two are one thing (graph/derived.py `merges`): a name you gave it then names the one it went
+into (the latest name you gave any of them), unless you named that one yourself, while a hide follows only your
+merges, so a rebuild never hides a Project because something you hid turned out to be part of it. It runs as the
+pipeline's last step and, when no rebuild is running, right after each correction (graph/corrections.py). It bumps
+nothing: whoever publishes bumps the version.
 """
 import json
 from dataclasses import dataclass, field
@@ -99,11 +103,12 @@ def apply(s: Session) -> dict:
         _reverse(s, r)
     if undone:
         s.execute(text("DELETE FROM overrides WHERE id = ANY(:ids)"), {"ids": [r["id"] for r in undone]})
-    p = plan(load(s))  # with what the undos gave back (a link you added, then took out)
+    rows = load(s)  # with what the undos gave back (a link you added, then took out)
+    p = plan(rows)
     _registry(s, p)
     folded = merges(s)
-    return {"undone": len(undone), "merged": _merge(s, p, folded), "projects": _projects(s, p),
-            "links": _links(s, p, folded)}
+    return {"undone": len(undone), "merged": _merge(s, p, folded),
+            "projects": _projects(s, p, given_names(rows, folded)), "links": _links(s, p, folded)}
 
 
 def _registry(s: Session, p: Plan) -> None:
@@ -216,18 +221,34 @@ def _reverse(s: Session, r: dict) -> None:
         _unmerge(s, r)
 
 
-def _projects(s: Session, p: Plan) -> int:
-    """Every Project back to its derived name, neither renamed nor hidden; then your renames and hides. A Project the
-    backbone stage found to be the same as an organization's thread (props.same_as_org) is hidden too. Only rows that
-    change are written."""
+def given_names(rows: list[dict], folded: dict[str, str]) -> dict[str, dict]:
+    """Project key -> the rename of yours (its override row) that names it: the latest you gave the Project itself, else
+    the latest you gave a Project folded into it (a merge of yours, or a rebuild that found the two are one thing:
+    `derived.merges`). A hide follows only your own merges (`plan`): a Project a rebuild folds into another never hides
+    it."""
+    own: dict[str, dict] = {}
+    inherited: dict[str, dict] = {}
+    for r in sorted(rows, key=lambda r: r["id"]):
+        if r["op"] == "rename" and r.get("value"):
+            key = r["node_keys"][0]
+            end = follow(folded, key)
+            (own if end == key else inherited)[end] = r
+    return {**inherited, **own}
+
+
+def _projects(s: Session, p: Plan, names: dict[str, dict]) -> int:
+    """Every Project back to its derived name, neither renamed nor hidden; then the names you gave (`given_names`) and
+    your hides. A Project the backbone stage found to be the same as an organization's thread (props.same_as_org) is
+    hidden too. Only rows that change are written."""
+    renames = {k: r["value"] for k, r in names.items()}
     changed = []
     for nid, natural, name, props in s.execute(text(
             "SELECT id, type || ':' || key, name, props FROM nodes WHERE type = 'Project' ORDER BY id")):
         props = props or {}
         target = {k: v for k, v in props.items() if k not in ("renamed", "hidden")}
         new_name = props.get("original_name") or name
-        if natural in p.renames:
-            new_name, target["renamed"] = p.renames[natural], True
+        if natural in renames:
+            new_name, target["renamed"] = renames[natural], True
         if natural in p.hidden or props.get("same_as_org"):
             target["hidden"] = True
         if (new_name, target) != (name, props):
