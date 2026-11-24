@@ -144,8 +144,8 @@ are six people's mail, so nobody is "you" there: search for `jeff.skilling` or `
 Enron is mail only. The synthetic persona has every kind of source, so it shows what mail alone can't: life
 threads, the backbone of schools and workplaces, the profile, and evidence across sources. It is Mira Castellanos,
 an invented computer science student, from August 2024 to October 2026: a mailbox, a Google Takeout export (chat,
-tasks, Meet, Maps, My Activity, Chrome, and a calendar no importer reads yet), LinkedIn and ChatGPT exports, and a
-documents folder with resumes, notes and a git checkout (`api/igneous/persona`). Generated from a seed on this
+tasks, Meet, Maps, My Activity, Chrome, and her calendar), LinkedIn and ChatGPT exports, and a documents folder with
+resumes, notes and a git checkout (`api/igneous/persona`). Generated from a seed on this
 computer, with no network or model calls:
 
 ```bash
@@ -158,7 +158,7 @@ how), never with raw inserts, and the persona's sync refuses any database other 
 holds records, so it never mixes with Enron or your own data. The build places the classes and the job's threads
 under Lakeshore University and Northwind Robotics by their email domains. Without a model, threads are named by their
 term and month ("Lisbon · Jan-Mar 2025"); with `AWS_BEARER_TOKEN_BEDROCK` set and its sources opted in
-(`IGNEOUS_LLM_SOURCES=email,fs,takeout,linkedin,ai_chats`, `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`), a Rebuild
+(`IGNEOUS_LLM_SOURCES=email,fs,takeout,gcal,linkedin,ai_chats`, `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`), a Rebuild
 also names them and checks where each was placed. Its gold set (threads, the identities that are one person, Ask
 questions) makes it an eval too: `api/eval/README.md`. `docs/final-demo.md` runs on it.
 
@@ -206,8 +206,9 @@ The Google steps (the OAuth client file) are under [Google](#google-gmail-drive-
 invented document-style files plus two ICS calendar events that reuse the public Enron demo persona addresses, so
 they link to the Enron graph (the synthetic persona above is a separate, whole life with its own people).
 It makes no network or model calls and **does not import** the data. The Local files source reads the documents
-(`igneous sync fs --path ../data/synthetic-cross-source`); no source reads ICS calendars. Every output is labeled
-synthetic and excludes real email text, credentials, and personal data.
+(`igneous sync fs --path ../data/synthetic-cross-source`), and the Google Takeout import reads the calendar, as it reads
+any calendar file given on its own (`igneous import takeout ../data/synthetic-cross-source/calendar.ics`). Every output
+is labeled synthetic and excludes real email text, credentials, and personal data.
 Re-run it safely to restore the exact fixture, or validate an existing output with:
 
 ```bash
@@ -262,8 +263,9 @@ cd api && uv run igneous sync imessage && uv run igneous pipeline
 ## Adding a stage or connector
 
 - **Connector:** a class whose `sync(cursor)` yields `SourceItem`s, a `Checkpoint` whenever what came before may be
-  committed, and a `Tombstone` for each item a change feed reports removed, or a final `CompletedScan` (with the
-  scopes it listed) when it listed everything (`connectors/base.py`; `run_sync` redacts and stores what it yields).
+  committed, and a `Tombstone` for each item a change feed reports removed, a `CompletedWindow` for a scope it listed
+  completely from a date on (a calendar's first listing), or a final `CompletedScan` (with the scopes it listed) when it
+  listed everything (`connectors/base.py`; `run_sync` redacts and stores what it yields).
   Then add its entry to `SOURCES` in `api/igneous/sources.py`, with the `build` that makes it (the CLI, the Sources
   page and the scheduler all use that one) and the steps to set it up; each value it stores in
   `source_items.source` to `source_catalog.py`; and how the spine turns its items into nodes (`graph/spine.py`'s
@@ -314,7 +316,8 @@ times (2 by default). `IGNEOUS_LLM_ENABLED=false` turns off hosted model calls (
 `/ask` returns 503).
 
 **What a model may read.** Only the sources listed in `IGNEOUS_LLM_SOURCES`: the comma-separated ids the Sources
-page shows (`gmail,ai_chats`; `takeout` covers every Takeout product, `ai_chats` every AI chat import). Every hosted
+page shows (`gmail,ai_chats`; `takeout` covers every Takeout product but its Gemini chats and calendar, which count as
+`ai_chats` and `gcal` like those sources' own records; `ai_chats` covers every AI chat import). Every hosted
 call follows one rule (`api/igneous/llm.py`): a prompt carries text only from records in those sources, names only of
 people and things that appear in them, and counts for everything else. Local files and Apple Notes also need
 `IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true`. Search and Ask may also send the question itself (never a record) to the

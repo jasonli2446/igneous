@@ -384,7 +384,7 @@ def lectures(life: Life, c: Course) -> None:
     until = at(c.term.end, "23:59").strftime("%Y%m%dT%H%M%SZ")
     byday = ",".join({"M": "MO", "T": "TU", "W": "WE", "R": "TH", "F": "FR"}[x] for x in c.meets)
     life.event(f"{c.code} {c.title}", at(first, c.hour), c.minutes, location=c.room,
-               rrule=f"FREQ=WEEKLY;BYDAY={byday};UNTIL={until}")
+               rrule=f"FREQ=WEEKLY;BYDAY={byday};UNTIL={until}", tag=f"{tag(c)}.lectures")
     for day in days(c.term.start, c.term.end, c.meets):
         if c.term.teaching(day):
             building = "marsh" if c.code.startswith("ENVS") else "hollis"

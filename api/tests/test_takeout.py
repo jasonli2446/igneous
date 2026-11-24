@@ -349,6 +349,268 @@ def test_search_joins_existing_project_after_rebuild(db, zpath):
             s.commit()
 
 
+LEE = {"name": "Lee Park", "email": "lee@example.com", "user_type": "Human"}
+SPACE_MSGS = {"messages": [
+    {"creator": LEE, "created_date": "Tuesday, May 6, 2025 at 7:00:00\u202fPM UTC", "text": "rules recap tonight?",
+     "topic_id": "t", "message_id": "s1"}]}
+ELLA = {"name": "Ella Novak", "email": "ella@example.com", "user_type": "Human"}  # a member who never writes
+SPACE_INFO = {"name": "Gloomhaven Night", "members": [CHAT_GROUP["members"][0], CHAT_GROUP["members"][1], LEE, ELLA]}
+CALENDAR = "\r\n".join([
+    "BEGIN:VCALENDAR", "PRODID:-//Google Inc//Google Calendar 70.9054//EN", "VERSION:2.0", "X-WR-CALNAME:me@example.com",
+    "X-WR-TIMEZONE:America/New_York",
+    "BEGIN:VEVENT", "DTSTART:20250604T180000Z", "DTEND:20250604T183000Z", "DTSTAMP:20250801T000000Z",
+    "ORGANIZER;CN=Sam Lee:mailto:sam@example.com", "UID:EVT123@google.com",
+    "ATTENDEE;PARTSTAT=ACCEPTED;CN=Me:mailto:me@example.com", "SUMMARY:Standup", "END:VEVENT",
+    "BEGIN:VEVENT", "DTSTART;TZID=America/New_York:20250505T190000", "DTEND;TZID=America/New_York:20250505T220000",
+    "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=4", "DTSTAMP:20250801T000000Z", "UID:gloom@google.com",
+    "ATTENDEE;PARTSTAT=ACCEPTED;CN=Lee Park:mailto:lee@example.com", "SUMMARY:Gloomhaven Night", "END:VEVENT",
+    "END:VCALENDAR", ""]).encode()
+
+
+@pytest.fixture
+def chat_and_calendar(tmp_path):
+    """A minimal export: a named space, a direct message, a single event and a weekly series."""
+    return build_zip(tmp_path / "takeout-20250801T000000Z-001.zip", {
+        "Google Chat/Groups/Space AAAAgloom/group_info.json": SPACE_INFO,
+        "Google Chat/Groups/Space AAAAgloom/messages.json": SPACE_MSGS,
+        "Google Chat/Groups/DM abc/group_info.json": CHAT_GROUP,
+        "Google Chat/Groups/DM abc/messages.json": CHAT_MSGS,
+        "Google Chat/Users/User 1234/user_info.json": {"user": {"name": "Me", "email": "me@example.com"}},
+        "Calendar/me@example.com.ics": CALENDAR})
+
+
+def test_spaces_are_called_by_their_names_and_direct_messages_by_who_is_in_them(chat_and_calendar):
+    items, report = takeout.parse([chat_and_calendar])
+    ids = by_id(items)
+    space, dm = ids["chat/space-aaaagloom/2025-05-06"], ids["chat/dm-abc/2025-05-06"]
+    assert space.title == "Gloomhaven Night, 2025-05-06" and space.raw_meta["space"] is True
+    assert dm.title == "Sam Lee, 2025-05-06" and dm.raw_meta["conversation"] == "Sam Lee"  # you aren't named
+    assert dm.raw_meta["space"] is False and "Lee Park: rules recap tonight?" in space.body_text
+    # Every member by address and the name Chat gives them, whether or not they wrote that day.
+    assert space.raw_meta["names"] == {"ella@example.com": "Ella Novak", "lee@example.com": "Lee Park",
+                                       "me@example.com": "Me", "sam@example.com": "Sam Lee"}
+    events = sorted(i.external_id for i in items if i.source == "gcal")
+    assert events == ["me@example.com/me@example.com/EVT123"] + [
+        f"me@example.com/me@example.com/gloom_202505{d}T230000Z" for d in ("05", "12", "19", "26")]
+    assert report["parts"] == {"chat": 2, "calendar": 5} and report["counts"]["calendar_events"] == 2
+    assert all(i.raw_meta["product"] == "Calendar" for i in items if i.source == "gcal")
+
+
+def test_takeout_calendar_and_chat_build_one_event_per_series_and_named_threads(db, chat_and_calendar):
+    from igneous import sources
+    from igneous.graph import spine
+
+    with SessionLocal() as s:
+        first = takeout.run_import(s, [chat_and_calendar])
+        assert first["inserted"] == 7 and first["parts"]["calendar"] == 5
+    with SessionLocal() as s:
+        again = takeout.run_import(s, [chat_and_calendar])
+        assert (again["inserted"], again["updated"], again["unchanged"]) == (0, 0, 7)  # the same zip changes nothing
+        spine.run(s)
+        threads = dict(s.execute(text("""SELECT name, (props->>'group')::bool FROM nodes
+                                         WHERE type = 'Thread' AND key LIKE 'takeout-chat:%'""")).all())
+        assert threads == {"Gloomhaven Night": True, "Sam Lee": False}
+        events = dict(s.execute(text("SELECT name, props->>'series' FROM nodes WHERE type = 'Event'")).all())
+        assert events == {"Standup": "false", "Gloomhaven Night": "true"}
+        (attended,) = s.execute(text("""SELECT count(*) FROM edges e JOIN nodes p ON p.id = e.src
+                                        JOIN nodes ev ON ev.id = e.dst AND ev.name = 'Gloomhaven Night'
+                                        WHERE e.type = 'ATTENDED' AND p.key = 'lee@example.com'""")).one()
+        assert attended == 1  # one edge for the series, spanning its occurrences
+        counts = {row["id"]: row["items"] for row in sources.describe(s)}
+        assert counts["takeout"] == 7 and counts["gcal"] == 0  # the export's events count for the export
+        # People known from the chat are named as Chat names them: the member who never wrote too.
+        named = dict(s.execute(text("SELECT key, name FROM nodes WHERE type = 'Person' AND key LIKE '%@example.com'")).all())
+        assert (named["ella@example.com"], named["lee@example.com"], named["sam@example.com"]) == (
+            "Ella Novak", "Lee Park", "Sam Lee")
+
+
+def test_a_chat_name_gives_way_to_a_mail_headers(db, chat_and_calendar):
+    from igneous.connectors.base import SourceItem, run_sync
+    from igneous.graph import spine
+
+    class Mail:
+        name = "takeouttest"
+
+        def sync(self, cursor):
+            yield SourceItem(source="email", external_id="inbox/1", title="Game night", body_text="See you there.",
+                             occurred_at=datetime(2025, 5, 7, tzinfo=UTC),
+                             raw_meta={"from": [{"email": "sam@example.com", "name": "Samuel Lee"}],
+                                       "to": [{"email": "me@example.com", "name": ""}], "fingerprint": "fp-1"})
+
+    with SessionLocal() as s:
+        takeout.run_import(s, [chat_and_calendar])
+        run_sync(s, Mail())
+        spine.run(s)
+        name = s.execute(text("SELECT name FROM nodes WHERE type = 'Person' AND key = 'sam@example.com'")).scalar_one()
+        assert name == "Samuel Lee"
+
+
+def ics(stamp: str, *events: str, name: str = "me@example.com") -> bytes:
+    """A calendar as Google exports one: every event stamped with the export's time."""
+    body = [line for e in events for line in ["BEGIN:VEVENT", *e.strip().splitlines(), f"DTSTAMP:{stamp}", "END:VEVENT"]]
+    return "\r\n".join(["BEGIN:VCALENDAR", "VERSION:2.0", f"X-WR-CALNAME:{name}", "X-WR-TIMEZONE:UTC", *body,
+                         "END:VCALENDAR", ""]).encode()
+
+
+STANDUP = "DTSTART:20250604T180000Z\nDTEND:20250604T183000Z\nUID:EVT123@google.com\nSUMMARY:Standup"
+RETRO = "DTSTART:20250610T180000Z\nUID:retro@google.com\nSUMMARY:Retro"
+GLOOM = "DTSTART:20250505T230000Z\nRRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=4\nUID:gloom@google.com\nSUMMARY:Gloomhaven Night"
+
+
+def calendar_records(s) -> dict[str, str | None]:
+    return dict(s.execute(text("SELECT external_id, raw_meta->>'product' FROM source_items WHERE source = 'gcal'")).all())
+
+
+def test_a_newer_export_replaces_a_calendars_records_and_an_older_one_leaves_them(db, tmp_path):
+    august = build_zip(tmp_path / "takeout-20250801T000000Z-001.zip",
+                       {"Calendar/me@example.com.ics": ics("20250801T000000Z", STANDUP, GLOOM)})
+    # A month later the standup is gone, Gloomhaven skipped its third night, and there is a retro.
+    september = build_zip(tmp_path / "takeout-20250901T000000Z-001.zip", {"Calendar/me@example.com.ics": ics(
+        "20250901T000000Z", RETRO, GLOOM + "\nEXDATE:20250519T230000Z")})
+    stem = "me@example.com/me@example.com"
+    with SessionLocal() as s:
+        assert takeout.run_import(s, [august])["inserted"] == 5
+        newer = takeout.run_import(s, [september])
+        assert (newer["inserted"], newer["deleted"]) == (1, 2)
+        assert set(calendar_records(s)) == {f"{stem}/retro", *(f"{stem}/gloom_202505{d}T230000Z" for d in ("05", "12", "26"))}
+        older = takeout.run_import(s, [august])  # the older export brings nothing back and moves nothing
+        assert (older["inserted"], older["updated"], older["deleted"]) == (0, 0, 0)
+        assert any("is older than one imported before (2025-09-01)" in n for n in older["notes"])
+        assert len(calendar_records(s)) == 4
+
+
+def test_two_calendars_keyed_alike_in_one_export_keep_each_others_records(db, tmp_path):
+    """Two calendars called "Work", and nothing says whose they are: both are keyed under takeout/Work, and importing
+    the export again changes nothing (neither removes the other's events)."""
+    export = build_zip(tmp_path / "takeout-20250801T000000Z-001.zip", {
+        "Calendar/Work.ics": ics("20250801T000000Z", RETRO, name="Work"),
+        "Calendar/Work (1).ics": ics("20250801T000000Z", STANDUP, name="Work")})
+    with SessionLocal() as s:
+        assert takeout.run_import(s, [export])["inserted"] == 2
+        again = takeout.run_import(s, [export])
+        assert (again["inserted"], again["updated"], again["deleted"], again["unchanged"]) == (0, 0, 0, 2)
+
+
+def test_a_calendar_emptied_or_keyed_by_a_later_export_keeps_no_stale_events(db, tmp_path):
+    """A newer export whose Work calendar holds nothing removes its events; and a calendar an earlier export couldn't
+    key (no Chat export said whose it was) is replaced by the same calendar a later export keys."""
+    work = "DTSTART:20250602T150000Z\nORGANIZER;CN=Work:mailto:w1@group.calendar.google.com\nUID:plan@google.com\nSUMMARY:Plan"
+    chat_user = {"Google Chat/Users/User 1/user_info.json": {"user": {"name": "Me", "email": "me@example.com"}}}
+    early = build_zip(tmp_path / "takeout-20250701T000000Z-001.zip", {
+        "Calendar/Work.ics": ics("20250701T000000Z", work, name="Work")})
+    later = build_zip(tmp_path / "takeout-20250801T000000Z-001.zip", {
+        "Calendar/Work.ics": ics("20250801T000000Z", work, name="Work"), **chat_user})
+    emptied = build_zip(tmp_path / "takeout-20250901T000000Z-001.zip", {
+        "Calendar/me@example.com.ics": ics("20250901T000000Z", RETRO),
+        "Calendar/Work.ics": ics("20250901T000000Z", name="Work"), **chat_user})
+    with SessionLocal() as s:
+        takeout.run_import(s, [early])
+        assert set(calendar_records(s)) == {"takeout/Work/plan"}
+        takeout.run_import(s, [later])
+        assert set(calendar_records(s)) == {"me@example.com/w1@group.calendar.google.com/plan"}
+        takeout.run_import(s, [emptied])
+        assert set(calendar_records(s)) == {"me@example.com/me@example.com/retro"}
+
+
+def test_a_calendar_sync_keeps_its_window_and_the_export_adds_only_what_came_before(db, tmp_path):
+    from fakes import FakeCalendar
+
+    from igneous import sources
+    from igneous.connectors.base import run_sync
+    from igneous.connectors.gcal import CalendarConnector
+
+    export = build_zip(tmp_path / "takeout-20250801T000000Z-001.zip",
+                       {"Calendar/me@example.com.ics": ics("20250801T000000Z", STANDUP, RETRO, GLOOM)})
+    stem = "me@example.com/me@example.com"
+    # The sync's first listing reaches back to June 1, 2025: Gloomhaven (May) is before it, the standup and the retro
+    # in it. The standup moved a day; the retro was deleted after the export, so the listing doesn't have it.
+    since_days = (datetime.now(UTC) - datetime(2025, 6, 1, tzinfo=UTC)).days
+    moved = {"id": "EVT123", "iCalUID": "EVT123@google.com", "summary": "Standup (moved)",
+             "start": {"dateTime": "2025-06-05T18:00:00Z"}, "end": {"dateTime": "2025-06-05T18:30:00Z"}}
+    with SessionLocal() as s:
+        takeout.run_import(s, [export])
+        service = FakeCalendar([{"id": "me@example.com", "summary": "me@example.com"}],
+                               [{"items": [moved], "nextSyncToken": "t1"}])
+        stats = run_sync(s, CalendarConnector(None, "me@example.com", since_days=since_days, service=service),
+                         account="me@example.com")
+        assert (stats["inserted"], stats["updated"], stats["deleted"]) == (0, 1, 1)
+        assert calendar_records(s) == {f"{stem}/EVT123": None, **{f"{stem}/gloom_202505{d}T230000Z": "Calendar"
+                                                                  for d in ("05", "12", "19", "26")}}
+        # The same export again: what the sync keeps stays its own (the standup as it moved, the retro gone), and what
+        # came before its window stays the export's.
+        again = takeout.run_import(s, [export])
+        assert (again["inserted"], again["updated"], again["deleted"]) == (0, 0, 0)
+        assert any(n.startswith("Google Calendar syncs the calendar me@example.com: 2 of its events were left as the "
+                                "sync keeps them") for n in again["notes"])
+        title = s.execute(text(f"SELECT title FROM source_items WHERE external_id = '{stem}/EVT123'")).scalar_one()
+        assert title == "Standup (moved)"
+        counts = {row["id"]: row["items"] for row in sources.describe(s)}
+        assert (counts["takeout"], counts["gcal"]) == (4, 1)  # the export's records count for the export
+
+
+def test_only_the_calendar_folder_or_a_calendar_file_given_on_its_own_is_your_calendar(tmp_path):
+    invite = ics("20250801T000000Z", RETRO, name="Team")
+    export = build_zip(tmp_path / "takeout-20250801T000000Z-001.zip", {
+        "Calendar/me@example.com.ics": ics("20250801T000000Z", STANDUP),
+        "Google Chat/Groups/Space AAAA/File-invite.ics": invite,  # an invitation someone shared in a chat
+        "Drive/My Drive/old team calendar.ics": invite})
+    items, _ = takeout.parse([export])
+    assert [i.external_id for i in items if i.source == "gcal"] == ["me@example.com/me@example.com/EVT123"]
+    loose = tmp_path / "work.ics"
+    loose.write_bytes(invite)
+    items, _ = takeout.parse([loose])
+    assert [i.external_id for i in items] == ["takeout/Team/retro"]  # no account in a file alone: keyed by the export
+
+
+def test_a_calendar_that_cannot_be_read_in_part_never_stops_the_import(tmp_path):
+    """An event out of Python's range, and a property in a CHARSET nobody knows: the rest of the export is read."""
+    odd = ics("20250801T000000Z", "DTSTART:99991231T230000Z\nDURATION:P2D\nRRULE:FREQ=DAILY\nUID:far@google.com",
+              "DTSTART:20250605T180000Z\nUID:caf@google.com\nSUMMARY;ENCODING=QUOTED-PRINTABLE;CHARSET=X-NOPE:caf=C3=A9",
+              name="Odd")
+    export = build_zip(tmp_path / "takeout-20250801T000000Z-001.zip", {
+        "Calendar/me@example.com.ics": ics("20250801T000000Z", STANDUP), "Calendar/Odd.ics": odd,
+        "Tasks/Tasks.json": TASKS})
+    items, report = takeout.parse([export])
+    titles = sorted(i.title for i in items if i.source == "gcal")
+    assert titles == ["Standup", "café"] and any(i.source == "takeout_tasks" for i in items)
+    assert any("couldn't be read were left out (1)" in n for n in report["notes"])
+
+
+def test_without_user_info_you_are_the_one_person_in_every_conversation(tmp_path):
+    space = {"name": "Gloomhaven Night", "members": [CHAT_GROUP["members"][1], LEE, ELLA]}  # Sam isn't in it
+    files = {"Google Chat/Groups/Space AAAAgloom/group_info.json": space,
+             "Google Chat/Groups/Space AAAAgloom/messages.json": SPACE_MSGS,
+             "Google Chat/Groups/DM abc/group_info.json": CHAT_GROUP,
+             "Google Chat/Groups/DM abc/messages.json": CHAT_MSGS}
+    items, _ = takeout.parse([build_zip(tmp_path / "takeout-20250801T000000Z-001.zip", files)])
+    dm = by_id(items)["chat/dm-abc/2025-05-06"]
+    assert dm.title == "Sam Lee, 2025-05-06"  # me@example.com is in both conversations: you
+
+
+def test_a_meet_call_finds_its_repeating_event_by_the_occurrences_id_or_the_series(db, tmp_path):
+    """Meet names the calendar event a call was joined from; for a repeating one, by the occurrence's id or by the
+    series' id, and either way the call is about the one Event, whichever was read first."""
+    from igneous.graph import spine
+
+    header = MEET_CSV.split(b"\n")[0]
+    calls = header + b"\n" + b"\n".join(
+        f"1,i{n},conf{n},meet:meeting,abc-defg-hij,{eid},,,,2025-05-{day} 23:00:00 UTC,2025-05-{day} 23:30:00 UTC,0:30:00,,,,"
+        .encode() for n, (eid, day) in enumerate([("gloom_20250512T230000Z", "12"), ("gloom", "19")])) + b"\n"
+    meet = build_zip(tmp_path / "takeout-20250801T000000Z-001.zip",
+                     {"Google Meet/ConferenceHistory/conference_history_records.csv": calls})
+    calendar = build_zip(tmp_path / "takeout-20250801T000000Z-002.zip",
+                         {"Calendar/me@example.com.ics": ics("20250801T000000Z", GLOOM)})
+    with SessionLocal() as s:
+        takeout.run_import(s, [meet])
+        spine.run(s)  # the calls first: each finds its event once the calendar is read
+        takeout.run_import(s, [meet, calendar])
+        spine.run(s)
+        linked = s.execute(text("""
+            SELECT f.key FROM edges e JOIN nodes ev ON ev.id = e.dst AND ev.type = 'Event' AND ev.key = 'gcal:gloom@google.com'
+            JOIN nodes f ON f.id = e.src WHERE e.type = 'RELATED_TO' ORDER BY 1""")).scalars().all()
+        assert linked == ["takeout_meet:meet/conf0", "takeout_meet:meet/conf1"]
+
+
 def test_takeout_sources_are_hidden_from_models_by_default():
     from igneous.llm import allowed_sources
 

@@ -10,6 +10,7 @@ This module stays light (the CLI imports it to list the sources): Google, the mo
 inside the functions that use them.
 """
 import glob
+import json
 import os
 import sqlite3
 import sys
@@ -175,7 +176,8 @@ SOURCES: list[dict] = [
      "build": _google(_gmail), "options": {"since_days", "all_mail"}},
     {"id": "gcal", "kind": "google", "name": "Google Calendar", "group": "Connected accounts",
      "reads": f"Your events from the last {FIRST_SYNC_DAYS['gcal']} days on, in every calendar on your list: titles, "
-              "times, attendees, and places.",
+              "times, attendees, and places. Events a Google Takeout import already stored are updated, not added "
+              "again, and those its first sync doesn't find are removed.",
      "steps": GOOGLE_STEPS, "cli": "igneous sync gcal", "build": _google(_gcal), "options": {"since_days"}},
     {"id": "gcontacts", "kind": "google", "name": "Google Contacts", "group": "Connected accounts",
      "reads": "Names, emails, phone numbers, and organizations on your contact cards. Helps merge duplicate people.",
@@ -216,9 +218,15 @@ SOURCES: list[dict] = [
      "cli": "igneous import linkedin ~/Downloads/Basic_LinkedInDataExport.zip"},
     {"id": "takeout", "kind": "import", "name": "Google Takeout", "group": "Exports you upload",
      "reads": "Your Google My Activity (Search, YouTube, Maps, Gemini and the rest), Chrome history and bookmarks, "
-              "and Maps places and visits. Gemini chats are part of My Activity (a Gemini-only export works too).",
+              "Maps places and visits, Google Chat (each space by its name, each direct message by who is in it), "
+              "Tasks, Meet call history, and Calendar: every event, and each occurrence of a repeating one up to the "
+              "export. Gemini chats are part of My Activity (a Gemini-only export works too). Calendar events are "
+              "stored as Google Calendar's, so connecting Google Calendar later doesn't add them again. Importing a "
+              "newer export replaces what an older one stored; a calendar Google Calendar syncs keeps the sync's "
+              "events.",
      "steps": ["Go to takeout.google.com and click Deselect all.",
-               "Tick My Activity, Chrome, and Maps (your places). If you see Location History (Timeline), tick it too.",
+               "Tick My Activity, Chrome, Maps (your places), Calendar, Google Chat, Tasks and Google Meet. If you see "
+               "Location History (Timeline), tick it too.",
                "On My Activity click Multiple formats and change Activity records from HTML to JSON. HTML is not read.",
                "Click Next step, keep one-time export and .zip, then Create export. It usually takes hours and may "
                "arrive as several zips.",
@@ -277,10 +285,10 @@ SOURCES: list[dict] = [
      "cli": "igneous sync email", "build": _local(_email), "options": {"path", "mailboxes"}},
     {"id": "persona", "kind": "local", "name": "Synthetic persona", "group": "Demo",
      "reads": "Two invented years of Mira Castellanos, a computer science student at the fictional Lakeshore "
-              "University: her mailbox, Google Takeout (chat, tasks, Meet, Maps, My Activity, Chrome), LinkedIn and "
-              "ChatGPT exports, and a documents folder with her resumes, notes and a git checkout. Generated on this "
-              "computer from a seed, so every source and the trips, classes, job and project they make can be shown "
-              "without personal data. For demos and evaluation, in a database of its own.",
+              "University: her mailbox, Google Takeout (chat, tasks, Meet, Maps, My Activity, Chrome, Calendar), "
+              "LinkedIn and ChatGPT exports, and a documents folder with her resumes, notes and a git checkout. "
+              "Generated on this computer from a seed, so every source and the trips, classes, job and project they "
+              "make can be shown without personal data. For demos and evaluation, in a database of its own.",
      "steps": ["From the repository root run make persona. It writes the exports to data/persona, creates the database "
                "igneous_persona (make persona CLEAN=1 replaces it), reads each export through its own source on "
                "this page, and builds the graph.",
@@ -291,8 +299,13 @@ SOURCES: list[dict] = [
      "cli": "make persona (igneous persona generate ../data/persona, then igneous sync persona)",
      "build": _persona, "options": {"path"}},
 ]
-# The persona's records are stored under the sources its exports come through.
-PERSONA_STORED = ("email", "fs", *source_catalog.of_connector("takeout"), "linkedin", "ai_chats")
+# The persona's records are stored under the sources its exports come through (its Takeout calendar as gcal).
+PERSONA_STORED = ("email", "fs", *source_catalog.of_connector("takeout"), "gcal", "linkedin", "ai_chats")
+# Records an export stores under another source, as that source stores them (Takeout's calendar events are Google
+# Calendar's): source -> the Takeout product its records from the export name. They count for the export.
+VIA_TAKEOUT = {"gcal": "Calendar"}
+# The IGNEOUS_LLM_SOURCES ids that cover all of the persona.
+PERSONA_IDS = "email,fs,takeout,gcal,linkedin,ai_chats"
 BY_ID = {s["id"]: s for s in SOURCES}
 SYNCABLE = tuple(s["id"] for s in SOURCES if "build" in s)  # in page order
 IMPORT_TOOL = {"chatgpt", "gemini", "claude_ai"}  # raw_meta.tool values stored under source 'ai_chats'
@@ -305,10 +318,10 @@ def model_use(sid: str, allowed: frozenset[str]) -> dict:
     if sid == "persona":
         n = sum(v in allowed for v in PERSONA_STORED)
         state = "yes" if n == len(PERSONA_STORED) else "partly" if n else "no"
-        return {"id": "email,fs,takeout,linkedin,ai_chats", "allowed": state, "note": (
+        return {"id": PERSONA_IDS, "allowed": state, "note": (
             "Its records are stored under the sources it came through. A hosted model reads the ones IGNEOUS_LLM_SOURCES "
-            "lists: email,fs,takeout,linkedin,ai_chats for all of it, with IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true "
-            "for its documents." + (" All of it is opted in." if state == "yes" else ""))}
+            f"lists: {PERSONA_IDS} for all of it, with IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true for its documents."
+            + (" All of it is opted in." if state == "yes" else ""))}
     mid = MODEL_ID.get(sid, sid)
     stored = source_catalog.of_connector(mid) or (mid,)
     n = sum(v in allowed for v in stored)
@@ -324,8 +337,8 @@ def model_use(sid: str, allowed: frozenset[str]) -> dict:
         note = (f"Never sent to a hosted model. To allow it, add {mid} to IGNEOUS_LLM_SOURCES"
                 + (" and set IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true" if mid in source_catalog.LOCAL_TEXT else "")
                 + (" (that covers all AI chat history)" if mid != sid else "") + ", then restart the API.")
-    if sid == "takeout":  # stored with the other AI chats, not under a takeout_* source
-        note += " Its Gemini chats count as AI chats (ai_chats)."
+    if sid == "takeout":  # stored with the other AI chats and calendars, not under a takeout_* source
+        note += " Its Gemini chats count as AI chats (ai_chats), its calendar events as Google Calendar's (gcal)."
     return {"id": mid, "allowed": state, "note": note}
 
 
@@ -414,6 +427,11 @@ def describe(s: Session) -> list[dict]:
     latest_item = dict(s.execute(text("SELECT source, max(updated_at) FROM source_items GROUP BY 1")).all())
     latest_export = dict(s.execute(text("""
         SELECT raw_meta->>'tool', max(updated_at) FROM source_items WHERE source = 'ai_chats' GROUP BY 1""")).all())
+    # Takeout's records stored under another source (VIA_TAKEOUT) count for Takeout, not for that source.
+    via_takeout = {r.source: r for r in s.execute(text("""
+        SELECT source, count(*) AS n, max(updated_at) AS at FROM source_items
+        WHERE source = ANY(:s) AND raw_meta->>'product' = CAST(:products AS jsonb)->>source GROUP BY 1
+    """), {"s": list(VIA_TAKEOUT), "products": json.dumps(VIA_TAKEOUT)})}
     states: dict[str, list[tuple[str, object]]] = {}
     for connector, account, updated in s.execute(text("SELECT connector, account, updated_at FROM sync_state")):
         states.setdefault(connector, []).append((account, updated))
@@ -429,7 +447,10 @@ def describe(s: Session) -> list[dict]:
         row = {k: src[k] for k in ("id", "kind", "name", "group", "reads", "steps")}
         row["cli"] = src.get("cli")
         if sid == "takeout":
-            count = sum(n for src_, n in counts.items() if src_.startswith("takeout_")) + export_counts.get("gemini", 0)
+            count = (sum(n for src_, n in counts.items() if src_.startswith("takeout_")) + export_counts.get("gemini", 0)
+                     + sum(r.n for r in via_takeout.values()))
+        elif sid in via_takeout:
+            count = counts.get(sid, 0) - via_takeout[sid].n
         elif sid == "linkedin":
             count = counts.get("linkedin", 0)
         elif kind == "import":
@@ -450,6 +471,7 @@ def describe(s: Session) -> list[dict]:
             last = max((u for a, u in states.get(sid, []) if a != dict(persona.ACCOUNTS)["email"]), default=None)
         if kind == "import":  # imports have no sync checkpoint: last import = newest item they wrote
             stamps = ([t for k, t in latest_item.items() if k.startswith("takeout_")] + [latest_export.get("gemini")]
+                      + [r.at for r in via_takeout.values()]
                       if sid == "takeout" else [latest_item.get(sid) if sid == "linkedin" else latest_export.get(sid)])
             last = max((t for t in stamps if t), default=None)
         ok, message = check_requirements(sid) if kind in ("google", "local") else (True, None)

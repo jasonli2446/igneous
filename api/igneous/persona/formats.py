@@ -11,8 +11,9 @@
   Documents/                                        notes, resumes, spreadsheets, slides and a git checkout
                                                     (connectors/filesystem.py, parsers.py)
 
-Takeout's Calendar folder holds the calendar as Takeout writes it (one .ics file per calendar); no importer reads
-ICS yet, so the calendar reaches the graph through the invitations in the mailbox and the Meet history.
+Takeout's Calendar folder holds the calendar as Takeout writes it (one .ics file per calendar, named after the
+calendar, which for her own is her address), and the Meet history names the calendar event each call was joined
+from (for a repeating event, the occurrence's id).
 
 Zip members carry fixed timestamps, Office files fixed document properties, and every file its record's date as its
 modification time, so the same seed writes the same bytes.
@@ -245,16 +246,39 @@ def _fold(line: str) -> str:
     return "\r\n".join([*out, cur])
 
 
-def calendar_ics(life: Life) -> bytes:
+ZONES = {"home": "America/New_York", "lisbon": "Europe/Lisbon", "iceland": "Atlantic/Reykjavik"}
+# The time zone Google writes once for the repeating events that use it (the persona's repeat at home).
+NEW_YORK = ["BEGIN:VTIMEZONE", "TZID:America/New_York", "X-LIC-LOCATION:America/New_York", "BEGIN:DAYLIGHT",
+            "TZOFFSETFROM:-0500", "TZOFFSETTO:-0400", "TZNAME:EDT", "DTSTART:19700308T020000",
+            "RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU", "END:DAYLIGHT", "BEGIN:STANDARD", "TZOFFSETFROM:-0400",
+            "TZOFFSETTO:-0500", "TZNAME:EST", "DTSTART:19701101T020000", "RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU",
+            "END:STANDARD", "END:VTIMEZONE"]
+
+
+def calendar_key(e) -> dict:
+    """The record of an event's first occurrence, as connectors/ical.py keys it: the persona's own calendar, named by
+    her address, is her account's calendar."""
+    return {"source": "gcal", "external_id": f"{ME.email}/{ME.email}/{e.occurrence_id(e.start)}"}
+
+
+def calendar_ics(life: Life) -> tuple[bytes, dict[str, dict]]:
+    """Her calendar as Takeout exports it: a repeating event in its zone's wall time, every other in UTC."""
     stamp = lambda t: t.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")  # noqa: E731
     lines = ["BEGIN:VCALENDAR", "PRODID:-//Google Inc//Google Calendar 70.9054//EN", "VERSION:2.0",
-             "CALSCALE:GREGORIAN", f"X-WR-CALNAME:{ME.email}", "X-WR-TIMEZONE:America/New_York"]
+             "CALSCALE:GREGORIAN", "METHOD:PUBLISH", f"X-WR-CALNAME:{ME.email}", "X-WR-TIMEZONE:America/New_York",
+             *NEW_YORK]
+    keys = {}
     for e in sorted(life.events, key=lambda x: (x.start, x.uid)):
-        lines += ["BEGIN:VEVENT", f"DTSTART:{stamp(e.start)}", f"DTEND:{stamp(e.end)}"]
         if e.rrule:
-            lines.append(f"RRULE:{e.rrule}")
+            start, end = (local(t, e.zone).strftime("%Y%m%dT%H%M%S") for t in (e.start, e.end))
+            lines += ["BEGIN:VEVENT", f"DTSTART;TZID={ZONES[e.zone]}:{start}", f"DTEND;TZID={ZONES[e.zone]}:{end}",
+                      f"RRULE:{e.rrule}"]
+        else:
+            lines += ["BEGIN:VEVENT", f"DTSTART:{stamp(e.start)}", f"DTEND:{stamp(e.end)}"]
         lines += [f"DTSTAMP:{stamp(EXPORTED)}", f"ORGANIZER;CN={e.organizer.name}:mailto:{e.organizer.email}",
                   f"UID:{e.uid}@google.com"]
+        if e.tag:
+            keys[e.tag] = calendar_key(e)
         for a in e.attendees:
             lines.append(f"ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;CN={a.name}:mailto:{a.email}")
         lines += [f"CREATED:{stamp(e.start - timedelta(days=10))}", f"DESCRIPTION:{_ics_text(e.description)}",
@@ -262,7 +286,7 @@ def calendar_ics(life: Life) -> bytes:
                   "SEQUENCE:0", "STATUS:CONFIRMED", f"SUMMARY:{_ics_text(e.summary)}", "TRANSP:OPAQUE",
                   "END:VEVENT"]
     lines.append("END:VCALENDAR")
-    return ("\r\n".join(_fold(x) for x in lines) + "\r\n").encode()
+    return ("\r\n".join(_fold(x) for x in lines) + "\r\n").encode(), keys
 
 
 def takeout_maps(life: Life) -> list[tuple[str, bytes]]:
@@ -357,10 +381,12 @@ def takeout_chrome(life: Life) -> list[tuple[str, bytes]]:
 def write_takeout(life: Life, path: Path) -> dict[str, dict]:
     chat, keys = takeout_chat(life)
     tasks, task_keys = takeout_tasks(life)
+    calendar, event_keys = calendar_ics(life)
     keys.update(task_keys)
+    keys.update(event_keys)
     members = [*chat, ("Tasks/Tasks.json", tasks),
                ("Google Meet/ConferenceHistory/conference_history_records.csv", takeout_meet(life)),
-               (f"Calendar/{ME.email}.ics", calendar_ics(life)), *takeout_maps(life), *takeout_activity(life),
+               (f"Calendar/{ME.email}.ics", calendar), *takeout_maps(life), *takeout_activity(life),
                *takeout_chrome(life)]
     index = "".join(f"<li>{name}</li>" for name in sorted({m[0].split('/')[0] for m in members}))
     members.insert(0, ("archive_browser.html", f"<html><body><h1>Your Google data</h1><ul>{index}</ul></body></html>"

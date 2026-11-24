@@ -27,6 +27,7 @@ dependencies = [
     "python-pptx>=1.0",
     "python-multipart>=0.0.32",
     "ijson>=3.6.0",
+    "python-dateutil>=2.9.0",
 ]
 
 [dependency-groups]

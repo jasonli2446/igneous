@@ -8,7 +8,8 @@ shown in a demo (CLAUDE.md, CO-5).
 
 Mira Castellanos studies computer science at Lakeshore University (fictional, like everything here) from August 2024
 to her graduation in May 2026. Her records: a mailbox, a Google Takeout export (chat, tasks, Meet, Maps, My Activity,
-Chrome), LinkedIn and ChatGPT exports, and a documents folder with two resumes, class notes and a git checkout.
+Chrome, and her calendar), LinkedIn and ChatGPT exports, and a documents folder with two resumes, class notes and a git
+checkout.
 What is in them, so you know what to click:
 
 - **Classes**, each named by its code: CS 341, ENVS 210 (fall 2024), CS 375, CS 362 (spring 2025), CS 452 with its
@@ -30,7 +31,7 @@ What is in them, so you know what to click:
 2. **Point the API at it** in `api/.env`:
    ```bash
    IGNEOUS_DATABASE_URL=postgresql+psycopg://igneous:igneous@localhost:5432/igneous_persona
-   IGNEOUS_LLM_SOURCES=email,fs,takeout,linkedin,ai_chats   # the sources the persona came through
+   IGNEOUS_LLM_SOURCES=email,fs,takeout,gcal,linkedin,ai_chats   # the sources the persona came through
    IGNEOUS_LOCAL_SOURCES_MODEL_ENABLED=true                 # its documents (resumes, notes) too
    ```
 3. **Let the model read it** (needs `AWS_BEARER_TOKEN_BEDROCK` in the API's shell): start the API and press
@@ -51,7 +52,7 @@ What is in them, so you know what to click:
    Enron database for Ask at scale (prompt 7):
    ```bash
    cd api
-   uv run igneous mcp install --database igneous_persona --sources email,fs,takeout,linkedin,ai_chats
+   uv run igneous mcp install --database igneous_persona --sources email,fs,takeout,gcal,linkedin,ai_chats
    uv run igneous mcp install --name igneous-enron --database igneous --sources email
    uv run igneous connect bedrock     # for `ask` only: the model key, saved where the server finds it
    claude mcp list | grep igneous     # -> ✔ Connected, twice
@@ -61,7 +62,7 @@ What is in them, so you know what to click:
 7. **Quiet other MCP servers.** Claude Code waits for every configured server at startup. A server that times out
    (for example a stale `figma` entry) shows as one failed "waiting for MCP servers" step at the start of the session.
    Remove or disable it before recording.
-8. **Check it.** `uv run igneous mcp check --database igneous_persona --sources email,fs,takeout,linkedin,ai_chats`
+8. **Check it.** `uv run igneous mcp check --database igneous_persona --sources email,fs,takeout,gcal,linkedin,ai_chats`
    starts the server as Claude Code does and calls every tool once (add `--ask` to try `ask`, which costs a model
    call). It also brings what the tools read into the database's memory, so the first prompt doesn't wait on the disk.
 
@@ -200,9 +201,8 @@ in a fresh session before recording: times depend on the model and on the warm c
 | Sync now on the persona says it never mixes with other records | The API points at another database. Set `IGNEOUS_DATABASE_URL` to `igneous_persona` and restart the API. |
 | Threads are named like "Lisbon · Jan-Mar 2025" and all sit under Projects | The model hasn't read the persona: set `AWS_BEARER_TOKEN_BEDROCK` and the opt-ins (step 2), then Rebuild once. |
 | Lakeshore University also opens to a trip or Tidepool | They were placed by email domain (most of their people write from the school's address). The model's checker judges each placement; without it nothing does. Either way it's the moment for **This is wrong**. |
-| Search shows two Lisbons (or two Icelands, two Tidepools, a class twice) | The other one is a documents folder made a project ("Lisbon 2025"): it takes in every record that mentions Lisbon, fare newsletters and her mother's mail included. Open the trip thread ("Lisbon · Jan-Mar 2025" without the model). |
+| Search shows two Lisbons (or two Icelands, two Herons, two Tidepools, a class twice) | The others are a documents folder, a named group chat or a calendar series made a project ("Lisbon 2025", "Lisbon spring break", "Heron field trials"); the folder's takes in every record that mentions Lisbon, fare newsletters and her mother's mail included. Open the trip thread ("Lisbon · Jan-Mar 2025" without the model, "Heron · May-Jul 2025" for the field trials). |
 | Lakeshore University or Northwind Robotics shows twice, on her first ring or in search | One is the company her LinkedIn connections name, the other the organization found by its email domain, which holds the threads (in MCP, `find` lists both). Open the one with classes or projects under it. |
-| Group chats show as "Google Chat Space AAAA…" | The Takeout reader doesn't read a chat's name yet, only its folder's. Open one: its members and messages are right. |
 | `me` lists Northwind only from July 2026 | The profile keeps one position per organization; the internship from January 2025 is in her LinkedIn export and resume. |
 | First tool call says "waiting for MCP servers" | Another configured server is slow; igneous still connects. Remove the slow one before recording. |
 | A trip or org opens with almost nothing | Its records arrived after the last build. Press Rebuild (or run `igneous pipeline`); the graph switches over when it publishes. |

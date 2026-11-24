@@ -53,7 +53,7 @@ def lisbon(life: Life) -> None:
          "Happy to. I'll track everything and we'll settle up when we're back."),
     ])
     trip = life.event("Lisbon spring break", at(LISBON[0], "18:40"), 7 * 24 * 60 - 60 * 4, location="Lisbon",
-                      attendees=(dana, sofia, rafael), organizer=dana)
+                      attendees=(dana, sofia, rafael), organizer=dana, tag="lisbon.event")
     life.mail(at(d(2025, 3, 1), "12:00"), dana, [ME, sofia, rafael],
               "Invitation: Lisbon spring break @ Sat Mar 8 - Sat Mar 15, 2025 (mcastellanos@lakeshore.example.edu)",
               "Dana Kimura has invited you to an event.\n\nLisbon spring break\nSat Mar 8, 2025 - Sat Mar 15, 2025\n"
@@ -237,7 +237,7 @@ def iceland(life: Life) -> None:
     ])
     life.event("Flight AT 310 PAV-KEF", at(ICELAND[0], "21:15"), 445, location="Port Avalon International Airport")
     life.event("Iceland Ring Road", at(d(2026, 6, 7), "07:30", "iceland"), 7 * 24 * 60, location="Iceland",
-               attendees=(dana, theo), zone="iceland")
+               attendees=(dana, theo), zone="iceland", tag="iceland.event")
     life.event("Dinner at Ama's", at(d(2026, 6, 7), "19:00", "iceland"), 150, location="Bergstaðastræti 52, Reykjavík",
                attendees=(dana, theo, ama), zone="iceland")
     rng = life.rng("iceland")

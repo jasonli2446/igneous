@@ -77,7 +77,7 @@ def mail(life: Life) -> None:
         (at(d(2026, 9, 14), "17:30"), rafael, [hannah, ME], "That's incredible. Thank you for trusting us with it!"),
     ])
     hack = life.event("Port Avalon Civic Hack Night: Tidepool demo", at(d(2025, 11, 6), "18:30"), 150,
-                      location="Port Avalon Public Library", attendees=(rafael, hannah))
+                      location="Port Avalon Public Library", attendees=(rafael, hannah), tag="tidepool.demo")
     _ = hack
 
 

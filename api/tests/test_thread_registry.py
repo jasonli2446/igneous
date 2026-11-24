@@ -222,3 +222,61 @@ def test_a_resume_project_is_found_by_its_name_never_by_a_word_used_for_other_th
         "Kestrel Mobile Suite", "Kestrel"]
     assert records(db, kestrel) == set(db.execute(text("SELECT id FROM source_items WHERE external_id = ANY(:e)"),
                                                   {"e": mine}).scalars())
+
+
+def test_a_calendar_series_is_seeded_with_every_occurrence(db):
+    """Every occurrence of a repeating event is one of its records: a weekly club's series finds its 20 nights."""
+    from igneous.graph import spine
+
+    for week in range(20):
+        put(db, "gcal", f"me/me/climb_{week}", "Climbing club", {
+            "attendees": [], "organizer": {"email": ME}, "recurring": True, "series_key": "me/me/climb",
+            "event_key": "gcal:climb@google.com"}, at(7 * week), "Climbing club at the gym.")
+    for i in range(2):
+        put(db, "gmail", f"climb-mail{i}", "Climbing club dues", {"from": [{"email": "club@climb.test"}],
+                                                               "to": [{"email": ME}]}, at(3 + 30 * i), "Dues for climbing club.")
+    db.commit()
+    spine.run(db)
+    items = {r.id: r for r in threads._items(db)}
+    (seed,) = [sd for sd in threads.name_seeds(db) if sd["how"] == "series"]
+    found = threads._seed_candidate(db, seed, items)
+    assert found is not None and dict(found["sources"]) == {"gcal": 20, "gmail": 2}
+
+
+def test_a_repeating_event_counts_once_toward_a_terms_share_and_its_burst():
+    """A standup named after the employer, 50 times over a year, is one mention of the employer: the hiring's burst
+    (mail, chat and documents in one month) is still found, which 50 separate mentions would make background."""
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    def item(i, source, title, when, unit=None):
+        return SimpleNamespace(id=i, source=source, title=title, body="", occurred_at=when, node_id=None, unit=unit)
+
+    t0 = at(0)
+    items = [item(i, "takeout_activity", "Searched for weather", t0 + timedelta(days=i % 300)) for i in range(500)]
+    items += [item(1000 + w, "gcal", "Northwind standup", t0 + timedelta(days=7 * w), unit=42) for w in range(50)]
+    items += [item(2000 + i, source, f"Northwind {what}", t0 + timedelta(days=2 + i))
+              for i, (source, what) in enumerate([("gmail", "offer"), ("gmail", "onboarding"), ("takeout_tasks", "first day"),
+                                                   ("fs", "notes"), ("gmail", "badge"), ("fs", "plan")])]
+    (found,) = [c for c in threads.burst_candidates(items, set()) if c["terms"][0] == "Northwind"]
+    assert found["sources"]["gcal"] == 1 and len(found["items"]) == 7
+
+
+def test_a_chat_days_title_is_its_conversations_name_not_something_said_that_day():
+    """Messages and Google Chat title a day by its conversation; only what was said that day names a term. Eight days
+    of a chat called "Climbing Crew" and three records that name it are three mentions, not a burst of eleven."""
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    def item(i, source, title, body):
+        return SimpleNamespace(id=i, source=source, title=title, body=body, occurred_at=at(0) + timedelta(days=i),
+                               node_id=None, unit=None)
+
+    days = [item(i, source, f"Climbing Crew — day {i}", "see you at the gym")
+            for i, source in enumerate(["imessage", "takeout_chat"] * 4)]
+    others = [item(10 + i, source, "Plans", "Climbing Crew booked the wall")
+              for i, source in enumerate(["gmail", "fs", "gmail"])]
+    rest = [item(100 + i, "takeout_activity", "Searched for weather", "") for i in range(1000)]
+    assert "Climbing Crew" not in {c["terms"][0] for c in threads.burst_candidates(days + others + rest, set())}
+    days[0].body = days[1].body = days[2].body = "Climbing Crew tonight?"  # said in the chat: it counts
+    assert "Climbing Crew" in {c["terms"][0] for c in threads.burst_candidates(days + others + rest, set())}

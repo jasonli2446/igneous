@@ -1,7 +1,7 @@
 """Connector contract and the sync runner that makes every connector resumable and idempotent.
 
-A connector yields SourceItems with Checkpoints between them, and Tombstones or a final CompletedScan for what was
-deleted. `run_sync` is the storage boundary: it stores each item without NUL characters and with every credential
+A connector yields SourceItems with Checkpoints between them, and for what was deleted Tombstones, a CompletedWindow
+for a part it listed completely from a date on, or a final CompletedScan. `run_sync` is the storage boundary: it stores each item without NUL characters and with every credential
 in its title, its text and the text in its metadata redacted (`redact.py`), then upserts it, skipping it when its
 content hash is unchanged.
 """
@@ -165,6 +165,18 @@ class CompletedScan:
 
 
 @dataclass
+class CompletedWindow:
+    """A listing of everything in one scope from `since` on, in the middle of a sync: the items of `source` in `scope`
+    (an external id that covers itself and every id below it, as in a CompletedScan) that happened at `since` or later
+    and that the listing did not observe are deleted. An empty listing deletes them all. A Google Calendar's first
+    listing of a calendar, every event from a year back on, is one."""
+    source: str
+    scope: str
+    since: datetime
+    external_ids: frozenset[str]
+
+
+@dataclass
 class Tombstone:
     """An item a change feed reports removed. With `prefix`, every item in the scope `external_id` names (the id
     and everything below it, as in a CompletedScan)."""
@@ -176,7 +188,7 @@ class Tombstone:
 class Connector(Protocol):
     name: str
 
-    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | CompletedScan | Tombstone]: ...
+    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | CompletedScan | CompletedWindow | Tombstone]: ...
 
 
 UPSERT = text("""
@@ -241,6 +253,15 @@ def _reconcile(s: Session, scan: CompletedScan) -> int:
         "kept": list(scan.kept)}).rowcount
 
 
+def _reconcile_window(s: Session, window: CompletedWindow) -> int:
+    """Delete the items in a completed window's scope, from its start on, that it did not observe."""
+    return s.execute(text(f"""
+        DELETE FROM source_items WHERE source = :source AND occurred_at >= :since AND {_in_scopes('scopes')}
+          AND NOT EXISTS (SELECT 1 FROM unnest(CAST(:observed AS text[])) AS seen(id) WHERE seen.id = external_id)
+    """), {"source": window.source, "since": window.since, "scopes": [window.scope],
+           "observed": sorted(window.external_ids)}).rowcount
+
+
 def _delete(s: Session, tombstone: Tombstone) -> int:
     where = _in_scopes("scopes") if tombstone.prefix else "external_id = :external_id"
     return s.execute(text(f"DELETE FROM source_items WHERE source = :source AND {where}"), {
@@ -257,7 +278,7 @@ def _deleted(s: Session, n: int) -> int:
 
 
 def run_sync(s: Session, connector: Connector, account: str = "default", limit: int | None = None) -> dict:
-    """Upsert every item; delete only what a Tombstone names or a CompletedScan did not observe.
+    """Upsert every item; delete only what a Tombstone names or a CompletedWindow or CompletedScan did not observe.
 
     A Checkpoint commits what came before it and never implies a complete scan, so an exception, a stopped process
     or `limit` (which stops at the first checkpoint after that many items) can store additions and updates but never
@@ -274,6 +295,9 @@ def run_sync(s: Session, connector: Connector, account: str = "default", limit: 
             break
         if isinstance(obj, Tombstone):
             stats["deleted"] += _deleted(s, _delete(s, obj))
+            continue
+        if isinstance(obj, CompletedWindow):
+            stats["deleted"] += _deleted(s, _reconcile_window(s, obj))
             continue
         if isinstance(obj, Checkpoint):
             save_cursor(s, connector.name, account, obj.cursor)

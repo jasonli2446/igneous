@@ -144,3 +144,40 @@ def wipe() -> None:
         _wipe(s)
 
 
+
+
+def chat_only_name(s, folder) -> int:
+    """Ella Novak, named only by a Google Chat space she belongs to and never writes in, and reached by one opted-in
+    message by her address alone, each imported as its source imports it and built by the spine. Returns her node."""
+    import zipfile
+
+    from igneous.connectors import takeout
+    from igneous.connectors.base import SourceItem, run_sync
+    from igneous.graph import spine
+
+    me = {"name": "Mo Self", "email": "mo@x.test", "user_type": "Human"}
+    sam = {"name": "Sam Shared", "email": "sam@x.test", "user_type": "Human"}
+    ella = {"name": "Ella Novak", "email": "ella@x.test", "user_type": "Human"}
+    space = "Takeout/Google Chat/Groups/Space AAAAread"
+    export = folder / "takeout-20250201T000000Z-001.zip"
+    with zipfile.ZipFile(export, "w") as zf:
+        zf.writestr(f"{space}/group_info.json", json.dumps({"name": "Reading group", "members": [me, sam, ella]}))
+        zf.writestr(f"{space}/messages.json", json.dumps({"messages": [
+            {"creator": sam, "created_date": "Wednesday, January 15, 2025 at 7:00:00 PM UTC",
+             "text": "Chapter four next week.", "topic_id": "t", "message_id": "r1"}]}))
+        zf.writestr("Takeout/Google Chat/Users/User 1/user_info.json", json.dumps({"user": me}))
+    takeout.run_import(s, [export])
+
+    class Mail:
+        name = "mixed-mail"
+
+        def sync(self, cursor):
+            yield SourceItem(source="gmail", external_id="ella-1", title="Notes", body_text="Notes from today.",
+                             occurred_at=T0 + timedelta(days=1),
+                             raw_meta={"from": [{"email": "mo@x.test", "name": ""}],
+                                       "to": [{"email": "ella@x.test", "name": ""}], "fingerprint": "fp-ella-1",
+                                       "gmail_thread_id": "t-ella", "labels": ["SENT"]})
+
+    run_sync(s, Mail())
+    spine.run(s)
+    return s.execute(text("SELECT id FROM nodes WHERE type = 'Person' AND key = 'ella@x.test'")).scalar_one()
