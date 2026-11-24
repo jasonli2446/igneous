@@ -90,9 +90,11 @@ def upgrade():
             FROM overrides o
             WHERE o.op = 'unlink' AND cardinality(o.node_keys) = 2 AND o.undone_at IS NULL
               AND COALESCE((o.data->>'pair_correction')::bool, false) = false;
+        -- A pair corrected twice is one verdict (the newest correction), and one statement can't write a key twice.
         INSERT INTO edge_verdicts (src_key, dst_key, type, extractor, evidence, verdict, confidence, reason, source)
-            SELECT a, b, type, 'entities', 'override:' || id, 'drop', 1.0, 'you said this connection is wrong', 'user'
-            FROM old_unlink
+            SELECT DISTINCT ON (a, b, type) a, b, type, 'entities', 'override:' || id, 'drop', 1.0,
+                   'you said this connection is wrong', 'user'
+            FROM old_unlink ORDER BY a, b, type, id DESC
         ON CONFLICT (src_key, dst_key, type, extractor) DO UPDATE SET evidence = EXCLUDED.evidence,
             verdict = 'drop', confidence = 1.0, reason = EXCLUDED.reason, source = 'user', updated_at = now();
         UPDATE overrides o SET data = jsonb_build_object('pair_correction', true, 'edges', '[]'::jsonb,
