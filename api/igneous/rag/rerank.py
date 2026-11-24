@@ -17,8 +17,8 @@ SCORED_CHARS = 1000
 
 
 def rerank(question: str, items: list[dict], keep: int) -> list[dict] | None:
-    """The `keep` items the cross-encoder scores highest for `question`, best first, each with its `rerank_score`;
-    None when reranking is off or its model can't run."""
+    """The `keep` items the cross-encoder scores highest for `question`, best first and equal scores in the order of
+    `items`, each with its `rerank_score`; None when reranking is off or its model can't run."""
     global _load_failure
 
     if not settings.reranker_enabled:
