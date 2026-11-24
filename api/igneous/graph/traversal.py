@@ -896,12 +896,16 @@ def children(s: Session, node: int, ntype: str) -> list[int]:
     # Projects under it: the ones you stated (or your resume did) always show; others earn their place by size.
     stated = s.execute(text(f"""
         SELECT DISTINCT e.src FROM edges e JOIN nodes c ON c.id = e.src AND c.type = 'Project' AND {visible('c')}
-        WHERE e.dst = :n AND e.type = 'PART_OF' AND e.extractor IN ('user', 'profile') ORDER BY e.src
+        LEFT JOIN thread_registry r ON r.key = c.key AND r.pinned AND r.status = 'active'
+        -- Stated by you (a link, your resume) or pinned by you (the gold set): always shown, however many siblings.
+        WHERE e.dst = :n AND e.type = 'PART_OF' AND (e.extractor IN ('user', 'profile') OR r.key IS NOT NULL)
+        ORDER BY e.src
     """), {"n": node}).scalars().all()
     subs = s.execute(text(f"""
         SELECT c.id, COALESCE((c.props->>'records')::float, 1) FROM edges e
         JOIN nodes c ON c.id = e.src AND c.type = 'Project' AND {visible('c')}
-        WHERE e.dst = :n AND e.type = 'PART_OF' AND e.extractor NOT IN ('user', 'profile')
+        LEFT JOIN thread_registry r ON r.key = c.key AND r.pinned AND r.status = 'active'
+        WHERE e.dst = :n AND e.type = 'PART_OF' AND e.extractor NOT IN ('user', 'profile') AND r.key IS NULL
         UNION
         SELECT c.id, COALESCE((c.props->>'records')::float, 1) FROM edges e
         JOIN nodes c ON c.id = e.dst AND c.type = 'Project' AND {visible('c')}

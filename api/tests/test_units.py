@@ -800,3 +800,13 @@ def test_ongoing_threads_have_no_window_and_nested_names_are_judged():
     a = {"id": 1, "name": "Climbing", "items": {1}, "people": set(), "a": datetime(2024, 1, 1), "b": datetime(2026, 1, 1)}
     b = {"id": 2, "name": "Climbing Club", "items": {9}, "people": set(), "a": datetime(2024, 8, 1), "b": datetime(2025, 4, 1)}
     assert len(candidate_pairs([a, b])) == 1  # nothing shared, but one name is inside the other
+
+
+def test_a_pinned_child_always_shows_under_its_parent():
+    import inspect
+
+    from igneous.graph import traversal
+
+    src = inspect.getsource(traversal.children)
+    # Pinned (by you) counts as stated: it skips the earned cut that keeps only the biggest inferred children.
+    assert "r.pinned AND r.status = 'active'" in src and "r.key IS NOT NULL" in src and "r.key IS NULL" in src
