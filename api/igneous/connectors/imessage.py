@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from igneous.connectors.base import Checkpoint, Every, SourceItem
+from igneous.connectors.macos import read_only
 
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=UTC)
 DEFAULT_DB = Path(os.path.expanduser("~/Library/Messages/chat.db"))
@@ -54,16 +55,11 @@ class MessagesConnector:
         self.db = Path(db)
         self.since_days = since_days
 
-    def _connect(self) -> sqlite3.Connection:
-        try:
-            return sqlite3.connect(f"file:{self.db}?mode=ro", uri=True)
-        except sqlite3.OperationalError as e:
-            raise PermissionError(
-                f"can't open {self.db} ({e}). Grant Full Disk Access to your terminal in System Settings -> "
-                "Privacy & Security -> Full Disk Access, then restart it.") from e
-
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint]:
-        db = self._connect()
+        with read_only(self.db) as db:
+            yield from self._read(db, cursor)
+
+    def _read(self, db: sqlite3.Connection, cursor: dict) -> Iterator[SourceItem | Checkpoint]:
         # Everything up to this row is read now; a row that arrives meanwhile is read next time.
         top = db.execute("SELECT COALESCE(max(ROWID), 0) FROM message").fetchone()[0]
         if "last_rowid" in cursor:
@@ -71,7 +67,8 @@ class MessagesConnector:
             # device, or a restored backup) is caught too.
             since, value = "m.ROWID > ?", cursor["last_rowid"]
         else:
-            # A first sync reads by date (`last_date` is where a cursor of dates stopped).
+            # Without a row to continue from, read by date: from a cursor's `last_date` (a message date, as `date`
+            # stores it), else `since_days` back.
             after = cursor.get("last_date", 0)
             if not after and self.since_days:
                 after = int((datetime.now(UTC) - timedelta(days=self.since_days) - APPLE_EPOCH).total_seconds() * 1e9)

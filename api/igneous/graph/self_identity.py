@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 
 from igneous.connectors.mac_contacts import SOURCES as CONTACT_DBS
 from igneous.connectors.mac_contacts import norm_phone
+from igneous.connectors.macos import read_only
 from igneous.graph import identity
 from igneous.graph.identity import OWNER_KEY, OWNER_NAME, self_id
 from igneous.graph.organizations import PERSONAL_DOMAINS
@@ -129,30 +130,33 @@ def _signals(s: Session) -> list[tuple[str, str]]:
             out.append(("gmail_sent", addr))
     if owner := archive_owner(s):
         out.append(("archive_sent", owner))
+    # The Mac's own records of you, when this process may read them; without them (no Full Disk Access, no such
+    # database, or one this version can't read) the other signals still work.
     if os.path.exists(CHAT_DB):
         try:
-            db = sqlite3.connect(f"file:{CHAT_DB}?mode=ro", uri=True)
-            for (h,) in db.execute("""
-                SELECT DISTINCT destination_caller_id FROM message
-                WHERE is_from_me = 1 AND destination_caller_id IS NOT NULL
-            """):
-                key = h.lower() if "@" in h else norm_phone(h)
-                if key:
-                    out.append(("imessage_handle", key))
-        except sqlite3.OperationalError:
-            pass  # no Full Disk Access: the other signals still work
+            with read_only(CHAT_DB) as db:
+                for (h,) in db.execute("""
+                    SELECT DISTINCT destination_caller_id FROM message
+                    WHERE is_from_me = 1 AND destination_caller_id IS NOT NULL
+                """):
+                    key = h.lower() if "@" in h else norm_phone(h)
+                    if key:
+                        out.append(("imessage_handle", key))
+        except (OSError, sqlite3.Error):
+            pass
     for path in glob.glob(CONTACT_DBS):
         try:
-            db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-            me = [r[0] for r in db.execute("SELECT Z_PK FROM ZABCDRECORD WHERE ZCONTAINERWHERECONTACTISME IS NOT NULL")]
-            for pk in me:
-                for (num,) in db.execute("SELECT ZFULLNUMBER FROM ZABCDPHONENUMBER WHERE ZOWNER = ?", (pk,)):
-                    if (n := norm_phone(num)):
-                        out.append(("me_card", n))
-                for (em,) in db.execute("SELECT ZADDRESS FROM ZABCDEMAILADDRESS WHERE ZOWNER = ?", (pk,)):
-                    if em:
-                        out.append(("me_card", em.strip().lower()))
-        except sqlite3.OperationalError:
+            with read_only(path) as db:
+                me = [r[0] for r in db.execute(
+                    "SELECT Z_PK FROM ZABCDRECORD WHERE ZCONTAINERWHERECONTACTISME IS NOT NULL")]
+                for pk in me:
+                    for (num,) in db.execute("SELECT ZFULLNUMBER FROM ZABCDPHONENUMBER WHERE ZOWNER = ?", (pk,)):
+                        if (n := norm_phone(num)):
+                            out.append(("me_card", n))
+                    for (em,) in db.execute("SELECT ZADDRESS FROM ZABCDEMAILADDRESS WHERE ZOWNER = ?", (pk,)):
+                        if em:
+                            out.append(("me_card", em.strip().lower()))
+        except (OSError, sqlite3.Error):
             continue
     return out
 

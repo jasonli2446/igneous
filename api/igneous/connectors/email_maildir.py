@@ -5,12 +5,13 @@ import email.policy
 import hashlib
 import re
 from collections.abc import Iterator
+from datetime import UTC
 from email.utils import getaddresses, parsedate_to_datetime
 from pathlib import Path
 
 from bs4 import BeautifulSoup
 
-from igneous.connectors.base import Checkpoint, SourceItem
+from igneous.connectors.base import Checkpoint, SourceItem, Tombstone
 
 CHECKPOINT_EVERY = 100  # also the granularity of `sync --limit` (it stops at the first checkpoint past the limit)
 
@@ -40,6 +41,8 @@ def parse_message(raw: bytes, external_id: str) -> SourceItem:
         occurred = parsedate_to_datetime(msg["date"]) if msg["date"] else None
     except (TypeError, ValueError):
         occurred = None
+    if occurred is not None and occurred.tzinfo is None:
+        occurred = occurred.replace(tzinfo=UTC)  # "-0000": the time is UTC, the sender's own zone unknown (RFC 5322)
     refs = re.findall(r"<[^>]+>", str(msg.get("references", "")))
     body = _body(msg)
     sender = (_addrs(msg, "from") or [{"email": ""}])[0]["email"]
@@ -56,7 +59,7 @@ def parse_message(raw: bytes, external_id: str) -> SourceItem:
         "to": _addrs(msg, "to"),
         "cc": _addrs(msg, "cc"),
         "bcc": _addrs(msg, "bcc"),
-        # Enron's X-From/X-To carry the human-readable names the address headers lack.
+        # Enron's X-From carries the sender's human-readable name, which the address header lacks.
         "x_from": str(msg.get("x-from", "")) or None,
         "folder": str(msg.get("x-folder", "")) or None,
     }
@@ -71,7 +74,8 @@ def parse_message(raw: bytes, external_id: str) -> SourceItem:
 
 class MaildirConnector:
     """Walks <root>/<mailbox>/... with each mailbox's files in path order. The cursor holds, per mailbox, the last
-    path fully processed, so syncing another mailbox starts that one from its beginning."""
+    path fully processed (`mailboxes`), so syncing another mailbox starts that one from its beginning. A cursor with
+    one position for every mailbox (`last_path`) holds it for that path's own mailbox."""
     name = "email"
 
     def __init__(self, root: Path, mailboxes: list[str] | None = None):
@@ -87,18 +91,25 @@ class MaildirConnector:
             raise ValueError(f"No mailbox {', '.join(missing)} in {self.root} (it has {len(found)}).")
         return sorted(set(self.mailboxes))
 
-    def _paths(self, box: str) -> list[str]:
+    def _paths(self, box: str) -> tuple[list[str], list[str]]:
+        """The mailbox's message files, and the files in it that aren't messages: a name that starts with a dot
+        (Finder leaves .DS_Store and ._ files in a folder you open)."""
         # Sorted as the strings the cursor compares, never as Path objects (which order "a/1" before "a-b/1").
-        return sorted(p.relative_to(self.root).as_posix() for p in (self.root / box).rglob("*") if p.is_file())
+        files = sorted(p.relative_to(self.root).as_posix() for p in (self.root / box).rglob("*") if p.is_file())
+        dotted = [rel for rel in files if rel.rsplit("/", 1)[-1].startswith(".")]
+        return [rel for rel in files if not rel.rsplit("/", 1)[-1].startswith(".")], dotted
 
-    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint]:
+    def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | Tombstone]:
         done = dict(cursor.get("mailboxes") or {})
-        if legacy := cursor.get("last_path"):  # one position shared by every mailbox: it holds for its own only
-            done.setdefault(legacy.split("/", 1)[0], legacy)
+        if shared := cursor.get("last_path"):
+            done.setdefault(shared.split("/", 1)[0], shared)
         n = 0
         for box in self._boxes():
             after = done.get(box)
-            for rel in self._paths(box):
+            messages, not_messages = self._paths(box)
+            for rel in not_messages:  # none is mail: one stored as mail goes, wherever the cursor is
+                yield Tombstone(self.name, rel)
+            for rel in messages:
                 if after and rel <= after:
                     continue
                 yield parse_message((self.root / rel).read_bytes(), external_id=rel)

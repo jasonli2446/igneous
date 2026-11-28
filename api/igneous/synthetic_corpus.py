@@ -169,23 +169,18 @@ def generate(out: Path) -> dict:
 
 
 def verify(out: Path) -> dict:
-    """Validate a generated corpus without requiring an importer or external package."""
+    """Check that `out` holds exactly what `generate` writes: its manifest, and every file byte for byte. Raises
+    ValueError naming the first difference."""
     out = Path(out)
     manifest_path = out / MANIFEST_NAME
     if not manifest_path.is_file():
         raise ValueError(f"missing {MANIFEST_NAME}: generate the corpus first")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     expected = _contents()
-    if manifest.get("files") != {k: _digest(v) for k, v in sorted(expected.items())}:
+    if json.loads(manifest_path.read_text(encoding="utf-8")).get("files") != {
+            relative: _digest(content) for relative, content in sorted(expected.items())}:
         raise ValueError("manifest does not match this generator version")
     for relative, content in expected.items():
         path = out / relative
-        if not path.is_file() or path.read_text(encoding="utf-8") != content:
+        if not path.is_file() or path.read_bytes() != content.encode("utf-8"):
             raise ValueError(f"invalid generated file: {relative}")
-    calendar = out / "calendar.ics"
-    lines = calendar.read_text(encoding="utf-8").splitlines()
-    if lines[0] != "BEGIN:VCALENDAR" or lines[-1] != "END:VCALENDAR":
-        raise ValueError("calendar.ics is not a complete VCALENDAR")
-    if lines.count("BEGIN:VEVENT") != lines.count("END:VEVENT") or lines.count("BEGIN:VEVENT") != 2:
-        raise ValueError("calendar.ics does not contain the expected events")
-    return {"documents": manifest["document_count"], "calendar_events": manifest["calendar_event_count"]}
+    return {"documents": len(FILES), "calendar_events": CALENDAR.count("BEGIN:VEVENT")}

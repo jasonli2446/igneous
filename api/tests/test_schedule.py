@@ -33,7 +33,7 @@ def test_a_run_reports_each_sources_outcome_and_errors(db, monkeypatch, tmp_path
 
     def fake_sync(sid, session, account=None, opts=None, progress=None, limit=None):
         if sid == "ai_chats":
-            raise sources.SyncFailed("No Claude Code or Codex sessions found on this Mac.", {"accounts": {}})
+            raise sources.SyncFailed("No Claude Code or Codex sessions found on this computer.", {"accounts": {}})
         return {"inserted": 0, "updated": 0, "unchanged": 4, "deleted": 0, "redactions": 0, "accounts": {}}
 
     monkeypatch.setattr(sources, "sync", fake_sync)
@@ -42,7 +42,7 @@ def test_a_run_reports_each_sources_outcome_and_errors(db, monkeypatch, tmp_path
     result = schedule.run(db)
     assert result["fs"]["status"] == "succeeded" and result["fs"]["result"]["unchanged"] == 4
     assert result["ai_chats"] == {"status": "failed", "result": {"accounts": {}},
-                                  "error": "No Claude Code or Codex sessions found on this Mac."}
+                                  "error": "No Claude Code or Codex sessions found on this computer."}
     assert result["pipeline"]["status"] == "succeeded" and ran == [1]  # never rebuilt before
     assert schedule.run(db)["pipeline"] == {"skipped": "nothing new since the last rebuild"}
     from igneous.graph import dirty

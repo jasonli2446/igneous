@@ -5,9 +5,14 @@ down, and each stays under its per-user limit instead of tripping it and waiting
 quota units (messages.get and list cost 5, getProfile 1, history.list 2) against IGNEOUS_GMAIL_UNITS_PER_MIN; the
 others count calls.
 """
+import errno
+import http.client
+import ssl
 import threading
 import time
 
+import httplib2
+from google.auth.exceptions import TransportError
 from googleapiclient.errors import HttpError
 
 from igneous.config import settings
@@ -43,20 +48,38 @@ BUCKETS = {
 }
 
 
-def call(api: str, request, units: float = 1, tries: int = 6):
-    """Execute a googleapiclient request against `api`'s bucket. Backs off on rate limits (429, 403 rateLimitExceeded)
-    and transient 5xx; Google's per-user window is a minute, so rate-limit waits grow to 64 s."""
+# The socket errors Google's own client (googleapiclient.http) tries again.
+_DROPPED = {"ETIMEDOUT", "EPIPE", "ECONNABORTED", "ECONNREFUSED", "ECONNRESET", "WSAETIMEDOUT"}
+
+
+def _connection_failed(e: Exception) -> bool:
+    """A connection that dropped, timed out, was refused or reset, broke its TLS session, couldn't resolve Google's
+    host, or ended mid-response (a token refresh's included): another attempt can succeed. A certificate Google's
+    can't be verified against never will."""
+    if isinstance(e, ssl.SSLCertVerificationError):
+        return False
+    if isinstance(e, (ssl.SSLError, TimeoutError, ConnectionError, httplib2.ServerNotFoundError,
+                      http.client.IncompleteRead, TransportError)):
+        return True
+    return isinstance(e, OSError) and errno.errorcode.get(e.errno or 0) in _DROPPED
+
+
+def call(api: str, request, units: float = 1, attempts: int = 7):
+    """Execute a googleapiclient request against `api`'s bucket, up to `attempts` times. Backs off on rate limits
+    (429, 403 rateLimitExceeded), transient 5xx and a failed connection (`_connection_failed`); Google's per-user
+    window is a minute, so rate-limit waits grow to 64 s. The last attempt's error is raised."""
     bucket = BUCKETS[api]
-    for i in range(tries):
+    for attempt in range(attempts):
         bucket.take(units)
         try:
             return request.execute()
         except HttpError as e:
             status = e.resp.status
             limited = status == 429 or (status == 403 and b"ateLimit" in (e.content or b""))
-            if limited or status in (500, 502, 503):
-                time.sleep(min(64, 2 ** (i + 1)) if limited else min(16, 2 ** i))
-                continue
-            raise
-    bucket.take(units)
-    return request.execute()
+            if not (limited or status in (500, 502, 503)) or attempt == attempts - 1:
+                raise
+            time.sleep(min(64, 2 ** (attempt + 1)) if limited else min(16, 2 ** attempt))
+        except (OSError, httplib2.HttpLib2Error, http.client.HTTPException, TransportError) as e:
+            if not _connection_failed(e) or attempt == attempts - 1:
+                raise
+            time.sleep(min(16, 2 ** attempt))

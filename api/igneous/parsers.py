@@ -70,9 +70,11 @@ _FORMATS = {
 # By MIME type, only the formats above: the legacy binary Office types (application/msword, vnd.ms-excel,
 # vnd.ms-powerpoint) are not OOXML, and the .docx/.xlsx/.pptx readers can't open them.
 _MIME_FORMATS = {mime: parser for mime, parser in _FORMATS.values()}
-_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$", re.MULTILINE)
-# A larger document is kept as metadata only: parsing holds it whole in memory, and its text would swamp search.
+# A larger document is never opened (a source keeps at most its name and size): parsing holds it whole in memory,
+# and its text would swamp search.
 MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
+# A text file in UTF-16 starts with one of these byte order marks; without one, text is read as UTF-8.
+_UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
 
 
 def supported(filename: str | None, mime: str | None = None) -> bool:
@@ -126,18 +128,21 @@ def _detect(data: bytes, filename: str | None, mime: str | None) -> tuple[str | 
 
 
 def _parse_text(data: bytes, mime: str | None) -> ParsedDocument:
+    """UTF-8 text, or UTF-16 text that starts with its byte order mark (Windows tools write it). Other legacy
+    encodings are not guessed: guessing turns a binary attachment into garbage text."""
+    if data.startswith(_UTF16_BOMS):
+        try:
+            text = data.decode("utf-16")
+        except UnicodeDecodeError:
+            return ParsedDocument("", mime, "text", [], "binary", "input is not UTF-16 text")
+        if _looks_binary(text.encode("utf-8")):
+            return ParsedDocument("", mime, "text", [], "binary", "input contains binary data")
+        return ParsedDocument(_normalize(text), mime, "text", [], "ok")
     if _looks_binary(data):
         return ParsedDocument("", mime, "text", [], "binary", "input contains binary data")
     try:
         return ParsedDocument(_normalize(data.decode("utf-8-sig")), mime, "text", [], "ok")
     except UnicodeDecodeError:
-        # UTF-16 is common enough to be a useful text boundary; arbitrary legacy encodings
-        # are intentionally not guessed, since they can turn binary attachments into garbage.
-        if data.startswith((b"\xff\xfe", b"\xfe\xff")):
-            try:
-                return ParsedDocument(_normalize(data.decode("utf-16")), mime, "text", [], "ok")
-            except UnicodeDecodeError:
-                pass
         return ParsedDocument("", mime, "text", [], "binary", "input is not UTF-8 text")
 
 
@@ -225,7 +230,8 @@ def _normalize(text: str) -> str:
 
 
 def _looks_binary(data: bytes) -> bool:
-    if b"\x00" in data and not data.startswith((b"\xff\xfe", b"\xfe\xff")):
+    """NUL bytes, or more than a tenth control characters: not text in a single-byte or UTF-8 encoding."""
+    if b"\x00" in data:
         return True
     if not data:
         return False

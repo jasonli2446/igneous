@@ -3,8 +3,9 @@
 State lives in the `jobs` table, so a page reload or an API restart still shows what happened, and a partial unique
 index allows one running job per source. Each job records its owner, the host and process running it: a job left
 running by a process that died is marked failed (`fail_interrupted`, when the API or the scheduled sync starts),
-while one another live process runs is left alone. `start` runs a job in a daemon thread and `run` in the caller,
-each with its own Session; progress is written at most once a second.
+while one another live process runs is left alone. `start` runs a job in a daemon thread and returns it as it
+started, running, whatever the thread has done since; `run` runs it in the caller and returns it finished. Each
+has its own Session; progress is written at most once a second.
 """
 import json
 import os
@@ -50,8 +51,8 @@ def _alive(pid: int) -> bool:
 
 
 def _dead(job) -> bool:
-    """Whether a running job's process is gone. Only a process on this host can be checked; a job without an owner
-    predates owners and outlived its process."""
+    """Whether a running job's process is gone. Only a process on this host can be checked; a job with no owner
+    recorded has no process that could still be running it."""
     if job.owner_pid is None:
         return True
     if job.owner_host != HOST:
@@ -91,35 +92,36 @@ def latest_by_source(s: Session) -> dict[str, dict]:
     return {r.source: _row(r) for r in rows}
 
 
-def _create(kind: str, source: str, account: str | None, session_factory) -> str:
-    """The job's row, owned by this process (JobBusy if `source` already has a running job)."""
-    job_id = uuid.uuid4().hex[:12]
+def _create(kind: str, source: str, account: str | None, session_factory) -> dict:
+    """The job's row as inserted, running and owned by this process (JobBusy if `source` already has a running
+    job)."""
     with session_factory() as s:
         try:
-            s.execute(text("""INSERT INTO jobs (id, kind, source, account, owner_host, owner_pid)
-                              VALUES (:i, :k, :s, :a, :h, :p)"""),
-                      {"i": job_id, "k": kind, "s": source, "a": account, "h": HOST, "p": os.getpid()})
+            row = s.execute(text("""INSERT INTO jobs (id, kind, source, account, owner_host, owner_pid)
+                                    VALUES (:i, :k, :s, :a, :h, :p) RETURNING *"""),
+                            {"i": uuid.uuid4().hex[:12], "k": kind, "s": source, "a": account, "h": HOST,
+                             "p": os.getpid()}).one()
             s.commit()
         except IntegrityError as e:
             s.rollback()
             raise JobBusy(f"{source} is already running") from e
-    _MINE.add(job_id)
-    return job_id
+    _MINE.add(row.id)
+    return _row(row)
 
 
 def start(kind: str, source: str, runner: Runner, account: str | None = None,
           session_factory=SessionLocal) -> dict:
-    """Create the job row (JobBusy if `source` already has a running job) and run `runner` in a thread."""
-    job_id = _create(kind, source, account, session_factory)
-    threading.Thread(target=_work, args=(job_id, runner, session_factory), daemon=True,
+    """Create the job row (JobBusy if `source` already has a running job) and run `runner` in a thread. Returns the
+    job as it started: what the thread does next is read from the table (`get`)."""
+    job = _create(kind, source, account, session_factory)
+    threading.Thread(target=_work, args=(job["id"], runner, session_factory), daemon=True,
                      name=f"job-{source}").start()
-    with session_factory() as s:
-        return get(s, job_id)
+    return job
 
 
 def run(kind: str, source: str, runner: Runner, account: str | None = None, session_factory=SessionLocal) -> dict:
     """Create the job row and run `runner` here; returns the finished job (JobBusy if `source` is running)."""
-    job_id = _create(kind, source, account, session_factory)
+    job_id = _create(kind, source, account, session_factory)["id"]
     _work(job_id, runner, session_factory)
     with session_factory() as s:
         return get(s, job_id)

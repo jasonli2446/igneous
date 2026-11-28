@@ -21,7 +21,7 @@ import os
 import re
 from collections import Counter, defaultdict
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import UTC, datetime
 
 from igneous.connectors.base import Checkpoint, Every, SourceItem
 from igneous.connectors.redact import redact
@@ -32,12 +32,14 @@ MAX_TURN_CHARS = 6000  # a single pasted wall of text shouldn't swamp a day's it
 
 
 def _ts(raw: str | None) -> datetime | None:
+    """An ISO 8601 timestamp; one without a zone is UTC, as the tools write theirs."""
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
+    return at if at.tzinfo else at.replace(tzinfo=UTC)
 
 
 def _text_blocks(content) -> list[str]:
@@ -111,7 +113,7 @@ def claude_turns(path: str) -> tuple[dict, list[dict]]:
     meta: dict = {"title": None, "cwd": None, "branches": set(), "session_id": None}
     turns: list[dict] = []
     paths: list[str] = []
-    with open(path, errors="replace") as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             try:
                 r = json.loads(line)
@@ -154,7 +156,7 @@ def codex_turns(path: str) -> tuple[dict, list[dict]]:
     meta: dict = {"title": None, "cwd": None, "branches": [], "session_id": None}
     turns: list[dict] = []
     paths: list[str] = []
-    with open(path, errors="replace") as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             try:
                 r = json.loads(line)
@@ -230,17 +232,22 @@ class AIChatConnector:
         return sorted(files, key=lambda f: f[1])
 
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint]:
-        seen = dict(cursor.get("files", {}))
+        previous = cursor.get("files", {})
+        seen: dict[str, str] = {}  # the session files listed now: one the tools deleted leaves the cursor
         due = Every()  # the cursor names every session file: write it every so often, not after each file
         for tool, path in self._files():
-            st = os.stat(path)
-            sig = f"{int(st.st_mtime)}:{st.st_size}"
-            if seen.get(path) == sig:
-                continue  # unchanged since last sync: don't even read it
-            meta, turns = (claude_turns if tool == "claude_code" else codex_turns)(path)
+            try:
+                st = os.stat(path)
+                sig = f"{int(st.st_mtime)}:{st.st_size}"
+                if previous.get(path) == sig:
+                    seen[path] = sig
+                    continue  # unchanged since last sync: don't even read it
+                meta, turns = (claude_turns if tool == "claude_code" else codex_turns)(path)
+            except OSError:
+                continue  # deleted since it was listed (the tools clean up old sessions): its items stay
             session = meta["session_id"] or os.path.splitext(os.path.basename(path))[0]
             yield from day_items(tool, session, meta, turns)
             seen[path] = sig
             if due():
-                yield Checkpoint({"files": seen})
+                yield Checkpoint({"files": {**previous, **seen}})  # the files not reached yet keep their entries
         yield Checkpoint({"files": seen})

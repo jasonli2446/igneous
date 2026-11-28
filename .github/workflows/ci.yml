@@ -29,7 +29,7 @@ jobs:
         with: { enable-cache: true, cache-dependency-glob: api/uv.lock }
       - run: uv sync --locked   # fails when uv.lock is out of step with pyproject.toml
       - run: uv run ruff check .
-      - run: uv run pytest -q   # creates, migrates and drops its own igneous_test_<pid> database
+      - run: uv run pytest -q   # creates, migrates and drops its own igneous_test_<pid>_<key> database
       - name: Audit the locked dependencies for known advisories
         shell: bash   # -eo pipefail, so a failed export fails the step instead of auditing nothing
         run: uv export --frozen --no-hashes --no-emit-project | uvx pip-audit --strict --disable-pip --no-deps -r /dev/stdin

@@ -1,5 +1,8 @@
 """Read Apple Notes' local SQLite store without modifying it. Titles and bodies are redacted where every item is,
-in the sync runner."""
+in the sync runner.
+
+The store is Core Data's, and its table and column names vary between macOS versions, so `_note_query` looks for the
+names each version uses; a store where it finds none of them is an error, not an empty one."""
 from __future__ import annotations
 
 import gzip
@@ -10,9 +13,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem
+from igneous.connectors.macos import read_only
 
 DEFAULT_DB = Path.home() / "Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=UTC)
+# How a note's item is made from its row. A note's fingerprint carries it, so changing what the item holds (bump it
+# then) reads every note again at the next sync, not only the notes edited since.
+READER = 2
 LOCK_FLAGS = ("ZISPASSWORDPROTECTED", "ZISLOCKED", "ZISENCRYPTED")
 
 
@@ -91,11 +98,17 @@ def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')}
 
 
-def _note_query(connection: sqlite3.Connection) -> tuple[str, str, str, str, tuple[str, str, str, str, str | None]] | None:
-    """Probe stable CoreData names rather than pinning a single macOS Notes schema."""
+def _table(tables: set[str], exact: str, part: str) -> str | None:
+    """The table named `exact`, else the first (by name) whose name contains `part`."""
+    return exact if exact in tables else next((name for name in sorted(tables) if part in name), None)
+
+
+def _note_query(connection: sqlite3.Connection) -> tuple[str, str, str, str, tuple[str, str | None, str, str, str | None]] | None:
+    """The tables and columns that hold the notes, found by the names Core Data gives them: None when there are none
+    of them."""
     tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    objects = next((name for name in tables if "CLOUDSYNCINGOBJECT" in name), None)
-    data_table = next((name for name in tables if "NOTEDATA" in name), None)
+    objects = _table(tables, "ZICCLOUDSYNCINGOBJECT", "CLOUDSYNCINGOBJECT")
+    data_table = _table(tables, "ZICNOTEDATA", "NOTEDATA")
     if not objects or not data_table:
         return None
     note_columns, data_columns = _columns(connection, objects), _columns(connection, data_table)
@@ -107,7 +120,9 @@ def _note_query(connection: sqlite3.Connection) -> tuple[str, str, str, str, tup
     if not title or not blob or not data_join or not object_join:
         return None
     identifier = next((c for c in ("ZIDENTIFIER", "ZUNIQUEIDENTIFIER") if c in note_columns), "Z_PK")
-    modified = next((c for c in ("ZMODIFICATIONDATE", "ZCREATIONDATE") if c in note_columns), "Z_PK")
+    # A note's dates carry a suffix in the shared object table (ZMODIFICATIONDATE1); without any, a note has no date.
+    modified = next((c for c in ("ZMODIFICATIONDATE1", "ZMODIFICATIONDATE", "ZCREATIONDATE3", "ZCREATIONDATE1",
+                                 "ZCREATIONDATE") if c in note_columns), None)
     # The flag that marks a note locked. Several columns mention passwords (ZPASSWORDHINT is text, set on unlocked
     # notes too): take the known flags first, then any other lock flag in name order, never a hint.
     flags = [c for c in LOCK_FLAGS if c in note_columns]
@@ -128,15 +143,16 @@ class AppleNotesConnector:
     def sync(self, cursor: dict) -> Iterator[SourceItem | Checkpoint | CompletedScan]:
         previous = cursor.get("notes", {}) if isinstance(cursor.get("notes", {}), dict) else {}
         observed, current = set(), {}
-        connection = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
-        try:
+        with read_only(self.path) as connection:
             spec = _note_query(connection)
             if spec is None:
-                return
+                raise RuntimeError(f"{self.path} has no notes tables this version of Igneous recognises, so nothing "
+                                   "was read and the notes stored before are kept.")
             objects, data_table, title, blob, details = spec
             identifier, modified, data_join, object_join, locked = details
+            modified_select = f'n."{modified}"' if modified else "NULL"
             lock_select = f', n."{locked}"' if locked else ""
-            query = (f'SELECT n."Z_PK", n."{identifier}", n."{title}", n."{modified}", d."{blob}"{lock_select} '
+            query = (f'SELECT n."Z_PK", n."{identifier}", n."{title}", {modified_select}, d."{blob}"{lock_select} '
                      f'FROM "{objects}" n JOIN "{data_table}" d ON d."{data_join}" = n."{object_join}" '
                      f'WHERE n."{title}" IS NOT NULL')
             for row in connection.execute(query):
@@ -145,10 +161,12 @@ class AppleNotesConnector:
                     continue
                 external_id = str(identity if identity is not None else primary_key)
                 observed.add(external_id)
-                # The title lives beside the body, not in it: a renamed note must read as changed too.
-                fingerprint = hashlib.sha256(bytes(blob_value or b"") + b"\0" + str(title_value).encode()).hexdigest()
-                current[external_id] = fingerprint
-                if previous.get(external_id) == fingerprint:
+                # What the item is made of (the title lives beside the body, so a renamed note reads as changed) and
+                # how (READER).
+                fingerprint = hashlib.sha256(b"\0".join([str(READER).encode(), bytes(blob_value or b""),
+                                                         str(title_value).encode(), str(modified_value).encode()]))
+                current[external_id] = fingerprint.hexdigest()
+                if previous.get(external_id) == current[external_id]:
                     continue
                 body = decode_body(blob_value)
                 if not body:
@@ -156,7 +174,5 @@ class AppleNotesConnector:
                 yield SourceItem(source=self.name, external_id=external_id, title=str(title_value), body_text=body,
                                  occurred_at=apple_time(modified_value), mime="text/plain",
                                  raw_meta={"path": f"notes/{external_id}", "folders": ["notes"],
-                                           "parser": "apple-notes", "model_opt_in": False})
-        finally:
-            connection.close()
+                                           "parser": "apple-notes"})
         yield CompletedScan({"notes": current}, self.name, frozenset(observed))

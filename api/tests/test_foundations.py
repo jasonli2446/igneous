@@ -1,5 +1,7 @@
-"""Shared helpers: identity, visibility, the source catalog, the model-result cache, settings paths."""
+"""Shared helpers: identity, visibility, the source catalog, the model-result cache, settings paths, and the test
+runs' own databases."""
 import json
+import secrets
 
 from sqlalchemy import text
 
@@ -76,3 +78,30 @@ def test_settings_resolve_against_the_api_folder_wherever_the_process_starts():
     assert Settings.model_config["env_file"] == API_DIR / ".env"
     assert Settings(_env_file=None, data_dir="../data").data_dir == str((API_DIR / "../data").resolve())
     assert Settings(_env_file=None, data_dir="/srv/igneous-data").data_dir == "/srv/igneous-data"
+
+
+def test_a_test_run_drops_only_the_databases_of_runs_that_are_gone(test_db):
+    """Each test run has its own database, named by a random key, and holds an advisory lock on that key while it
+    lives (tests/conftest.py). A run in another PID namespace (a container, a sandbox) has a pid this one can't see,
+    or the same pid as this one: its database is dropped only once its lock is free."""
+    import conftest
+
+    admin = conftest._admin()
+    living, gone = secrets.randbits(63), secrets.randbits(63)
+    names = {key: f"{conftest.TEST_DB_PREFIX}999999999_{key:016x}" for key in (living, gone)}  # no such pid here
+    unkeyed = f"{conftest.TEST_DB_PREFIX}999999999_unkeyed"
+    other_run = admin.connect()
+    try:
+        other_run.execute(text("SELECT pg_advisory_lock(:k)"), {"k": living})
+        with admin.connect() as c:
+            for name in [*names.values(), unkeyed]:
+                c.execute(text(f'CREATE DATABASE "{name}"'))
+            conftest._drop_abandoned(c)
+            left = set(c.execute(text("SELECT datname FROM pg_database")).scalars())
+        assert {names[living], unkeyed, conftest.TEST_DB} <= left and names[gone] not in left
+    finally:
+        other_run.close()
+        with admin.connect() as c:
+            for name in [*names.values(), unkeyed]:
+                c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()

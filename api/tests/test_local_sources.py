@@ -1,20 +1,22 @@
 """Sources read from files on this computer: the Enron maildir, Messages, Contacts, Notes and AI coding chats."""
 import gzip
+import hashlib
 import json
 import os
 import sqlite3
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from fakes import refused_by_macos
 from sqlalchemy import text
 
 from igneous.connectors import email_maildir
 from igneous.connectors.ai_chats import AIChatConnector, claude_turns
 from igneous.connectors.apple_notes import AppleNotesConnector, decode_body
-from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem, run_sync
+from igneous.connectors.base import Checkpoint, CompletedScan, SourceItem, run_sync, save_cursor, store
 from igneous.connectors.email_maildir import MaildirConnector
 from igneous.connectors.imessage import APPLE_EPOCH, MessagesConnector, apple_time, decode_attributed
 from igneous.connectors.mac_contacts import MacContactsConnector, norm_phone
@@ -54,6 +56,20 @@ def test_a_resumed_mailbox_skips_nothing_whatever_the_folder_names(db, tmp_path,
     run_sync(db, MaildirConnector(root, ["x"]), limit=1)
     run_sync(db, MaildirConnector(root, ["x"]))
     assert stored(db, "email") == ["x/a-b/1.", "x/a/1."]
+
+
+def test_files_finder_leaves_in_a_mailbox_are_not_messages(db, tmp_path):
+    """Finder leaves .DS_Store and ._ files in a folder you open. They are not read, and one stored as mail is
+    removed, though the mailbox's cursor is past it."""
+    root = maildir(tmp_path, "allen-p/inbox/1.")
+    (root / "allen-p" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    (root / "allen-p" / "inbox" / "._1.").write_bytes(b"\x00\x05\x16\x07")
+    events = list(MaildirConnector(root, ["allen-p"]).sync({}))
+    assert [e.external_id for e in events if isinstance(e, SourceItem)] == ["allen-p/inbox/1."]
+    run_sync(db, MaildirConnector(root, ["allen-p"]))
+    store(db, email_maildir.parse_message(b"Bud1", "allen-p/.DS_Store"))  # read as mail
+    assert run_sync(db, MaildirConnector(root, ["allen-p"]))["deleted"] == 1
+    assert stored(db, "email") == ["allen-p/inbox/1."]
 
 
 def test_an_unknown_mailbox_is_an_error(tmp_path):
@@ -191,8 +207,152 @@ def test_apple_notes_gzip_protobuf_body_and_locked_rows(tmp_path):
     events = list(AppleNotesConnector(db).sync({}))
     items = [event for event in events if isinstance(event, SourceItem)]
     assert [(item.external_id, item.title) for item in items] == [("note-1", "Plan"), ("3", "Fallback")]
-    assert "Ship safely" in items[0].body_text and items[0].raw_meta["model_opt_in"] is False
+    assert "Ship safely" in items[0].body_text
     assert next(event for event in events if isinstance(event, CompletedScan)).external_ids == frozenset({"note-1", "3"})
+
+
+def test_a_notes_date_comes_from_the_column_its_macos_version_uses(tmp_path):
+    """A note's dates carry a suffix in the shared object table (ZMODIFICATIONDATE1); without a date column a note
+    has no date, never one made of its row number."""
+    when = datetime(2025, 3, 9, 15, 30, tzinfo=UTC)
+    seconds = (when - APPLE_EPOCH).total_seconds()
+    for column, expected in (("ZMODIFICATIONDATE1", when), ("ZMODIFICATIONDATE", when), ("ZNOTEDATE", None)):
+        path = tmp_path / f"{column}.sqlite"
+        connection = sqlite3.connect(path)
+        connection.executescript(f"""
+            CREATE TABLE ZICCLOUDSYNCINGOBJECT (Z_PK INTEGER, ZTITLE1 TEXT, ZIDENTIFIER TEXT, {column} REAL);
+            CREATE TABLE ZICNOTEDATA (ZNOTE INTEGER, ZDATA BLOB);
+        """)
+        connection.execute("INSERT INTO ZICCLOUDSYNCINGOBJECT VALUES (7, 'Plan', 'note-7', ?)", (seconds,))
+        connection.execute("INSERT INTO ZICNOTEDATA VALUES (7, ?)", (gzip.compress(PLAN),))
+        connection.commit()
+        connection.close()
+        (item,) = [e for e in AppleNotesConnector(path).sync({}) if isinstance(e, SourceItem)]
+        assert item.occurred_at == expected, column
+
+
+def test_notes_an_earlier_reader_stored_are_read_again_once(db, tmp_path):
+    """A note stored by a reader that made its item differently (dated by its row number, with a flag this reader
+    doesn't write) and fingerprinted only its body and title is read again once, though the note is unchanged, and
+    stored as this reader makes it."""
+    when = datetime(2025, 3, 9, 15, 30, tzinfo=UTC)
+    path, blob = tmp_path / "NoteStore.sqlite", gzip.compress(PLAN)
+    connection = sqlite3.connect(path)
+    connection.executescript("""
+        CREATE TABLE ZICCLOUDSYNCINGOBJECT (Z_PK INTEGER, ZTITLE1 TEXT, ZIDENTIFIER TEXT, ZMODIFICATIONDATE1 REAL);
+        CREATE TABLE ZICNOTEDATA (ZNOTE INTEGER, ZDATA BLOB);
+    """)
+    connection.execute("INSERT INTO ZICCLOUDSYNCINGOBJECT VALUES (7, 'Plan', 'note-7', ?)",
+                       ((when - APPLE_EPOCH).total_seconds(),))
+    connection.execute("INSERT INTO ZICNOTEDATA VALUES (7, ?)", (blob,))
+    connection.commit()
+    connection.close()
+    store(db, SourceItem("notes", "note-7", "Plan", decode_body(blob), APPLE_EPOCH + timedelta(seconds=7), "text/plain",
+                         {"path": "notes/note-7", "folders": ["notes"], "parser": "apple-notes", "model_opt_in": False}))
+    save_cursor(db, "notes", "default", {"notes": {"note-7": hashlib.sha256(blob + b"\0" + b"Plan").hexdigest()}})
+    assert run_sync(db, AppleNotesConnector(path))["updated"] == 1
+    note = db.execute(text("SELECT occurred_at, raw_meta FROM source_items WHERE external_id = 'note-7'")).one()
+    assert note.occurred_at == when and "model_opt_in" not in note.raw_meta
+    assert run_sync(db, AppleNotesConnector(path))["updated"] == 0
+
+
+def test_a_notes_store_without_its_tables_is_an_error_not_every_note_deleted(db, tmp_path):
+    path = notes_db(tmp_path / "NoteStore.sqlite", [(1, "Plan", "note-1", 0, PLAN)])
+    run_sync(db, AppleNotesConnector(path))
+    connection = sqlite3.connect(path)
+    connection.execute("ALTER TABLE ZICNOTEDATA RENAME TO ZNOTEBODY")  # a layout this version doesn't know
+    connection.commit()
+    connection.close()
+    with pytest.raises(RuntimeError, match="no notes tables"):
+        run_sync(db, AppleNotesConnector(path))
+    db.rollback()
+    assert stored(db, "notes") == ["note-1"]
+
+
+def test_the_mac_databases_are_closed_after_a_sync_and_their_errors_say_what_is_wrong(db, tmp_path, monkeypatch):
+    from igneous.connectors import macos
+
+    chats = chat_db(tmp_path / "chat.db")
+    text_message(chats, 1, datetime(2025, 6, 2, 12, tzinfo=UTC), "see you Tuesday")
+    book = contacts_db(tmp_path / "Sources" / "A1" / "AddressBook-v22.abcddb", [("card-1", "Sam", "(614) 555-0101")])
+    notes = notes_db(tmp_path / "NoteStore.sqlite", [(1, "Plan", "note-1", 0, PLAN)])
+    opened = []
+    connect = sqlite3.connect
+
+    def recording(*args, **kwargs):
+        opened.append(connect(*args, **kwargs))
+        return opened[-1]
+
+    monkeypatch.setattr(macos.sqlite3, "connect", recording)
+    run_sync(db, MessagesConnector(chats))
+    run_sync(db, MacContactsConnector(str(book)))
+    run_sync(db, AppleNotesConnector(notes))
+    sync = MessagesConnector(chats).sync({})
+    next(sync)
+    sync.close()  # a sync stopped early closes its database too
+    assert len(opened) == 4
+    for connection in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+    monkeypatch.setattr(macos.sqlite3, "connect", connect)
+
+    # A file that isn't a database, a missing one and a refused one are three different problems.
+    copied = tmp_path / "copied.sqlite"
+    copied.write_bytes(b"not a database" * 100)
+    with pytest.raises(sqlite3.DatabaseError, match=r"copied\.sqlite is not a database Igneous can read") as damaged:
+        list(AppleNotesConnector(copied).sync({}))
+    assert "Full Disk Access" not in str(damaged.value)
+    with pytest.raises(FileNotFoundError, match=r"chat\.db not found"):
+        list(MessagesConnector(tmp_path / "gone" / "chat.db").sync({}))
+    monkeypatch.setattr(macos.sqlite3, "connect", refused_by_macos)
+    with pytest.raises(PermissionError, match="Full Disk Access"):
+        list(AppleNotesConnector(notes).sync({}))
+
+
+def test_your_own_mac_records_are_read_closed_and_skipped_when_unreadable(db, tmp_path, monkeypatch):
+    """Who you are comes partly from the Mac: the handles Messages sends from and Contacts' card for you. Their
+    databases are opened like the connectors' (any folder name, always closed), and one that can't be read leaves
+    the other signals."""
+    from igneous.connectors import macos
+    from igneous.graph import self_identity
+
+    library = tmp_path / "Library ?#%20 x"  # a name the database's URI must encode
+    chats, book = library / "chat.db", library / "Sources" / "A1" / "AddressBook-v22.abcddb"
+    book.parent.mkdir(parents=True)
+    connection = sqlite3.connect(chats)
+    connection.executescript("""
+        CREATE TABLE message (is_from_me INTEGER, destination_caller_id TEXT);
+        INSERT INTO message VALUES (1, 'Me@Example.com'), (1, '(614) 555-0199'), (0, 'them@example.com');
+    """)
+    connection.close()
+    connection = sqlite3.connect(book)
+    connection.executescript("""
+        CREATE TABLE ZABCDRECORD (Z_PK INTEGER, ZCONTAINERWHERECONTACTISME INTEGER);
+        CREATE TABLE ZABCDPHONENUMBER (ZOWNER INTEGER, ZFULLNUMBER TEXT);
+        CREATE TABLE ZABCDEMAILADDRESS (ZOWNER INTEGER, ZADDRESS TEXT);
+        INSERT INTO ZABCDRECORD VALUES (1, 1), (2, NULL);
+        INSERT INTO ZABCDEMAILADDRESS VALUES (1, ' me@example.com'), (2, 'sam@example.com');
+    """)
+    connection.close()
+    monkeypatch.setattr(self_identity, "CHAT_DB", str(chats))
+    monkeypatch.setattr(self_identity, "CONTACT_DBS", str(library / "Sources" / "*" / "AddressBook-v22.abcddb"))
+    opened, connect = [], sqlite3.connect
+
+    def recording(*args, **kwargs):
+        opened.append(connect(*args, **kwargs))
+        return opened[-1]
+
+    monkeypatch.setattr(macos.sqlite3, "connect", recording)
+    mac = [signal for signal in self_identity._signals(db) if signal[0] in ("imessage_handle", "me_card")]
+    assert sorted(mac) == [("imessage_handle", "+16145550199"), ("imessage_handle", "me@example.com"),
+                           ("me_card", "me@example.com")]
+    assert len(opened) == 2
+    for connection in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+    chats.write_bytes(b"not a database" * 100)
+    assert [signal for signal in self_identity._signals(db) if signal[0] in ("imessage_handle", "me_card")] == [
+        ("me_card", "me@example.com")]
 
 
 def test_the_locked_flag_is_chosen_the_same_way_every_run(tmp_path):
@@ -279,6 +439,66 @@ def test_ai_chat_checkpoints_come_by_time_not_per_file(tmp_path, monkeypatch):
     assert len(checkpoints) == 1 and len(checkpoints[0].cursor["files"]) == 4  # a quick scan writes its cursor once
     monkeypatch.setattr(base, "CHECKPOINT_SECONDS", 0)
     assert len([o for o in conn.sync({}) if isinstance(o, Checkpoint)]) == 5
+
+
+def test_a_session_file_deleted_mid_sync_is_skipped_and_leaves_the_cursor(tmp_path, monkeypatch):
+    """Claude Code and Codex delete old sessions on their own. One that goes between the listing and the read is
+    skipped (its items stay), and a file that is gone leaves the cursor."""
+    from igneous.connectors import ai_chats
+
+    proj = tmp_path / "claude" / "-Users-x-repo"
+    proj.mkdir(parents=True)
+    for n in range(3):
+        (proj / f"s{n}.jsonl").write_text(json.dumps({"type": "user", "timestamp": "2026-10-21T10:00:00Z",
+                                                      "message": {"content": f"session {n}"}}))
+    conn = AIChatConnector(claude_root=str(tmp_path / "claude"), codex_root=str(tmp_path / "none"))
+    cursor = [o for o in conn.sync({}) if isinstance(o, Checkpoint)][-1].cursor
+    (proj / "s3.jsonl").write_text(json.dumps({"type": "user", "timestamp": "2026-10-22T10:00:00Z",
+                                               "message": {"content": "session 3"}}))
+    listed = conn._files()
+    (proj / "s0.jsonl").unlink()
+    (proj / "s3.jsonl").unlink()  # gone between the listing and the read
+    monkeypatch.setattr(ai_chats.AIChatConnector, "_files", lambda self: listed)
+    events = list(conn.sync(cursor))
+    assert not [o for o in events if isinstance(o, SourceItem)]
+    assert sorted(os.path.basename(p) for p in events[-1].cursor["files"]) == ["s1.jsonl", "s2.jsonl"]
+
+
+def test_transcripts_and_git_configs_are_read_as_utf8_whatever_the_locale(tmp_path):
+    """Claude Code, Codex and git write UTF-8. A process whose locale names another encoding (a scheduled job
+    started without LANG, say) still reads them as UTF-8: a prompt keeps its accents, and a remote its path."""
+    (tmp_path / "claude.jsonl").write_text(json.dumps({
+        "type": "user", "timestamp": "2026-10-21T10:00:00Z", "message": {"content": "café crème, 日本"}},
+        ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "codex.jsonl").write_text(json.dumps({
+        "type": "response_item", "timestamp": "2026-10-21T10:00:00Z", "payload": {
+            "type": "message", "role": "user", "content": [{"type": "input_text", "text": "déjà vu"}]}},
+        ensure_ascii=False), encoding="utf-8")
+    gitdir = tmp_path / "main" / ".git"  # a worktree: its .git file names its gitdir, whose commondir has the config
+    (gitdir / "worktrees" / "wt").mkdir(parents=True)
+    (gitdir / "config").write_text('[remote "origin"]\n\turl = https://example.com/josé/repo.git\n', encoding="utf-8")
+    (gitdir / "worktrees" / "wt" / "commondir").write_text("../..\n", encoding="utf-8")
+    (tmp_path / "wt").mkdir()
+    (tmp_path / "wt" / ".git").write_text(f"gitdir: {gitdir / 'worktrees' / 'wt'}\n", encoding="utf-8")
+    script = """
+import json, os, sys
+from pathlib import Path
+from igneous.connectors.ai_chats import claude_turns, codex_turns
+from igneous.connectors.filesystem import _git_remote
+folder = Path(sys.argv[1])
+with open(os.devnull) as nothing:
+    default = nothing.encoding
+print(json.dumps([default, claude_turns(str(folder / "claude.jsonl"))[1][0]["text"],
+                  codex_turns(str(folder / "codex.jsonl"))[1][0]["text"], _git_remote(folder / "wt")]))
+"""
+    env = {k: v for k, v in os.environ.items() if k.startswith("IGNEOUS_")} | {
+        "PATH": os.environ["PATH"], "LC_ALL": "C", "PYTHONCOERCECLOCALE": "0", "PYTHONUTF8": "0"}
+    done = subprocess.run([sys.executable, "-X", "utf8=0", "-c", script, str(tmp_path)], env=env,
+                          capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert done.returncode == 0, done.stderr
+    default, claude, codex, remote = json.loads(done.stdout)
+    assert default.lower().replace("-", "") != "utf8"  # the child's default encoding really is another one
+    assert (claude, codex, remote) == ("café crème, 日本", "déjà vu", "https://example.com/josé/repo.git")
 
 
 def test_queued_prompts_with_images_keep_their_text(tmp_path):

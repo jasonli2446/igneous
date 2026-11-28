@@ -21,7 +21,7 @@ git clone https://github.com/jasonli2446/igneous.git && cd igneous
 ### 2. Database and migrations
 
 ```bash
-make db                                  # docker compose up -d --wait db  (Postgres on :5432, user/password/db: igneous)
+make db                                  # docker compose up -d --wait db  (Postgres on localhost:5432, user/password/db: igneous)
 cd api && uv sync                        # create api/.venv
 uv run alembic upgrade head              # create the schema (or `make migrate` from the repo root)
 ```
@@ -41,8 +41,8 @@ next Rebuild or `igneous pipeline` reads again the records that gave someone a n
 26k records, about 15 seconds), and everything that shows a person's name follows.
 
 Tests (`make test`) never use that database or your personal one, nor your `api/.env` or model credentials: each
-run creates, migrates and finally drops its own `igneous_test_<pid>` database on the same server
-(`api/tests/conftest.py`), so two runs can share a server.
+run creates, migrates and finally drops its own `igneous_test_<pid>_<key>` database on the same server
+(`api/tests/conftest.py`), so two runs can share a server, from any process namespace (a container, a sandbox).
 `make check` runs the checks every pull request must pass: ruff and the tests for the API, then `next typegen`, `tsc`,
 ESLint and the production build for the web app. CI runs them too, and audits the locked dependencies (`make audit`).
 `web/README.md` covers the explorer walkthrough (`npm run walkthrough`), a browser check run against the demo database.
@@ -100,6 +100,8 @@ make web    # terminal 2: cd web && npm install && npm run dev                 (
 Always run the API with `--reload`; otherwise you test stale code. Both Make targets already do. The web app talks to
 `http://localhost:8000` unless `NEXT_PUBLIC_API_URL` is set (`web/.env.example`). `docker compose up` runs the API and
 web in containers instead, against the `igneous` database; the API container reads `api/.env` for its other settings.
+The stack publishes Postgres, the API and the web app on this computer only (127.0.0.1): no other device on your
+network can reach them.
 
 ### 5. Open the Sources page and follow it
 

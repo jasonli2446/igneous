@@ -16,6 +16,16 @@ def test_parse_plain_text_markdown_and_binary_are_nonfatal():
     assert binary.status == "binary" and binary.text == "" and binary.error
 
 
+def test_utf16_text_is_read_by_its_byte_order_mark():
+    """Windows tools write UTF-16 text (a CSV, a log) with a byte order mark. Without one, no encoding is guessed."""
+    for marked in ("Name,Phone\r\nSam,555".encode("utf-16"), b"\xff\xfe" + "Name,Phone\r\nSam,555".encode("utf-16-le"),
+                   b"\xfe\xff" + "Name,Phone\r\nSam,555".encode("utf-16-be")):
+        parsed = parse_document(marked, "contacts.csv")
+        assert (parsed.status, parsed.text) == ("ok", "Name,Phone\nSam,555"), marked[:4]
+    assert parse_document("no mark".encode("utf-16-le"), "notes.txt").status == "binary"
+    assert parse_document(b"\xff\xfe" + "\x00\x01\x02 binary".encode("utf-16-le"), "x.txt").status == "binary"
+
+
 def test_parse_pdf_with_page_boundaries():
     def pdf_bytes():
         objects = [

@@ -1,8 +1,13 @@
 """Google connectors (Drive, Calendar, Contacts, Gmail) against in-memory API fakes. No network."""
+import errno
+import http.client
+import ssl
 import time
 
+import httplib2
 import pytest
 from fakes import FakeCalendar, FakeDrive, FakeGmail, FakePeople, Request, http_error
+from google.auth.exceptions import TransportError
 from googleapiclient.errors import HttpError
 
 from igneous.connectors import gmail, google_api
@@ -43,6 +48,23 @@ def test_gmail_backfill_resumes_mid_page(monkeypatch):
     resumed = gmail_sync(fake, mid[1])
     assert [i.external_id for i in items(resumed)] == ["m4", "m5"]  # after m3, not from m0
     assert resumed[-1].cursor["history_id"] == "h1" and "backfill_q" not in resumed[-1].cursor
+
+
+def test_a_backfill_that_stops_early_fetches_no_more_of_its_page():
+    """`--limit`, or a failure while storing, stops a sync at a checkpoint. The page's other fetches are cancelled,
+    not waited for: each spends Gmail quota, paced to minutes for a full page."""
+    class Slow(FakeGmail):
+        def _get(self, id, **kwargs):
+            if int(id[1:]) >= gmail.CHECKPOINT_EVERY:
+                time.sleep(0.1)
+            return super()._get(id, **kwargs)
+
+    fake = Slow({f"m{i}": ["INBOX"] for i in range(300)}, pages=[[f"m{i}" for i in range(300)]])
+    sync = GmailConnector(None, "me@x.com", service=fake, since_days=None).sync({})
+    checkpoint = next(e for e in sync if isinstance(e, Checkpoint))
+    sync.close()
+    assert checkpoint.cursor["backfill_offset"] == gmail.CHECKPOINT_EVERY
+    assert len([call for call, _ in fake.calls if call == "get"]) < 150  # of 300; the rest were never fetched
 
 
 def test_gmail_lists_everything_since_the_last_sync_when_its_history_id_expired():
@@ -265,6 +287,39 @@ def test_each_google_api_has_its_own_pace(monkeypatch):
     list(ContactsConnector(None, "me@x.com", service=FakePeople([])).sync({}))
     assert {api for api, _ in taken} == {"gmail", "calendar", "people"}
     assert ("gmail", 5) in taken and ("calendar", 1) in taken  # Gmail counts quota units, the others calls
+
+
+def test_a_google_call_retries_what_passes_and_gives_up_on_the_rest(monkeypatch):
+    """A dropped connection, a rate limit or a server error is tried again, up to the attempts; anything else, or the
+    last attempt's error, is raised."""
+    monkeypatch.setattr(google_api.time, "sleep", lambda seconds: None)
+
+    class Flaky:
+        def __init__(self, *outcomes):
+            self.outcomes, self.executed = list(outcomes), 0
+
+        def execute(self):
+            self.executed += 1
+            outcome = self.outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+    dropped = [ConnectionResetError("reset"), TimeoutError("timed out"), ssl.SSLEOFError("EOF in violation of protocol"),
+               httplib2.ServerNotFoundError("Unable to find the server"), http.client.IncompleteRead(b"{"),
+               OSError(errno.ECONNREFUSED, "refused"), TransportError("token refresh: connection dropped")]
+    passing = Flaky(*dropped, http_error(429), http_error(503), {"ok": True})
+    assert google_api.call("drive", passing, attempts=10) == {"ok": True} and passing.executed == 10
+    down = Flaky(*[http_error(500, "backendError")] * 3)
+    with pytest.raises(HttpError):
+        google_api.call("drive", down, attempts=3)
+    assert down.executed == 3
+    for answer in (http_error(403, "insufficientPermissions"), ssl.SSLCertVerificationError("unknown issuer"),
+                   OSError(errno.ENOSPC, "no space left")):
+        refused = Flaky(answer)
+        with pytest.raises(type(answer)):
+            google_api.call("drive", refused)
+        assert refused.executed == 1, answer
 
 
 def test_a_drive_change_that_makes_a_file_unreadable_removes_it():
